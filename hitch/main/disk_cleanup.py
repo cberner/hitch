@@ -15,7 +15,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
-from hitch.main import demo, system_agents
+from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -24,6 +24,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     cleanup_managed_worktree_path,

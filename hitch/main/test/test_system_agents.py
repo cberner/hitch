@@ -20,21 +20,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import (
-    agent_io,
-    codex_events,
-    demo,
-    gh_cli,
-    gh_observations,
-    pr_handoff,
-    pr_monitor_format,
-    pr_stage_refresh_state,
-    qa_prompts,
-    rate_limit,
-    spec_critic_prompts,
-    streaming,
-    system_agents,
-)
+from hitch.main import codex_events, demo, rate_limit, streaming
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
@@ -51,6 +37,17 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
+)
+from hitch.main.workflows import (
+    agent_io,
+    gh_cli,
+    gh_observations,
+    pr_handoff,
+    pr_monitor_format,
+    pr_stage_refresh_state,
+    qa_prompts,
+    spec_critic_prompts,
+    system_agents,
 )
 
 
@@ -286,8 +283,8 @@ class _DesignGateCase(NamedTuple):
 
 
 class PrQaWorkflowTests(TestCase):
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_qa_workflow_starts_hidden_subagent_thread(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -339,7 +336,7 @@ class PrQaWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
 
-    @patch("hitch.main.system_agents._spawn_workflow_failure_turn")
+    @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
     def test_surface_workflow_failure_is_idempotent_across_stale_copies(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -367,7 +364,7 @@ class PrQaWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertTrue(workflow.state["failure_surfaced"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_pr_prompt_failure_is_not_surfaced_as_qa_failure(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -408,8 +405,8 @@ class PrQaWorkflowTests(TestCase):
         )
         return workflow
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_respawns_qa_when_spawn_handler_died(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -439,7 +436,7 @@ class PrQaWorkflowTests(TestCase):
         system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_leaves_fresh_qa_running_alone(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -459,7 +456,7 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 0)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_skips_qa_running_with_live_review(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -479,8 +476,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 0)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents._qa_review_in_flight", side_effect=[False, True])
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._qa_review_in_flight", side_effect=[False, True])
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_skips_qa_when_review_appears_during_claim(
         self, mock_spawn: MagicMock, _mock_in_flight: MagicMock
     ) -> None:
@@ -499,8 +496,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_respawns_qa_despite_prior_round_completed_instance(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -536,10 +533,10 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 1)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch(
-        "hitch.main.system_agents.codex_pool.spawn_new_session",
+        "hitch.main.workflows.system_agents.codex_pool.spawn_new_session",
         side_effect=RuntimeError("database is locked"),
     )
     def test_reconcile_blocks_when_qa_respawn_fails(
@@ -571,7 +568,7 @@ class PrQaWorkflowTests(TestCase):
         )
         return workflow
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_reconcile_blocks_zombie_turn_steps_with_surfaced_error(
         self, mock_surface: MagicMock
     ) -> None:
@@ -599,7 +596,7 @@ class PrQaWorkflowTests(TestCase):
                 mock_surface.assert_called_once()
                 workflow.delete()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_reconcile_assigns_owner_for_zombie_turn(
         self, _mock_surface: MagicMock
     ) -> None:
@@ -622,7 +619,7 @@ class PrQaWorkflowTests(TestCase):
             system_agents._WORKFLOW_FAILURE_OWNER_PR,
         )
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_reconcile_leaves_fresh_turn_step_alone(
         self, mock_surface: MagicMock
     ) -> None:
@@ -642,7 +639,7 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 0)
         mock_surface.assert_not_called()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_reconcile_leaves_live_turn_worker_alone(
         self, mock_surface: MagicMock
     ) -> None:
@@ -664,7 +661,7 @@ class PrQaWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_reconcile_defers_turn_with_fresh_routing_claim(
         self, mock_surface: MagicMock
     ) -> None:
@@ -707,7 +704,7 @@ class PrQaWorkflowTests(TestCase):
         )
         return workflow
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_redrives_pr_prompt_when_spawn_died(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -734,9 +731,9 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertEqual(workflow.state["next_user_message_index"], 4)
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     @patch(
-        "hitch.main.system_agents.codex_pool.spawn_turn",
+        "hitch.main.workflows.system_agents.codex_pool.spawn_turn",
         side_effect=RuntimeError("database is locked"),
     )
     def test_reconcile_pr_prompt_redrive_blocks_on_failure(
@@ -757,7 +754,7 @@ class PrQaWorkflowTests(TestCase):
             system_agents._WORKFLOW_FAILURE_OWNER_PR,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_does_not_redrive_pr_prompt_when_turn_exists(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -786,8 +783,8 @@ class PrQaWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_routes_turn_spawned_before_index_save(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -859,7 +856,7 @@ class SessionPrStageRefreshTests(TestCase):
             },
         )
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     def test_refresh_respects_limit(self, mock_gh_pr_view: MagicMock) -> None:
         mock_gh_pr_view.return_value = {
             "url": "https://github.com/cberner/hitch/pull/201",
@@ -876,7 +873,7 @@ class SessionPrStageRefreshTests(TestCase):
         self.assertEqual(refreshed, 1)
         self.assertEqual(mock_gh_pr_view.call_count, 1)
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     def test_refresh_skips_workflow_lost_to_concurrent_claim(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -901,7 +898,7 @@ class SessionPrStageRefreshTests(TestCase):
         self.assertEqual(refreshed, 0)
         mock_gh_pr_view.assert_not_called()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -1108,7 +1105,7 @@ class SessionPrStageRefreshTests(TestCase):
                 )
             )
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     def test_pr_snapshot_refresh_is_globally_debounced_per_pr(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -1134,7 +1131,7 @@ class SessionPrStageRefreshTests(TestCase):
 
 class SpecCriticWorkflowTests(TestCase):
     @patch(
-        "hitch.main.system_agents._classify_spec_critic_prompt_with_codex",
+        "hitch.main.workflows.system_agents._classify_spec_critic_prompt_with_codex",
         return_value=None,
     )
     def test_prompt_classifier_fallback_targets_vague_broad_and_high_impact_prompts(
@@ -1183,7 +1180,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(system_agents.spec_critic_should_run("Change tokenizer tests"))
         self.assertFalse(system_agents.spec_critic_should_run("Explain how sessions work"))
 
-    @patch("hitch.main.system_agents.Codex")
+    @patch("hitch.main.workflows.system_agents.Codex")
     def test_prompt_classifier_asks_codex_with_smallest_model(
         self, mock_codex_class: MagicMock
     ) -> None:
@@ -1222,9 +1219,9 @@ class SpecCriticWorkflowTests(TestCase):
         thread.turn.assert_called_once()
         self.assertEqual(thread.turn.call_args.kwargs["model"], "gpt-5-mini")
 
-    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_starts_hidden_specialized_agents(
         self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
     ) -> None:
@@ -1287,7 +1284,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("ambiguity and risk agent", prompts)
         self.assertIn("acceptance and test strategist", prompts)
 
-    @patch("hitch.main.system_agents.threading.Thread")
+    @patch("hitch.main.workflows.system_agents.threading.Thread")
     def test_spec_critic_workflow_runs_classifier_in_background(
         self, mock_thread: MagicMock
     ) -> None:
@@ -1311,8 +1308,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertTrue(mock_thread.call_args.kwargs["daemon"])
         mock_thread.return_value.start.assert_called_once_with()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
     def test_spec_critic_classification_advances_to_analysis_when_needed(
         self, mock_should_run: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -1342,8 +1339,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
         self.assertEqual(mock_spawn.call_count, 3)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=False)
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=False)
     def test_spec_critic_classification_skips_to_original_prompt(
         self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1384,7 +1381,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["user_message_index"], 3)
         self.assertTrue(kwargs["auto_pr_enabled"])
 
-    @patch("hitch.main.system_agents._start_spec_critic_classification")
+    @patch("hitch.main.workflows.system_agents._start_spec_critic_classification")
     def test_reconcile_rearms_stale_spec_critic_classification(
         self, mock_start: MagicMock
     ) -> None:
@@ -1415,7 +1412,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_start.assert_not_called()
 
-    @patch("hitch.main.system_agents._start_spec_critic_classification")
+    @patch("hitch.main.workflows.system_agents._start_spec_critic_classification")
     def test_reconcile_leaves_fresh_spec_critic_classification_alone(
         self, mock_start: MagicMock
     ) -> None:
@@ -1459,7 +1456,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         return workflow
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_respawns_analysis_when_orphaned_without_runs(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1481,7 +1478,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(reconciled, 1)
         self.assertEqual(mock_spawn.call_count, 3)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_leaves_analysis_with_runs_to_instance_reconciler(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1507,7 +1504,7 @@ class SpecCriticWorkflowTests(TestCase):
         # would duplicate them, so the stale recoverer must leave it alone.
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_finalizes_skip_when_turn_never_spawned(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1527,7 +1524,7 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_finalizes_skip_without_double_spawning_turn(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1548,9 +1545,9 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch(
-        "hitch.main.system_agents.spec_critic_should_run",
+        "hitch.main.workflows.system_agents.spec_critic_should_run",
         side_effect=RuntimeError("boom"),
     )
     def test_classification_skips_when_classifier_raises(
@@ -1565,8 +1562,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         mock_spawn_turn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.spec_critic_should_run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run")
     def test_classification_ignores_workflow_no_longer_classifying(
         self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1580,7 +1577,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_should_run.assert_not_called()
         mock_spawn_turn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_skip_blocks_workflow_when_implementation_turn_fails(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1592,7 +1589,7 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_skip_noop_when_no_longer_classifying(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1605,8 +1602,8 @@ class SpecCriticWorkflowTests(TestCase):
 
         mock_spawn_turn.assert_not_called()
 
-    @patch("hitch.main.system_agents._skip_spec_critic_and_implement")
-    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=False)
+    @patch("hitch.main.workflows.system_agents._skip_spec_critic_and_implement")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=False)
     def test_run_classification_swallows_unexpected_routing_errors(
         self, mock_should_run: MagicMock, mock_skip: MagicMock
     ) -> None:
@@ -1618,7 +1615,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         mock_skip.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_advance_to_analysis_noop_when_already_advanced(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1632,7 +1629,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.codex_pool.spawn_new_session",
+        "hitch.main.workflows.system_agents.codex_pool.spawn_new_session",
         side_effect=RuntimeError("no worker"),
     )
     def test_begin_analysis_blocks_when_agents_fail_to_start(
@@ -1645,9 +1642,9 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch(
-        "hitch.main.system_agents.threading.Thread",
+        "hitch.main.workflows.system_agents.threading.Thread",
         side_effect=RuntimeError("no thread"),
     )
     def test_start_classification_runs_analysis_inline_when_thread_fails(
@@ -1670,9 +1667,9 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
         self.assertEqual(mock_spawn.call_count, 3)
 
-    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_gates_on_required_clarification(
         self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
     ) -> None:
@@ -1796,7 +1793,7 @@ class SpecCriticWorkflowTests(TestCase):
             agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_preserves_partial_clarification_answers_across_reprompt(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1891,7 +1888,7 @@ class SpecCriticWorkflowTests(TestCase):
             agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_analysis_advance_claims_synthesizer_once(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1960,7 +1957,7 @@ class SpecCriticWorkflowTests(TestCase):
             1,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_spec_critic_invalid_json_failure_surfaces_to_visible_thread(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -2027,7 +2024,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Improve onboarding", kwargs["prompt"])
         self.assertIn("output was not valid JSON", kwargs["prompt"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_spec_critic_synthesis_injects_visible_implementation_brief(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -2092,7 +2089,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertIn("scope: New session flow", kwargs["prompt"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_spec_critic_synthesis_preserves_auto_merge_settings(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -2133,7 +2130,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertTrue(kwargs["auto_merge_to_local_branch"])
         self.assertEqual(kwargs["auto_merge_branch"], "release")
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_stop_active_workflow_cancels_spec_critic_clarification_without_running_agent(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -2216,8 +2213,8 @@ class SpecCriticWorkflowTests(TestCase):
             ["success", "pending", "failure", None],
         )
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_qa_only_workflow_uses_ten_iteration_limit(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -2240,14 +2237,14 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.build_auto_merge_review_patch",
+        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
         return_value=AutoMergeReviewPatch(
             patch="diff --git",
             target_sha="base123",
             base_sha="session-base123",
         ),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_local_auto_merge_workflow_stores_reviewed_diff(
         self, mock_spawn: MagicMock, mock_patch: MagicMock
     ) -> None:
@@ -2280,10 +2277,10 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.build_auto_merge_review_patch",
+        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
         side_effect=LocalBranchMergeError("no merge base"),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_local_auto_merge_workflow_blocks_without_strict_patch(
         self, mock_spawn: MagicMock, _mock_patch: MagicMock
     ) -> None:
@@ -2300,8 +2297,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertIn("no merge base", workflow.state["error"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_legacy_qa_panel_run_cancels_in_flight_panel_workflow(
         self, mock_interrupt: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -2367,7 +2364,7 @@ class SpecCriticWorkflowTests(TestCase):
             system_agents.QA_DISPLAY_AUTHOR,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
         existing = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -2387,8 +2384,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow, existing)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_pr_starts_workflow_after_completed_user_implementation_turn(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -2424,7 +2421,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 3)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_waits_when_turn_finishes_with_proposed_plan(
         self, mock_start: MagicMock
     ) -> None:
@@ -2455,7 +2452,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_waits_when_rollout_renders_pending_plan(
         self, mock_start: MagicMock
     ) -> None:
@@ -2514,7 +2511,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_starts_after_literal_proposed_plan_example(
         self, mock_start: MagicMock
     ) -> None:
@@ -2574,7 +2571,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNotNone(instance.auto_pr_triggered_at)
         mock_start.assert_called_once()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_qa_starts_review_workflow_after_completed_user_turn(
         self, mock_start: MagicMock
     ) -> None:
@@ -2610,8 +2607,8 @@ class SpecCriticWorkflowTests(TestCase):
             open_pr_on_lgtm=False,
         )
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_qa_hidden_qa_worker_uses_system_agent_approval_mode(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -2639,7 +2636,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_qa_does_not_start_when_approval_requires_visible_control(
         self, mock_start: MagicMock
     ) -> None:
@@ -2657,7 +2654,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_qa_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_does_not_start_when_approval_requires_visible_control(
         self, mock_start: MagicMock
     ) -> None:
@@ -2680,7 +2677,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_takes_precedence_over_auto_qa(self, mock_start: MagicMock) -> None:
         instance = _instance(auto_pr_enabled=True, auto_qa_enabled=True)
 
@@ -2691,7 +2688,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNone(instance.auto_qa_triggered_at)
         self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_qa_forwards_local_auto_merge_setting(
         self, mock_start: MagicMock
     ) -> None:
@@ -2706,7 +2703,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(mock_start.call_args.kwargs["open_pr_on_lgtm"])
         self.assertEqual(mock_start.call_args.kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_merge_start_block_records_failed_metadata(
         self, mock_start: MagicMock
     ) -> None:
@@ -2755,7 +2752,7 @@ class SpecCriticWorkflowTests(TestCase):
             "failed to start QA agent: no merge base",
         )
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_does_not_stamp_when_workflow_start_fails(
         self, mock_start: MagicMock
     ) -> None:
@@ -2768,7 +2765,7 @@ class SpecCriticWorkflowTests(TestCase):
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_pr_triggered_at)
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_qa_does_not_stamp_when_workflow_start_fails(
         self, mock_start: MagicMock
     ) -> None:
@@ -2781,7 +2778,7 @@ class SpecCriticWorkflowTests(TestCase):
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_qa_triggered_at)
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_pr_claims_turn_before_starting_workflow(
         self, mock_start: MagicMock
     ) -> None:
@@ -2797,7 +2794,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         mock_start.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_pr_skips_completed_plan_mode_turn(self, mock_spawn: MagicMock) -> None:
         instance = _instance(auto_pr_enabled=True, plan_mode=True)
 
@@ -2806,7 +2803,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_pr_skips_workflow_owned_user_turn(self, mock_spawn: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -2859,7 +2856,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("no longer supported", workflow.state["error"])
         self.assertNotIn("failure_surfaced", workflow.state)
 
-    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.demo.on_codex_instance_finished")
     def test_demo_system_workflow_is_routed_to_demo_router(
         self, mock_demo_finished: MagicMock
     ) -> None:
@@ -2894,7 +2891,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, "demo_running")
 
-    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.demo.on_codex_instance_finished")
     def test_demo_workflow_requires_demo_agent_kind(
         self, mock_demo_finished: MagicMock
     ) -> None:
@@ -2930,7 +2927,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
 
-    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.demo.on_codex_instance_finished")
     def test_demo_workflow_requires_demo_instance_kind(
         self, mock_demo_finished: MagicMock
     ) -> None:
@@ -2967,7 +2964,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
 
     @patch(
-        "hitch.main.system_agents.demo.on_codex_instance_finished",
+        "hitch.main.workflows.system_agents.demo.on_codex_instance_finished",
         side_effect=RuntimeError("boom"),
     )
     def test_demo_system_workflow_fails_if_demo_router_raises(
@@ -3003,7 +3000,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("demo workflow router failed: boom", run.error)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
 
-    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.demo.on_codex_instance_finished")
     def test_demo_agent_kind_does_not_route_non_demo_workflow(
         self, mock_demo_finished: MagicMock
     ) -> None:
@@ -3132,7 +3129,7 @@ class SpecCriticWorkflowTests(TestCase):
                 step=system_agents.STEP_QA_RUNNING,
             )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_feedback_spawns_tagged_visible_turn(self, mock_spawn: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3200,7 +3197,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.iteration, 1)
         self.assertEqual(workflow.state["next_user_message_index"], 3)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_design_synthesis_gate_cases(self, mock_spawn: MagicMock) -> None:
         cases = (
             _DesignGateCase(
@@ -3374,7 +3371,7 @@ class SpecCriticWorkflowTests(TestCase):
             output={"feedback": feedback, "lgtm": lgtm},
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_lgtm_spawns_pr_prompt(self, mock_spawn: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3445,7 +3442,7 @@ class SpecCriticWorkflowTests(TestCase):
             workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 4
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_lgtm_can_complete_without_pr_prompt(self, mock_spawn: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3495,7 +3492,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 4)
         self.assertEqual(workflow.state["last_feedback"], "Looks good")
 
-    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
     def test_qa_lgtm_merges_configured_local_branch(
         self, mock_merge: MagicMock
     ) -> None:
@@ -3564,8 +3561,8 @@ class SpecCriticWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_merge_commit_sha"], "abc123"
         )
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
-    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
     def test_qa_lgtm_blocks_when_local_branch_merge_fails(
         self, mock_merge: MagicMock, mock_surface: MagicMock
     ) -> None:
@@ -3629,15 +3626,15 @@ class SpecCriticWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_merge_error"], "patch conflict"
         )
 
-    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
     @patch(
-        "hitch.main.system_agents.build_auto_merge_review_patch",
+        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
         return_value=AutoMergeReviewPatch(
             patch="diff --git final", target_sha="final-base"
         ),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_auto_merge_feedback_loop_uses_refreshed_review_patch(
         self,
         mock_turn: MagicMock,
@@ -3719,10 +3716,10 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_start_pr_monitor_workflow_skips_qa_and_starts_monitor(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -3769,11 +3766,11 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
         self, mock_spawn: MagicMock, mock_run: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -3891,11 +3888,11 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("gh_observation", run.input)
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 170}),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_opens_pr_with_gh_cli(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -4006,8 +4003,8 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_prompt_completion_completes_without_changes_when_no_commits(
         self, mock_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -4057,9 +4054,9 @@ class SpecCriticWorkflowTests(TestCase):
             CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
         )
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh", return_value={})
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh", return_value={})
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_blocks_when_no_commits_but_worktree_dirty(
         self,
         mock_surface: MagicMock,
@@ -4106,7 +4103,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[-1], ["gh", "pr", "create", "--fill"])
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_failed_notice_turn_does_not_reblock_completed_workflow(
         self, mock_surface: MagicMock
     ) -> None:
@@ -4136,8 +4133,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
         mock_surface.assert_not_called()
 
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_refuses_to_push_default_branch(
         self, mock_surface: MagicMock, mock_run: MagicMock
     ) -> None:
@@ -4189,7 +4186,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_branch_push_force_with_lease_after_non_fast_forward_rejection(
         self, mock_run: MagicMock
     ) -> None:
@@ -4243,7 +4240,7 @@ class SpecCriticWorkflowTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_branch_push_does_not_force_when_active_pr_head_differs(
         self, mock_run: MagicMock
     ) -> None:
@@ -4287,11 +4284,11 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 173}),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_branch_pr(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -4400,12 +4397,12 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 174}),
     )
-    @patch("hitch.main.system_agents.codex_events.latest_pr_snapshot_for_instance")
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_events.latest_pr_snapshot_for_instance")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_worker_snapshot(
         self,
         mock_spawn: MagicMock,
@@ -4524,11 +4521,11 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 171}),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_keeps_created_pr_when_view_fails(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -4592,8 +4589,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("head_sha", handoff)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_without_handoff_blocks_workflow(
         self, mock_surface: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -4621,11 +4618,11 @@ class SpecCriticWorkflowTests(TestCase):
         mock_surface.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_without_snapshot_monitors_existing_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -4695,11 +4692,11 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_force_pushes_existing_handoff_without_snapshot(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -4783,11 +4780,11 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_force_pushes_authoritative_worker_snapshot(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -5014,7 +5011,7 @@ class SpecCriticWorkflowTests(TestCase):
         feedback = gh_observations._gh_review_thread_feedback(threads)
         self.assertIn("outdated conversation", feedback)
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_monitor_observation_fetches_github_state_with_gh(
         self, mock_run: MagicMock
     ) -> None:
@@ -5181,7 +5178,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("This branch misses the retry", feedback)
         self.assertIn("name=lint", feedback)
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_monitor_observation_clears_stale_ci_when_rollup_is_null(
         self, mock_run: MagicMock
     ) -> None:
@@ -5316,7 +5313,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("unresolved_thread_count", pr)
         self.assertEqual(gate["status"], gh_observations._PR_GATE_PENDING)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -5402,7 +5399,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(progress[1]["label"], "Review")
         self.assertEqual(progress[1]["status"], "blocked")
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_monitor_uses_hitch_gh_observation_as_authoritative_pr(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -5478,7 +5475,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Active PR: #169", mock_spawn.call_args.kwargs["prompt"])
         self.assertIn("name=lint", mock_spawn.call_args.kwargs["prompt"])
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_monitor_refreshes_gh_observation_after_agent_wait(
         self, mock_observe: MagicMock
     ) -> None:
@@ -5555,8 +5552,8 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
             mock_observe.assert_called_once_with(workflow)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_monitor_uses_refreshed_gh_feedback_for_followup(
         self, mock_observe: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -5629,7 +5626,7 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertIn("fresh requested changes body", prompt)
             self.assertNotIn("stale monitor feedback", prompt)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_monitor_spawns_followup_for_actionable_feedback_when_gates_pass(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -5707,9 +5704,9 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Codecov reports one changed line missing coverage.", prompt)
         self.assertNotIn("Raw PR comments include Codecov output.", prompt)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_monitor_reruns_when_refresh_has_unrelated_text(
         self,
         mock_observe: MagicMock,
@@ -5812,7 +5809,7 @@ class SpecCriticWorkflowTests(TestCase):
             mock_spawn_turn.assert_not_called()
             self.assertEqual(mock_observe.call_count, 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_monitor_ignores_non_actionable_feedback_when_gates_pass(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -5876,8 +5873,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(monitor["monitor_feedback"], "No actionable comments.")
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_pending_backoff_preserves_current_monitor_feedback_until_gates_pass(
         self, mock_observe: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -6003,9 +6000,9 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(mock_observe.call_count, 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_clean_pending_backoff_reruns_monitor_when_feedback_appears(
         self,
         mock_observe: MagicMock,
@@ -6138,9 +6135,9 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_session.assert_called_once()
         mock_spawn_turn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_pending_backoff_reruns_monitor_when_feedback_observation_changes(
         self,
         mock_observe: MagicMock,
@@ -6286,11 +6283,11 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"head_sha": "newsha"}),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_restarts_monitor_with_updated_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -6397,11 +6394,11 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_force_pushes_rebased_pr_branch(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -6501,7 +6498,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[5][:3], ["gh", "pr", "view"])
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_open_force_pushes_observed_current_branch_pr_without_handoff(
         self, mock_run: MagicMock
     ) -> None:
@@ -6566,7 +6563,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertEqual(commands[5][:3], ["gh", "pr", "view"])
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_open_revalidates_stored_pr_before_force_pushing(
         self, mock_run: MagicMock
     ) -> None:
@@ -6645,7 +6642,7 @@ class SpecCriticWorkflowTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_branch_push_does_not_force_without_matching_active_pr_head(
         self, mock_run: MagicMock
     ) -> None:
@@ -6696,13 +6693,13 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {"pr_number": 174, "head": "followup", "head_sha": "followupsha"}
         ),
     )
-    @patch("hitch.main.gh_cli.subprocess.run")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_opens_followup_pr_for_stale_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -6870,10 +6867,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"ci_status": "pending"}),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pending_only_gates_do_not_consume_remediation_iteration(
         self, mock_spawn: MagicMock, _mock_observe: MagicMock
     ) -> None:
@@ -6939,7 +6936,7 @@ class SpecCriticWorkflowTests(TestCase):
         _mock_observe.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {
                 "review_signal": "approved",
@@ -6991,7 +6988,7 @@ class SpecCriticWorkflowTests(TestCase):
             ).exists()
         )
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_future_pr_monitor_backoff_does_not_poll_github(
         self, mock_observe: MagicMock
     ) -> None:
@@ -7025,7 +7022,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_observe.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {
                 "review_signal": "approved",
@@ -7084,7 +7081,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
         self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     def test_reconcile_does_not_poll_due_pr_monitor_backoff(
         self, mock_observe: MagicMock
     ) -> None:
@@ -7123,8 +7120,8 @@ class SpecCriticWorkflowTests(TestCase):
         backoff = workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]
         self.assertNotIn("claim_token", backoff)
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_missing_cwd_pr_monitor_backoff_blocks_after_retry_limit(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -7164,10 +7161,10 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         side_effect=gh_cli._GhPrOpenError("auth failed"),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_gh_error_pr_monitor_backoff_blocks_after_retry_limit(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -7207,8 +7204,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_actionable_gate_at_iteration_limit_stops_without_feedback_turn(
         self, mock_spawn_turn: MagicMock, mock_surface: MagicMock
     ) -> None:
@@ -7254,8 +7251,8 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.assert_not_called()
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.system_agents._surface_workflow_failure")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pending_gate_at_monitor_limit_stops_without_new_monitor(
         self, mock_spawn_new_session: MagicMock, mock_surface: MagicMock
     ) -> None:
@@ -7303,7 +7300,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_new_session.assert_not_called()
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_completion_recovers_when_run_row_does_not_exist_yet(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7350,7 +7347,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_invalid_qa_output_blocks_workflow_and_surfaces_failure(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7408,8 +7405,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["user_message_index"], 1)
         self.assertIn("QA output was not valid JSON", kwargs["prompt"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stop_active_workflow_interrupts_hidden_run_and_blocks(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -7448,8 +7445,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stop_active_workflow_marks_only_interrupted_runs_failed(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -7507,7 +7504,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_stop_active_workflow_returns_false_without_hidden_run(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7526,8 +7523,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_stop_active_workflow_blocks_pr_monitor_backoff_without_hidden_run(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -7571,7 +7568,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
         self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_active_workflow_reconciles_terminal_hidden_run(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7610,7 +7607,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("worker process exited", workflow.state["error"])
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_terminal_hidden_run_recovers_missing_run_row(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7648,10 +7645,10 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_recovers_stale_pr_monitor_without_run(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
     ) -> None:
@@ -7703,7 +7700,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_observe.assert_called_once_with(workflow)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
     def test_reconcile_stale_pr_monitor_blocks_on_restart_failure(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7743,7 +7740,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("failed to restart PR follow-up monitor", workflow.state["error"])
         self.assertIn("boom", workflow.state["error"])
 
-    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
     def test_reconcile_stale_pr_monitor_waits_for_route_claimed_monitor(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7798,7 +7795,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents._handle_pr_qa_agent_finished")
+    @patch("hitch.main.workflows.system_agents._handle_pr_qa_agent_finished")
     def test_system_agent_finish_claims_instance_before_routing(
         self, mock_route: MagicMock
     ) -> None:
@@ -7848,11 +7845,11 @@ class SpecCriticWorkflowTests(TestCase):
         cases = [
             (
                 CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                "hitch.main.system_agents._handle_system_feedback_finished",
+                "hitch.main.workflows.system_agents._handle_system_feedback_finished",
             ),
             (
                 CodexInstance.PURPOSE_USER,
-                "hitch.main.system_agents._handle_workflow_user_turn_finished",
+                "hitch.main.workflows.system_agents._handle_workflow_user_turn_finished",
             ),
         ]
         for purpose, handler in cases:
@@ -7877,7 +7874,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertTrue(handled)
                 mock_handler.assert_not_called()
 
-    @patch("hitch.main.system_agents._handle_system_feedback_finished")
+    @patch("hitch.main.workflows.system_agents._handle_system_feedback_finished")
     def test_reconcile_terminal_workflow_turn_clears_claim_when_routing_raises(
         self, mock_handler: MagicMock
     ) -> None:
@@ -7915,9 +7912,9 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNotNone(instance.workflow_routing_started_at)
         self.assertEqual(mock_handler.call_count, 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
-    @patch("hitch.main.system_agents._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_qa_run")
     def test_reconcile_terminal_workflow_turns_ignores_prior_completed_turn(
         self,
         mock_spawn_qa: MagicMock,
@@ -7999,7 +7996,7 @@ class SpecCriticWorkflowTests(TestCase):
                 mock_spawn_qa.assert_not_called()
                 mock_spawn_monitor.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_qa_feedback_worker_is_retried_once(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -8046,7 +8043,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertEqual(kwargs["user_message_index"], 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_qa_feedback_worker_blocks_after_retry_budget(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -8092,7 +8089,7 @@ class SpecCriticWorkflowTests(TestCase):
             kwargs["prompt"],
         )
 
-    @patch("hitch.main.system_agents._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_qa_run")
     def test_completed_qa_feedback_clears_dead_worker_retry_state(
         self, mock_spawn_qa: MagicMock
     ) -> None:
@@ -8127,7 +8124,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn_qa.assert_called_once_with(workflow)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_pr_feedback_worker_is_retried_once(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -8174,7 +8171,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertEqual(kwargs["user_message_index"], 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_pr_feedback_worker_blocks_after_retry_budget(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -8222,9 +8219,9 @@ class SpecCriticWorkflowTests(TestCase):
             kwargs["prompt"],
         )
 
-    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
     @patch(
-        "hitch.main.system_agents._open_or_find_pr_with_gh_cli",
+        "hitch.main.workflows.system_agents._open_or_find_pr_with_gh_cli",
         return_value={
             "url": "https://github.com/cberner/hitch/pull/169",
             "repository_full_name": "cberner/hitch",
@@ -8267,8 +8264,8 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn_monitor.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance", return_value=None)
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance", return_value=None)
     def test_stop_active_workflow_leaves_running_when_interrupt_fails(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -8305,8 +8302,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_user_steering_turn_pauses_running_qa_and_spawns_user_turn(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -8364,8 +8361,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["workflow_id"], workflow.pk)
         self.assertEqual(kwargs["user_message_index"], 3)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_user_steering_turn_keeps_uninterrupted_qa_run_running(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -8412,8 +8409,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_user_steering_turn_completion_restarts_qa(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
@@ -9148,8 +9145,8 @@ class AutoProposalQuotaPauseTests(TestCase):
             )
         )
 
-    @patch("hitch.main.system_agents.timezone.now")
-    @patch("hitch.main.system_agents.Codex")
+    @patch("hitch.main.workflows.system_agents.timezone.now")
+    @patch("hitch.main.workflows.system_agents.Codex")
     def test_auto_proposal_quota_pause_reads_account_rate_limits(
         self, mock_codex: MagicMock, mock_now: MagicMock
     ) -> None:
@@ -9176,8 +9173,8 @@ class AutoProposalQuotaPauseTests(TestCase):
             response_model=GetAccountRateLimitsResponse,
         )
 
-    @patch("hitch.main.system_agents.timezone.now")
-    @patch("hitch.main.system_agents._auto_proposals_paused_by_usage_quota")
+    @patch("hitch.main.workflows.system_agents.timezone.now")
+    @patch("hitch.main.workflows.system_agents._auto_proposals_paused_by_usage_quota")
     def test_quota_throttle_caches_verdict_within_ttl(
         self, mock_quota: MagicMock, mock_now: MagicMock
     ) -> None:
@@ -9210,13 +9207,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         super().setUp()
         system_agents._reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
-            "hitch.main.system_agents._auto_proposals_paused_by_usage_quota",
+            "hitch.main.workflows.system_agents._auto_proposals_paused_by_usage_quota",
             return_value=False,
         )
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
         self.worktree_patcher = patch(
-            "hitch.main.system_agents.create_worktree_for_session",
+            "hitch.main.workflows.system_agents.create_worktree_for_session",
             return_value=MagicMock(path=Path("/repo-worktree")),
         )
         self.mock_create_worktree = self.worktree_patcher.start()
@@ -9334,7 +9331,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "Use the message as the durable summary.",
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -9403,7 +9400,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_candidate_prompt_includes_prior_proposal_descriptions(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -9595,7 +9592,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             autonomous_goal_prompts._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_skips_candidate_spawn_when_goal_deleted_after_record_create(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -9622,7 +9619,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             return workflow, True
 
         with patch(
-            "hitch.main.system_agents._create_autonomous_goal_workflow_record",
+            "hitch.main.workflows.system_agents._create_autonomous_goal_workflow_record",
             side_effect=fake_create,
         ):
             workflow = system_agents.start_autonomous_goal_workflow(
@@ -9636,11 +9633,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["error"], "autonomous goal no longer exists")
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.create_worktree_for_session")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_candidate_thread_in_worktree_when_requested(
         self,
         mock_spawn: MagicMock,
@@ -9683,16 +9680,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(thread_id="candidate-thread")
         self.assertEqual(run.input["cwd"], "/repo-worktree")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_acceptance_replaces_previous_proposal(
         self,
         mock_spawn: MagicMock,
@@ -9841,7 +9838,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     def test_accepted_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -9930,7 +9927,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.accepted_session, accepted_candidate)
         mock_cleanup.assert_called_once_with("/repo-worktree-3")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     def test_rejected_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -10020,7 +10017,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             ["/repo-worktree-3", "/repo-worktree-2"],
         )
 
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_ignores_different_proposal(
         self, mock_interrupt: MagicMock
     ) -> None:
@@ -10094,8 +10091,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_cleans_worktree_between_agent_turns(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -10175,8 +10172,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-3")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_keeps_accepted_worktree_before_next_candidate(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -10244,8 +10241,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_leaves_live_uninterrupted_run(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -10345,16 +10342,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(handled)
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_rejection_stops_with_existing_proposal(
         self,
         mock_spawn: MagicMock,
@@ -10488,14 +10485,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         side_effect=RuntimeError("snapshot failed"),
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_continuation_failure_publishes_existing_proposal(
         self,
         mock_spawn: MagicMock,
@@ -10571,16 +10568,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_snapshot.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_candidate_parse_failure_publishes_existing_proposal(
         self,
         mock_spawn: MagicMock,
@@ -10666,16 +10663,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_no_proposal_publishes_existing_proposal(
         self,
         mock_spawn: MagicMock,
@@ -10769,16 +10766,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stacked_diff_judge_parse_failure_publishes_existing_proposal(
         self,
         mock_spawn: MagicMock,
@@ -10886,13 +10883,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch("hitch.main.workflows.system_agents.cleanup_worktree")
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.create_worktree_for_session")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_cleans_up_candidate_worktree_when_spawn_fails(
         self,
         mock_spawn: MagicMock,
@@ -10920,10 +10917,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_starts_enabled_goal_without_pending_proposal(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -10954,16 +10951,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_continues_from_pending_stack_proposal(
         self,
         mock_spawn: MagicMock,
@@ -11092,8 +11089,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_when_any_extra_pending_proposal_exists(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11135,8 +11132,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_pending_proposal_without_stack_metadata(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11174,9 +11171,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.system_agents._claim_autonomous_goal_stack_continuation_proposal")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents._claim_autonomous_goal_stack_continuation_proposal")
     def test_auto_proposal_does_not_start_when_stack_claim_loses_race(
         self,
         mock_claim: MagicMock,
@@ -11386,11 +11383,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(SystemWorkflow.objects.exists())
 
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_continues_legacy_stopped_stack_proposal_once(
         self,
         mock_spawn: MagicMock,
@@ -11609,16 +11606,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         ]
         self.assertEqual(len(pending_proposal_queries), 1)
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_does_not_retry_stopped_stack_continuation(
         self,
         mock_spawn: MagicMock,
@@ -11690,14 +11687,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
-        "hitch.main.system_agents.commit_hash_for_ref",
+        "hitch.main.workflows.system_agents.commit_hash_for_ref",
         return_value="b" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_with_auto_merge_uses_target_branch_snapshot(
         self,
         mock_spawn: MagicMock,
@@ -11739,8 +11736,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_lock(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11759,8 +11756,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_ignores_soft_deleted_goal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11780,8 +11777,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11808,8 +11805,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_called_once_with("/repo")
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.commit_hash_for_ref")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.commit_hash_for_ref")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_base_selection_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_ref_sha: MagicMock
     ) -> None:
@@ -11876,8 +11873,8 @@ class AutonomousGoalWorkflowTests(TestCase):
             [first.pk, second.pk],
         )
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_pauses_when_usage_quota_is_low(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -11898,10 +11895,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_skips_pending_proposal_but_not_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -11943,10 +11940,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_does_not_block_on_resolved_proposals(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -11993,10 +11990,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(SystemWorkflow.objects.count(), 2)
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_transient_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12031,10 +12028,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_ignores_manual_transient_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12068,10 +12065,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(SystemWorkflow.objects.count(), 1)
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_ignores_stale_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12148,10 +12145,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_serializes_running_workflows_per_project(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12184,10 +12181,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_in_flight_autonomous_goal_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12229,10 +12226,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_legacy_in_flight_autonomous_goal_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12276,10 +12273,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_user_accepted_auto_review_proposal(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12324,10 +12321,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_user_accepted_running_goal_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12369,10 +12366,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_in_flight_pr_qa_for_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12429,10 +12426,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_unresolved_failure_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12464,10 +12461,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_does_not_block_resolved_failure_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
@@ -12498,10 +12495,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value=None,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_waits_when_base_branch_is_unavailable(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -12520,14 +12517,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
         "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
         return_value=0,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_run_auto_proposals_command_starts_eligible_goals(
         self,
         mock_spawn: MagicMock,
@@ -12572,14 +12569,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
         "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
         return_value=0,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_run_auto_proposals_command_without_project_starts_across_projects(
         self,
         mock_spawn: MagicMock,
@@ -12632,8 +12629,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_reconcile_dead.assert_called_once_with()
         self.assertEqual(mock_spawn.call_count, 2)
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_waits_for_default_branch_change_after_no_proposal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -12664,8 +12661,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(started, 1)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_no_proposal_records_and_suppresses_until_branch_changes(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -12720,7 +12717,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(started, 1)
         self.assertEqual(mock_spawn.call_count, 2)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_yolo_workflow_starts_candidate_thread_with_yolo_guidance(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -12744,7 +12741,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("substantial session", prompt)
         self.assertNotIn("incremental", prompt.lower())
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_candidate_prompt_includes_prior_memory(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -12787,7 +12784,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(run.input["memory_count"], 1)
         self.assertFalse(run.input["memory_compacted"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 350)
     def test_candidate_prompt_compacts_large_prior_memory(
         self, mock_spawn: MagicMock
@@ -13020,7 +13017,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Processed file 3", memory_context.text)
         self.assertNotIn("Processed file 0", memory_context.text)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_candidate_completion_starts_judge_thread(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -13117,7 +13114,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_candidate_completion_creates_notice_when_no_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -13195,8 +13192,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_commit_hash")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_no_proposal_records_workflow_start_sha_snapshot(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -13237,8 +13234,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_default_sha.assert_called_once_with("/repo")
 
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_candidate_spawn_interrupts_worker_when_goal_deleted_mid_spawn(
         self, mock_spawn: MagicMock, mock_interrupt: MagicMock
     ) -> None:
@@ -13278,8 +13275,8 @@ class AutonomousGoalWorkflowTests(TestCase):
             run.instance_id, expected_thread_id=run.thread_id
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_dead_autonomous_goal_candidate_worker_is_retried_once(
         self, mock_spawn: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -13439,7 +13436,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
         self.assertEqual(notice.candidate_session, candidate_metadata)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_candidate_worker_retries_within_proposal_budget_after_death_retry(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -13536,7 +13533,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(ProposedSession.objects.exists())
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_dead_autonomous_goal_judge_worker_is_retried_once(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -13627,10 +13624,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Add parser coverage", kwargs["prompt"])
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_manual_no_proposal_does_not_record_auto_checkpoint(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -13665,10 +13662,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_stale_no_proposal_workflow_does_not_restore_cleared_sha(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -13707,7 +13704,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
         mock_default_sha.assert_called_once_with("/repo")
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_yolo_candidate_completion_starts_judge_thread_with_yolo_guidance(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -13773,8 +13770,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("substantial and high-upside", prompt)
         self.assertNotIn("incremental", prompt.lower())
 
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_judge_spawn_interrupts_worker_when_goal_deleted_mid_spawn(
         self, mock_spawn: MagicMock, mock_interrupt: MagicMock
     ) -> None:
@@ -13960,7 +13957,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         autonomous_goal.refresh_from_db()
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_autonomy_leaves_proposal_pending_for_candidate_session(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -14050,7 +14047,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_draft_pr_autonomy_records_auto_pr_from_judge_completion(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -14125,8 +14122,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
 
-    @patch("hitch.main.system_agents.create_worktree_for_session")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_merge_worktree_candidate_starts_from_target_branch(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
@@ -14203,10 +14200,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "release")
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value=None,
     )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_draft_patch_does_not_revalidate_until_user_continuation(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
@@ -14272,7 +14269,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_auto_qa_setting_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -14330,7 +14327,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_draft_pr_autonomy_records_auto_pr_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -14389,8 +14386,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
 
-    @patch("hitch.main.system_agents.create_worktree_for_session")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_autonomous_goal_auto_merge_config_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
@@ -14452,7 +14449,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_autonomous_goal_auto_merge_does_not_spawn_before_acceptance(
         self,
         mock_spawn: MagicMock,
@@ -14520,7 +14517,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "proposed",
         )
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_draft_pr_implementation_completion_records_pr_workflow(
         self, mock_start: MagicMock
     ) -> None:
@@ -14561,7 +14558,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_pr_workflow_id"], pr_workflow.pk
         )
 
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
     def test_auto_qa_implementation_completion_records_qa_workflow(
         self, mock_start: MagicMock
     ) -> None:
@@ -14601,7 +14598,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_qa_workflow_id"], qa_workflow.pk
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_pending_proposal_ignores_spawn_failure(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -14722,7 +14719,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertFalse(ProposedSession.objects.exists())
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     def test_deleted_autonomous_goal_terminal_callback_cleans_workflow_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -15062,7 +15059,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "(none)",
         )
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_invalid_candidate_output_retries_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -15159,7 +15156,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("not json", mock_spawn.call_args.kwargs["prompt"])
         self.assertFalse(ProposedSession.objects.exists())
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_exhausted_candidate_budget_persists_tokens_before_blocking(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -15251,7 +15248,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_candidate_budget_retries_without_new_token_progress(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -15369,7 +15366,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(ProposedSession.objects.exists())
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_candidate_budget_no_progress_retry_cap_blocks_loop(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -15463,7 +15460,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_no_proposal_retries_candidate_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -15544,7 +15541,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("No safe target found", mock_spawn.call_args.kwargs["prompt"])
         self.assertFalse(ProposedSession.objects.exists())
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_below_threshold_retries_candidate_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:

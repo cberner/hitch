@@ -1,7 +1,8 @@
 from django.test import SimpleTestCase
 
-from hitch.main import session_stage, system_agents
+from hitch.main import session_stage
 from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.workflows import system_agents
 
 
 class SessionStageTests(SimpleTestCase):

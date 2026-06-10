@@ -13,14 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from hitch.main import (
-    codex_events,
-    codex_pool,
-    demo,
-    rollout,
-    streaming,
-    system_agents,
-)
+from hitch.main import codex_events, codex_pool, demo, rollout, streaming
 from hitch.main.entry_render import (
     collapse_flat_entries,
     render_entries,
@@ -31,6 +24,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)
 

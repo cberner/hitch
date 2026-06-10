@@ -16,7 +16,8 @@ from typing import Any
 
 from openai_codex.generated.v2_all import Turn
 
-from hitch.main.agent_io import (
+from hitch.main.models import AutonomousGoal, SystemAgentRun, SystemWorkflow
+from hitch.main.workflows.agent_io import (
     _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
     SPEC_REQUIREMENTS_AGENT_KIND,
     SPEC_RISK_AGENT_KIND,
@@ -24,8 +25,7 @@ from hitch.main.agent_io import (
     SPEC_TEST_AGENT_KIND,
     _parse_json_object,
 )
-from hitch.main.models import AutonomousGoal, SystemAgentRun, SystemWorkflow
-from hitch.main.workflow_state import _state_dict, _state_string
+from hitch.main.workflows.workflow_state import _state_dict, _state_string
 
 _SPEC_CRITIC_ANALYSIS_AGENT_KINDS = (
     SPEC_REQUIREMENTS_AGENT_KIND,

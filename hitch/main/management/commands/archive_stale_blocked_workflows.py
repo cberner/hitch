@@ -7,7 +7,7 @@ from typing import Any, override
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from hitch.main import system_agents
+from hitch.main.workflows import system_agents
 
 
 class Command(BaseCommand):

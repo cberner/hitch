@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from hitch.main.agent_io import _CONFIDENCE_RANK
 from hitch.main.models import SessionMetadata, SystemWorkflow
+from hitch.main.workflows.agent_io import _CONFIDENCE_RANK
 
 
 def _state_dict(workflow: SystemWorkflow, key: str) -> dict[str, Any]:

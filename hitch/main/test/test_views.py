@@ -44,16 +44,13 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
-    agent_io,
     caches,
     codex_events,
     codex_pool,
     coding_agents,
     demo,
     entry_render,
-    gh_cli,
     input_images,
-    pr_stage_refresh_state,
     session_entry_display,
     session_index,
     session_pr_plan,
@@ -64,7 +61,6 @@ from hitch.main import (
     settings_cookies,
     streaming,
     system_agent_summary,
-    system_agents,
     token_usage,
     views,
 )
@@ -96,6 +92,7 @@ from hitch.main.test.support import (
     _seed_cookies,
     _setup_codex,
 )
+from hitch.main.workflows import agent_io, gh_cli, pr_stage_refresh_state, system_agents
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -1233,7 +1230,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
@@ -1323,7 +1320,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
@@ -1386,7 +1383,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_observe.assert_called_once()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
@@ -2647,7 +2644,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_cached_pr_stage_to_done_merged(
@@ -2746,7 +2743,7 @@ class IndexViewTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_due_pr_monitor_backoff_to_done_merged(
@@ -2818,7 +2815,7 @@ class IndexViewTests(TestCase):
         mock_observe.assert_called_once()
 
     @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
-    @patch("hitch.main.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
+    @patch("hitch.main.workflows.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
@@ -2910,7 +2907,7 @@ class IndexViewTests(TestCase):
             self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_uncached_pr_snapshot_to_done_merged(
@@ -3153,7 +3150,7 @@ class IndexViewTests(TestCase):
         )
 
         with patch(
-            "hitch.main.pr_stage._update_cached_stage",
+            "hitch.main.workflows.pr_stage._update_cached_stage",
             side_effect=OperationalError("database is locked"),
         ) as update_stage:
             response = self.client.get(reverse("index"))
@@ -3957,7 +3954,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_ready_pr_to_done_merged(
@@ -4053,7 +4050,7 @@ class IndexViewTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_caps_ready_pr_refreshes(
@@ -4173,8 +4170,8 @@ class IndexViewTests(TestCase):
         self.assertEqual(steps.count(system_agents.STEP_PR_CLOSED), 2)
         self.assertEqual(mock_gh_pr_view.call_count, 2)
 
-    @patch("hitch.main.system_agents.logger")
-    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.system_agents.logger")
+    @patch("hitch.main.workflows.system_agents._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_backs_off_failed_ready_pr_refresh(
@@ -6224,7 +6221,7 @@ class IndexViewTests(TestCase):
                 reverse("system_session", kwargs={"session_id": session_id})
             )
 
-    @patch("hitch.main.system_agents.accepted_visible_system_thread_ids")
+    @patch("hitch.main.workflows.system_agents.accepted_visible_system_thread_ids")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_reuses_accepted_visible_thread_ids_across_pages(
@@ -17427,7 +17424,7 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"label": "CI"', body)
         self.assertIn(b'"statusLabel": "Pending"', body)
 
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_stream_reloads_and_blocks_when_hidden_system_worker_died(
         self, mock_worker_alive: MagicMock, mock_spawn: MagicMock
@@ -18413,7 +18410,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, 'data-run-status-log-url="None"')
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
@@ -18591,7 +18588,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
@@ -20380,7 +20377,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_reconciles_terminal_running_workflow(
         self, mock_interrupt: MagicMock
     ) -> None:
@@ -20437,8 +20434,8 @@ class AutonomousGoalViewTests(TestCase):
             system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
         )
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_stops_running_workflow(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -20494,8 +20491,8 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNotNone(goal.deleted_at)
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_cleans_worktree_when_interrupt_is_terminal(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -20543,9 +20540,9 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
-    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.system_agents.codex_pool.interrupt_instance",
+        "hitch.main.workflows.system_agents.codex_pool.interrupt_instance",
         return_value=None,
     )
     def test_delete_autonomous_goal_keeps_goal_when_running_workflow_cannot_stop(

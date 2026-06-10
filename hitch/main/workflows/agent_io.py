@@ -23,8 +23,8 @@ from hitch.main.models import (
     ProposedSession,
     SystemWorkflow,
 )
-from hitch.main.pr_handoff import _compact_pr_handoff
 from hitch.main.sdk_values import truncate_for_prompt
+from hitch.main.workflows.pr_handoff import _compact_pr_handoff
 
 SPEC_REQUIREMENTS_AGENT_KIND = "spec_critic_requirements"
 SPEC_RISK_AGENT_KIND = "spec_critic_risks"

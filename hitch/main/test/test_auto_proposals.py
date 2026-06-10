@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase, override_settings
 
 import hitch.main as main_app
-from hitch.main import workflow_maintenance
 from hitch.main.apps import MainConfig
 from hitch.main.goals import auto_proposals
 from hitch.main.models import SessionMetadata
+from hitch.main.workflows import workflow_maintenance
 
 
 class AutoProposalSchedulerTests(SimpleTestCase):
@@ -140,7 +140,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
 
     @patch(
-        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
+        "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
     def test_disk_usage_cleanup_runs_every_ten_minutes(
         self, mock_cleanup: MagicMock
@@ -180,22 +180,22 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         fake_stop.wait.side_effect = StopSchedulerError
         with (
             patch(
-                "hitch.main.workflow_maintenance.threading.Event",
+                "hitch.main.workflows.workflow_maintenance.threading.Event",
                 return_value=fake_stop,
             ),
             patch(
-                "hitch.main.workflow_maintenance.time.monotonic",
+                "hitch.main.workflows.workflow_maintenance.time.monotonic",
                 return_value=10.0,
             ),
             patch(
-                "hitch.main.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
+                "hitch.main.workflows.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
             ) as mock_tick,
             patch(
-                "hitch.main.workflow_maintenance._run_due_stale_blocked_archive",
+                "hitch.main.workflows.workflow_maintenance._run_due_stale_blocked_archive",
                 return_value=999.0,
             ) as mock_stale_archive,
             patch(
-                "hitch.main.workflow_maintenance._run_due_disk_usage_cleanup",
+                "hitch.main.workflows.workflow_maintenance._run_due_disk_usage_cleanup",
                 return_value=999.0,
             ) as mock_disk_cleanup,
             self.assertRaises(StopSchedulerError),
@@ -235,22 +235,22 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         fake_stop.wait.side_effect = StopSchedulerError
         with (
             patch(
-                "hitch.main.workflow_maintenance.threading.Event",
+                "hitch.main.workflows.workflow_maintenance.threading.Event",
                 return_value=fake_stop,
             ),
             patch(
-                "hitch.main.workflow_maintenance.time.monotonic",
+                "hitch.main.workflows.workflow_maintenance.time.monotonic",
                 return_value=10.0,
             ),
             patch(
-                "hitch.main.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
+                "hitch.main.workflows.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
             ),
             patch(
-                "hitch.main.workflow_maintenance._run_due_stale_blocked_archive",
+                "hitch.main.workflows.workflow_maintenance._run_due_stale_blocked_archive",
                 side_effect=record_archive,
             ),
             patch(
-                "hitch.main.workflow_maintenance._run_due_disk_usage_cleanup",
+                "hitch.main.workflows.workflow_maintenance._run_due_disk_usage_cleanup",
                 side_effect=record_disk,
             ),
             self.assertRaises(StopSchedulerError),
@@ -260,7 +260,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         self.assertEqual(order, ["archive", "disk"])
 
     @patch(
-        "hitch.main.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
+        "hitch.main.workflows.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
         return_value=[],
     )
     def test_stale_blocked_archive_runs_every_hour(
@@ -276,7 +276,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
 
         frozen = datetime(2026, 6, 6, tzinfo=UTC)
         with patch(
-            "hitch.main.workflow_maintenance.timezone.now", return_value=frozen
+            "hitch.main.workflows.workflow_maintenance.timezone.now", return_value=frozen
         ):
             next_due = workflow_maintenance._run_due_stale_blocked_archive(
                 next_due_at=next_due, now=100.0
@@ -285,7 +285,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             next_due,
             100.0 + workflow_maintenance._STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS,
         )
-        from hitch.main import system_agents
+        from hitch.main.workflows import system_agents
 
         mock_archive.assert_called_once_with(
             older_than=frozen - system_agents.STALE_BLOCKED_AGE, apply=True
@@ -297,9 +297,9 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
         self.assertEqual(mock_archive.call_count, 1)
 
-    @patch("hitch.main.workflow_maintenance.logger.exception")
+    @patch("hitch.main.workflows.workflow_maintenance.logger.exception")
     @patch(
-        "hitch.main.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
+        "hitch.main.workflows.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
         side_effect=RuntimeError("archive failed"),
     )
     def test_stale_blocked_archive_failure_is_logged_and_rescheduled(
@@ -318,9 +318,9 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             "failed to run scheduled stale blocked workflow archive"
         )
 
-    @patch("hitch.main.workflow_maintenance.logger.exception")
+    @patch("hitch.main.workflows.workflow_maintenance.logger.exception")
     @patch(
-        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup",
+        "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup",
         side_effect=RuntimeError("cleanup failed"),
     )
     def test_disk_usage_cleanup_failure_is_logged_and_rescheduled(
@@ -352,17 +352,17 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
 
     @patch(
-        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
+        "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
     @patch(
-        "hitch.main.workflow_maintenance.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.workflows.workflow_maintenance.system_agents.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
     @patch(
-        "hitch.main.workflow_maintenance.system_agents.refresh_due_pr_monitor_backoffs",
+        "hitch.main.workflows.workflow_maintenance.system_agents.refresh_due_pr_monitor_backoffs",
         return_value=2,
     )
-    @patch("hitch.main.workflow_maintenance.codex_pool.reconcile_dead")
+    @patch("hitch.main.workflows.workflow_maintenance.codex_pool.reconcile_dead")
     def test_scheduler_tick_reconciles_and_refreshes_pr_monitor_backoffs(
         self,
         mock_reconcile_dead: MagicMock,
@@ -550,7 +550,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
 
 
 class MainConfigTests(SimpleTestCase):
-    @patch("hitch.main.workflow_maintenance.start_workflow_maintenance_scheduler")
+    @patch("hitch.main.workflows.workflow_maintenance.start_workflow_maintenance_scheduler")
     @patch("hitch.main.goals.auto_proposals.start_auto_proposal_scheduler")
     def test_ready_starts_schedulers(
         self, mock_auto_start: MagicMock, mock_workflow_start: MagicMock

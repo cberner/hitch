@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hitch.main.agent_io import _string_list
-from hitch.main.gh_observations import (
+from hitch.main.sdk_values import string_from_any, truncate_for_prompt
+from hitch.main.workflows.agent_io import _string_list
+from hitch.main.workflows.gh_observations import (
     _PR_GATE_BLOCKED,
     _PR_GATE_PENDING,
     _normalize_ci_status,
 )
-from hitch.main.pr_handoff import (
+from hitch.main.workflows.pr_handoff import (
     _PR_HANDOFF_BOOLEAN_FIELDS,
     _PR_HANDOFF_FIELDS,
     _PR_HANDOFF_INTEGER_FIELDS,
@@ -24,7 +25,6 @@ from hitch.main.pr_handoff import (
     _PR_SAFE_LIST_ITEM_FIELDS,
     _compact_pr_handoff,
 )
-from hitch.main.sdk_values import string_from_any, truncate_for_prompt
 
 
 def _pr_handoff_for_monitor_schema(value: Any) -> dict[str, Any]:

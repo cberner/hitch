@@ -5,7 +5,8 @@ from typing import Any, override
 
 from django.test import TestCase
 
-from hitch.main import rollout, system_agents
+from hitch.main import rollout
+from hitch.main.workflows import system_agents
 
 
 def _line(line_type: str, payload: dict[str, Any], *, timestamp: str = "2025-01-05T12:00:00Z") -> str:

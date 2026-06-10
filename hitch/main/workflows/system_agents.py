@@ -29,50 +29,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import codex_events, codex_pool, demo, rate_limit, rollout, session_index
-from hitch.main.agent_io import (
-    _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
-    SPEC_REQUIREMENTS_AGENT_KIND,
-    SPEC_RISK_AGENT_KIND,
-    SPEC_SYNTHESIZER_AGENT_KIND,
-    SPEC_TEST_AGENT_KIND,
-    _parse_autonomous_goal_candidate_output,
-    _parse_autonomous_goal_judge_output,
-    _parse_pr_monitor_output,
-    _parse_qa_output,
-    _parse_spec_critic_output,
-    _string_list,
-)
 from hitch.main.diffs import build_worktree_diff_text
-from hitch.main.gh_cli import (
-    _GH_PR_CREATE_TIMEOUT_SECONDS,
-    _GH_PR_MONITOR_TIMEOUT_SECONDS,
-    _GH_REVIEW_THREAD_PAGE_LIMIT,
-    _GH_STATUS_CHECK_PAGE_LIMIT,
-    _gh_error,
-    _gh_pr_review_threads,
-    _gh_pr_status_checks,
-    _gh_pr_view_payload,
-    _GhPrOpenError,
-    _PrWorkflowNoCommitsError,
-    _push_current_branch_with_git_cli,
-    _run_gh_cli,
-    _run_git_cli,
-)
-from hitch.main.gh_observations import (
-    _copy_gh_comment_fields,
-    _copy_gh_reaction_fields,
-    _copy_gh_review_fields,
-    _copy_gh_review_thread_fields,
-    _copy_gh_status_check_fields,
-    _evaluate_pr_gates,
-    _gh_monitor_blockers,
-    _gh_monitor_feedback,
-    _gh_monitor_summary,
-    _github_pr_url_from_text,
-    _pr_gates_all_passed,
-    _pr_gates_have_actionable_blockers,
-    _pr_handoff_from_github_url,
-)
 from hitch.main.goals.autonomous_goal_prompts import (
     _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
     _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
@@ -124,7 +81,56 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.pr_handoff import (
+from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
+from hitch.main.sdk_values import (
+    positive_int,
+    string_from_any,
+    truncate_for_prompt,
+)
+from hitch.main.workflows.agent_io import (
+    _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
+    SPEC_REQUIREMENTS_AGENT_KIND,
+    SPEC_RISK_AGENT_KIND,
+    SPEC_SYNTHESIZER_AGENT_KIND,
+    SPEC_TEST_AGENT_KIND,
+    _parse_autonomous_goal_candidate_output,
+    _parse_autonomous_goal_judge_output,
+    _parse_pr_monitor_output,
+    _parse_qa_output,
+    _parse_spec_critic_output,
+    _string_list,
+)
+from hitch.main.workflows.gh_cli import (
+    _GH_PR_CREATE_TIMEOUT_SECONDS,
+    _GH_PR_MONITOR_TIMEOUT_SECONDS,
+    _GH_REVIEW_THREAD_PAGE_LIMIT,
+    _GH_STATUS_CHECK_PAGE_LIMIT,
+    _gh_error,
+    _gh_pr_review_threads,
+    _gh_pr_status_checks,
+    _gh_pr_view_payload,
+    _GhPrOpenError,
+    _PrWorkflowNoCommitsError,
+    _push_current_branch_with_git_cli,
+    _run_gh_cli,
+    _run_git_cli,
+)
+from hitch.main.workflows.gh_observations import (
+    _copy_gh_comment_fields,
+    _copy_gh_reaction_fields,
+    _copy_gh_review_fields,
+    _copy_gh_review_thread_fields,
+    _copy_gh_status_check_fields,
+    _evaluate_pr_gates,
+    _gh_monitor_blockers,
+    _gh_monitor_feedback,
+    _gh_monitor_summary,
+    _github_pr_url_from_text,
+    _pr_gates_all_passed,
+    _pr_gates_have_actionable_blockers,
+    _pr_handoff_from_github_url,
+)
+from hitch.main.workflows.pr_handoff import (
     _PR_HANDOFF_BOOLEAN_FIELDS,
     _PR_HANDOFF_FIELDS,
     _PR_HANDOFF_INTEGER_FIELDS,
@@ -136,7 +142,7 @@ from hitch.main.pr_handoff import (
     _pr_handoff_identity_changed,
     _pr_handoff_is_terminal,
 )
-from hitch.main.pr_monitor_format import (
+from hitch.main.workflows.pr_monitor_format import (
     _format_pr_handoff,
     _pr_actionable_feedback,
     _pr_gate_observation_handoff,
@@ -146,7 +152,7 @@ from hitch.main.pr_monitor_format import (
     _pr_monitor_actionable_feedback,
     _pr_monitor_feedback,
 )
-from hitch.main.pr_stage_refresh_state import (
+from hitch.main.workflows.pr_stage_refresh_state import (
     _PR_STAGE_REFRESH_MIN_SECONDS,
     _PR_STAGE_REFRESH_STATE_KEY,
     _hitch_pr_handoff_marker,
@@ -158,7 +164,7 @@ from hitch.main.pr_stage_refresh_state import (
     _pr_stage_refresh_globally_due,
     _should_refresh_pr_snapshot_for_stage,
 )
-from hitch.main.qa_prompts import (
+from hitch.main.workflows.qa_prompts import (
     _QA_DESIGN_SYNTHESIS_STATE_KEY,
     _QA_REVIEW_REVISION_STATE_KEY,
     _maybe_build_qa_design_synthesis_gate,
@@ -166,13 +172,7 @@ from hitch.main.qa_prompts import (
     _qa_prompt,
     _qa_review_revision,
 )
-from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
-from hitch.main.sdk_values import (
-    positive_int,
-    string_from_any,
-    truncate_for_prompt,
-)
-from hitch.main.spec_critic_prompts import (
+from hitch.main.workflows.spec_critic_prompts import (
     _SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
     _below_threshold_notice_summary,
     _below_threshold_notice_title,
@@ -191,7 +191,7 @@ from hitch.main.spec_critic_prompts import (
     _spec_synthesis_prompt,
     _spec_test_prompt,
 )
-from hitch.main.workflow_state import (
+from hitch.main.workflows.workflow_state import (
     _confidence_meets_threshold,
     _session_metadata_from_state,
     _state_bool,

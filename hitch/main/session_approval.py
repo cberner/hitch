@@ -17,9 +17,10 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from hitch.main import codex_pool, system_agents
+from hitch.main import codex_pool
 from hitch.main.models import ApprovalRequest, UserInputRequest
 from hitch.main.settings_cookies import _MAX_BIGAUTOFIELD
+from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)
 

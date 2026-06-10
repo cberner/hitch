@@ -15,7 +15,9 @@ from typing import Any
 
 from django.utils import timezone
 
-from hitch.main.agent_io import (
+from hitch.main.models import AutonomousGoal, AutonomousGoalMemory, ProposedSession, SystemWorkflow
+from hitch.main.sdk_values import truncate_for_prompt
+from hitch.main.workflows.agent_io import (
     _AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT,
     _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
     _autonomous_goal_history_sections,
@@ -27,9 +29,7 @@ from hitch.main.agent_io import (
     _string_list,
     _write_autonomous_goal_history_files,
 )
-from hitch.main.models import AutonomousGoal, AutonomousGoalMemory, ProposedSession, SystemWorkflow
-from hitch.main.sdk_values import truncate_for_prompt
-from hitch.main.workflow_state import (
+from hitch.main.workflows.workflow_state import (
     _session_metadata_from_state,
     _state_dict,
     _state_int,

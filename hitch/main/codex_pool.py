@@ -1514,7 +1514,7 @@ def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     ):
         return False
     try:
-        from hitch.main import system_agents
+        from hitch.main.workflows import system_agents
 
         if system_agents.auto_review_intentionally_skipped(instance):
             return False
@@ -1913,7 +1913,7 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
         and instance.workflow_id is not None
     ):
         try:
-            from hitch.main import system_agents
+            from hitch.main.workflows import system_agents
 
             system_agents_handled = system_agents.on_codex_instance_finished(instance)
         except Exception:
@@ -1942,7 +1942,7 @@ def _reconcile_terminal_workflow_instances(
     *, main_thread_id: str | None = None, workflow_id: int | None = None
 ) -> None:
     try:
-        from hitch.main import system_agents
+        from hitch.main.workflows import system_agents
 
         system_agents.reconcile_terminal_workflow_instances(
             main_thread_id=main_thread_id,

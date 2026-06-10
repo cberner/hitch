@@ -15,10 +15,10 @@ import subprocess
 from collections.abc import Iterable
 from typing import Any
 
-from hitch.main.gh_observations import _review_threads_page, _status_checks_page
 from hitch.main.models import SystemWorkflow
-from hitch.main.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 from hitch.main.sdk_values import string_from_any
+from hitch.main.workflows.gh_observations import _review_threads_page, _status_checks_page
+from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
 _GH_PR_CREATE_TIMEOUT_SECONDS = 120
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5

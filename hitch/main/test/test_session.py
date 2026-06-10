@@ -17,7 +17,7 @@ from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import AppServerError
 
-from hitch.main import codex_events, demo, system_agents
+from hitch.main import codex_events, demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.entry_render import tool_call_detail, tool_call_status
 from hitch.main.models import (
@@ -37,6 +37,7 @@ from hitch.main.test.support import (
     _rollout_line,
     _seed_cookies,
 )
+from hitch.main.workflows import system_agents
 
 # Used for active-worker rendering tests so the session view's
 # ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
