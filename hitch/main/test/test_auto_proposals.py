@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase, override_settings
 
 import hitch.main as main_app
-from hitch.main import auto_proposals, workflow_maintenance
+from hitch.main import workflow_maintenance
 from hitch.main.apps import MainConfig
+from hitch.main.goals import auto_proposals
 from hitch.main.models import SessionMetadata
 
 
@@ -50,11 +51,11 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
 
     @patch(
-        "hitch.main.auto_proposals.system_agents.maybe_start_auto_proposal_workflows",
+        "hitch.main.goals.auto_proposals.system_agents.maybe_start_auto_proposal_workflows",
         return_value=2,
     )
-    @patch("hitch.main.auto_proposals._refresh_unarchived_session_state_best_effort")
-    @patch("hitch.main.auto_proposals.codex_pool.reconcile_dead")
+    @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.reconcile_dead")
     def test_scheduler_tick_reconciles_and_starts_auto_proposals(
         self,
         mock_reconcile_dead: MagicMock,
@@ -67,10 +68,10 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         mock_refresh.assert_called_once_with(None, start_cursor="")
         mock_start.assert_called_once_with()
 
-    @patch("hitch.main.auto_proposals.logger.exception")
-    @patch("hitch.main.auto_proposals.system_agents.maybe_start_auto_proposal_workflows")
-    @patch("hitch.main.auto_proposals._refresh_unarchived_session_state_best_effort")
-    @patch("hitch.main.auto_proposals.codex_pool.reconcile_dead")
+    @patch("hitch.main.goals.auto_proposals.logger.exception")
+    @patch("hitch.main.goals.auto_proposals.system_agents.maybe_start_auto_proposal_workflows")
+    @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.reconcile_dead")
     def test_scheduler_tick_keeps_running_after_errors(
         self,
         mock_reconcile_dead: MagicMock,
@@ -390,11 +391,11 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
 
 class UnarchivedSessionStateRefreshTests(TestCase):
     @patch(
-        "hitch.main.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.goals.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
         return_value=2,
     )
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.auto_proposals.Codex")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.Codex")
     def test_refresh_updates_active_codex_metadata_and_pr_stages(
         self,
         mock_codex: MagicMock,
@@ -433,12 +434,12 @@ class UnarchivedSessionStateRefreshTests(TestCase):
         self.assertEqual(metadata.codex_display_title, "Renamed session")
         self.assertEqual(metadata.codex_updated_at, datetime.fromtimestamp(10, UTC))
 
-    @patch("hitch.main.auto_proposals.logger.exception")
+    @patch("hitch.main.goals.auto_proposals.logger.exception")
     @patch(
-        "hitch.main.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.goals.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
     def test_refresh_still_updates_pr_stages_when_codex_metadata_fails(
         self,
         mock_config: MagicMock,
@@ -461,8 +462,8 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
 
 class SchedulerCodexReuseTests(SimpleTestCase):
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
     def test_get_reuses_one_app_server(
         self, mock_start: MagicMock, mock_config: MagicMock
     ) -> None:
@@ -477,8 +478,8 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         self.assertIs(second, codex)
         mock_start.assert_called_once_with(mock_config.return_value)
 
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
     def test_reset_closes_and_reconnects(
         self, mock_start: MagicMock, _mock_config: MagicMock
     ) -> None:
@@ -492,9 +493,9 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         self.assertIs(holder.get(), second_codex)
         self.assertEqual(mock_start.call_count, 2)
 
-    @patch("hitch.main.auto_proposals.refresh_unarchived_session_state")
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
     def test_best_effort_reuses_held_codex_across_ticks(
         self,
         mock_start: MagicMock,
@@ -516,9 +517,9 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         self.assertEqual(mock_refresh.call_count, 2)
         mock_refresh.assert_called_with(codex, start_cursor="")
 
-    @patch("hitch.main.auto_proposals.refresh_unarchived_session_state")
-    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
     def test_best_effort_resets_codex_on_failure(
         self,
         mock_start: MagicMock,
@@ -550,7 +551,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
 
 class MainConfigTests(SimpleTestCase):
     @patch("hitch.main.workflow_maintenance.start_workflow_maintenance_scheduler")
-    @patch("hitch.main.auto_proposals.start_auto_proposal_scheduler")
+    @patch("hitch.main.goals.auto_proposals.start_auto_proposal_scheduler")
     def test_ready_starts_schedulers(
         self, mock_auto_start: MagicMock, mock_workflow_start: MagicMock
     ) -> None:

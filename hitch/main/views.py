@@ -63,23 +63,23 @@ from hitch.main import (
 )
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
-from hitch.main.autonomous_goal_form import (
+from hitch.main.db import run_ignoring_database_locks
+from hitch.main.diffs import build_worktree_diff
+from hitch.main.entry_render import (
+    collapse_flat_entries,
+)
+from hitch.main.goals.autonomous_goal_form import (
     _attach_autonomous_goal_display_state,
     _validated_autonomous_goal_values,
 )
-from hitch.main.autonomous_goal_proposal_stack import _proposal_outcome_metadata
-from hitch.main.autonomous_goal_run_display import (
+from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
+from hitch.main.goals.autonomous_goal_run_display import (
     _attach_autonomous_goal_run_state,
     _attach_proposed_session_display_state,
     _auto_review_settings_for_proposed_session,
     _autonomous_goal_workflow_for_log,
     _proposal_metadata,
     _proposed_session_prompt,
-)
-from hitch.main.db import run_ignoring_database_locks
-from hitch.main.diffs import build_worktree_diff
-from hitch.main.entry_render import (
-    collapse_flat_entries,
 )
 from hitch.main.input_images import (
     _INPUT_IMAGE_ACCEPT,

@@ -7,7 +7,7 @@ from typing import Any, override
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.urls import reverse
 
-from hitch.main.proposed_sessions import (
+from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
     create_proposed_session,
