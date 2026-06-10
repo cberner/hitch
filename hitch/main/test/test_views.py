@@ -58,6 +58,7 @@ from hitch.main import (
     gh_cli,
     input_images,
     pr_stage_refresh_state,
+    session_entry_display,
     session_index,
     session_pr_plan,
     session_resume,
@@ -2474,7 +2475,7 @@ class ActiveTurnTrimTests(TestCase):
             {"kind": "agent", "text": "working after steer"},
         ]
 
-        trimmed = views._trim_in_progress_turn(entries, active)
+        trimmed = session_entry_display._trim_in_progress_turn(entries, active)
 
         self.assertEqual(
             trimmed,
@@ -2483,7 +2484,9 @@ class ActiveTurnTrimTests(TestCase):
                 {"kind": "agent", "text": "before reply"},
             ],
         )
-        self.assertEqual(views._pending_user_prompt(active), "initial prompt")
+        self.assertEqual(
+            session_entry_display._pending_user_prompt(active), "initial prompt"
+        )
 
 
 class IndexViewTests(TestCase):
