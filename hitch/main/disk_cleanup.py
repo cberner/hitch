@@ -15,7 +15,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
-from hitch.main import demo
+from hitch.main import demo, system_agents
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -207,7 +207,7 @@ class _CleanupContext:
 
 
 def _cleanup_context(*, now: datetime) -> _CleanupContext:
-    accepted_visible_thread_ids = _accepted_visible_system_thread_ids()
+    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
     hidden_system_thread_ids = _hidden_system_thread_ids()
     protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
@@ -412,16 +412,6 @@ def _candidate_sort_key(
 
 
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
-
-
-def _accepted_visible_system_thread_ids() -> set[str]:
-    return set(
-        ProposedSession.objects.filter(
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            candidate_session__isnull=False,
-            accepted_session=models.F("candidate_session"),
-        ).values_list("candidate_session__thread_id", flat=True)
-    )
 
 
 def _protected_proposal_session_ids() -> set[int]:

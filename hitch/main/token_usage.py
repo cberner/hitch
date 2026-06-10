@@ -23,7 +23,7 @@ from django.utils import timezone
 from openai_codex import AppServerError, Codex
 from openai_codex.errors import InvalidRequestError
 
-from hitch.main import codex_pool, rollout, session_index, system_agents
+from hitch.main import codex_pool, formatting, rollout, session_index, system_agents
 from hitch.main.models import (
     ArchivedSessionTokenUsage,
     Project,
@@ -89,11 +89,6 @@ _TOKEN_USAGE_KEYS = (
 # v1: sum positive per-event deltas and skip context-window reset events
 # (commit 20ea557), correcting sessions that hit their context window.
 _TOKEN_USAGE_LOGIC_VERSION = 1
-_HUMAN_TOKEN_UNITS = (
-    (1_000_000_000, "B"),
-    (1_000_000, "M"),
-    (1_000, "K"),
-)
 _MISSING_TOKEN_USAGE_CACHE = object()
 
 
@@ -811,33 +806,10 @@ def _empty_lifetime_token_usage() -> dict[str, int]:
 
 def _format_lifetime_token_usage(usage: Mapping[str, int]) -> dict[str, str]:
     return {
-        "input": _format_human_token_count(usage["input"]),
-        "output": _format_human_token_count(usage["output"]),
-        "cached": _format_human_token_count(usage["cached"]),
+        "input": formatting.format_token_count(usage["input"]),
+        "output": formatting.format_token_count(usage["output"]),
+        "cached": formatting.format_token_count(usage["cached"]),
     }
-
-
-def _format_human_token_count(value: int) -> str:
-    value = max(0, value)
-    for index, (scale, suffix) in enumerate(_HUMAN_TOKEN_UNITS):
-        if value < scale:
-            continue
-        amount = _format_human_token_amount(value, scale)
-        if amount == "1000" and index > 0:
-            next_scale, next_suffix = _HUMAN_TOKEN_UNITS[index - 1]
-            return _format_human_token_amount(value, next_scale) + next_suffix
-        return amount + suffix
-    return str(value)
-
-
-def _format_human_token_amount(value: int, scale: int) -> str:
-    if value >= 10 * scale:
-        return str((value + scale // 2) // scale)
-    tenths = (value * 10 + scale // 2) // scale
-    whole, fraction = divmod(tenths, 10)
-    if fraction == 0:
-        return str(whole)
-    return f"{whole}.{fraction}"
 
 
 def _merge_daily_token_usage(
@@ -866,10 +838,10 @@ def _format_lifetime_token_chart(
         chart.append(
             {
                 "date": date_key,
-                "input": _format_human_token_count(values["input"]),
-                "output": _format_human_token_count(values["output"]),
-                "cached": _format_human_token_count(values["cached"]),
-                "total": _format_human_token_count(total),
+                "input": formatting.format_token_count(values["input"]),
+                "output": formatting.format_token_count(values["output"]),
+                "cached": formatting.format_token_count(values["cached"]),
+                "total": formatting.format_token_count(total),
                 "input_percent": _chart_segment_percent(values["input"], max_total),
                 "output_percent": _chart_segment_percent(values["output"], max_total),
                 "cached_percent": _chart_segment_percent(values["cached"], max_total),
@@ -891,7 +863,7 @@ def _format_lifetime_token_chart_axis(
     if 0 < midpoint < max_total:
         ticks.append(midpoint)
     ticks.append(0)
-    return [_format_human_token_count(value) for value in ticks]
+    return [formatting.format_token_count(value) for value in ticks]
 
 
 def _lifetime_token_chart_max_total(

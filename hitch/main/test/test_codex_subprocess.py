@@ -48,7 +48,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import codex_events, codex_pool, coding_agents, demo, streaming
+from hitch.main import codex_events, codex_pool, coding_agents, demo, formatting, streaming
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
@@ -8916,14 +8916,15 @@ class StreamForInstanceTests(TestCase):
         )
 
     def test_compact_token_count_formatter(self) -> None:
-        self.assertEqual(streaming._format_compact_token_count(-1), "0")
-        self.assertEqual(streaming._format_compact_token_count(999), "999")
-        self.assertEqual(streaming._format_compact_token_count(1200), "1.2K")
-        self.assertEqual(streaming._format_compact_token_count(1250), "1.3K")
-        self.assertEqual(streaming._format_compact_token_count(10_500), "11K")
-        self.assertEqual(streaming._format_compact_token_count(999_950), "1M")
-        self.assertEqual(streaming._format_compact_token_count(13_000_000), "13M")
-        self.assertEqual(streaming._format_compact_token_count(1_000_000_000), "1B")
+        self.assertEqual(formatting.format_token_count(-1), "0")
+        self.assertEqual(formatting.format_token_count(999), "999")
+        self.assertEqual(formatting.format_token_count(1200), "1.2K")
+        self.assertEqual(formatting.format_token_count(1250), "1.3K")
+        self.assertEqual(formatting.format_token_count(10_500), "11K")
+        self.assertEqual(formatting.format_token_count(999_950), "1M")
+        self.assertEqual(formatting.format_token_count(1_500_000), "1.5M")
+        self.assertEqual(formatting.format_token_count(13_000_000), "13M")
+        self.assertEqual(formatting.format_token_count(1_000_000_000), "1B")
 
     def test_system_workflow_status_text_handles_non_qa_workflow(self) -> None:
         workflow = cast(SystemWorkflow, SimpleNamespace(kind="other"))
