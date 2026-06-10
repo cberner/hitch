@@ -76,6 +76,7 @@ from hitch.main.autonomous_goal_run_display import (
     _proposal_metadata,
     _proposed_session_prompt,
 )
+from hitch.main.db import run_ignoring_database_locks
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.entry_render import (
     collapse_flat_entries,
@@ -4752,6 +4753,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         plan_mode = False
     if qa_workflow_activation:
         plan_mode = False
+    run_ignoring_database_locks(
+        lambda: codex_pool.reconcile_dead_for_thread(session_id),
+        description="send-message dead-worker reconcile",
+    )
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     if qa_workflow_activation and has_input_images:
         return HttpResponseBadRequest(

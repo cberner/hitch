@@ -13069,10 +13069,12 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_steers_latest_active_when_form_has_no_instance(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
@@ -13101,10 +13103,12 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_steers_active_workflow_user_turn(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
@@ -13142,10 +13146,12 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_blocks_active_workflow_system_feedback_worker_steering(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
@@ -13182,10 +13188,12 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_steers_active_instance_with_uploaded_image(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
@@ -13247,10 +13255,12 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_failed_steer_falls_back_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
         mock_discover: MagicMock,
@@ -13347,13 +13357,48 @@ class SendMessageViewTests(TestCase):
                 )
                 self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.views.Codex")
+    def test_dead_posted_active_instance_is_reconciled_before_follow_up_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_worker_alive: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        instance = CodexInstance.objects.create(
+            pid=99999999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="stale work",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "still there?", "active_instance": str(instance.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_worker_alive.assert_called()
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("worker process exited", instance.error)
+        self._assert_follow_up_spawn(mock_spawn, prompt="still there?")
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_failed_steer_falls_back_to_spawn_with_uploaded_image(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
         mock_discover: MagicMock,
@@ -13405,10 +13450,12 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.Codex")
     def test_image_steer_attachment_cap_returns_bad_request_without_fallback(
         self,
         mock_codex: MagicMock,
+        _mock_worker_alive: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
