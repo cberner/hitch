@@ -20,8 +20,7 @@ from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import InvalidRequestError
 
-from hitch.main import codex_pool, rollout, session_index
-from hitch.main.entry_render import collapse_flat_entries
+from hitch.main import codex_pool, rollout
 from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
@@ -34,7 +33,9 @@ from hitch.main.rollout_state import (
     _rollout_path_is_archived,
 )
 from hitch.main.sdk_values import updated_at_seconds
-from hitch.main.settings_cookies import SettingsValues
+from hitch.main.sessions import session_index
+from hitch.main.sessions.entry_render import collapse_flat_entries
+from hitch.main.sessions.settings_cookies import SettingsValues
 
 logger = logging.getLogger(__name__)
 

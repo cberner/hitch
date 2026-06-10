@@ -17,7 +17,7 @@ from typing import Any
 from django.conf import settings as django_settings
 from django.db import close_old_connections
 
-from hitch.main import codex_events, rollout, session_stage
+from hitch.main import codex_events, rollout
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -33,7 +33,8 @@ from hitch.main.sdk_values import (
     datetime_value,
     string_value,
 )
-from hitch.main.session_pr_plan import (
+from hitch.main.sessions import session_stage
+from hitch.main.sessions.session_pr_plan import (
     _pr_observation_result_for_rollout_path,
     _pr_snapshot_identity,
     _workflow_after_main_lifecycle,

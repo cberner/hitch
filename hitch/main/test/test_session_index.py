@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 from django.test import TestCase
 from openai_codex import AppServerError, Codex
 
-from hitch.main import session_index
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
+from hitch.main.sessions import session_index
 
 
 def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:

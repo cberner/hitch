@@ -10,8 +10,9 @@ from typing import NamedTuple
 from django.db import close_old_connections
 from openai_codex import Codex
 
-from hitch.main import codex_pool, server_lifecycle, session_index
+from hitch.main import codex_pool, server_lifecycle
 from hitch.main.models import Project
+from hitch.main.sessions import session_index
 from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)

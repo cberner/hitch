@@ -17,9 +17,9 @@ from collections.abc import Iterable
 from django.db.models import Q
 from django.utils import timezone
 
-from hitch.main import session_stage
 from hitch.main.db import run_ignoring_database_locks
 from hitch.main.models import SessionMetadata, SystemWorkflow
+from hitch.main.sessions import session_stage
 
 
 def _latest_stage_workflows_by_thread_id(

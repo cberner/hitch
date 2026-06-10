@@ -12,7 +12,7 @@ from django.db.models import Q, QuerySet
 from django.urls import reverse
 
 from hitch.main.models import Project, ProposedSession, SessionMetadata
-from hitch.main.settings_cookies import (
+from hitch.main.sessions.settings_cookies import (
     SessionProjectVisibility,
     SettingsValues,
     _visible_session_project_ids_cookie_fits,

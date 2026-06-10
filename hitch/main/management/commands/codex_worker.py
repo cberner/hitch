@@ -80,7 +80,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import disk_cleanup, session_index
+from hitch.main import disk_cleanup
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import (
     WorkerSqliteHome,
@@ -101,6 +101,7 @@ from hitch.main.codex_tools import (
     is_dynamic_tool_call,
 )
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.sessions import session_index
 
 logger = logging.getLogger(__name__)
 

@@ -14,15 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from hitch.main import codex_events, codex_pool, demo, rollout, streaming
-from hitch.main.entry_render import (
-    collapse_flat_entries,
-    render_entries,
-)
 from hitch.main.formatting import render_markdown
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
     SystemWorkflow,
+)
+from hitch.main.sessions.entry_render import (
+    collapse_flat_entries,
+    render_entries,
 )
 from hitch.main.workflows import system_agents
 
