@@ -12,9 +12,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from hitch.main.agent_io import _parse_qa_output
 from hitch.main.models import SystemAgentRun, SystemWorkflow
-from hitch.main.workflow_state import _state_int
+from hitch.main.workflows.agent_io import _parse_qa_output
+from hitch.main.workflows.workflow_state import _state_int
 
 _QA_VERDICT_AGENT_KINDS = ("pr_qa",)
 

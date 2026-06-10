@@ -13,12 +13,12 @@ from typing import Any
 
 from django.utils import timezone
 
-from hitch.main.pr_handoff import (
+from hitch.main.sdk_values import string_from_any, truncate_for_prompt
+from hitch.main.workflows.pr_handoff import (
     _PR_SAFE_LIST_ITEM_FIELDS,
     _compact_pr_list,
     _pr_handoff_is_terminal,
 )
-from hitch.main.sdk_values import string_from_any, truncate_for_prompt
 
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
 _PR_GATE_REVIEW = "review"

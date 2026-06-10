@@ -17,8 +17,8 @@ from django.utils import timezone
 
 from hitch.main import rate_limit
 from hitch.main.models import SystemWorkflow
-from hitch.main.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 from hitch.main.sdk_values import string_from_any
+from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
 _SECONDS_PER_MINUTE = 60
 _PR_HITCH_HANDOFF_STATE_KEY = "hitch_pr_handoff"

@@ -13,12 +13,7 @@ from typing import Any
 from django.http import HttpRequest
 from django.urls import reverse
 
-from hitch.main import (
-    caches,
-    coding_agents,
-    disk_cleanup,
-    system_agents,
-)
+from hitch.main import caches, coding_agents, disk_cleanup
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.input_images import _INPUT_IMAGE_ACCEPT
@@ -63,6 +58,7 @@ from hitch.main.settings_cookies import (
     _valid_visible_session_project_ids,
     _web_search_mode_label,
 )
+from hitch.main.workflows import system_agents
 
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
 _QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT

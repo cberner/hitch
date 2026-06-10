@@ -420,7 +420,7 @@ def _commit_terminal_status(instance: CodexInstance) -> None:
 def _notify_system_agents(instance: CodexInstance) -> None:
     system_agents_handled = False
     try:
-        from hitch.main import system_agents
+        from hitch.main.workflows import system_agents
 
         system_agents_handled = system_agents.on_codex_instance_finished(instance)
     except Exception:

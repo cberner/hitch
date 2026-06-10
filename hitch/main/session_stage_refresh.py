@@ -17,13 +17,7 @@ from typing import Any
 from django.conf import settings as django_settings
 from django.db import close_old_connections
 
-from hitch.main import (
-    codex_events,
-    pr_stage,
-    rollout,
-    session_stage,
-    system_agents,
-)
+from hitch.main import codex_events, rollout, session_stage
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -44,6 +38,7 @@ from hitch.main.session_pr_plan import (
     _pr_snapshot_identity,
     _workflow_after_main_lifecycle,
 )
+from hitch.main.workflows import pr_stage, system_agents
 
 logger = logging.getLogger(__name__)
 

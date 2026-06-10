@@ -52,13 +52,11 @@ from hitch.main import (
     coding_agents,
     demo,
     health,
-    pr_stage,
     rollout,
     session_index,
     session_stage,
     streaming,
     system_agent_summary,
-    system_agents,
     token_usage,
 )
 from hitch.main import repos as repos_module
@@ -267,6 +265,7 @@ from hitch.main.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
+from hitch.main.workflows import pr_stage, system_agents
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,

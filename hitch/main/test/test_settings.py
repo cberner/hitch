@@ -12,19 +12,14 @@ from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import (
-    caches,
-    coding_agents,
-    context_processors,
-    pr_stage,
-    settings_cookies,
-)
+from hitch.main import caches, coding_agents, context_processors, settings_cookies
 from hitch.main.models import GlobalSettings, Project, UserSettings
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
     _seed_cookies,
 )
+from hitch.main.workflows import pr_stage
 from hitch.settings import common as common_settings
 
 _MODEL_COOKIE = "hitch_model"
@@ -76,7 +71,7 @@ class StageCacheLockToleranceTests(SimpleTestCase):
         from django.db import OperationalError
 
         with patch(
-            "hitch.main.pr_stage._update_cached_stage",
+            "hitch.main.workflows.pr_stage._update_cached_stage",
             side_effect=OperationalError("database is locked"),
         ):
             # Must not raise: a locked cache write is skipped, not surfaced.
@@ -87,7 +82,7 @@ class StageCacheLockToleranceTests(SimpleTestCase):
 
         with (
             patch(
-                "hitch.main.pr_stage._update_cached_stage",
+                "hitch.main.workflows.pr_stage._update_cached_stage",
                 side_effect=OperationalError("no such table: main_sessionmetadata"),
             ),
             self.assertRaises(OperationalError),

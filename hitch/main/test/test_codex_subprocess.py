@@ -2593,8 +2593,8 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(n, 1)
 
-    @patch("hitch.main.system_agents.reconcile_terminal_workflow_instances")
-    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=True)
+    @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=True)
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_for_workflow_scopes_pending_rows(
         self,
@@ -2643,7 +2643,7 @@ class ReconcileAndLookupTests(TestCase):
         )
 
     @patch("hitch.main.codex_pool.reconcile_orphaned_workers", return_value=0)
-    @patch("hitch.main.system_agents.reconcile_terminal_workflow_instances")
+    @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
     def test_reconcile_dead_for_workflow_reaps_orphans(
         self, _mock_reconcile: MagicMock, mock_reap: MagicMock
     ) -> None:
@@ -2661,7 +2661,7 @@ class ReconcileAndLookupTests(TestCase):
 
         mock_reap.assert_called_once()
 
-    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
     def test_reconcile_does_not_notify_system_agents_for_unassigned_pid(
         self, mock_notify: MagicMock
     ) -> None:
@@ -2888,7 +2888,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.input_attachment_paths, [outside_path])
         self.assertTrue(instance.input_attachment_cleanup_requested)
 
-    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_notifies_system_agents_for_dead_system_rows(
         self, _mock_worker_alive: MagicMock, mock_notify: MagicMock
@@ -2908,7 +2908,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
 
     @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_does_not_double_route_demo_system_agent(
         self,
@@ -2932,7 +2932,7 @@ class ReconcileAndLookupTests(TestCase):
         mock_demo_notify.assert_not_called()
 
     @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=False)
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_keeps_demo_fallback_when_system_agents_noop(
         self,
@@ -3796,7 +3796,7 @@ class FinalizeReapedInstanceTests(TestCase):
         mock_disk_cleanup.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
         return_value=False,
     )
     def test_completed_auto_pr_not_fired_is_marked_failed(
@@ -3814,7 +3814,7 @@ class FinalizeReapedInstanceTests(TestCase):
         self.assertIn("retry", done.error)
 
     @patch(
-        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
         return_value=True,
     )
     def test_completed_auto_pr_intentionally_skipped_is_preserved(
@@ -3833,7 +3833,7 @@ class FinalizeReapedInstanceTests(TestCase):
         self.assertEqual(done.error, "")
 
     @patch(
-        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
         side_effect=RuntimeError("boom"),
     )
     def test_completed_auto_pr_preserved_when_intent_check_errors(
@@ -5973,7 +5973,7 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(input_request.responded_at)
 
     @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
     def test_notify_system_agents_does_not_double_route_demo_system_agent(
         self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
     ) -> None:
@@ -5994,7 +5994,7 @@ class CodexWorkerCommandTests(TestCase):
         mock_demo_notify.assert_not_called()
 
     @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
+    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=False)
     def test_notify_system_agents_keeps_demo_fallback_when_system_agents_noop(
         self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
     ) -> None:
