@@ -45,9 +45,6 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import (
     agent_io,
-    autonomous_goal_prompts,
-    autonomous_goal_proposal_stack,
-    autonomous_goal_run_display,
     caches,
     codex_events,
     codex_pool,
@@ -74,6 +71,7 @@ from hitch.main import (
 from hitch.main import (
     rollout as rollout_module,
 )
+from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack, autonomous_goal_run_display
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,

@@ -22,8 +22,6 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import (
     agent_io,
-    autonomous_goal_prompts,
-    autonomous_goal_proposal_stack,
     codex_events,
     demo,
     gh_cli,
@@ -37,6 +35,7 @@ from hitch.main import (
     streaming,
     system_agents,
 )
+from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
     LocalBranchMergeError,

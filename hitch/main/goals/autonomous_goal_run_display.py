@@ -15,13 +15,8 @@ from django.http import Http404, HttpRequest
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import (
-    autonomous_goal_prompts,
-    autonomous_goal_proposal_stack,
-    codex_events,
-    system_agents,
-    token_usage,
-)
+from hitch.main import codex_events, system_agents, token_usage
+from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,

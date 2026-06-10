@@ -9,8 +9,8 @@ class MainConfig(AppConfig):
 
     @override
     def ready(self) -> None:
-        from hitch.main.auto_proposals import start_auto_proposal_scheduler
         from hitch.main.codex_pool import start_codex_pool_keepalive
+        from hitch.main.goals.auto_proposals import start_auto_proposal_scheduler
         from hitch.main.workflow_maintenance import (
             start_workflow_maintenance_scheduler,
         )

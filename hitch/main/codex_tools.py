@@ -8,12 +8,12 @@ from typing import Any
 
 from django.db import connection
 
-from hitch.main.models import AutonomousGoal
-from hitch.main.proposed_sessions import (
+from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
     create_proposed_session,
 )
+from hitch.main.models import AutonomousGoal
 
 _TOOL_CALL_METHOD = "item/tool/call"
 _HITCH_NAMESPACE = "hitch"

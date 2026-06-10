@@ -14,12 +14,12 @@ from hitch.main.codex_tools import (
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
-from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
-from hitch.main.proposed_sessions import (
+from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
     create_proposed_session,
 )
+from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
 
 
 class ProposedSessionServiceTests(TestCase):
