@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, override
 
 from django.db import IntegrityError, close_old_connections, models, transaction
 from django.db.models import QuerySet
@@ -89,6 +89,7 @@ from hitch.main.runtime.sdk_values import (
     truncate_for_prompt,
 )
 from hitch.main.sessions import session_index
+from hitch.main.workflows import engine
 from hitch.main.workflows.agent_io import (
     _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
     SPEC_REQUIREMENTS_AGENT_KIND,
@@ -2281,16 +2282,26 @@ def _route_finished_codex_instance(instance: CodexInstance) -> bool:
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT:
         return _handle_system_agent_finished(instance)
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK:
-        _handle_system_feedback_finished(instance)
+        _dispatch_workflow_event(instance, "on_feedback_finished")
         return True
     if (
         instance.purpose == CodexInstance.PURPOSE_USER
         and instance.workflow_id is not None
     ):
-        _handle_workflow_user_turn_finished(instance)
+        _dispatch_workflow_event(instance, "on_user_turn_finished")
         return True
     _maybe_start_auto_review_workflow(instance)
     return False
+
+
+def _dispatch_workflow_event(instance: CodexInstance, event: str) -> None:
+    workflow = _workflow_for_instance(instance)
+    if workflow is None:
+        return
+    handler = engine.primary_handler(workflow.kind)
+    if handler is None:
+        return
+    getattr(handler, event)(instance, workflow)
 
 
 def _workflow_owned_instance_requires_route_claim(instance: CodexInstance) -> bool:
@@ -2501,28 +2512,146 @@ def _route_system_agent_finished(
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
         _cleanup_cancelled_autonomous_goal_terminal_run(instance, run, workflow)
         return
-    if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
-        _handle_autonomous_goal_agent_finished(instance, run, workflow)
-        return
-    if (
-        workflow.kind == demo.DEMO_WORKFLOW_KIND
-        and run.agent_kind == demo.DEMO_AGENT_KIND
-        and instance.agent_kind == demo.DEMO_AGENT_KIND
-    ):
-        _handle_demo_agent_finished(instance, run, workflow)
-        return
-    if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
-        _handle_spec_critic_agent_finished(instance, run, workflow)
-        return
-    if workflow.kind == SystemWorkflow.KIND_PR_QA and run.agent_kind == (
-        PR_FOLLOWUP_MONITOR_AGENT_KIND
-    ):
-        _handle_pr_followup_monitor_finished(instance, run, workflow)
-        return
-    if workflow.kind != SystemWorkflow.KIND_PR_QA:
+    handler = engine.handler_for(workflow, run=run, instance=instance)
+    if handler is None:
         _fail_unsupported_system_agent_run(run, workflow)
         return
-    _handle_pr_qa_agent_finished(instance, run, workflow)
+    handler.on_agent_finished(instance, run, workflow)
+
+
+@engine.register
+class _AutonomousGoalHandler(engine.WorkflowHandler):
+    kind = AUTONOMOUS_GOAL_AGENT_KIND
+    steps = frozenset(
+        {
+            STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            STEP_AUTONOMOUS_GOAL_PROPOSED,
+            STEP_AUTONOMOUS_GOAL_SKIPPED,
+        }
+    )
+
+    @override
+    def on_agent_finished(
+        self,
+        instance: CodexInstance,
+        run: SystemAgentRun,
+        workflow: SystemWorkflow,
+    ) -> None:
+        _handle_autonomous_goal_agent_finished(instance, run, workflow)
+
+
+@engine.register
+class _DemoHandler(engine.WorkflowHandler):
+    kind = demo.DEMO_WORKFLOW_KIND
+    # The demo subsystem owns its workflow lifecycle end to end.
+    steps = None
+
+    @override
+    def matches_run(self, run: SystemAgentRun, instance: CodexInstance) -> bool:
+        return (
+            run.agent_kind == demo.DEMO_AGENT_KIND
+            and instance.agent_kind == demo.DEMO_AGENT_KIND
+        )
+
+    @override
+    def on_agent_finished(
+        self,
+        instance: CodexInstance,
+        run: SystemAgentRun,
+        workflow: SystemWorkflow,
+    ) -> None:
+        _handle_demo_agent_finished(instance, run, workflow)
+
+
+@engine.register
+class _SpecCriticHandler(engine.WorkflowHandler):
+    kind = SPEC_CRITIC_WORKFLOW_KIND
+    steps = frozenset(
+        {
+            STEP_SPEC_CRITIC_CLASSIFYING,
+            STEP_SPEC_CRITIC_ANALYZING,
+            STEP_SPEC_CRITIC_CLARIFYING,
+            STEP_SPEC_CRITIC_SYNTHESIZING,
+            STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+        }
+    )
+
+    @override
+    def on_agent_finished(
+        self,
+        instance: CodexInstance,
+        run: SystemAgentRun,
+        workflow: SystemWorkflow,
+    ) -> None:
+        _handle_spec_critic_agent_finished(instance, run, workflow)
+
+
+# Shared by the PR-QA review phases and the followup monitor, which run in
+# the same KIND_PR_QA workflow row.
+_PR_QA_STEPS = frozenset(
+    {
+        STEP_QA_RUNNING,
+        STEP_FEEDBACK_RUNNING,
+        STEP_USER_STEERING_RUNNING,
+        STEP_QA_APPROVED,
+        STEP_PR_PROMPT_SPAWNED,
+        STEP_PR_PROMPT_RUNNING,
+        STEP_PR_MONITORING,
+        STEP_PR_FEEDBACK_RUNNING,
+        STEP_PR_READY,
+        STEP_PR_CLOSED,
+        STEP_PR_NO_CHANGES,
+        STEP_LOCAL_BRANCH_MERGED,
+        STEP_MAX_ITERATIONS_REACHED,
+    }
+)
+
+
+@engine.register
+class _PrMonitorHandler(engine.WorkflowHandler):
+    kind = SystemWorkflow.KIND_PR_QA
+    steps = _PR_QA_STEPS
+
+    @override
+    def matches_run(self, run: SystemAgentRun, instance: CodexInstance) -> bool:
+        return run.agent_kind == PR_FOLLOWUP_MONITOR_AGENT_KIND
+
+    @override
+    def on_agent_finished(
+        self,
+        instance: CodexInstance,
+        run: SystemAgentRun,
+        workflow: SystemWorkflow,
+    ) -> None:
+        _handle_pr_followup_monitor_finished(instance, run, workflow)
+
+
+@engine.register
+class _PrQaHandler(engine.WorkflowHandler):
+    kind = SystemWorkflow.KIND_PR_QA
+    steps = _PR_QA_STEPS
+
+    @override
+    def on_agent_finished(
+        self,
+        instance: CodexInstance,
+        run: SystemAgentRun,
+        workflow: SystemWorkflow,
+    ) -> None:
+        _handle_pr_qa_agent_finished(instance, run, workflow)
+
+    @override
+    def on_feedback_finished(
+        self, instance: CodexInstance, workflow: SystemWorkflow
+    ) -> None:
+        _handle_system_feedback_finished(instance)
+
+    @override
+    def on_user_turn_finished(
+        self, instance: CodexInstance, workflow: SystemWorkflow
+    ) -> None:
+        _handle_workflow_user_turn_finished(instance)
 
 
 def _handle_demo_agent_finished(
@@ -6364,6 +6493,7 @@ def _complete_workflow(
     persists the same columns (status, step, state, updated_at); callers
     that also change ``workflow.state`` assign it before calling.
     """
+    _validate_workflow_step(workflow, step)
     workflow.status = status
     workflow.step = step
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
@@ -6377,12 +6507,27 @@ def _advance_workflow_step(
     Counterpart of _complete_workflow for non-terminal transitions; callers
     that also change ``workflow.state`` assign it before calling.
     """
+    _validate_workflow_step(workflow, step)
     update_fields = ["step", "state", "updated_at"]
     if bump_iteration:
         workflow.iteration += 1
         update_fields.insert(0, "iteration")
     workflow.step = step
     workflow.save(update_fields=update_fields)
+
+
+def _validate_workflow_step(workflow: SystemWorkflow, step: str) -> None:
+    """Refuse to persist a step the workflow's kind does not declare.
+
+    Catches a transition wired to the wrong workflow object (or a typo'd
+    step constant) at write time instead of leaving the row in a state no
+    reconciler recognizes.
+    """
+    legal = engine.legal_steps(workflow.kind)
+    if legal is not None and step not in legal:
+        raise ValueError(
+            f"illegal step {step!r} for workflow kind {workflow.kind!r}"
+        )
 
 
 def _block_workflow(
