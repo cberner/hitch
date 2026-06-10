@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+from collections.abc import Callable
 
 from django.conf import settings
 
@@ -56,3 +58,33 @@ def _configured_bool(env_var: str) -> bool | None:
     if normalized in _FALSE_VALUES:
         return False
     return None
+
+class SchedulerHandle:
+    """Once-only starter for an in-process background scheduler thread.
+
+    Owns the started flag and its lock so every scheduler (workflow
+    maintenance, auto proposals, codex pool keepalive) shares one start
+    protocol instead of each module hand-rolling the same guard.
+    """
+
+    def __init__(self, *, thread_name: str) -> None:
+        self._lock = threading.Lock()
+        self._started = False
+        self._thread_name = thread_name
+
+    def start(self, target: Callable[[], None]) -> bool:
+        """Start ``target`` on a daemon thread once; False if already started."""
+        with self._lock:
+            if self._started:
+                return False
+            self._started = True
+            threading.Thread(
+                target=target,
+                name=self._thread_name,
+                daemon=True,
+            ).start()
+            return True
+
+    def reset_for_tests(self) -> None:
+        with self._lock:
+            self._started = False

@@ -2808,8 +2808,9 @@ def _shared_pool_enabled() -> bool:
 # plausible app-server idle timeout so the server stays warm, long enough not to
 # add meaningful load.
 _KEEPALIVE_INTERVAL_SECONDS = 30
-_keepalive_lock = threading.Lock()
-_keepalive_started = False
+_keepalive = server_lifecycle.SchedulerHandle(
+    thread_name="hitch-codex-pool-keepalive"
+)
 
 
 def _codex_pool_keepalive_enabled() -> bool:
@@ -2839,19 +2840,9 @@ def start_codex_pool_keepalive() -> bool:
     server is already warm when the user returns and a dead one is rebuilt
     *before* they hit it rather than on their request.
     """
-    global _keepalive_started
     if not _codex_pool_keepalive_enabled():
         return False
-    with _keepalive_lock:
-        if _keepalive_started:
-            return False
-        _keepalive_started = True
-        threading.Thread(
-            target=_codex_pool_keepalive_loop,
-            name="hitch-codex-pool-keepalive",
-            daemon=True,
-        ).start()
-        return True
+    return _keepalive.start(_codex_pool_keepalive_loop)
 
 
 def _codex_pool_keepalive_loop() -> None:
