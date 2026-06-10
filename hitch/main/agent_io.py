@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -360,59 +361,29 @@ def _write_autonomous_goal_history_files(
 
 def _parse_spec_critic_output(agent_kind: str, raw_output: str) -> dict[str, Any] | None:
     if agent_kind == SPEC_REQUIREMENTS_AGENT_KIND:
-        return _parse_spec_requirements_output(raw_output)
+        return _parse_spec_section_output(raw_output, "requirements")
     if agent_kind == SPEC_RISK_AGENT_KIND:
-        return _parse_spec_risk_output(raw_output)
+        return _parse_spec_section_output(raw_output, "risk")
     if agent_kind == SPEC_TEST_AGENT_KIND:
-        return _parse_spec_test_output(raw_output)
+        return _parse_spec_section_output(raw_output, "test")
     if agent_kind == SPEC_SYNTHESIZER_AGENT_KIND:
         return _parse_spec_synthesis_output(raw_output)
     return None
 
 
-def _parse_spec_requirements_output(raw_output: str) -> dict[str, Any] | None:
+def _parse_spec_section_output(raw_output: str, section: str) -> dict[str, Any] | None:
+    """Parse one spec-critic analysis section: a JSON object with a required
+    string ``summary`` plus the section's list fields."""
     parsed = _parse_json_object(raw_output)
     if parsed is None:
         return None
     summary = parsed.get("summary")
     if not isinstance(summary, str):
         return None
-    return {
-        "summary": summary.strip(),
-        "requirements": _string_list(parsed.get("requirements")),
-        "assumptions": _string_list(parsed.get("assumptions")),
-        "repo_signals": _string_list(parsed.get("repo_signals")),
-    }
-
-
-def _parse_spec_risk_output(raw_output: str) -> dict[str, Any] | None:
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    summary = parsed.get("summary")
-    if not isinstance(summary, str):
-        return None
-    return {
-        "summary": summary.strip(),
-        "ambiguities": _string_list(parsed.get("ambiguities")),
-        "risks": _string_list(parsed.get("risks")),
-        "questions": _normalize_spec_questions(parsed.get("questions")),
-    }
-
-
-def _parse_spec_test_output(raw_output: str) -> dict[str, Any] | None:
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    summary = parsed.get("summary")
-    if not isinstance(summary, str):
-        return None
-    return {
-        "summary": summary.strip(),
-        "acceptance_criteria": _string_list(parsed.get("acceptance_criteria")),
-        "test_strategy": _string_list(parsed.get("test_strategy")),
-        "manual_checks": _string_list(parsed.get("manual_checks")),
-    }
+    result: dict[str, Any] = {"summary": summary.strip()}
+    for key, normalize in _SPEC_SECTION_FIELDS[section].items():
+        result[key] = normalize(parsed.get(key))
+    return result
 
 
 def _parse_spec_synthesis_output(raw_output: str) -> dict[str, str] | None:
@@ -713,3 +684,22 @@ def _merge_string_lists(*values: list[str]) -> list[str]:
             if item and item not in merged:
                 merged.append(item)
     return merged
+
+
+_SPEC_SECTION_FIELDS: dict[str, dict[str, Callable[[Any], Any]]] = {
+    "requirements": {
+        "requirements": _string_list,
+        "assumptions": _string_list,
+        "repo_signals": _string_list,
+    },
+    "risk": {
+        "ambiguities": _string_list,
+        "risks": _string_list,
+        "questions": _normalize_spec_questions,
+    },
+    "test": {
+        "acceptance_criteria": _string_list,
+        "test_strategy": _string_list,
+        "manual_checks": _string_list,
+    },
+}
