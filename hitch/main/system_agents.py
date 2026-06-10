@@ -2573,8 +2573,7 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     workflow.state = _state_without_workflow_turn_death_retry(
         workflow.state, "qa_feedback"
     )
-    workflow.step = STEP_QA_RUNNING
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_QA_RUNNING)
     try:
         _spawn_pr_qa_run(workflow)
     except Exception as exc:
@@ -2767,12 +2766,9 @@ def _complete_pr_qa_verdict(
             _complete_local_branch_merge(workflow, auto_merge_branch)
             return
         if workflow.state.get("open_pr_on_lgtm", True) is not True:
-            workflow.status = SystemWorkflow.STATUS_COMPLETED
-            workflow.step = STEP_QA_APPROVED
-            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            _complete_workflow(workflow, STEP_QA_APPROVED)
             return
-        workflow.step = STEP_PR_PROMPT_RUNNING
-        workflow.save(update_fields=["step", "state", "updated_at"])
+        _advance_workflow_step(workflow, STEP_PR_PROMPT_RUNNING)
         try:
             _spawn_pr_prompt(workflow)
         except Exception as exc:
@@ -2781,9 +2777,11 @@ def _complete_pr_qa_verdict(
         return
 
     if workflow.iteration >= workflow.max_iterations:
-        workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-        workflow.step = STEP_MAX_ITERATIONS_REACHED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _complete_workflow(
+            workflow,
+            STEP_MAX_ITERATIONS_REACHED,
+            status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
+        )
         _surface_workflow_failure(
             workflow,
             (
@@ -2801,9 +2799,7 @@ def _complete_pr_qa_verdict(
             **workflow.state,
             _QA_DESIGN_SYNTHESIS_STATE_KEY: synthesis_gate,
         }
-    workflow.iteration += 1
-    workflow.step = STEP_FEEDBACK_RUNNING
-    workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_FEEDBACK_RUNNING, bump_iteration=True)
     try:
         _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
     except Exception as exc:
@@ -2838,13 +2834,11 @@ def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
         _fail_local_branch_merge(workflow, branch, exc)
         return
 
-    workflow.status = SystemWorkflow.STATUS_COMPLETED
-    workflow.step = STEP_LOCAL_BRANCH_MERGED
     workflow.state = {
         **workflow.state,
         "auto_merge_result": _local_branch_merge_result_dict(result),
     }
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(workflow, STEP_LOCAL_BRANCH_MERGED)
     _record_auto_merge_result_for_proposals(
         workflow,
         {
@@ -2928,8 +2922,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
                     ),
                 )
                 return
-            workflow.step = STEP_PR_MONITORING
-            workflow.save(update_fields=["step", "state", "updated_at"])
+            _advance_workflow_step(workflow, STEP_PR_MONITORING)
             try:
                 _spawn_pr_followup_monitor_run(workflow)
             except Exception as exc:
@@ -2965,9 +2958,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if hitch_handoff_snapshot:
         _mark_hitch_pr_handoff(workflow, snapshot)
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
-        workflow.status = SystemWorkflow.STATUS_COMPLETED
-        workflow.step = STEP_PR_CLOSED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _complete_workflow(workflow, STEP_PR_CLOSED)
         return
     if not hitch_handoff_snapshot:
         try:
@@ -2981,8 +2972,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
                 ),
             )
             return
-    workflow.step = STEP_PR_MONITORING
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_PR_MONITORING)
     try:
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
@@ -2992,9 +2982,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
 def _complete_pr_workflow_without_changes(workflow: SystemWorkflow) -> None:
     # The PR cleanup turn produced no commits beyond the base branch, so there
     # is nothing to open a PR for. Treat it as a successful no-op completion.
-    workflow.status = SystemWorkflow.STATUS_COMPLETED
-    workflow.step = STEP_PR_NO_CHANGES
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(workflow, STEP_PR_NO_CHANGES)
     _surface_pr_workflow_no_changes(workflow)
 
 
@@ -3460,10 +3448,8 @@ def _complete_spec_critic_workflow(
             workflow, f"failed to start implementation from Spec Critic brief: {exc!r}"
         )
         return
-    workflow.status = SystemWorkflow.STATUS_COMPLETED
-    workflow.step = STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
     workflow.state = {**workflow.state, "synthesized_brief": brief.strip()}
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(workflow, STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED)
 
 
 def _handle_pr_followup_monitor_finished(
@@ -3608,9 +3594,11 @@ _PR_MONITOR_MAX_ITERATIONS_FEEDBACK = (
 def _fail_pr_monitor_max_iterations(workflow: SystemWorkflow, feedback: str) -> None:
     """Mark a PR-monitor workflow as out of iterations and surface ``feedback``."""
     workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-    workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-    workflow.step = STEP_MAX_ITERATIONS_REACHED
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(
+        workflow,
+        STEP_MAX_ITERATIONS_REACHED,
+        status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
+    )
     _surface_workflow_failure(workflow, feedback)
 
 
@@ -3619,9 +3607,7 @@ def _start_pr_followup_feedback(workflow: SystemWorkflow, feedback: str) -> None
     turn cannot be spawned."""
     workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
     workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-    workflow.iteration += 1
-    workflow.step = STEP_PR_FEEDBACK_RUNNING
-    workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_PR_FEEDBACK_RUNNING, bump_iteration=True)
     try:
         _spawn_pr_followup_feedback_turn(workflow, feedback)
     except Exception as exc:
@@ -3638,9 +3624,7 @@ def _advance_pr_workflow_from_monitor_result(
     handoff = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(handoff):
         workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.status = SystemWorkflow.STATUS_COMPLETED
-        workflow.step = STEP_PR_CLOSED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _complete_workflow(workflow, STEP_PR_CLOSED)
         return
 
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
@@ -3667,9 +3651,7 @@ def _advance_pr_workflow_from_monitor_result(
             _start_pr_followup_feedback(workflow, feedback)
             return
         workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.status = SystemWorkflow.STATUS_COMPLETED
-        workflow.step = STEP_PR_READY
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _complete_workflow(workflow, STEP_PR_READY)
         return
 
     actionable_blockers = _pr_gates_have_actionable_blockers(gates)
@@ -3981,8 +3963,7 @@ def _schedule_pr_monitor_backoff(
         **workflow.state,
         _PR_MONITOR_BACKOFF_STATE_KEY: backoff,
     }
-    workflow.step = STEP_PR_MONITORING
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_PR_MONITORING)
 
 
 def _next_pr_monitor_retry_attempts(workflow: SystemWorkflow, reason: str) -> int:
@@ -4054,8 +4035,7 @@ def _handle_pr_feedback_finished(
         return
     _merge_pr_handoff(workflow, snapshot)
     _mark_hitch_pr_handoff(workflow, snapshot)
-    workflow.step = STEP_PR_MONITORING
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_PR_MONITORING)
     try:
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
@@ -4105,13 +4085,11 @@ def _complete_autonomous_goal_workflow_after_proposal_resolution(
     reason = _autonomous_goal_stack_proposal_stop_reason(outcome_status)
     if not reason:
         return
-    workflow.status = SystemWorkflow.STATUS_COMPLETED
-    workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     workflow.state = {
         **workflow.state,
         "stacked_diff_stopped_reason": reason,
     }
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(workflow, STEP_AUTONOMOUS_GOAL_PROPOSED)
 
 
 def _handle_autonomous_goal_agent_finished(
@@ -4308,11 +4286,10 @@ def _handle_autonomous_goal_agent_finished_locked(
                 token_delta=token_delta,
             )
             if retry_action is not None:
-                workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
                 workflow.state = _state_without_current_candidate_result(
                     workflow.state
                 )
-                workflow.save(update_fields=["step", "state", "updated_at"])
+                _advance_workflow_step(workflow, STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
                 return retry_action
             if previous_proposal is not None and _publish_current_stack_proposal(
                 previous_proposal,
@@ -4322,14 +4299,12 @@ def _handle_autonomous_goal_agent_finished_locked(
                 cleanup_cwd = _candidate_session_cwd_from_state(
                     workflow, "candidate_session_id"
                 )
-                workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
-                workflow.status = SystemWorkflow.STATUS_COMPLETED
                 workflow.state = {
                     **state,
                     "candidate": candidate_output,
                     "stacked_diff_stopped_reason": "candidate_no_proposal",
                 }
-                workflow.save(update_fields=["status", "step", "state", "updated_at"])
+                _complete_workflow(workflow, STEP_AUTONOMOUS_GOAL_PROPOSED)
                 return _AutonomousGoalPostCommitAction(
                     cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
                 )
@@ -4348,15 +4323,12 @@ def _handle_autonomous_goal_agent_finished_locked(
                 outcome_metadata=_autonomous_goal_proposal_budget_metadata(workflow),
             )
             _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
-            workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
-            workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {**state, "candidate": candidate_output}
-            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            _complete_workflow(workflow, STEP_AUTONOMOUS_GOAL_SKIPPED)
             return None
         candidate = cast(dict[str, Any], candidate_output["proposal"])
-        workflow.step = STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
         workflow.state = {**state, "candidate": candidate}
-        workflow.save(update_fields=["step", "state", "updated_at"])
+        _advance_workflow_step(workflow, STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING)
         return _AutonomousGoalPostCommitAction(
             _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION,
             candidate,
@@ -4412,8 +4384,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             workflow.state = _autonomous_goal_next_stack_candidate_state(
                 workflow, proposal
             )
-            workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
-            workflow.save(update_fields=["step", "state", "updated_at"])
+            _advance_workflow_step(workflow, STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
             return _AutonomousGoalPostCommitAction(
                 _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION,
                 cleanup_candidate_cwds=cleanup_cwds,
@@ -4431,9 +4402,8 @@ def _handle_autonomous_goal_agent_finished_locked(
             token_delta=token_delta,
         )
         if retry_action is not None:
-            workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
             workflow.state = _state_without_current_candidate_result(workflow.state)
-            workflow.save(update_fields=["step", "state", "updated_at"])
+            _advance_workflow_step(workflow, STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
             return retry_action
         if previous_proposal is not None and _publish_current_stack_proposal(
             previous_proposal,
@@ -4443,14 +4413,12 @@ def _handle_autonomous_goal_agent_finished_locked(
             cleanup_cwd = _candidate_session_cwd_from_state(
                 workflow, "candidate_session_id"
             )
-            workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
-            workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {
                 **state,
                 "judgment": judgment,
                 "stacked_diff_stopped_reason": "judge_confidence_below_threshold",
             }
-            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            _complete_workflow(workflow, STEP_AUTONOMOUS_GOAL_PROPOSED)
             return _AutonomousGoalPostCommitAction(
                 cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
             )
@@ -4974,14 +4942,12 @@ def _complete_autonomous_goal_with_current_stack_proposal(
         continuation_stopped_error=error,
     ):
         return False
-    workflow.status = SystemWorkflow.STATUS_COMPLETED
-    workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     workflow.state = {
         **workflow.state,
         "stacked_diff_stopped_reason": "stacked_diff_continuation_failed",
         "stacked_diff_continuation_error": error,
     }
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _complete_workflow(workflow, STEP_AUTONOMOUS_GOAL_PROPOSED)
     return True
 
 
@@ -6130,9 +6096,7 @@ def refreshed_pr_handoff_for_stage(
     _merge_pr_handoff(workflow, observed)
     refreshed = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(refreshed):
-        workflow.status = SystemWorkflow.STATUS_COMPLETED
-        workflow.step = STEP_PR_CLOSED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _complete_workflow(workflow, STEP_PR_CLOSED)
     else:
         workflow.save(update_fields=["state", "updated_at"])
     return refreshed
@@ -6386,6 +6350,39 @@ def archive_stale_blocked_workflows(
     return archived_ids
 
 
+def _complete_workflow(
+    workflow: SystemWorkflow,
+    step: str,
+    *,
+    status: str = SystemWorkflow.STATUS_COMPLETED,
+) -> None:
+    """Move a workflow to a terminal status/step and persist it.
+
+    Single home for the terminal transition write so every completion path
+    persists the same columns (status, step, state, updated_at); callers
+    that also change ``workflow.state`` assign it before calling.
+    """
+    workflow.status = status
+    workflow.step = step
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+
+
+def _advance_workflow_step(
+    workflow: SystemWorkflow, step: str, *, bump_iteration: bool = False
+) -> None:
+    """Advance a running workflow to its next transient step and persist it.
+
+    Counterpart of _complete_workflow for non-terminal transitions; callers
+    that also change ``workflow.state`` assign it before calling.
+    """
+    update_fields = ["step", "state", "updated_at"]
+    if bump_iteration:
+        workflow.iteration += 1
+        update_fields.insert(0, "iteration")
+    workflow.step = step
+    workflow.save(update_fields=update_fields)
+
+
 def _block_workflow(
     workflow: SystemWorkflow, error: str, *, surface_to_thread: bool = True
 ) -> None:
@@ -6561,7 +6558,6 @@ def _create_spec_critic_clarification_request(
         method=SPEC_CRITIC_CLARIFICATION_METHOD,
         params={"questions": questions},
     )
-    workflow.step = STEP_SPEC_CRITIC_CLARIFYING
     workflow.state = {
         **workflow.state,
         "clarification_request_id": input_request.pk,
@@ -6569,7 +6565,7 @@ def _create_spec_critic_clarification_request(
         "clarification_safe_defaults": safe_defaults,
         "clarification_answers": recorded_answers,
     }
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    _advance_workflow_step(workflow, STEP_SPEC_CRITIC_CLARIFYING)
     return input_request
 
 
