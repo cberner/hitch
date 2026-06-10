@@ -4489,31 +4489,11 @@ def _proposal_outcome_metadata(
     return metadata
 
 
-def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
-    if raw is None:
-        return default, None
-    value = raw.strip().lower()
-    if value in {"", "false"}:
-        return False, None
-    if value == "true":
-        return True, None
-    return False, "invalid auto-PR setting"
-
-
-def _posted_auto_qa_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
-    if raw is None:
-        return default, None
-    value = raw.strip().lower()
-    if value in {"", "false"}:
-        return False, None
-    if value == "true":
-        return True, None
-    return False, "invalid auto-QA setting"
-
-
-def _posted_use_worktree_override(
-    raw: str | None, *, default: bool
+def _posted_bool_override(
+    raw: str | None, *, default: bool, error: str
 ) -> tuple[bool, str | None]:
+    """Parse an optional posted checkbox override: absent keeps the default,
+    ""/"false" disables, "true" enables, anything else is rejected."""
     if raw is None:
         return default, None
     value = raw.strip().lower()
@@ -4521,7 +4501,7 @@ def _posted_use_worktree_override(
         return False, None
     if value == "true":
         return True, None
-    return False, "invalid worktree setting"
+    return False, error
 
 
 def _posted_web_search_override(
@@ -5923,8 +5903,10 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if coding_agent_override
         else settings
     )
-    use_worktrees, use_worktrees_error = _posted_use_worktree_override(
-        request.POST.get("use_worktrees"), default=settings.use_worktrees
+    use_worktrees, use_worktrees_error = _posted_bool_override(
+        request.POST.get("use_worktrees"),
+        default=settings.use_worktrees,
+        error="invalid worktree setting",
     )
     if use_worktrees_error is not None:
         return HttpResponseBadRequest(use_worktrees_error)
@@ -5937,13 +5919,17 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         None if target.project_cleared else source_project,
         global_enabled=settings.auto_pr_enabled,
     )
-    auto_pr_enabled, auto_pr_error = _posted_auto_pr_override(
-        request.POST.get("auto_pr"), default=default_auto_pr_enabled
+    auto_pr_enabled, auto_pr_error = _posted_bool_override(
+        request.POST.get("auto_pr"),
+        default=default_auto_pr_enabled,
+        error="invalid auto-PR setting",
     )
     if auto_pr_error is not None:
         return HttpResponseBadRequest(auto_pr_error)
-    auto_qa_enabled, auto_qa_error = _posted_auto_qa_override(
-        request.POST.get("auto_qa"), default=settings.auto_qa_enabled
+    auto_qa_enabled, auto_qa_error = _posted_bool_override(
+        request.POST.get("auto_qa"),
+        default=settings.auto_qa_enabled,
+        error="invalid auto-QA setting",
     )
     if auto_qa_error is not None:
         return HttpResponseBadRequest(auto_qa_error)

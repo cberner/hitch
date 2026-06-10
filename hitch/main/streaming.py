@@ -70,19 +70,6 @@ _IDLE_MAX_STREAM_SECONDS = 5 * 60
 # the case where the subprocess never started writing.
 _FILE_APPEAR_TIMEOUT = 30.0
 
-_QA_AGENT_DISPLAY_AUTHOR = "QA agent"
-_QA_AGENT_KIND = "pr_qa"
-_PR_MONITOR_AGENT_KIND = "pr_followup_monitor"
-_STEP_FEEDBACK_RUNNING = "feedback_running"
-_STEP_USER_STEERING_RUNNING = "user_steering_running"
-_STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
-_STEP_PR_MONITORING = "pr_monitoring"
-_STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
-_STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
-_STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
-_STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
-_STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
-_SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 _COMPACT_TOKEN_UNITS = (
     (1_000_000_000, "B"),
     (1_000_000, "M"),
@@ -589,7 +576,7 @@ def _pr_gate_status_label(status: str) -> str:
 def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
     if instance is None:
         return ""
-    if instance.agent_kind == _PR_MONITOR_AGENT_KIND:
+    if instance.agent_kind == system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND:
         tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
         if tokens_used is None:
             return "PR follow-up agent working..."
@@ -608,29 +595,29 @@ def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
 def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow is None:
         return ""
-    if workflow.kind == _SPEC_CRITIC_WORKFLOW_KIND:
-        if workflow.step == _STEP_SPEC_CRITIC_CLARIFYING:
+    if workflow.kind == system_agents.SPEC_CRITIC_WORKFLOW_KIND:
+        if workflow.step == system_agents.STEP_SPEC_CRITIC_CLARIFYING:
             return "Spec Critic is waiting for clarification..."
-        if workflow.step == _STEP_SPEC_CRITIC_SYNTHESIZING:
+        if workflow.step == system_agents.STEP_SPEC_CRITIC_SYNTHESIZING:
             return "Spec Critic is synthesizing the brief..."
-        if workflow.step == _STEP_SPEC_CRITIC_CLASSIFYING:
+        if workflow.step == system_agents.STEP_SPEC_CRITIC_CLASSIFYING:
             return "Spec Critic is reviewing the request..."
-        if workflow.step == _STEP_SPEC_CRITIC_ANALYZING:
+        if workflow.step == system_agents.STEP_SPEC_CRITIC_ANALYZING:
             return "Spec Critic is analyzing the request..."
         return "Spec Critic is preparing the implementation..."
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."
-    if workflow.step == _STEP_FEEDBACK_RUNNING:
+    if workflow.step == system_agents.STEP_FEEDBACK_RUNNING:
         return "QA feedback agent is fixing feedback..."
-    if workflow.step == _STEP_PR_PROMPT_RUNNING:
+    if workflow.step == system_agents.STEP_PR_PROMPT_RUNNING:
         return "PR agent is opening and following up..."
-    if workflow.step == _STEP_PR_FEEDBACK_RUNNING:
+    if workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING:
         return "PR follow-up agent is fixing feedback..."
-    if workflow.step == _STEP_USER_STEERING_RUNNING:
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
         return "Coding agent is working..."
-    if workflow.step == _STEP_PR_MONITORING:
+    if workflow.step == system_agents.STEP_PR_MONITORING:
         instance = _running_system_agent_instance(workflow.pk)
-        if instance is not None and instance.agent_kind == _PR_MONITOR_AGENT_KIND:
+        if instance is not None and instance.agent_kind == system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND:
             return "PR monitor is checking GitHub..."
         return "PR monitor is waiting..."
     instance = _running_system_agent_instance(workflow.pk)
@@ -640,8 +627,8 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
 
 def _is_qa_agent_instance(instance: CodexInstance) -> bool:
     return (
-        instance.display_author == _QA_AGENT_DISPLAY_AUTHOR
-        or instance.agent_kind == _QA_AGENT_KIND
+        instance.display_author == system_agents.QA_DISPLAY_AUTHOR
+        or instance.agent_kind == system_agents.PR_QA_AGENT_KIND
     )
 
 
