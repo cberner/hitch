@@ -25,6 +25,8 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -59,6 +61,12 @@ _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
 # on a loaded host but bounded so a parent that crashed mid-spawn cannot leave
 # the row pending forever.
 _PID_ASSIGNMENT_GRACE = timedelta(minutes=2)
+# How long a steer waits for the worker's delivery ack. The signal-driven
+# drain normally acks within a poll interval; the long tail is a turn that
+# completes mid-steer, where the row turning terminal resolves the wait well
+# before this cap. The cap only bites on a wedged-but-alive worker.
+_STEER_ACK_TIMEOUT_SECONDS = 8.0
+_STEER_ACK_POLL_SECONDS = 0.1
 _WORKER_ISOLATION_AUTO = "auto"
 _WORKER_ISOLATION_DIRECT = "direct"
 _WORKER_ISOLATION_SYSTEMD = "systemd"
@@ -662,9 +670,11 @@ def _steer_instance(
     if not _track_steer_input_attachments(instance, image_paths):
         return None
     images_tracked = bool(image_paths)
+    steer_id = uuid.uuid4().hex
     try:
         payload: dict[str, Any] = {
             "op": "steer",
+            "id": steer_id,
             "input": prompt,
         }
         if image_paths:
@@ -690,12 +700,69 @@ def _steer_instance(
         return None
     except OSError:
         return instance
-    instance.refresh_from_db()
-    if not instance.is_active:
-        if images_tracked:
-            _remove_input_attachment_paths(instance, image_paths)
+    return _await_steer_ack(
+        instance, steer_id, image_paths=image_paths, images_tracked=images_tracked
+    )
+
+
+def _await_steer_ack(
+    instance: CodexInstance,
+    steer_id: str,
+    *,
+    image_paths: list[str],
+    images_tracked: bool,
+) -> CodexInstance | None:
+    """Wait for the worker to record the steer's delivery outcome.
+
+    A turn can complete while the steer is in flight: the worker's final
+    drain still reads the payload but the SDK rejects steering a finished
+    turn, and anything appended after that drain is never read at all --
+    previously both shapes were reported as a successful steer and the
+    user's message silently vanished. The worker now acks every delivery
+    attempt; a failed ack (or no ack by the time the row turns terminal)
+    means the message was never delivered, so return None and let the
+    caller preserve it as a follow-up turn. A worker that stays RUNNING
+    without ever acking (wedged drain) falls back to the old optimistic
+    answer at the timeout rather than risking a duplicate turn.
+    """
+    control_path = control_path_for(instance)
+    deadline = time.monotonic() + _STEER_ACK_TIMEOUT_SECONDS
+    while True:
+        delivered = _read_steer_ack(control_path, steer_id)
+        if delivered is True:
+            return instance
+        if delivered is False:
+            # The worker already discarded the steer's duplicated attachments.
+            return None
+        instance.refresh_from_db()
+        if not instance.is_active:
+            if images_tracked:
+                _remove_input_attachment_paths(instance, image_paths)
+            return None
+        if time.monotonic() >= deadline:
+            return instance
+        time.sleep(_STEER_ACK_POLL_SECONDS)
+
+
+def _read_steer_ack(control_path: Path, steer_id: str) -> bool | None:
+    try:
+        data = control_path.read_bytes()
+    except OSError:
         return None
-    return instance
+    for raw in data.split(b"\n"):
+        if not raw:
+            continue
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("op") == "steer_ack"
+            and record.get("id") == steer_id
+        ):
+            return bool(record.get("delivered"))
+    return None
 
 
 def _append_control_request(instance: CodexInstance, payload: dict[str, Any]) -> None:
@@ -1287,8 +1354,15 @@ def acquire_worker_sqlite_home(instance_id: int) -> WorkerSqliteHome:
         except OSError:
             os.close(fd)
             continue
-        home = worker_sqlite_slot_home(slot)
-        home.mkdir(parents=True, exist_ok=True)
+        try:
+            home = worker_sqlite_slot_home(slot)
+            home.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Without this, the held flock (and its fd) would outlive the
+            # caller's CODEX_HOME fallback and block the slot for the whole
+            # turn.
+            os.close(fd)
+            raise
         return WorkerSqliteHome(home=home, _lock_fd=fd, overflow=False)
     home = base / f"worker-overflow-{instance_id}"
     home.mkdir(parents=True, exist_ok=True)
