@@ -578,6 +578,9 @@ def _attach_proposed_session_display_state(
         proposed_session.stack_label = _proposed_session_stack_label(  # type: ignore[attr-defined]
             proposed_session
         )
+        proposed_session.tokens_used_display = _proposed_session_tokens_used_display(  # type: ignore[attr-defined]
+            proposed_session
+        )
 
 
 def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
@@ -601,6 +604,16 @@ def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
         iteration = metadata_iteration
         return f"Stack {iteration} of {depth}"
     return ""
+
+
+def _proposed_session_tokens_used_display(proposed_session: ProposedSession) -> str:
+    tokens = autonomous_goal_proposal_stack._proposal_metadata_non_negative_int(
+        _proposal_metadata(proposed_session),
+        autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
+    )
+    if tokens is None:
+        return ""
+    return f"{token_usage._format_token_count(tokens)} tokens"
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
