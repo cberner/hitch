@@ -221,9 +221,9 @@ class SendMessageViewTests(TestCase):
         expected.update(overrides)
         mock_spawn.assert_called_once_with(**expected)
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_steers_posted_active_instance_without_spawning(
         self,
         mock_codex: MagicMock,
@@ -248,10 +248,10 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_steers_latest_active_when_form_has_no_instance(
         self,
         mock_codex: MagicMock,
@@ -282,10 +282,10 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_steers_active_workflow_user_turn(
         self,
         mock_codex: MagicMock,
@@ -325,10 +325,10 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_blocks_active_workflow_system_feedback_worker_steering(
         self,
         mock_codex: MagicMock,
@@ -367,10 +367,10 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_steers_active_instance_with_uploaded_image(
         self,
         mock_codex: MagicMock,
@@ -414,9 +414,9 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_active_instance(
         self,
         mock_codex: MagicMock,
@@ -434,10 +434,10 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_failed_steer_falls_back_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
@@ -539,9 +539,9 @@ class SendMessageViewTests(TestCase):
                 self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=False)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.views.common.Codex")
     def test_dead_posted_active_instance_is_reconciled_before_follow_up_spawn(
         self,
         mock_codex: MagicMock,
@@ -572,10 +572,10 @@ class SendMessageViewTests(TestCase):
         self._assert_follow_up_spawn(mock_spawn, prompt="still there?")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_failed_steer_falls_back_to_spawn_with_uploaded_image(
         self,
         mock_codex: MagicMock,
@@ -629,10 +629,10 @@ class SendMessageViewTests(TestCase):
             input_image_paths=spawned_paths,
         )
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
     def test_image_steer_attachment_cap_returns_bad_request_without_fallback(
         self,
         mock_codex: MagicMock,
@@ -683,8 +683,8 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_and_redirects(
         self,
         mock_codex: MagicMock,
@@ -714,8 +714,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_first_follow_up_uses_project_developer_prompt(
         self,
         mock_codex: MagicMock,
@@ -753,8 +753,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_idle_follow_up_resumes_from_disk_without_app_server(
         self,
         mock_codex: MagicMock,
@@ -805,8 +805,8 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_unarchives_before_spawning(
         self,
         mock_codex: MagicMock,
@@ -879,8 +879,8 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_rejects_disallowed_cached_cwd_before_unarchive(
         self,
         mock_codex: MagicMock,
@@ -922,8 +922,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_live_resume_retry_unarchives_before_spawning(
         self,
         mock_codex: MagicMock,
@@ -967,8 +967,8 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_live_resume_retry_rejects_cached_cwd_before_unarchive(
         self,
         mock_codex: MagicMock,
@@ -1005,8 +1005,8 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_live_resume_retry_rearchives_disallowed_resumed_cwd(
         self,
         mock_codex: MagicMock,
@@ -1061,8 +1061,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_rearchives_when_spawn_rejects(
         self,
         mock_codex: MagicMock,
@@ -1109,8 +1109,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_rearchives_when_default_model_missing(
         self,
         mock_codex: MagicMock,
@@ -1151,8 +1151,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_disk_resume_plan_turn_recovers_thread_model(
         self,
         mock_codex: MagicMock,
@@ -1213,11 +1213,11 @@ class SendMessageViewTests(TestCase):
         # The model-sensitive turn recovered the thread model via a live resume.
         mock_codex.assert_called()
 
-    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spec_critic_resume_intercepts_ambiguous_implementation_prompt(
         self,
         mock_codex: MagicMock,
@@ -1257,11 +1257,11 @@ class SendMessageViewTests(TestCase):
             auto_qa_enabled=False,
         )
 
-    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spec_critic_resume_preserves_auto_merge_settings(
         self,
         mock_codex: MagicMock,
@@ -1295,11 +1295,11 @@ class SendMessageViewTests(TestCase):
         self.assertTrue(kwargs["auto_merge_to_local_branch"])
         self.assertEqual(kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.views.spec_critic.spec_critic_should_run")
-    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run")
+    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spec_critic_resume_defers_classification_to_background(
         self,
         mock_codex: MagicMock,
@@ -1332,8 +1332,8 @@ class SendMessageViewTests(TestCase):
         mock_start_spec_critic.assert_called_once()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_with_uploaded_image(
         self,
         mock_codex: MagicMock,
@@ -1366,8 +1366,8 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "use this screenshot")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_with_image_only_prompt(
         self,
         mock_codex: MagicMock,
@@ -1400,8 +1400,8 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_with_multiple_uploaded_image_formats(
         self,
         mock_codex: MagicMock,
@@ -1444,8 +1444,8 @@ class SendMessageViewTests(TestCase):
             )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_send_message_cleans_uploaded_images_when_spawn_handoff_fails(
         self,
         mock_codex: MagicMock,
@@ -1479,8 +1479,8 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_send_message_cleans_uploaded_images_when_resume_validation_fails(
         self,
         mock_codex: MagicMock,
@@ -1517,9 +1517,9 @@ class SendMessageViewTests(TestCase):
                 [],
             )
 
-    @patch("hitch.main.views.codex_pool.steer_instance")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.steer_instance")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_send_message_rejects_invalid_image_uploads_before_side_effects(
         self,
         mock_codex: MagicMock,
@@ -1591,9 +1591,9 @@ class SendMessageViewTests(TestCase):
             mock_codex.assert_not_called()
             self.assertFalse((Path(raw) / "attachments").exists())
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_send_message_rejects_workflow_image_uploads_before_side_effects(
         self,
         mock_codex: MagicMock,
@@ -1622,8 +1622,8 @@ class SendMessageViewTests(TestCase):
                 mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_unwraps_pydantic_rootmodel_cwd(
         self,
         mock_codex: MagicMock,
@@ -1651,8 +1651,8 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_allows_follow_up_turns_in_managed_worktrees(
         self,
         mock_codex: MagicMock,
@@ -1680,8 +1680,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_forwards_follow_up_cookie_options_to_spawn_turn(
         self,
         mock_codex: MagicMock,
@@ -1756,8 +1756,8 @@ class SendMessageViewTests(TestCase):
                 )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_follow_up_uses_session_approval_mode_override(
         self,
         mock_codex: MagicMock,
@@ -1788,8 +1788,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_follow_up_clears_previous_web_search_when_setting_is_default(
         self,
         mock_codex: MagicMock,
@@ -1824,8 +1824,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_hitch_coding_agent_forwards_base_instructions_to_follow_up(
         self,
         mock_codex: MagicMock,
@@ -1846,8 +1846,8 @@ class SendMessageViewTests(TestCase):
         self.assertIn("You are running inside HITCH", base_instructions)
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_codex_coding_agent_clears_previous_hitch_base_instructions(
         self,
         mock_codex: MagicMock,
@@ -1880,8 +1880,8 @@ class SendMessageViewTests(TestCase):
         self.assertNotIn("You are running inside HITCH", base_instructions)
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_codex_coding_agent_clears_unknown_previous_base_instructions(
         self,
         mock_codex: MagicMock,
@@ -1904,8 +1904,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_auto_pr_session_marks_follow_up_turn(
         self,
         mock_codex: MagicMock,
@@ -1943,8 +1943,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_auto_qa_session_marks_follow_up_turn(
         self,
         mock_codex: MagicMock,
@@ -1982,8 +1982,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_auto_merge_session_marks_follow_up_turn(
         self,
         mock_codex: MagicMock,
@@ -2011,8 +2011,8 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(mock_spawn.call_args.kwargs["auto_merge_branch"], "main")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_plan_routing_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
@@ -2258,8 +2258,8 @@ class SendMessageViewTests(TestCase):
                 self._assert_follow_up_spawn(mock_spawn, **expected)
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_follow_up_after_plan_mode_discussion_stays_in_plan_mode(
         self,
         mock_codex: MagicMock,
@@ -2296,8 +2296,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_plan_mode_state_uses_stored_fallback_when_rollout_unreadable(
         self,
         mock_codex: MagicMock,
@@ -2334,8 +2334,8 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_plan_slash_follow_up_allows_image_only_prompt(
         self,
         mock_codex: MagicMock,
@@ -2370,9 +2370,9 @@ class SendMessageViewTests(TestCase):
             input_image_paths=image_paths,
         )
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_pr_qa_activation_routes_to_workflow_matrix(
         self,
         mock_codex: MagicMock,
@@ -2449,10 +2449,10 @@ class SendMessageViewTests(TestCase):
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_starts_monitor_for_opened_pr(
         self,
         mock_codex: MagicMock,
@@ -2540,9 +2540,9 @@ class SendMessageViewTests(TestCase):
             initial_user_message_index=1,
         )
 
-    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_requires_opened_pr(
         self,
         mock_codex: MagicMock,
@@ -2564,9 +2564,9 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
         self,
         mock_codex: MagicMock,
@@ -2636,9 +2636,9 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_slash_commands_forward_session_auto_merge_branch_to_workflow(
         self,
         mock_codex: MagicMock,
@@ -2678,9 +2678,9 @@ class SendMessageViewTests(TestCase):
                     "release",
                 )
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_qa_slash_command_forwards_hitch_base_instructions_to_workflow(
         self,
         mock_codex: MagicMock,
@@ -2700,9 +2700,9 @@ class SendMessageViewTests(TestCase):
         base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
         self.assertIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_pr_slash_command_inherits_session_web_search_when_setting_is_default(
         self,
         mock_codex: MagicMock,
@@ -2729,9 +2729,9 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_start_workflow.call_args.kwargs["web_search_mode"], "live")
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_qa_slash_command_forwards_web_search_setting(
         self,
         mock_codex: MagicMock,
@@ -2752,9 +2752,9 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(kwargs["web_search_mode"], "cached")
         self.assertFalse(kwargs["open_pr_on_lgtm"])
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
         self,
         mock_codex: MagicMock,
@@ -2786,9 +2786,9 @@ class SendMessageViewTests(TestCase):
         )
         self.assertNotIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.pr_qa.start_user_steering_turn")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.workflows.pr_qa.start_user_steering_turn")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_running_qa_workflow_routes_normal_follow_up_to_user_steering(
         self,
         mock_codex: MagicMock,
@@ -2821,9 +2821,9 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.pr_qa.start_user_steering_turn")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.workflows.pr_qa.start_user_steering_turn")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_running_pr_workflow_non_qa_step_blocks_normal_follow_up(
         self,
         mock_codex: MagicMock,
@@ -2851,8 +2851,8 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.views.common.Codex")
     def test_duplicate_pr_command_during_running_workflow_redirects(
         self, mock_codex: MagicMock, mock_start_workflow: MagicMock
     ) -> None:
@@ -2878,8 +2878,8 @@ class SendMessageViewTests(TestCase):
         mock_start_workflow.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_plan_mode_model_resolution_matrix(
         self,
         mock_codex: MagicMock,
@@ -2927,8 +2927,8 @@ class SendMessageViewTests(TestCase):
                     )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_input(
         self,
         mock_codex: MagicMock,
@@ -2984,8 +2984,8 @@ class SendMessageViewTests(TestCase):
                     mock_codex.assert_not_called()
                 mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_get(
         self,
         mock_codex: MagicMock,
@@ -3000,8 +3000,8 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
 
 class StopSessionViewTests(TestCase):
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.codex_pool.interrupt_active")
+    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_targets_instance_from_form_value(
         self,
         mock_interrupt_active: MagicMock,
@@ -3024,8 +3024,8 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.codex_pool.interrupt_active")
+    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_stop_with_selected_images_still_interrupts_worker(
         self,
         mock_interrupt_active: MagicMock,
@@ -3045,8 +3045,8 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.codex_pool.interrupt_active")
+    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_stop_with_over_limit_images_still_interrupts_worker(
         self,
         mock_interrupt_active: MagicMock,
@@ -3070,11 +3070,11 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_active.assert_not_called()
 
     @patch(
-        "hitch.main.views.system_agents.stop_active_workflow",
+        "hitch.main.workflows.system_agents.stop_active_workflow",
         wraps=system_agents.stop_active_workflow,
     )
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.codex_pool.interrupt_active")
+    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_falls_back_to_latest_active_without_instance(
         self,
         mock_interrupt_active: MagicMock,
@@ -3096,8 +3096,8 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_active.assert_called_once_with("abc")
         mock_interrupt_instance.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.interrupt_active")
-    @patch("hitch.main.views.system_agents.stop_active_workflow", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
+    @patch("hitch.main.workflows.system_agents.stop_active_workflow", return_value=True)
     def test_stops_active_system_workflow_without_instance(
         self, mock_stop_workflow: MagicMock, mock_interrupt_active: MagicMock
     ) -> None:
@@ -3109,8 +3109,8 @@ class StopSessionViewTests(TestCase):
         mock_stop_workflow.assert_called_once_with("abc")
         mock_interrupt_active.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.codex_pool.interrupt_active")
+    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
+    @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_rejects_invalid_requests(
         self, mock_interrupt_active: MagicMock, mock_interrupt_instance: MagicMock
     ) -> None:

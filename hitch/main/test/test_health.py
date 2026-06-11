@@ -354,7 +354,7 @@ class HealthDashboardViewTests(TestCase):
         self.assertContains(response, 'id="health-copy"')
         self.assertContains(response, reverse("profile"))
 
-    @patch("hitch.main.views._usage_context", side_effect=RuntimeError("codex down"))
+    @patch("hitch.main.views.common._usage_context", side_effect=RuntimeError("codex down"))
     def test_profile_links_to_health_dashboard(self, _mock_usage: Any) -> None:
         self.client.force_login(_make_user())
 

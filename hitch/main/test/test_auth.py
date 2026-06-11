@@ -186,7 +186,7 @@ class AuthViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "false")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_profile_renders_anonymous_user_with_usage(
         self, mock_codex: MagicMock
     ) -> None:
@@ -210,7 +210,7 @@ class AuthViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("register")}"')
         self.assertNotContains(response, f'action="{reverse("logout")}"')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_profile_hides_server_git_hash_for_anonymous_user(
         self, _mock_hash: MagicMock, mock_codex: MagicMock
@@ -224,7 +224,7 @@ class AuthViewTests(TestCase):
         self.assertNotContains(response, "Server git hash")
         self.assertNotContains(response, "abc123")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_profile_renders_logout_form_for_authenticated_user(
         self, _mock_hash: MagicMock, mock_codex: MagicMock
@@ -257,7 +257,7 @@ class AuthViewTests(TestCase):
             body.index('<p class="profile-revision"'),
         )
 
-    @patch("hitch.main.views._usage_context", side_effect=RuntimeError("codex down"))
+    @patch("hitch.main.views.common._usage_context", side_effect=RuntimeError("codex down"))
     def test_profile_renders_account_controls_when_usage_context_fails(
         self, mock_usage_context: MagicMock
     ) -> None:
@@ -275,7 +275,7 @@ class AuthViewTests(TestCase):
 
 
 class NukeCodexViewTests(TestCase):
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_profile_renders_nuke_button_for_authenticated_user(
         self, mock_codex: MagicMock
     ) -> None:
@@ -289,7 +289,7 @@ class NukeCodexViewTests(TestCase):
         # No confirmation line until the action has run.
         self.assertNotContains(response, "Killed ")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_profile_hides_nuke_button_for_anonymous_user(
         self, mock_codex: MagicMock
     ) -> None:
@@ -299,7 +299,7 @@ class NukeCodexViewTests(TestCase):
 
         self.assertNotContains(response, "Nuke Codex instances")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_profile_shows_killed_count_after_nuke(
         self, mock_codex: MagicMock
     ) -> None:
@@ -310,7 +310,7 @@ class NukeCodexViewTests(TestCase):
 
         self.assertContains(response, "Killed 1 Codex app server.")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_profile_ignores_malformed_nuked_param(
         self, mock_codex: MagicMock
     ) -> None:
@@ -321,7 +321,7 @@ class NukeCodexViewTests(TestCase):
 
         self.assertNotContains(response, "Killed ")
 
-    @patch("hitch.main.views.reconciliation.nuke_codex_app_servers", return_value=3)
+    @patch("hitch.main.runtime.reconciliation.nuke_codex_app_servers", return_value=3)
     def test_nuke_kills_app_servers_and_redirects_with_count(
         self, mock_nuke: MagicMock
     ) -> None:
@@ -333,7 +333,7 @@ class NukeCodexViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], f"{reverse('profile')}?nuked=3")
 
-    @patch("hitch.main.views.reconciliation.nuke_codex_app_servers")
+    @patch("hitch.main.runtime.reconciliation.nuke_codex_app_servers")
     def test_nuke_requires_authentication(self, mock_nuke: MagicMock) -> None:
         response = self.client.post(reverse("nuke_codex"))
 
@@ -350,7 +350,7 @@ class NukeCodexViewTests(TestCase):
 
 class AuthenticatedSettingsTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_index_places_profile_link_in_primary_nav(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -453,7 +453,7 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefers_account_settings_over_conflicting_cookies(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -529,8 +529,8 @@ class AuthenticatedSettingsTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_send_message_uses_account_settings_without_cookies(
         self,
         mock_codex: MagicMock,

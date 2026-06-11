@@ -38,7 +38,7 @@ from hitch.main.test.views_helpers import (
 
 
 class SetSessionNameViewTests(TestCase):
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_updates_name_and_response_shape(self, mock_codex: MagicMock) -> None:
         client = mock_codex.return_value.__enter__.return_value
         cases: list[tuple[str, dict[str, str], bool, int, str | None]] = [
@@ -86,7 +86,7 @@ class SetSessionNameViewTests(TestCase):
                     "abc", "New title"
                 )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_requests(self, mock_codex: MagicMock) -> None:
         # The form caps input client-side; the view enforces the same bounds
         # so a hand-crafted POST can't bypass them.
@@ -366,7 +366,7 @@ class SetSessionApprovalModeViewTests(TestCase):
             },
         )
 
-    @patch("hitch.main.views.codex_events.append_event", side_effect=OSError("full"))
+    @patch("hitch.main.views.common.codex_events.append_event", side_effect=OSError("full"))
     def test_live_pending_approval_append_failure_still_settles_row(
         self, mock_append_event: MagicMock
     ) -> None:
@@ -389,7 +389,7 @@ class SetSessionApprovalModeViewTests(TestCase):
         )
         url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
 
-        with patch("hitch.main.views.logger.warning") as warning:
+        with patch("hitch.main.views.common.logger.warning") as warning:
             response = self.client.post(url, data={"approval_mode": "deny_all"})
 
         self.assertEqual(response.status_code, 302)
@@ -417,7 +417,7 @@ class SetSessionApprovalModeViewTests(TestCase):
                 return 0
 
         with patch(
-            "hitch.main.views.ApprovalRequest.objects.filter",
+            "hitch.main.views.common.ApprovalRequest.objects.filter",
             side_effect=[PendingQuery(), UpdateQuery()],
         ):
             resolved_events = views._settle_live_pending_approval_requests(
@@ -455,7 +455,7 @@ class SetSessionApprovalModeViewTests(TestCase):
         self.assertEqual(running.approval_mode, "prompt_user")
 
 class SetSessionArchivedViewTests(TestCase):
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_updates_archive_state_and_response_shape(
         self, mock_codex: MagicMock
     ) -> None:
@@ -553,7 +553,7 @@ class SetSessionArchivedViewTests(TestCase):
                         ).exists()
                     )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_archive_keeps_cached_usage_for_unrelated_sessions(
         self, mock_codex: MagicMock
     ) -> None:
@@ -584,7 +584,7 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(other_totals, {"other-1": 200, "other-2": 300})
 
     @patch("hitch.main.demo.subprocess.run")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_archive_cleans_up_active_demo_container(
         self, mock_codex: MagicMock, mock_run: MagicMock
     ) -> None:
@@ -632,7 +632,7 @@ class SetSessionArchivedViewTests(TestCase):
         mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.demo.subprocess.run")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_failed_archive_does_not_clean_up_active_demo(
         self, mock_codex: MagicMock, mock_run: MagicMock
     ) -> None:
@@ -678,8 +678,8 @@ class SetSessionArchivedViewTests(TestCase):
             SessionDemo.STATUS_ACTIVE,
         )
 
-    @patch("hitch.main.views.codex_pool.cleanup_input_images_for_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.codex_pool.cleanup_input_images_for_thread")
+    @patch("hitch.main.views.common.Codex")
     def test_archive_keeps_retained_input_images_for_unarchive(
         self, mock_codex: MagicMock, mock_cleanup_images: MagicMock
     ) -> None:
@@ -694,7 +694,7 @@ class SetSessionArchivedViewTests(TestCase):
             "abc"
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_archive_requests(self, mock_codex: MagicMock) -> None:
         cases: list[tuple[str, dict[str, str], int]] = [
             ("post", {}, 400),
@@ -713,8 +713,8 @@ class SetSessionArchivedViewTests(TestCase):
         mock_codex.assert_not_called()
 
 class StartSessionDemoViewTests(TestCase):
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread")
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread")
     def test_rejects_start_while_system_workflow_is_active(
         self, mock_active_workflow: MagicMock, mock_request_demo: MagicMock
     ) -> None:
@@ -732,8 +732,8 @@ class StartSessionDemoViewTests(TestCase):
         )
         mock_request_demo.assert_not_called()
 
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     def test_rejects_start_while_user_turn_is_active(
         self, _mock_active_workflow: MagicMock, mock_request_demo: MagicMock
     ) -> None:
@@ -759,9 +759,9 @@ class StartSessionDemoViewTests(TestCase):
         mock_request_demo.assert_not_called()
 
     @override_settings(HITCH_DEMO_RUNTIME="docker")
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     def test_rejects_unsupported_runtime_before_spawning_agent(
         self,
         _mock_active_workflow: MagicMock,
@@ -777,12 +777,12 @@ class StartSessionDemoViewTests(TestCase):
         mock_request_demo.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn(
         self,
         mock_run_borrowed: MagicMock,
@@ -856,12 +856,12 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(run.thread_id, "abc")
         self.assertEqual(run.instance, spawned_instances[0])
 
-    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos", return_value=[])
-    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn_uses_managed_worktree_sandbox(
         self,
         mock_run_borrowed: MagicMock,
@@ -901,12 +901,12 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_spawn.call_args.kwargs["sandbox_policy"], "workspaceWrite")
 
-    @patch("hitch.main.views.demo.cleanup_demo_for_session")
-    @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_demo_for_session")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_cleans_up_demo_when_worker_dispatch_fails(
         self,
         mock_codex: MagicMock,
@@ -926,12 +926,12 @@ class StartSessionDemoViewTests(TestCase):
 
         mock_cleanup.assert_called_once_with("abc")
 
-    @patch("hitch.main.views.demo.cleanup_demo_for_session")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_demo_for_session")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_cleans_up_demo_when_workflow_state_save_fails(
         self,
         mock_codex: MagicMock,
@@ -968,16 +968,16 @@ class StartSessionDemoViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_cleanup.assert_called_once_with("abc")
 
-    @patch("hitch.main.views.demo.cleanup_demo_for_session")
+    @patch("hitch.main.demo.cleanup_demo_for_session")
     @patch(
-        "hitch.main.views.demo.start_demo_prompt_for",
+        "hitch.main.demo.start_demo_prompt_for",
         side_effect=RuntimeError("prompt failed"),
     )
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_cleans_up_demo_when_prompt_construction_fails(
         self,
         mock_codex: MagicMock,
@@ -1005,12 +1005,12 @@ class StartSessionDemoViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_cleanup.assert_called_once_with("abc")
 
-    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_requests_demo_agent_turn_tolerates_existing_system_run(
         self,
         mock_codex: MagicMock,
@@ -1062,13 +1062,13 @@ class StartSessionDemoViewTests(TestCase):
             SystemAgentRun.STATUS_COMPLETED,
         )
 
-    @patch("hitch.main.views.demo.cleanup_demo_for_session")
-    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.cleanup_demo_for_session")
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_duplicate_running_demo_workflow_rejects_without_mutating_owner(
         self,
         mock_codex: MagicMock,
@@ -1108,13 +1108,13 @@ class StartSessionDemoViewTests(TestCase):
         stale_workflow.refresh_from_db()
         self.assertEqual(stale_workflow.status, SystemWorkflow.STATUS_RUNNING)
 
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.SystemWorkflow.objects.create")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.views.common.SystemWorkflow.objects.create")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_demo_workflow_integrity_error_rejects_before_mutating_demo_state(
         self,
         mock_codex: MagicMock,
@@ -1148,7 +1148,7 @@ class StartSessionDemoViewTests(TestCase):
         mock_spawn.assert_not_called()
         self.assertFalse(SessionDemo.objects.filter(thread_id="abc").exists())
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_system_sessions_lists_demo_run_without_hiding_user_session(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1191,11 +1191,11 @@ class StartSessionDemoViewTests(TestCase):
             reverse("system_session", kwargs={"session_id": "thread-1"}),
         )
 
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_missing_cwd_before_starting_container(
         self,
         mock_codex: MagicMock,
@@ -1216,11 +1216,11 @@ class StartSessionDemoViewTests(TestCase):
         self.assertContains(response, "thread has no cwd", status_code=400)
         mock_request_demo.assert_not_called()
 
-    @patch("hitch.main.views.demo.request_demo_start", side_effect=demo.DemoError("no podman"))
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start", side_effect=demo.DemoError("no podman"))
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_reports_demo_start_failure(
         self,
         mock_codex: MagicMock,
@@ -1257,12 +1257,12 @@ class StartSessionDemoViewTests(TestCase):
         )
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
 
-    @patch("hitch.main.views.demo.request_demo_start", side_effect=RuntimeError("boom"))
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start", side_effect=RuntimeError("boom"))
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_fails_workflow_when_demo_start_raises_unexpected_error(
         self,
         mock_codex: MagicMock,
@@ -1288,11 +1288,11 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_pending_demo_before_spawning_agent(
         self,
         mock_codex: MagicMock,
@@ -1320,11 +1320,11 @@ class StartSessionDemoViewTests(TestCase):
         self.assertContains(response, "demo setup is already running", status_code=400)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.demo.request_demo_start")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.demo.request_demo_start")
+    @patch("hitch.main.workflows.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejects_unallowed_cwd_before_starting_container(
         self,
         mock_codex: MagicMock,

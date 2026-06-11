@@ -46,15 +46,15 @@ class AutonomousGoalViewTests(TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.quota_patcher = patch(
-            "hitch.main.views.goal_workflows._auto_proposals_paused_by_usage_quota_throttled",
+            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota_throttled",
             return_value=False,
         )
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
 
-    @patch("hitch.main.views.goal_workflows.maybe_start_auto_proposal_workflows")
+    @patch("hitch.main.workflows.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_get_pages_do_not_start_auto_proposals(
         self,
         mock_codex: MagicMock,
@@ -79,7 +79,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_scheduler.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_lists_goals_and_inbox_count_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -192,7 +192,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Deleted goal")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_tappable_run_status_indicators(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -447,7 +447,7 @@ class AutonomousGoalViewTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_not_running_run_status_reasons(
         self,
         mock_codex: MagicMock,
@@ -540,7 +540,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_quota_pause_instead_of_completed_run(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -578,7 +578,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "The last run proposed useful work.")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_treats_completed_auto_proposal_as_ready_not_done(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -625,7 +625,7 @@ class AutonomousGoalViewTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_treats_pending_stack_proposal_as_ready_to_continue(
         self,
         mock_codex: MagicMock,
@@ -684,7 +684,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_treats_legacy_stopped_stack_proposal_as_ready(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -740,7 +740,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_manual_goal_with_pending_stack_proposal_as_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -786,7 +786,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_blocks_pending_proposal_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -824,7 +824,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_blocks_stack_continuation_when_extra_pending_proposal_exists(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -871,7 +871,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_queued_when_accepted_automation_is_in_flight(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -925,7 +925,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, ">Ready</button>", html=False)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_edit_form_sync_preserves_auto_qa_choice_when_required(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -955,7 +955,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIn("autoQa.disabled = required || !supported;", body)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_draft_pr_goal_shows_auto_qa_required_on_reopen(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -982,7 +982,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_page_lists_proposals_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -1100,7 +1100,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Other proposal")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_page_shows_autonomous_goal_stack_number(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1149,7 +1149,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_page_omits_stack_label_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1182,7 +1182,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Stack 1 of 5")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1223,7 +1223,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_keeps_active_proposal_start_claim_hidden(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1257,7 +1257,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inbox_visible_projects_filter_messages(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1309,7 +1309,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "No repo -")
         self.assertNotContains(response, "Matching proposal")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_reject_proposed_session_uses_visible_project_filter(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -1342,7 +1342,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_notes, "Not useful enough.")
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_update_outcome_rejects_proposal_hidden_by_visible_project_filter(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -1375,7 +1375,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefills_proposed_session(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1405,7 +1405,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("inbox")}"')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1447,7 +1447,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefills_prompt_and_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1467,7 +1467,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, f'value="{project.pk}" selected')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_rejects_unavailable_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1481,7 +1481,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefills_bare_repo_cwd_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1499,7 +1499,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, f'value="{project.pk}" selected')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_rejects_unavailable_bare_repo_cwd(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1510,7 +1510,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_new_session_page_rejects_proposed_session_for_unavailable_repo(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1529,7 +1529,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_lists_no_proposal_notice_with_dismiss(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -1561,7 +1561,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, 'data-reject-url="')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_lists_agent_created_proposal(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1587,7 +1587,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_create_form_inline_when_no_goals(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -1623,7 +1623,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_page_moves_create_form_to_header_dialog_when_goals_exist(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -1691,7 +1691,7 @@ class AutonomousGoalViewTests(TestCase):
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
-        with patch("hitch.main.views.local_branch_names", return_value=["main"]):
+        with patch("hitch.main.views.common.local_branch_names", return_value=["main"]):
             response = self.client.post(
                 reverse("create_autonomous_goal"),
                 {
@@ -1827,7 +1827,7 @@ class AutonomousGoalViewTests(TestCase):
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
 
-        with patch("hitch.main.views.local_branch_names", return_value=["release"]):
+        with patch("hitch.main.views.common.local_branch_names", return_value=["release"]):
             response = self.client.post(
                 reverse("edit_autonomous_goal", args=[goal.pk]),
                 {
@@ -2308,7 +2308,7 @@ class AutonomousGoalViewTests(TestCase):
             {"candidate-thread"},
         )
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_delete_autonomous_goal_dismisses_unresolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -2341,7 +2341,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_delete_autonomous_goal_cleans_hidden_stacked_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -2379,7 +2379,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -2633,7 +2633,7 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNone(goal.deleted_at)
 
-    @patch("hitch.main.views.goal_workflows.start_autonomous_goal_workflow")
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
     def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
@@ -2658,7 +2658,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.views.goal_workflows.start_autonomous_goal_workflow")
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
     def test_run_single_always_uses_worktrees(
         self, mock_start: MagicMock
     ) -> None:
@@ -2679,7 +2679,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.views.goal_workflows.start_autonomous_goal_workflow")
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
     def test_run_single_is_scoped_to_selected_project(
         self, mock_start: MagicMock
     ) -> None:
@@ -2697,7 +2697,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.views.goal_workflows.start_autonomous_goal_workflow")
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
     def test_run_all_starts_each_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
@@ -2738,7 +2738,7 @@ class AutonomousGoalViewTests(TestCase):
             [True, True],
         )
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_reject_proposed_session_requires_reason(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -2763,7 +2763,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.content, b"reason is required")
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_accept_proposed_session_links_candidate_session(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2803,10 +2803,10 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch(
-        "hitch.main.views.goal_workflows."
+        "hitch.main.views.common.goal_workflows."
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
     )
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_accept_proposed_session_stops_background_stack(
         self, mock_codex: MagicMock, mock_stop_stack: MagicMock
     ) -> None:
@@ -2844,9 +2844,9 @@ class AutonomousGoalViewTests(TestCase):
             ProposedSession.OUTCOME_ACCEPTED,
         )
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.views.goal_workflows."
+        "hitch.main.views.common.goal_workflows."
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
     )
     def test_resolving_visible_stack_proposal_stops_background_stack_before_cleanup(
@@ -2916,9 +2916,9 @@ class AutonomousGoalViewTests(TestCase):
                 mock_cleanup.assert_called_once_with(candidate.cwd)
                 self.assertEqual(calls, ["stop", "cleanup"])
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.views.goal_workflows."
+        "hitch.main.views.common.goal_workflows."
         "stop_running_autonomous_goal_stack_after_proposal_resolution",
         return_value=False,
     )
@@ -3013,7 +3013,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b"outcome status is invalid")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_dismiss_proposed_session_uses_distinct_outcome(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -3046,7 +3046,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_notes, "")
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_reject_proposed_session_cleans_candidate_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -3082,7 +3082,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_notes, "Not useful enough.")
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
-    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_update_outcome_rejects_already_resolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
