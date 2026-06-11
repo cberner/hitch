@@ -4862,6 +4862,15 @@ class InterruptInstanceTests(TestCase):
 class SteerInstanceTests(TestCase):
     """Targeted-steer entry point used by active composer submissions."""
 
+    @override
+    def setUp(self) -> None:
+        # Steers now wait for the worker's delivery ack; with no worker in
+        # these tests the wait would only end at the timeout, so zero it and
+        # let individual tests write explicit acks where the outcome matters.
+        patcher = patch.object(codex_pool, "_STEER_ACK_TIMEOUT_SECONDS", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _make(
         self,
         *,
@@ -4876,6 +4885,22 @@ class SteerInstanceTests(TestCase):
             cwd="/r",
             events_path=events_path,
             status=status,
+        )
+
+    def _ack_after_append(self, *, delivered: bool) -> Any:
+        """Patch the control append so the worker's ack lands immediately."""
+        original_append = codex_pool._append_control_request
+
+        def append_and_ack(instance: CodexInstance, payload: dict[str, Any]) -> None:
+            original_append(instance, payload)
+            original_append(
+                instance,
+                {"op": "steer_ack", "id": payload["id"], "delivered": delivered},
+            )
+
+        return patch(
+            "hitch.main.runtime.codex_pool._append_control_request",
+            side_effect=append_and_ack,
         )
 
     @patch("hitch.main.runtime.codex_pool._steer_instance")
@@ -4936,8 +4961,10 @@ class SteerInstanceTests(TestCase):
             mock_identity.assert_called_once_with(4321, target.pk)
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
             line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            payload = json.loads(line)
+            self.assertTrue(payload.pop("id"))
             self.assertEqual(
-                json.loads(line),
+                payload,
                 {"op": "steer", "input": "also update the tests"},
             )
             self.assertFalse(codex_pool.control_path_for(bystander).exists())
@@ -4964,8 +4991,10 @@ class SteerInstanceTests(TestCase):
             self.assertIsNotNone(result)
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
             line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            payload = json.loads(line)
+            self.assertTrue(payload.pop("id"))
             self.assertEqual(
-                json.loads(line),
+                payload,
                 {
                     "op": "steer",
                     "input": "use this",
@@ -4998,14 +5027,91 @@ class SteerInstanceTests(TestCase):
             self.assertIsNotNone(result)
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
             line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            payload = json.loads(line)
+            self.assertTrue(payload.pop("id"))
             self.assertEqual(
-                json.loads(line),
+                payload,
                 {
                     "op": "steer",
                     "input": "",
                     "inputImagePaths": ["/tmp/screen.png"],
                 },
             )
+
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_steer_returns_instance_on_delivered_ack(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            with self._ack_after_append(delivered=True):
+                result = codex_pool.steer_instance(
+                    target.pk,
+                    expected_thread_id="t",
+                    prompt="also update the tests",
+                )
+
+            self.assertIsNotNone(result)
+
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_steer_falls_back_when_worker_reports_failed_delivery(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # The worker acks delivered=false when the SDK refuses to steer a
+        # finished turn; the caller must report failure so the view preserves
+        # the message as a follow-up turn instead of silently dropping it.
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            with self._ack_after_append(delivered=False):
+                result = codex_pool.steer_instance(
+                    target.pk,
+                    expected_thread_id="t",
+                    prompt="also update the tests",
+                )
+
+            self.assertIsNone(result)
+
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_steer_falls_back_when_instance_turns_terminal_before_ack(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # A steer appended after the worker's final control drain is never
+        # read; the row turning terminal without an ack is the only signal,
+        # and it must surface as a failed steer rather than a silent drop.
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            def kill_then_complete(*args: Any, **kwargs: Any) -> None:
+                CodexInstance.objects.filter(pk=target.pk).update(
+                    status=CodexInstance.STATUS_COMPLETED
+                )
+
+            mock_kill.side_effect = kill_then_complete
+            with patch.object(codex_pool, "_STEER_ACK_TIMEOUT_SECONDS", 5.0):
+                result = codex_pool.steer_instance(
+                    target.pk,
+                    expected_thread_id="t",
+                    prompt="also update the tests",
+                )
+
+            self.assertIsNone(result)
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
@@ -6185,6 +6291,27 @@ class CodexWorkerCommandTests(TestCase):
         )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_worker_exits_when_row_already_terminal(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # reconcile_dead can fail a slow-starting row (pid grace expiry) and
+        # route the failure to system agents before the worker gets going; an
+        # unconditional first save would resurrect the row to RUNNING and run
+        # the turn anyway, double-driving the workflow.
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_FAILED,
+                error="worker process exited before reporting completion",
+            )
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+            instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_streams_notifications_and_marks_completed(self, mock_codex: MagicMock) -> None:
         events = [
             SimpleNamespace(
@@ -7221,6 +7348,31 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(context.cwd, "/repo")
         self.assertEqual(context.thread_id, "thread-approval")
 
+    def test_dynamic_tool_call_contains_handler_exceptions(self) -> None:
+        # Tool handlers run on the SDK reader thread; an escaping exception
+        # kills the reader loop and tears down the whole turn, so any internal
+        # failure must come back as a failed tool response instead.
+        from hitch.main.runtime.codex_tools import ToolContext, handle_dynamic_tool_call
+
+        with patch(
+            "hitch.main.runtime.codex_tools.create_proposed_session",
+            side_effect=RuntimeError("database is locked"),
+        ):
+            response = handle_dynamic_tool_call(
+                {
+                    "tool": "propose_session",
+                    "arguments": {
+                        "title": "t",
+                        "summary": "s",
+                        "prompt": "p",
+                    },
+                },
+                ToolContext(cwd="/repo", thread_id="thread-approval"),
+            )
+
+        self.assertFalse(response["success"])
+        self.assertIn("failed internally", response["contentItems"][0]["text"])
+
     def test_handler_observes_live_approve_all_mode_change(self) -> None:
         instance = self._make_instance()
         events: list[tuple[str, object]] = []
@@ -7556,6 +7708,16 @@ class ApprovalHandlerTests(TestCase):
 
         self.assertEqual(steered, ["first", "second"])
         self.assertEqual(new_offset, len(complete))
+
+    def test_wait_for_decision_declines_when_row_deleted(self) -> None:
+        # The wait runs on the SDK reader thread: a DoesNotExist escaping it
+        # would kill the reader loop and fail the whole turn instead of just
+        # this one approval.
+        from hitch.main.management.commands.codex_worker import _wait_for_decision
+
+        self.assertEqual(
+            _wait_for_decision(987654321), ApprovalRequest.DECISION_DECLINE
+        )
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
@@ -8133,6 +8295,42 @@ class WorkerCancellationTests(TestCase):
                 self.assertFalse(image_path.exists())
                 instance.refresh_from_db()
                 self.assertEqual(instance.input_attachment_paths, [])
+
+    def test_drain_steer_requests_acks_delivery_outcomes(self) -> None:
+        # ``steer_instance`` waits on these acks to distinguish a delivered
+        # steer from one the SDK rejected (turn already finished), so both
+        # outcomes must be recorded against the request id.
+        turn = MagicMock()
+        turn.steer.side_effect = [None, RuntimeError("turn finished")]
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_text(
+                json.dumps({"op": "steer", "id": "ok-1", "input": "first"})
+                + "\n"
+                + json.dumps({"op": "steer", "id": "late-2", "input": "second"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            codex_worker_module._drain_steer_requests(
+                turn,
+                instance=self._make_instance(raw),
+                control_path=control_path,
+                control_offset=0,
+            )
+
+            records = [
+                json.loads(line)
+                for line in control_path.read_text(encoding="utf-8").splitlines()
+            ]
+        acks = [record for record in records if record.get("op") == "steer_ack"]
+        self.assertEqual(
+            acks,
+            [
+                {"op": "steer_ack", "id": "ok-1", "delivered": True},
+                {"op": "steer_ack", "id": "late-2", "delivered": False},
+            ],
+        )
 
     def test_steer_forwarder_drains_once_after_stop(self) -> None:
         turn = MagicMock()

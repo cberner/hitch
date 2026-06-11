@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,8 @@ from hitch.main.goals.proposed_sessions import (
     create_proposed_session,
 )
 from hitch.main.models import AutonomousGoal
+
+logger = logging.getLogger(__name__)
 
 _TOOL_CALL_METHOD = "item/tool/call"
 _HITCH_NAMESPACE = "hitch"
@@ -76,6 +79,16 @@ def handle_dynamic_tool_call(
             connection.close()
     except ProposedSessionError as exc:
         return _tool_response(str(exc), success=False)
+    except Exception:
+        # The handler runs on the SDK's reader thread: an exception escaping
+        # here kills the reader loop, which fails every pending request and
+        # tears down the whole turn. A failed tool response keeps the blast
+        # radius to this one call (e.g. a transient DB error past the busy
+        # timeout).
+        logger.exception("Hitch tool %s.%s failed", namespace, tool_name)
+        return _tool_response(
+            f"Hitch tool {namespace}.{tool_name} failed internally", success=False
+        )
     return _tool_response(message, success=True)
 
 

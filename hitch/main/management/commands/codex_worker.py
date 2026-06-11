@@ -302,9 +302,23 @@ class Command(BaseCommand):
         signal.signal(signal.SIGUSR1, _on_sigusr1)
 
         _apply_worker_oom_score_adjust()
+        # Conditional on the row still being active: an unconditional save
+        # here would resurrect a row that reconcile_dead already marked FAILED
+        # (slow systemd start past the pid-assignment grace) -- the failure
+        # has been routed to system agents by then, so running the turn anyway
+        # double-drives the workflow.
+        claimed = CodexInstance.objects.filter(
+            pk=instance.pk,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+        ).update(pid=os.getpid(), status=CodexInstance.STATUS_RUNNING)
+        if not claimed:
+            _worker_log(
+                instance_id,
+                "row was already terminal before the turn started; exiting",
+            )
+            return
         instance.pid = os.getpid()
         instance.status = CodexInstance.STATUS_RUNNING
-        instance.save(update_fields=["pid", "status"])
         _worker_log(
             instance_id,
             f"started thread_id={instance.thread_id} events_path={instance.events_path}",
@@ -767,7 +781,28 @@ def _drain_steer_requests(
             sent = _try_steer(turn, text, input_image_paths=input_image_paths)
             if not sent:
                 discard_input_attachment_paths(instance, input_image_paths)
+            _append_steer_ack(control_path, request.get("id"), delivered=sent)
     return control_offset + len(complete)
+
+
+def _append_steer_ack(control_path: Path, steer_id: Any, *, delivered: bool) -> None:
+    """Record a steer's delivery outcome for the requesting process.
+
+    ``steer_instance`` waits on this ack: a failed delivery (the SDK refuses
+    to steer a finished turn) tells it to fall back to spawning a follow-up
+    turn instead of silently dropping the user's message.
+    """
+    if not isinstance(steer_id, str) or not steer_id:
+        return
+    line = (
+        json.dumps(
+            {"op": "steer_ack", "id": steer_id, "delivered": delivered},
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    with contextlib.suppress(OSError), control_path.open("ab") as fh:
+        fh.write(line.encode("utf-8"))
 
 
 def _instance_input_image_paths(instance: CodexInstance) -> list[str]:
@@ -1530,6 +1565,12 @@ def _wait_for_decision(request_id: int) -> str | dict[str, Any]:
             decision, payload = ApprovalRequest.objects.values_list(
                 "decision", "decision_payload"
             ).get(pk=request_id)
+        except ApprovalRequest.DoesNotExist:
+            # The row was deleted out from under the wait (e.g. an admin or
+            # cascade delete). This handler runs on the SDK reader thread, so
+            # letting the exception escape would tear down the entire turn;
+            # decline just this action instead, like the timeout path.
+            return ApprovalRequest.DECISION_DECLINE
         finally:
             connection.close()
         if decision:
