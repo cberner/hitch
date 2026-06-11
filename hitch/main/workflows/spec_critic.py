@@ -336,6 +336,24 @@ def _spec_critic_implementation_turn_exists(workflow: SystemWorkflow) -> bool:
 @engine.register
 class _SpecCriticHandler(engine.WorkflowHandler):
     kind = system_agents.SPEC_CRITIC_WORKFLOW_KIND
+    # Top-level SystemWorkflow.state keys this machine reads and writes (the
+    # engine-shared turn-config/failure keys live in engine.SHARED_STATE_KEYS).
+    state_keys = frozenset(
+        {
+            "auto_merge_branch",
+            "auto_merge_to_local_branch",
+            "auto_pr_enabled",
+            "auto_qa_enabled",
+            "clarification_answers",
+            "clarification_questions",
+            "clarification_request_id",
+            "clarification_safe_defaults",
+            "clarification_source",
+            "original_prompt",
+            "skipped_classification",
+            "synthesized_brief",
+        }
+    )
 
     @override
     def spawn_recovery_specs(self) -> tuple[engine.SpawnRecoverySpec, ...]:
