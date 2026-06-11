@@ -377,6 +377,13 @@ class _SpecCriticHandler(engine.WorkflowHandler):
             ),
             engine.SpawnRecoverySpec(
                 kind=self.kind,
+                step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING,
+                stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+                needs_recovery=_spec_critic_synthesizing_needs_recovery,
+                recover=_recover_spec_critic_synthesizing,
+            ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
                 step=system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
                 stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
                 # Only the skip path leaves this step RUNNING (the synthesis
@@ -616,15 +623,71 @@ def _complete_spec_critic_workflow(
     if not isinstance(brief, str) or not brief.strip():
         _block_spec_critic_workflow(workflow, "Spec Critic synthesizer returned no brief")
         return
-    try:
-        _spawn_spec_critic_implementation_turn(workflow, brief.strip())
-    except Exception as exc:
-        _block_spec_critic_workflow(
-            workflow, f"failed to start implementation from Spec Critic brief: {exc!r}"
-        )
-        return
+    # Idempotent like the skip path: synthesizing recovery re-drives this
+    # completion after a death between the implementation spawn and the
+    # workflow save, and must not start a duplicate implementation turn.
+    if not _spec_critic_implementation_turn_exists(workflow):
+        try:
+            _spawn_spec_critic_implementation_turn(workflow, brief.strip())
+        except Exception as exc:
+            _block_spec_critic_workflow(
+                workflow, f"failed to start implementation from Spec Critic brief: {exc!r}"
+            )
+            return
     workflow.state = {**workflow.state, "synthesized_brief": brief.strip()}
     system_agents._complete_workflow(workflow, system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED)
+
+def _spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun | None:
+    return (
+        workflow.agent_runs.filter(agent_kind=SPEC_SYNTHESIZER_AGENT_KIND)
+        .order_by("-created_at", "-pk")
+        .first()
+    )
+
+def _spec_critic_synthesizing_needs_recovery(workflow: SystemWorkflow) -> bool:
+    """No live or finish-routing synthesizer owns the SYNTHESIZING step.
+
+    Two stranding shapes: the claim committed the step but died before
+    spawning the synthesizer (no run exists), or the synthesizer's finish
+    handler saved the terminal run and died before advancing the workflow
+    (the terminal-instance reconciler skips runs that are already terminal,
+    so nothing else can route it).
+    """
+    run = _spec_critic_synthesizer_run(workflow)
+    if run is None:
+        return True
+    if run.status not in (
+        SystemAgentRun.STATUS_COMPLETED,
+        SystemAgentRun.STATUS_FAILED,
+    ):
+        # A live worker (or a dead one awaiting terminal-instance
+        # reconciliation) owns the step.
+        return False
+    # Leave a freshly-claimed routing alone: the original finish handler may
+    # still be advancing the workflow right now.
+    fresh_claim = timezone.now() - system_agents._WORKFLOW_ROUTE_CLAIM_TIMEOUT
+    return not CodexInstance.objects.filter(
+        pk=run.instance_id,
+        workflow_routing_started_at__gte=fresh_claim,
+    ).exists()
+
+def _recover_spec_critic_synthesizing(workflow: SystemWorkflow) -> None:
+    run = _spec_critic_synthesizer_run(workflow)
+    if run is None:
+        try:
+            _spawn_spec_critic_synthesizer_run(workflow)
+        except Exception as exc:
+            _block_spec_critic_workflow(
+                workflow, f"failed to start Spec Critic synthesizer: {exc!r}"
+            )
+        return
+    if run.status == SystemAgentRun.STATUS_COMPLETED:
+        _complete_spec_critic_workflow(workflow, run)
+        return
+    _block_spec_critic_workflow(
+        workflow,
+        run.error or "Spec Critic synthesizer failed",
+    )
 
 def _spawn_spec_critic_analysis_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
     prompts_and_schemas = (

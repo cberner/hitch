@@ -693,14 +693,22 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
         if workflow.kind != SystemWorkflow.KIND_PR_QA:
             continue
         current_user_message_index = _state_int(workflow, "next_user_message_index") - 1
-        if current_user_message_index < 0:
-            continue
         # ``_spawn_workflow_turn`` creates the turn *before* it saves the
         # incremented ``next_user_message_index``. If the spawner dies in that
         # gap, the durable turn carries ``next_user_message_index`` (one ahead of
         # the value used here), so match both indices to route it rather than
         # strand it. No turn is assigned the higher index in healthy states.
-        turn_indices = (current_user_message_index, current_user_message_index + 1)
+        # When the stored index is still 0 (normal for /pr-from-proposal
+        # workflows) only the higher arm can match -- skipping the workflow
+        # outright would strand exactly the dead-spawn turn this dual match
+        # exists for.
+        turn_indices = tuple(
+            index
+            for index in (current_user_message_index, current_user_message_index + 1)
+            if index >= 0
+        )
+        if not turn_indices:
+            continue
         if workflow.step in (STEP_FEEDBACK_RUNNING, STEP_PR_FEEDBACK_RUNNING):
             filters |= models.Q(
                 workflow_id=workflow.pk,
@@ -1537,13 +1545,23 @@ def _validate_workflow_step(workflow: SystemWorkflow, step: str) -> None:
 
 
 def _block_workflow(
-    workflow: SystemWorkflow, error: str, *, surface_to_thread: bool = True
-) -> None:
+    workflow: SystemWorkflow,
+    error: str,
+    *,
+    surface_to_thread: bool = True,
+    only_if: Callable[[SystemWorkflow], bool] | None = None,
+) -> bool:
     # Hidden system-agent callbacks can race when multiple workers finish or
     # fail together. Lock and re-read the row (as the Spec Critic equivalents
     # do) so the state-column overwrite cannot lose a concurrent write.
+    # ``only_if`` runs against the locked row so a caller whose claim on the
+    # workflow may have been superseded (a stale QA verdict racing a user
+    # steering claim) makes the ownership check and the block one atomic
+    # decision; returns whether the workflow was blocked.
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if only_if is not None and not only_if(locked):
+            return False
         failure_owner = _workflow_failure_owner(locked, error)
         locked.status = SystemWorkflow.STATUS_BLOCKED
         locked.step = STEP_BLOCKED
@@ -1559,6 +1577,7 @@ def _block_workflow(
     pr_qa._interrupt_orphaned_qa_review_runs(workflow, error)
     if surface_to_thread:
         _surface_workflow_failure(workflow, error)
+    return True
 
 
 def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
