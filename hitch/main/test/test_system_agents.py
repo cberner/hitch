@@ -1533,6 +1533,133 @@ class SpecCriticWorkflowTests(TestCase):
         # would duplicate them, so the stale recoverer must leave it alone.
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.workflows.spec_critic._spawn_spec_critic_synthesizer_run")
+    def test_reconcile_respawns_synthesizer_when_orphaned_without_run(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        # The claim commits SYNTHESIZING and then spawns; a death in that gap
+        # leaves no synthesizer run, so nothing else can ever route the step.
+        self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.workflows.spec_critic._spawn_spec_critic_synthesizer_run")
+    def test_reconcile_leaves_live_synthesizer_alone(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = self._aged_workflow(
+            step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING
+        )
+        instance = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
+
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_reconcile_completes_synthesizing_after_routed_terminal_run(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        # The finish handler saved the COMPLETED run and died before advancing
+        # the workflow; the terminal-instance reconciler skips already-terminal
+        # runs, so the spawn-recovery spec must re-drive the completion.
+        mock_spawn_turn.return_value = _instance(status=CodexInstance.STATUS_RUNNING)
+        workflow = self._aged_workflow(
+            step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING,
+            next_user_message_index=0,
+        )
+        instance = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"brief": "Build the onboarding flow"},
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_spawn_turn.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
+        )
+        self.assertEqual(
+            workflow.state["synthesized_brief"], "Build the onboarding flow"
+        )
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_reconcile_completes_synthesizing_without_double_spawning_turn(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = self._aged_workflow(
+            step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING,
+            next_user_message_index=0,
+        )
+        instance = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"brief": "Build the onboarding flow"},
+        )
+        # The implementation turn already exists: the death happened between
+        # its spawn and the workflow completion save.
+        _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            status=CodexInstance.STATUS_RUNNING,
+            user_message_index=0,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_spawn_turn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_finalizes_skip_when_turn_never_spawned(
         self, mock_spawn_turn: MagicMock
@@ -8024,6 +8151,103 @@ class SpecCriticWorkflowTests(TestCase):
                 mock_spawn_turn.assert_called_once()
                 mock_spawn_qa.assert_not_called()
                 mock_spawn_monitor.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
+    def test_reconcile_routes_index_zero_workflow_turn(
+        self,
+        mock_spawn_qa: MagicMock,
+        mock_spawn_monitor: MagicMock,
+        mock_spawn_turn: MagicMock,
+    ) -> None:
+        # ``next_user_message_index`` is still 0 exactly when the spawner died
+        # before saving the increment -- the dead-spawn shape the dual-index
+        # match exists for. Skipping such workflows stranded the turn and let
+        # the zombie recovery later block them with a misleading explanation.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 0},
+        )
+        _instance(
+            thread_id=workflow.main_thread_id,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            error="current failed",
+            user_message_index=0,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id=workflow.main_thread_id
+        )
+
+        self.assertEqual(reconciled, 1)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(
+            workflow.state["error"], "QA feedback worker failed: current failed"
+        )
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_qa_verdict_yields_to_concurrent_user_steering_claim(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        # A user steering claim can land while the verdict handler is parsing
+        # the QA output; the verdict's transition must re-validate under the
+        # lock and stand down instead of overwriting the steering step and
+        # its qa_review_revision bump with the stale snapshot.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Tighten the tests", "lgtm": False},
+            ),
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        def _steer_mid_parse(*args: Any, **kwargs: Any) -> None:
+            claimed = pr_qa._claim_user_steering_turn(
+                SystemWorkflow.objects.get(pk=workflow.pk)
+            )
+            assert claimed
+            return None
+
+        with patch.object(
+            pr_qa,
+            "_maybe_build_qa_design_synthesis_gate",
+            side_effect=_steer_mid_parse,
+        ):
+            system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
+        self.assertEqual(workflow.state["qa_review_revision"], 1)
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("stale QA review", run.error)
+        mock_spawn_turn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_qa_feedback_worker_is_retried_once(

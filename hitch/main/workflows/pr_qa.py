@@ -597,36 +597,41 @@ def _complete_pr_qa_verdict(
     parsed: dict[str, Any],
     raw_output: str,
 ) -> None:
-    run.status = SystemAgentRun.STATUS_COMPLETED
-    run.output = parsed
-    run.raw_output = raw_output
-    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
-
     feedback = parsed["feedback"].strip()
     lgtm = parsed["lgtm"]
-    workflow.state = {**workflow.state, "last_feedback": feedback}
-    if lgtm:
-        auto_merge_branch = _state_string(workflow, "auto_merge_branch")
-        if auto_merge_branch:
-            _complete_local_branch_merge(workflow, auto_merge_branch)
-            return
-        if workflow.state.get("open_pr_on_lgtm", True) is not True:
-            system_agents._complete_workflow(workflow, system_agents.STEP_QA_APPROVED)
-            return
-        system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_PROMPT_RUNNING)
-        try:
-            _spawn_pr_prompt(workflow)
-        except Exception as exc:
-            system_agents._block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
-            return
+    # Heavy reads (a runs scan) stay outside the locked claim below; building
+    # the gate from the pre-claim snapshot is fine since a superseded verdict
+    # discards it.
+    synthesis_gate = None
+    if not lgtm and workflow.iteration < workflow.max_iterations:
+        synthesis_gate = _maybe_build_qa_design_synthesis_gate(
+            workflow, feedback, current_run_id=run.pk
+        )
+    action = _claim_qa_verdict_transition(
+        workflow,
+        run,
+        parsed=parsed,
+        raw_output=raw_output,
+        feedback=feedback,
+        lgtm=lgtm,
+        synthesis_gate=synthesis_gate,
+    )
+    if not action:
+        # A user steering claim (or another writer) superseded this review
+        # between routing and the claim; their step/revision write must win.
+        system_agents._fail_run(
+            run,
+            "stale QA review superseded by a user steering message",
+            block_workflow=False,
+        )
         return
 
-    if workflow.iteration >= workflow.max_iterations:
-        system_agents._complete_workflow(
-            workflow,
-            system_agents.STEP_MAX_ITERATIONS_REACHED,
-            status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
+    if action == "merge":
+        _complete_local_branch_merge(
+            workflow, _state_string(workflow, "auto_merge_branch"), run
         )
+        return
+    if action == "maxed":
         system_agents._surface_workflow_failure(
             workflow,
             (
@@ -635,28 +640,102 @@ def _complete_pr_qa_verdict(
             ),
         )
         return
+    if action == "pr_prompt":
+        try:
+            _spawn_pr_prompt(workflow)
+        except Exception as exc:
+            system_agents._block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
+        return
+    if action == "feedback":
+        try:
+            _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
+        except Exception as exc:
+            system_agents._block_workflow(workflow, f"failed to start QA feedback turn: {exc!r}")
 
-    synthesis_gate = _maybe_build_qa_design_synthesis_gate(
-        workflow, feedback, current_run_id=run.pk
-    )
-    if synthesis_gate is not None:
-        workflow.state = {
-            **workflow.state,
-            _QA_DESIGN_SYNTHESIS_STATE_KEY: synthesis_gate,
-        }
-    system_agents._advance_workflow_step(workflow, system_agents.STEP_FEEDBACK_RUNNING, bump_iteration=True)
-    try:
-        _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start QA feedback turn: {exc!r}")
+def _claim_qa_verdict_transition(
+    workflow: SystemWorkflow,
+    run: SystemAgentRun,
+    *,
+    parsed: dict[str, Any],
+    raw_output: str,
+    feedback: str,
+    lgtm: bool,
+    synthesis_gate: dict[str, Any] | None,
+) -> str:
+    """Re-validate the verdict and commit its step transition under the lock.
 
-def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
+    The staleness checks at routing time read an in-memory snapshot; a user
+    steering claim can land while the handler parses the QA output (events
+    file read, JSON parse, runs scan), and an unguarded read-modify-write
+    here would overwrite the steering step and its ``qa_review_revision``
+    bump with the stale copy -- spawning a feedback/PR turn concurrently
+    with the user's steering turn. Mirror the claim-commit-spawn pattern:
+    validate against the locked row, write the transition in the same
+    transaction, and let the caller act post-commit. Returns the action the
+    caller should perform, or ``""`` when superseded.
+
+    The run's terminal save is part of the same transaction: committing a
+    terminal workflow status first would let a process death strand the run
+    RUNNING forever (the reconcilers only revisit RUNNING workflows).
+    """
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            not locked.is_active
+            or locked.step != system_agents.STEP_QA_RUNNING
+            or not _run_matches_current_qa_review(locked, run)
+        ):
+            return ""
+        run.status = SystemAgentRun.STATUS_COMPLETED
+        run.output = parsed
+        run.raw_output = raw_output
+        run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+        locked.state = {**locked.state, "last_feedback": feedback}
+        if lgtm:
+            if _state_string(locked, "auto_merge_branch"):
+                # The merge runs git work post-commit and re-validates before
+                # completing the workflow; the step stays QA_RUNNING here.
+                action = "merge"
+                locked.save(update_fields=["state", "updated_at"])
+            elif locked.state.get("open_pr_on_lgtm", True) is not True:
+                action = "approved"
+                system_agents._complete_workflow(locked, system_agents.STEP_QA_APPROVED)
+            else:
+                action = "pr_prompt"
+                system_agents._advance_workflow_step(
+                    locked, system_agents.STEP_PR_PROMPT_RUNNING
+                )
+        elif locked.iteration >= locked.max_iterations:
+            action = "maxed"
+            system_agents._complete_workflow(
+                locked,
+                system_agents.STEP_MAX_ITERATIONS_REACHED,
+                status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
+            )
+        else:
+            action = "feedback"
+            if synthesis_gate is not None:
+                locked.state = {
+                    **locked.state,
+                    _QA_DESIGN_SYNTHESIS_STATE_KEY: synthesis_gate,
+                }
+            system_agents._advance_workflow_step(
+                locked, system_agents.STEP_FEEDBACK_RUNNING, bump_iteration=True
+            )
+        system_agents._sync_workflow_instance(workflow, locked)
+        workflow.iteration = locked.iteration
+        return action
+
+def _complete_local_branch_merge(
+    workflow: SystemWorkflow, branch: str, run: SystemAgentRun
+) -> None:
     reviewed_patch = workflow.state.get(system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY)
     if not isinstance(reviewed_patch, str):
         _fail_local_branch_merge(
             workflow,
             branch,
             LocalBranchMergeError("reviewed diff is missing"),
+            run,
         )
         return
     reviewed_target_sha = workflow.state.get(system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY)
@@ -665,6 +744,7 @@ def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
             workflow,
             branch,
             LocalBranchMergeError("reviewed target branch SHA is missing"),
+            run,
         )
         return
     try:
@@ -675,14 +755,28 @@ def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
             reviewed_target_sha,
         )
     except LocalBranchMergeError as exc:
-        _fail_local_branch_merge(workflow, branch, exc)
+        _fail_local_branch_merge(workflow, branch, exc, run)
         return
 
-    workflow.state = {
-        **workflow.state,
-        "auto_merge_result": _local_branch_merge_result_dict(result),
-    }
-    system_agents._complete_workflow(workflow, system_agents.STEP_LOCAL_BRANCH_MERGED)
+    # The merge's git work runs unlocked, so a user steering claim may have
+    # taken the workflow meanwhile -- and a slow merge even leaves room for
+    # that steering cycle to finish and return to qa_running under a newer
+    # review revision, so ownership requires the revision match, not just the
+    # step. The merge itself already happened either way (the target branch
+    # advanced), so the proposal metadata below is recorded regardless; a
+    # superseded workflow simply continues and its next QA cycle sees an
+    # already-applied patch.
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if _qa_verdict_owns_workflow(locked, run):
+            locked.state = {
+                **locked.state,
+                "auto_merge_result": _local_branch_merge_result_dict(result),
+            }
+            system_agents._complete_workflow(
+                locked, system_agents.STEP_LOCAL_BRANCH_MERGED
+            )
+            system_agents._sync_workflow_instance(workflow, locked)
     system_agents._record_auto_merge_result_for_proposals(
         workflow,
         {
@@ -692,10 +786,34 @@ def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
         },
     )
 
+def _qa_verdict_owns_workflow(
+    workflow: SystemWorkflow, run: SystemAgentRun
+) -> bool:
+    return (
+        workflow.is_active
+        and workflow.step == system_agents.STEP_QA_RUNNING
+        and _run_matches_current_qa_review(workflow, run)
+    )
+
 def _fail_local_branch_merge(
-    workflow: SystemWorkflow, branch: str, exc: LocalBranchMergeError
+    workflow: SystemWorkflow,
+    branch: str,
+    exc: LocalBranchMergeError,
+    run: SystemAgentRun,
 ) -> None:
+    # A merge failure from a superseded verdict must not block (or report on)
+    # a workflow a user steering claim now owns -- the newer review cycle
+    # rebuilds the patch and owns all reporting from here. The ownership
+    # check runs on the locked row inside the block transaction so a steering
+    # claim cannot slip in between the check and the block.
     error = f"auto merge to local branch failed: {exc}"
+    blocked = system_agents._block_workflow(
+        workflow,
+        error,
+        only_if=lambda locked: _qa_verdict_owns_workflow(locked, run),
+    )
+    if not blocked:
+        return
     system_agents._record_auto_merge_result_for_proposals(
         workflow,
         {
@@ -704,7 +822,6 @@ def _fail_local_branch_merge(
             "auto_merge_error": str(exc),
         },
     )
-    system_agents._block_workflow(workflow, error)
 
 def _local_branch_merge_result_dict(
     result: LocalBranchMergeResult,
