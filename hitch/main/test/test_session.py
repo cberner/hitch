@@ -4271,7 +4271,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "still running")
         self.assertNotContains(response, "bailed fast")
 
-    @patch("hitch.main.views.codex_pool.reconcile_dead_if_due", return_value=0)
+    @patch("hitch.main.views.reconciliation.reconcile_dead_if_due", return_value=0)
     @patch("hitch.main.views.Codex")
     def test_dead_worker_is_reconciled_before_render(
         self, mock_codex: MagicMock, mock_global_reconcile: MagicMock

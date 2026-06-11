@@ -9,7 +9,7 @@ import time
 from django.db import close_old_connections
 from django.utils import timezone
 
-from hitch.main.runtime import codex_pool, disk_cleanup, server_lifecycle
+from hitch.main.runtime import disk_cleanup, reconciliation, server_lifecycle
 from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def _workflow_maintenance_scheduler_loop() -> None:
 def _run_workflow_maintenance_scheduler_tick() -> None:
     close_old_connections()
     try:
-        codex_pool.reconcile_dead()
+        reconciliation.reconcile_dead()
         refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
             limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
         )

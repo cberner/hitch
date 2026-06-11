@@ -35,7 +35,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, codex_pool
+from hitch.main.runtime import codex_events, codex_pool, reconciliation
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.workflows import system_agents
 
@@ -725,7 +725,7 @@ def _latest_id_for_thread(session_id: str) -> int | None:
 def _reconcile_dead_for_thread(session_id: str) -> None:
     try:
         run_ignoring_database_locks(
-            lambda: codex_pool.reconcile_dead_for_thread(session_id),
+            lambda: reconciliation.reconcile_dead_for_thread(session_id),
             description="stream dead-worker reconcile",
         )
     finally:
@@ -739,7 +739,7 @@ def _reconcile_dead_for_workflow(
         # Runs each heartbeat tick of an open workflow stream; skip a contended
         # tick rather than tear down the SSE generator. The next tick retries.
         run_ignoring_database_locks(
-            lambda: codex_pool.reconcile_dead_for_workflow(
+            lambda: reconciliation.reconcile_dead_for_workflow(
                 workflow_id, main_thread_id=main_thread_id
             ),
             description="workflow dead-worker reconcile",

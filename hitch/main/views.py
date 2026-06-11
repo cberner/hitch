@@ -77,7 +77,7 @@ from hitch.main.models import (
     UserSettings,
 )
 from hitch.main.repos import git_common_dir, same_repo_or_worktree
-from hitch.main.runtime import app_server_pool, codex_events, codex_pool, health, rollout, streaming
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool, health, reconciliation, rollout, streaming
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.runtime.input_images import (
     _INPUT_IMAGE_ACCEPT,
@@ -1599,7 +1599,7 @@ def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
     # otherwise stays pending forever, since we don't run a periodic task.
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_if_due()
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
@@ -1657,7 +1657,7 @@ def index(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def system_sessions(request: HttpRequest) -> HttpResponse:
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_if_due()
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
@@ -1787,7 +1787,7 @@ def _usage_context(request: HttpRequest) -> UsageContext:
 
 @require_http_methods(["GET"])
 def inbox(request: HttpRequest) -> HttpResponse:
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_if_due()
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
@@ -1835,7 +1835,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def autonomous_goals(request: HttpRequest) -> HttpResponse:
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_if_due()
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
@@ -2277,8 +2277,8 @@ def _render_session_detail(
     # writing a terminal status would otherwise leave the page in "streaming"
     # mode forever, since the EventSource wouldn't reach an end event. The
     # global sweep stays debounced, but this exact session must be fresh.
-    codex_pool.reconcile_dead_for_thread(session_id)
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_for_thread(session_id)
+    reconciliation.reconcile_dead_if_due()
     initial_settings = _stored_settings(request)
     active_instance = _active_instance_for(session_id)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
@@ -2904,7 +2904,7 @@ def nuke_codex(request: HttpRequest) -> HttpResponse:
     """
     if _authenticated_user(request) is None:
         return HttpResponseForbidden("authentication required")
-    killed = codex_pool.nuke_codex_app_servers()
+    killed = reconciliation.nuke_codex_app_servers()
     return redirect(f"{reverse('profile')}?nuked={killed}")
 
 
@@ -3585,8 +3585,8 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     demo_param = request.GET.get("demo", "")
-    codex_pool.reconcile_dead_for_thread(session_id)
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_for_thread(session_id)
+    reconciliation.reconcile_dead_if_due()
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
     active = _active_instance_for(session_id)
@@ -4747,7 +4747,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     if qa_workflow_activation:
         plan_mode = False
     run_ignoring_database_locks(
-        lambda: codex_pool.reconcile_dead_for_thread(session_id),
+        lambda: reconciliation.reconcile_dead_for_thread(session_id),
         description="send-message dead-worker reconcile",
     )
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
@@ -5777,7 +5777,7 @@ def _prefill_bare_repo_cwd_for_new_session_page(
 
 
 def _render_new_session_page(request: HttpRequest) -> HttpResponse:
-    codex_pool.reconcile_dead_if_due()
+    reconciliation.reconcile_dead_if_due()
     repos = [str(p) for p in repos_module.discover_repos()]
     repo_set = set(repos)
     proposed_session = _proposed_session_for_new_session_page(

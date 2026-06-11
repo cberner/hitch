@@ -21,7 +21,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_pool, disk_cleanup, health, host_probes
+from hitch.main.runtime import disk_cleanup, health, host_probes, reconciliation
 from hitch.main.runtime.disk_cleanup import HitchDiskUsage
 from hitch.main.runtime.host_probes import (
     LeakedScope,
@@ -51,7 +51,7 @@ class CollectHealthReportTests(TestCase):
         # Pin every collector that reads /proc, the real disk, or host load so
         # report severity reflects only the DB state under test.
         for module, target, value in (
-            (codex_pool, "count_running_codex_app_servers", 0),
+            (reconciliation, "count_running_codex_app_servers", 0),
             (host_probes, "cpu_count", 4),
             (host_probes, "load_average", (0.1, 0.1, 0.1)),
             (host_probes, "runserver_fd_count", 50),
@@ -142,7 +142,7 @@ class CollectHealthReportTests(TestCase):
         self.assertEqual(report.overall_severity, health.SEVERITY_WARN)
 
     def test_app_server_surplus_is_danger(self) -> None:
-        with patch.object(codex_pool, "count_running_codex_app_servers", return_value=12):
+        with patch.object(reconciliation, "count_running_codex_app_servers", return_value=12):
             report = health.collect_health_report()
 
         metric = _find(report, "app_servers")
@@ -183,9 +183,7 @@ class CollectHealthReportTests(TestCase):
         self.assertIn(headline.value, report.copy_text())
 
     def test_metric_failure_degrades_gracefully(self) -> None:
-        with patch.object(
-            codex_pool,
-            "count_running_codex_app_servers",
+        with patch.object(reconciliation, "count_running_codex_app_servers",
             side_effect=RuntimeError("boom"),
         ):
             report = health.collect_health_report()
@@ -305,7 +303,7 @@ class HealthReportCacheTests(TestCase):
                 return_value=WorkerScopeProbe(active_count=0, leaked=[]),
             ) as probe,
             patch.object(disk_cleanup, "hitch_home_disk_usage", return_value=None),
-            patch.object(codex_pool, "count_running_codex_app_servers", return_value=0),
+            patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
         ):
             first = health.collect_health_report()
             second = health.collect_health_report()

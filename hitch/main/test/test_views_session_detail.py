@@ -2364,7 +2364,7 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
-    @patch("hitch.main.views.codex_pool.reconcile_dead_if_due", return_value=0)
+    @patch("hitch.main.views.reconciliation.reconcile_dead_if_due", return_value=0)
     def test_reconciles_dead_active_worker_before_stream_routing(
         self, mock_global_reconcile: MagicMock
     ) -> None:

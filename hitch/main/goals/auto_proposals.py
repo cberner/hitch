@@ -11,7 +11,7 @@ from django.db import close_old_connections
 from openai_codex import Codex
 
 from hitch.main.models import Project
-from hitch.main.runtime import app_server_pool, codex_pool, server_lifecycle
+from hitch.main.runtime import app_server_pool, codex_pool, reconciliation, server_lifecycle
 from hitch.main.sessions import session_index
 from hitch.main.workflows import autonomous_goals, pr_qa
 
@@ -107,7 +107,7 @@ def _run_auto_proposal_scheduler_tick(
     close_old_connections()
     next_cursor = ""
     try:
-        codex_pool.reconcile_dead()
+        reconciliation.reconcile_dead()
         next_cursor = _refresh_unarchived_session_state_best_effort(
             scheduler_codex, start_cursor=start_cursor
         )

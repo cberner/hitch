@@ -27,7 +27,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import app_server_pool, codex_pool, disk_cleanup, host_probes
+from hitch.main.runtime import app_server_pool, disk_cleanup, host_probes, reconciliation
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import discover_managed_worktrees
 
@@ -213,7 +213,7 @@ def _active_turn_count() -> int:
 
 def _app_server_metric() -> HealthMetric:
     def collect() -> HealthMetric:
-        running = codex_pool.count_running_codex_app_servers()
+        running = reconciliation.count_running_codex_app_servers()
         active = _active_turn_count()
         surplus = max(0, running - active)
         severity = SEVERITY_OK

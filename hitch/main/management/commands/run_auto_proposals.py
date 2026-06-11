@@ -5,7 +5,7 @@ from typing import Any, override
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from hitch.main.models import Project
-from hitch.main.runtime import codex_pool
+from hitch.main.runtime import reconciliation
 from hitch.main.workflows import autonomous_goals
 
 
@@ -24,6 +24,6 @@ class Command(BaseCommand):
             project = Project.objects.filter(pk=project_id).first()
             if project is None:
                 raise CommandError("project not found")
-        codex_pool.reconcile_dead()
+        reconciliation.reconcile_dead()
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
         return f"Started {started} auto-proposal workflow(s)."

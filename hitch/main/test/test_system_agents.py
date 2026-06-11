@@ -12522,7 +12522,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch(
-        "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
+        "hitch.main.management.commands.run_auto_proposals.reconciliation.reconcile_dead",
         return_value=0,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12574,7 +12574,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch(
-        "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
+        "hitch.main.management.commands.run_auto_proposals.reconciliation.reconcile_dead",
         return_value=0,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")

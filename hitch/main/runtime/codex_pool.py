@@ -24,9 +24,7 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -39,7 +37,6 @@ from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
-from hitch.main.runtime import rate_limit
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
 
 logger = logging.getLogger(__name__)
@@ -66,7 +63,6 @@ _WORKER_ISOLATION_AUTO = "auto"
 _WORKER_ISOLATION_DIRECT = "direct"
 _WORKER_ISOLATION_SYSTEMD = "systemd"
 _CODEX_THREAD_PATH_ATTR = "_hitch_codex_thread_path"
-_WORKER_UNIT_RE = re.compile(r"hitch-codex-worker-(\d+)\.(?:service|scope)")
 
 
 @dataclass(frozen=True)
@@ -869,7 +865,7 @@ def _force_kill_instance(instance: CodexInstance) -> None:
         )
         if result.returncode == 0:
             return
-        if _systemd_scope_is_missing(systemctl, instance.systemd_scope_unit):
+        if systemd_isolation._systemd_scope_is_missing(systemctl, instance.systemd_scope_unit):
             raise ProcessLookupError
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         message = "systemctl failed to kill systemd Codex worker"
@@ -877,106 +873,6 @@ def _force_kill_instance(instance: CodexInstance) -> None:
             message = f"{message}: {detail}"
         raise OSError(message)
     os.killpg(instance.pid, signal.SIGKILL)
-
-
-def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
-    try:
-        result = subprocess.run(
-            [systemctl, "--user", "show", scope_unit, "--property=LoadState", "--value"],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return False
-    if result.returncode != 0:
-        return False
-    return result.stdout.decode("utf-8", errors="replace").strip() in {"", "not-found"}
-
-
-def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) -> bool:
-    """Whether any live ``codex_worker`` process currently runs in ``scope_unit``.
-
-    Worker unit names are not deployment-unique, so once our dead worker's unit
-    is collected another Hitch checkout under the same user can create a unit
-    with the same name. We only reap a unit whose own worker is already gone, so
-    a *live* ``codex_worker`` in it means the name was reused by a different
-    launch -- signaling it would kill that launch's worker and grandchildren.
-    Linux-only; without ``/proc`` it reports ``False`` (the reap is then
-    best-effort, as before).
-    """
-    if not proc_root.exists():
-        return False
-    target = scope_unit.encode()
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if b"codex_worker" not in cmdline.split(b"\0"):
-            continue
-        try:
-            cgroup = (entry / "cgroup").read_bytes()
-        except OSError:
-            continue
-        if target in cgroup:
-            return True
-    return False
-
-
-def _worker_unit_from_pid_cgroup(
-    pid: int, instance_id: int, *, proc_root: Path = Path("/proc")
-) -> str | None:
-    """Return the worker unit containing ``pid`` when /proc exposes it."""
-    try:
-        cgroup = (proc_root / str(pid) / "cgroup").read_bytes()
-    except OSError:
-        return None
-    decoded = cgroup.decode("utf-8", errors="replace")
-    for match in _WORKER_UNIT_RE.finditer(decoded):
-        if match.group(1) == str(instance_id):
-            return match.group(0)
-    return None
-
-
-def _reap_scope_cgroup(instance: CodexInstance) -> None:
-    """Best-effort kill of a dead systemd worker's cgroup to clear leaked
-    grandchildren.
-
-    A worker reaped here exited without reporting completion -- wedged,
-    OOM-killed, or SIGKILL'd. The codex exec sandbox runs each command in its own
-    pgid/session, so a grandchild it spawned (e.g. a runaway ``cargo bench``) is
-    reparented out of the worker's process group but stays in the worker's
-    systemd cgroup, holding memory until the unit's last process exits. A unit only
-    dies when that last process exits, so without this the grandchild can hold
-    gigabytes for hours after the worker is gone. ``systemctl kill
-    --kill-whom=all`` reaches every process in the cgroup; an already
-    empty/collected unit is a no-op. Direct launches have no systemd cgroup
-    to sweep and their already-dead pid must never be re-signaled, so they are
-    skipped.
-
-    Unit names are not deployment-unique, so a collected unit's name can be
-    reused by another checkout: skip the reap if a live worker now holds the
-    unit (it can't be ours -- ours is already dead) rather than killing an
-    unrelated launch's worker.
-    """
-    if not instance.systemd_scope_unit:
-        return
-    if _scope_has_live_worker(instance.systemd_scope_unit):
-        return
-    try:
-        _force_kill_instance(instance)
-    except ProcessLookupError:
-        return
-    except OSError:
-        logger.warning(
-            "failed to reap systemd cgroup %s for instance %s",
-            instance.systemd_scope_unit,
-            instance.pk,
-        )
 
 
 def _pid_is_instance_worker(instance: CodexInstance) -> bool:
@@ -1061,716 +957,18 @@ def _pid_is_our_worker(
     return idx + 1 < len(parts) and parts[idx + 1] == str(instance_id).encode()
 
 
-def reconcile_dead() -> int:
-    """Mark workers as failed whose PID is no longer alive.
-
-    A worker that crashed before writing its terminal status leaves a row
-    stuck in ``starting``/``running``. We sweep those rows and mark them
-    failed so the UI doesn't show a permanently-pending turn.
-    """
-    _reap_finished_workers()
-    pending = CodexInstance.objects.filter(
-        status__in=CodexInstance.ACTIVE_STATUSES
-    )
-    updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances()
-    reconcile_orphaned_workers()
-    retry_failed_input_image_cleanups()
-    _prune_reaped_workers()
-    return updated
-
-
 # Grace after a worker commits its terminal status before the orphan reaper may
 # kill it. ``codex_worker`` runs ``_notify_system_agents`` (which can spawn
 # follow-up turns) and input-image cleanup *after* the terminal commit, so a
 # still-live terminal worker inside this window is finishing those hooks rather
 # than leaked. Generous so even a slow hook (e.g. spawning a follow-up workflow)
 # completes; a genuinely leaked worker is still reaped one grace later.
-_ORPHAN_REAP_GRACE = timedelta(seconds=60)
-
-
-def _iter_running_worker_pids(
-    *,
-    proc_root: Path = Path("/proc"),
-    manage_py: str | None = None,
-) -> Iterable[tuple[int, int]]:
-    """Yield ``(pid, instance_id)`` for this deployment's live ``codex_worker``
-    processes.
-
-    Matches the same ``codex_worker --instance-id <pk>`` marker
-    ``_pid_is_our_worker`` uses, and *additionally* requires this deployment's
-    ``manage.py`` path on the command line. Without that, a second Hitch checkout
-    running under the same Unix user -- whose worker command lines carry the same
-    generic ``codex_worker`` marker but whose instance ids belong to a different
-    database -- would be scanned here and could be reaped as "not in our expected
-    set". Linux-only (the deployment target); on a host without ``/proc`` it
-    yields nothing, so the orphan reap is simply a no-op there rather than
-    guessing.
-    """
-    if not proc_root.exists():
-        return
-    marker = (manage_py or _our_manage_py()).encode()
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        parts = cmdline.split(b"\0")
-        if b"codex_worker" not in parts or marker not in parts:
-            continue
-        try:
-            idx = parts.index(b"--instance-id")
-        except ValueError:
-            continue
-        if idx + 1 >= len(parts):
-            continue
-        try:
-            instance_id = int(parts[idx + 1])
-            pid = int(entry.name)
-        except ValueError:
-            continue
-        yield pid, instance_id
-
-
-def _is_tracked_worker(pid: int) -> bool:
-    """Whether ``pid`` is a worker this process spawned and still supervises.
-
-    ``reconcile_dead`` calls ``_reap_finished_workers`` first, which drops every
-    tracked worker that has *exited*, so a pid still tracked here is alive and
-    mid-shutdown -- its tracker (``_wait_for_tracked_worker``) reaps it when it
-    exits -- rather than leaked.
-    """
-    with _TRACKED_WORKER_PROCS_LOCK:
-        return pid in _TRACKED_WORKER_PROCS
-
-
-def reconcile_orphaned_workers() -> int:
-    """Kill leaked worker processes whose instance is no longer expected to run.
-
-    ``reconcile_dead`` reconciles the DB->process direction (rows whose worker pid
-    is gone). This reconciles the reverse: a live ``codex_worker`` process whose
-    CodexInstance has reached a terminal status (or no longer exists) has leaked.
-    Until it exits it keeps a connection open to the shared CODEX_HOME state DB
-    and contends on its single writer lock, which surfaces as "database is locked"
-    for every other app-server start. Force-killing the worker's process group
-    takes its app-server child down with it (the app-server inherits the worker's
-    session, so ``killpg``/``systemctl kill --kill-whom=all`` reaches it).
-
-    A still-running worker is spared only while a turn could genuinely be in
-    progress or just finishing:
-
-    * its instance is still ``starting``/``running`` (spanning *all* purposes --
-      user, system-agent, and workflow turns -- so a system-session worker is
-      never reaped);
-    * its instance reached a terminal status within ``_ORPHAN_REAP_GRACE``:
-      ``codex_worker`` commits the terminal status *before* running
-      ``_notify_system_agents`` (which can spawn follow-up turns) and input-image
-      cleanup, so a terminal-but-live worker inside that window is finishing
-      hooks, not leaked. *Past* the grace a still-live terminal worker is wedged
-      and is reaped even if this process spawned it -- the tracked check only
-      guards the thin race before ``ended_at`` is recorded, so a same-process
-      hung worker holding the lock is never exempted indefinitely.
-
-    We only ever kill on a positive DB answer: if the rows cannot be read,
-    nothing is killed.
-    """
-    running = list(_iter_running_worker_pids())
-    if not running:
-        return 0
-    instance_ids = {instance_id for _, instance_id in running}
-    try:
-        rows = {
-            pk: (status, ended_at)
-            for pk, status, ended_at in CodexInstance.objects.filter(
-                pk__in=instance_ids
-            ).values_list("pk", "status", "ended_at")
-        }
-    except Exception:
-        # Never kill on incomplete information: if the DB read fails (e.g. it is
-        # momentarily locked) we cannot tell which workers are still expected.
-        logger.exception("could not read worker rows; skipping orphan reap")
-        return 0
-    now = timezone.now()
-    killed = 0
-    for pid, instance_id in running:
-        row = rows.get(instance_id)
-        if row is not None:
-            status, ended_at = row
-            if status in CodexInstance.ACTIVE_STATUSES:
-                continue
-            # Terminal: spare it only while it may still be running its
-            # post-terminal hooks. Within the grace window it is finishing them;
-            # *past* the grace a still-live terminal worker is wedged and IS
-            # reaped -- even one this process spawned -- so the same-process
-            # process actually holding the state-DB lock gets killed rather than
-            # exempted forever by the tracked check.
-            if ended_at is not None:
-                if ended_at > now - _ORPHAN_REAP_GRACE:
-                    continue
-            elif _is_tracked_worker(pid):
-                # No ``ended_at`` recorded yet but we still supervise it: it is
-                # mid terminal-commit, not leaked. (Real terminal rows set
-                # ``ended_at`` before committing, so this is a thin race guard.)
-                continue
-        if _kill_orphaned_worker(pid, instance_id):
-            killed += 1
-            # The worker was killed before its own post-terminal cleanup, so
-            # cancel a failed turn's dangling prompts and surface a completed
-            # turn whose auto-PR/QA follow-up was dropped.
-            _finalize_reaped_instance(instance_id)
-    if killed:
-        logger.warning("reaped %s orphaned codex worker process(es)", killed)
-    return killed
-
-
-def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
-    """Force-kill a leaked worker (and its app-server child); report success."""
-    instance = None
-    try:
-        instance = CodexInstance.objects.filter(pk=instance_id).first()
-    except Exception:
-        logger.exception("could not load instance %s for orphan reap", instance_id)
-    scope_unit = instance.systemd_scope_unit if instance is not None else None
-    # The systemd unit may be absent even for a systemd worker: the row can be
-    # gone (e.g. a reset/cleaned DB) or exist with an empty
-    # ``systemd_scope_unit`` (the parent died after ``systemd-run`` returned but
-    # before saving it). Systemd workers are not launched as our direct session
-    # leaders; if the scanned pid is ours under the relaxed check but fails the
-    # session-leader check it was launched under systemd isolation, and the
-    # killpg path below would skip it -- leaving its app-server (and the Codex DB
-    # lock) alive. Reap it through its derived unit instead.
-    if (
-        not scope_unit
-        and _pid_is_our_worker(pid, instance_id, require_session_leader=False)
-        and not _pid_is_our_worker(pid, instance_id)
-    ):
-        scope_unit = (
-            _worker_unit_from_pid_cgroup(pid, instance_id)
-            or _scope_unit_for_instance(instance_id)
-        )
-    if scope_unit:
-        # The unit name (``hitch-codex-worker-<id>``) is not
-        # deployment-unique, so ``systemctl kill <unit>`` could hit another
-        # checkout's reused unit if our systemd worker exited since the scan.
-        # Reverify the scanned pid is still our deployment's worker for this
-        # instance (systemd workers are not session leaders) before signaling.
-        if not _pid_is_our_worker(pid, instance_id, require_session_leader=False):
-            return False
-        # Carry the effective systemd unit on the target even when the row had it
-        # empty (a derived unit), so _force_kill_instance signals the unit
-        # rather than falling back to killpg.
-        target = instance or CodexInstance(pid=pid)
-        target.systemd_scope_unit = scope_unit
-        try:
-            _force_kill_instance(target)
-            return True
-        except ProcessLookupError:
-            return False
-        except OSError:
-            logger.warning(
-                "failed to kill orphaned systemd worker for instance %s", instance_id
-            )
-            return False
-    # Re-verify identity right before signaling: the pid could have been recycled
-    # since the /proc scan, and we must never SIGKILL an unrelated process group.
-    if not _pid_is_our_worker(pid, instance_id):
-        return False
-    try:
-        os.killpg(pid, signal.SIGKILL)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        logger.warning(
-            "failed to kill orphaned worker pid %s (instance %s)", pid, instance_id
-        )
-        return False
-
-
-_APP_SERVER_DEPLOYMENT_ENV = "HITCH_CODEX_DEPLOYMENT"
-
-
-def _app_server_deployment_id() -> str:
-    """Stable per-deployment id stamped on the app-servers Hitch spawns.
-
-    Uses this checkout's ``BASE_DIR`` -- the same deployment identity the worker
-    reaper derives from ``manage.py`` (see ``_our_manage_py``) -- so two
-    checkouts running under one Unix user and sharing a resolved ``codex``
-    binary never match each other's app-servers.
-    """
-    return str(settings.BASE_DIR)
-
-
-def _proc_is_our_app_server(pid_dir: Path, deployment_id: str) -> bool:
-    """Whether ``pid_dir`` is a ``codex app-server`` process this deployment spawned.
-
-    Two independent signals, both fixed at ``exec`` and therefore stable across
-    reparenting (so a leaked/orphaned app-server whose worker died is still
-    matched):
-
-    * cmdline is the SDK's stdio app-server invocation
-      (``codex ... app-server --listen stdio://``) -- so an interactive
-      ``codex`` TUI a developer runs by hand never matches;
-    * environ carries our ``HITCH_CODEX_DEPLOYMENT`` marker
-      (stamped in ``app_server_config``) -- so another checkout's app-servers
-      are excluded even when the resolved ``codex`` binary is shared. Pinning
-      ``argv[0]`` to the binary path alone could not tell two such checkouts
-      apart, which is why the deployment marker is required.
-
-    Re-reading ``/proc`` here (rather than caching the scan result) also lets
-    callers reuse this as the pre-signal identity recheck that guards against
-    pid recycling.
-    """
-    try:
-        cmdline = (pid_dir / "cmdline").read_bytes()
-    except OSError:
-        return False
-    parts = cmdline.split(b"\0")
-    if b"app-server" not in parts or b"stdio://" not in parts:
-        return False
-    try:
-        environ = (pid_dir / "environ").read_bytes()
-    except OSError:
-        return False
-    marker = f"{_APP_SERVER_DEPLOYMENT_ENV}={deployment_id}".encode()
-    return marker in environ.split(b"\0")
-
-
-def _proc_ppid(pid_dir: Path) -> int | None:
-    """Parent pid from ``/proc/<pid>/stat`` field 4, or ``None`` if unreadable.
-
-    ``stat`` field 2 (``comm``) is wrapped in parentheses and may itself contain
-    spaces or a literal ``)``, so the positional fields are read from after the
-    final ``)`` -- the parsing the kernel docs prescribe. There ``state`` is the
-    first field and ``ppid`` the second.
-    """
-    try:
-        stat = (pid_dir / "stat").read_text()
-    except OSError:
-        return None
-    rparen = stat.rfind(")")
-    if rparen == -1:
-        return None
-    fields = stat[rparen + 1 :].split()
-    if len(fields) < 2:
-        return None
-    try:
-        return int(fields[1])
-    except ValueError:
-        return None
-
-
-def _matched_app_server_pids(
-    *, proc_root: Path, deployment_id: str
-) -> dict[int, Path]:
-    """Map every matching ``codex app-server`` pid to its ``/proc`` entry.
-
-    Includes both halves of each logical app-server: the ``codex`` CLI is a node
-    wrapper that re-execs a native child, and both inherit the SDK app-server
-    argv and our ``HITCH_CODEX_DEPLOYMENT`` marker, so each logical app-server
-    matches twice. Callers decide how to treat the pair -- the nuke sweep
-    signals every entry, while the health count collapses each wrapper/child
-    pair to one. Linux-only; without ``/proc`` the map is empty.
-    """
-    matched: dict[int, Path] = {}
-    if not proc_root.exists():
-        return matched
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        if not _proc_is_our_app_server(entry, deployment_id):
-            continue
-        try:
-            matched[int(entry.name)] = entry
-        except ValueError:
-            continue
-    return matched
-
-
-def _iter_codex_app_server_pids(
-    *, proc_root: Path = Path("/proc"), deployment_id: str | None = None
-) -> Iterable[int]:
-    """Yield the pid of *every* ``codex app-server`` process this deployment started.
-
-    Discovery is process-based (a /proc scan), not DB-based, on purpose: a
-    leaked app-server -- one whose worker died without reaping it, or whose
-    CodexInstance row is already terminal or gone -- is exactly what this is
-    meant to find, and it has no live DB row to locate it by. Scoping to this
-    deployment is handled by ``_proc_is_our_app_server``. Linux-only; on a host
-    without ``/proc`` it yields nothing.
-
-    Both halves of each logical app-server (the node wrapper and its native
-    re-exec child) are yielded, deliberately not deduped: the nuke sweep that
-    drives this must SIGKILL each one. SIGKILL is not delivered to a process's
-    children, and the native child -- not the wrapper -- is what actually runs
-    the app-server and holds the CODEX_HOME state-DB connection, so killing only
-    the wrapper would orphan the lock-holder. ``count_running_codex_app_servers``
-    is the surface that collapses the pair to one logical app-server.
-    """
-    if deployment_id is None:
-        deployment_id = _app_server_deployment_id()
-    yield from _matched_app_server_pids(
-        proc_root=proc_root, deployment_id=deployment_id
-    )
-
-
-def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
-    """SIGKILL every ``codex app-server`` process this deployment started.
-
-    A manual escape hatch (surfaced on the profile page) for when app-servers
-    have leaked: each one holds a connection to the shared CODEX_HOME state DB
-    and contends on its single writer lock, so a pile of orphans surfaces as
-    "database is locked" on every new turn. ``reconcile_orphaned_workers``
-    handles the common case, but it only reaps app-servers reachable from a
-    known worker row; this sweeps live processes directly so it also kills the
-    truly orphaned ones.
-
-    Each app-server is signaled individually with ``os.kill`` rather than
-    ``killpg``: the SDK spawns it sharing its parent's process group (the
-    detached worker, or the Django process itself for synchronous opens), so a
-    group kill could take down the parent. Both halves of each logical
-    app-server -- the node wrapper and its native child -- are signaled directly
-    for the same reason SIGKILL cannot be left to cascade: it is not delivered
-    to children, and the native child is the lock-holder, so it must be killed
-    in its own right. Returns the number of processes signaled (roughly twice
-    the logical app-server count when wrapper/child pairs are present).
-    """
-    deployment_id = _app_server_deployment_id()
-    killed = 0
-    for pid in list(
-        _iter_codex_app_server_pids(proc_root=proc_root, deployment_id=deployment_id)
-    ):
-        # Re-verify identity immediately before signaling: the pid could have
-        # been recycled since the scan, and we must never SIGKILL an unrelated
-        # process. Re-reading /proc (not just trusting ProcessLookupError, which
-        # a recycled pid would never raise) closes that race the same way
-        # ``_kill_orphaned_worker`` does.
-        if not _proc_is_our_app_server(proc_root / str(pid), deployment_id):
-            continue
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            # Exited between the recheck and the signal -- nothing to kill.
-            continue
-        except OSError:
-            logger.warning("failed to SIGKILL codex app-server pid %s", pid)
-            continue
-        killed += 1
-    if killed:
-        logger.warning("nuked %s codex app-server process(es)", killed)
-    return killed
-
-
-def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
-    """Number of *logical* ``codex app-server`` processes this deployment is running.
-
-    Read-only counterpart to ``nuke_codex_app_servers``: a health surface for
-    spotting leaked app-servers (each holds a CODEX_HOME state-DB connection)
-    without killing anything. The ``codex`` CLI is a node wrapper that re-execs a
-    native child, so each logical app-server matches the /proc scan twice; drop
-    any matched pid whose parent is itself matched (the native child) so the
-    figure reflects logical app-servers, not doubled pids. A pid whose parent is
-    unknown or unmatched -- including a native child orphaned by a dead wrapper
-    -- counts, so a leaked app-server is never undercounted.
-    """
-    matched = _matched_app_server_pids(
-        proc_root=proc_root, deployment_id=_app_server_deployment_id()
-    )
-    return sum(
-        1
-        for pid, entry in matched.items()
-        if (ppid := _proc_ppid(entry)) is None or ppid not in matched
-    )
-
-
-def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
-    """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
-
-    The worker fires the auto-review workflow from ``_notify_system_agents``
-    *after* committing the terminal status, claiming ``auto_pr_triggered_at`` /
-    ``auto_qa_triggered_at`` as it does. A reaped COMPLETED user turn with the
-    automation enabled but neither field set was killed before it could fire --
-    and unlike workflow-owned rows there is no later reconcile that recovers it.
-
-    Excludes turns where the automation would have been *intentionally* declined
-    (visible-approval mode, or a pending proposed plan): there the null
-    timestamps are by design, so the turn is a real success, not a lost
-    follow-up, and must not be rewritten as failed.
-    """
-    if not (
-        instance.status == CodexInstance.STATUS_COMPLETED
-        and instance.purpose == CodexInstance.PURPOSE_USER
-        and instance.workflow_id is None
-        and not instance.plan_mode
-        and (instance.auto_pr_enabled or instance.auto_qa_enabled)
-        and instance.auto_pr_triggered_at is None
-        and instance.auto_qa_triggered_at is None
-    ):
-        return False
-    try:
-        from hitch.main.workflows import system_agents
-
-        if system_agents.auto_review_intentionally_skipped(instance):
-            return False
-    except Exception:
-        # If we cannot determine intent, prefer leaving a completed turn intact
-        # over rewriting a successful result as a false failure.
-        logger.exception(
-            "could not check auto-review intent for reaped instance %s", instance.pk
-        )
-        return False
-    return True
-
-
-def _finalize_reaped_instance(instance_id: int) -> None:
-    """Clean up after force-killing a reaped worker so its turn isn't left in a
-    silently-broken state.
-
-    Things the killed worker never got to handle itself:
-
-    * finish routing: a terminal demo/system-agent (or workflow-owned user) turn
-      relies on ``_notify_system_agents_if_needed`` to route its post-terminal
-      hooks, the same idempotent callback ``_mark_dead_instances_failed`` runs for
-      rows that died after saving terminal status; without it the
-      ``SessionDemo``/``SystemAgentRun``/workflow follow-up is stranded;
-    * a ``FAILED`` turn's dangling prompts: ``codex_worker`` cancels its pending
-      approval/input prompts before exiting, and reaped terminal rows never pass
-      through ``_mark_dead_instances_failed`` (which does the same), so otherwise
-      the UI keeps actionable cards no worker can answer;
-    * a ``COMPLETED`` plain user turn whose auto-PR/QA never fired
-      (``_reaped_turn_lost_auto_review``; not covered by the routing above):
-      surface it as a failed turn with a retry hint so the user sees the dropped
-      follow-up instead of a silent success.
-    """
-    try:
-        instance = CodexInstance.objects.filter(pk=instance_id).first()
-    except Exception:
-        logger.exception("could not load reaped instance %s for finalize", instance_id)
-        return
-    if instance is None or instance.status not in (
-        CodexInstance.STATUS_COMPLETED,
-        CodexInstance.STATUS_FAILED,
-    ):
-        return
-    if instance.status == CodexInstance.STATUS_FAILED:
-        _resolve_dangling_requests(instance.pk)
-    # Idempotent finish routing for demo/system-agent/workflow-owned rows (a
-    # no-op for a plain user turn, which the lost-auto-review check below covers).
-    _notify_system_agents_if_needed(instance)
-    cleanup_requested_input_images_for(instance)
-    if _reaped_turn_lost_auto_review(instance):
-        automation = "auto-PR" if instance.auto_pr_enabled else "auto-QA"
-        CodexInstance.objects.filter(
-            pk=instance_id, status=CodexInstance.STATUS_COMPLETED
-        ).update(
-            status=CodexInstance.STATUS_FAILED,
-            error=(
-                f"This turn finished, but its {automation} workflow could not "
-                "start because the worker had to be terminated while holding the "
-                "Codex database lock. Send the message again to retry."
-            ),
-        )
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
 # Short enough that a crashed worker still clears within a couple seconds, long
 # enough that a burst of concurrent page loads / SSE reconnects collapses to one
 # sweep instead of one per request.
-_RECONCILE_DEAD_MIN_INTERVAL = timedelta(seconds=2)
-
-
-def reconcile_dead_if_due() -> int:
-    """Debounced ``reconcile_dead`` for the request and SSE paths.
-
-    Every major GET view and every SSE (re)connect ran the full
-    ``reconcile_dead`` sweep, so N concurrent browser tabs produced N concurrent
-    full-table sweeps all contending for SQLite's single write lock. Gating the
-    sweep through ``rate_limit.claim`` collapses that to at most one sweep per
-    ``_RECONCILE_DEAD_MIN_INTERVAL`` across the whole app; skipped callers rely
-    on the next due request and the 60s workflow-maintenance scheduler (which
-    still calls ``reconcile_dead`` directly) to clear dead workers. Tests run the
-    sweep unconditionally so existing per-request reconcile assertions hold.
-    """
-    if getattr(settings, "TESTING", False):
-        return reconcile_dead()
-    if rate_limit.claim(
-        "reconcile_dead", min_interval=_RECONCILE_DEAD_MIN_INTERVAL
-    ):
-        return reconcile_dead()
-    return 0
-
-
-def reconcile_dead_for_thread(thread_id: str) -> int:
-    """Mark dead active workers for one user-visible thread.
-
-    Session detail and SSE routing need this exact thread's active-worker state
-    to be fresh even when the global sweep is debounced. Keep the scope narrow so
-    opening a stale session repairs it without doing a full active-worker scan.
-    """
-    _reap_finished_workers()
-    pending = CodexInstance.objects.filter(
-        thread_id=thread_id,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    )
-    updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances(main_thread_id=thread_id)
-    if updated:
-        _reconcile_orphaned_workers_if_due()
-    _prune_reaped_workers()
-    return updated
-
-
-def reconcile_dead_for_workflow(
-    workflow_id: int, *, main_thread_id: str | None = None
-) -> int:
-    """Mark dead workers for one workflow without sweeping every session."""
-    _reap_finished_workers()
-    pending = CodexInstance.objects.filter(
-        workflow_id=workflow_id,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    )
-    updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances(
-        main_thread_id=main_thread_id,
-        workflow_id=workflow_id,
-    )
-    # A hidden workflow stream may be the only thing reconciling (maintenance
-    # scheduler disabled, or between its 60s ticks), so reap leaked workers here
-    # too -- otherwise a wedged workflow worker keeps the Codex state-DB lock.
-    # The reap is a global /proc scan, so debounce it: many concurrent workflow
-    # streams collapse to one sweep per interval (the 60s reap grace makes this
-    # coarse gate harmless).
-    _reconcile_orphaned_workers_if_due()
-    _prune_reaped_workers()
-    return updated
-
-
-def _reconcile_orphaned_workers_if_due() -> int:
-    """Debounced global orphan reap for scoped callers (workflow streams)."""
-    if getattr(settings, "TESTING", False):
-        return reconcile_orphaned_workers()
-    if rate_limit.claim(
-        "reconcile_orphaned_workers", min_interval=_RECONCILE_DEAD_MIN_INTERVAL
-    ):
-        return reconcile_orphaned_workers()
-    return 0
-
-
-def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
-    updated = 0
-    now = timezone.now()
-    for instance in pending:
-        if worker_is_alive(instance):
-            continue
-        error = worker_errors._dead_worker_error(instance)
-        # Conditional UPDATE keyed on the active statuses so a worker that
-        # reached a terminal state in the gap between the queryset read and this
-        # write is preserved rather than retroactively rewritten as failed (and
-        # falsely routed to the system agents). Mirrors ``_mark_failed``.
-        rows = CodexInstance.objects.filter(
-            pk=instance.pk,
-            status__in=CodexInstance.ACTIVE_STATUSES,
-        ).update(
-            status=CodexInstance.STATUS_FAILED,
-            error=error,
-            ended_at=now,
-        )
-        if rows == 0:
-            # The worker reached a terminal state in the gap. Preserve its
-            # status (don't count it as a kill), but still run finish routing:
-            # demo system-agent rows are excluded from
-            # reconcile_terminal_workflow_instances() and rely on this callback,
-            # so a worker that died after saving its status but before notifying
-            # would otherwise strand the SessionDemo/SystemAgentRun. Routing is
-            # idempotent, so a worker that already notified is a no-op.
-            try:
-                instance.refresh_from_db()
-            except CodexInstance.DoesNotExist:
-                continue
-            if instance.status in (
-                CodexInstance.STATUS_COMPLETED,
-                CodexInstance.STATUS_FAILED,
-            ):
-                _notify_system_agents_if_needed(instance)
-                cleanup_requested_input_images_for(instance)
-            continue
-        _resolve_dangling_requests(instance.pk)
-        instance.refresh_from_db()
-        # The worker died without reporting completion, so its systemd cgroup may
-        # still hold grandchildren the codex sandbox reparented into their own
-        # session (a process-group signal would miss them). Reap the cgroup so a
-        # leaked ``cargo bench`` can't hold memory long after the worker is gone.
-        _reap_scope_cgroup(instance)
-        _notify_system_agents_if_needed(instance)
-        cleanup_requested_input_images_for(instance)
-        updated += 1
-    return updated
-
-
-def _prune_reaped_workers() -> None:
-    with _TRACKED_WORKER_PROCS_LOCK:
-        reaped_workers = set(_REAPED_WORKERS)
-    if not reaped_workers:
-        return
-    active_workers = set(
-        CodexInstance.objects.filter(
-            pk__in=[instance_id for _, instance_id in reaped_workers],
-            status__in=CodexInstance.ACTIVE_STATUSES,
-        ).values_list("pid", "pk")
-    )
-    with _TRACKED_WORKER_PROCS_LOCK:
-        _REAPED_WORKERS.intersection_update(active_workers)
-
-
-def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
-    system_agents_handled = False
-    if instance.purpose in (
-        CodexInstance.PURPOSE_SYSTEM_AGENT,
-        CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-    ) or (
-        instance.purpose == CodexInstance.PURPOSE_USER
-        and instance.workflow_id is not None
-    ):
-        try:
-            from hitch.main.workflows import system_agents
-
-            system_agents_handled = system_agents.on_codex_instance_finished(instance)
-        except Exception:
-            logger.exception(
-                "failed to notify system workflow for reconciled instance %s",
-                instance.pk,
-            )
-    try:
-        from hitch.main import demo
-
-        if (
-            system_agents_handled
-            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and instance.agent_kind == demo.DEMO_AGENT_KIND
-        ):
-            return
-        demo.on_codex_instance_finished(instance)
-    except Exception:
-        logger.exception(
-            "failed to notify demo workflow for reconciled instance %s",
-            instance.pk,
-        )
-
-
-def _reconcile_terminal_workflow_instances(
-    *, main_thread_id: str | None = None, workflow_id: int | None = None
-) -> None:
-    try:
-        from hitch.main.workflows import system_agents
-
-        system_agents.reconcile_terminal_workflow_instances(
-            main_thread_id=main_thread_id,
-            workflow_id=workflow_id,
-        )
-    except Exception:
-        logger.exception("failed to reconcile terminal workflow instances")
 
 
 def events_dir() -> Path:
@@ -2125,7 +1323,7 @@ def app_server_config(
     # SIGKILLs to this marker so a second checkout sharing the resolved codex
     # binary -- whose app-server command lines are otherwise identical -- is
     # never swept.
-    env = {_APP_SERVER_DEPLOYMENT_ENV: _app_server_deployment_id()}
+    env = {reconciliation._APP_SERVER_DEPLOYMENT_ENV: reconciliation._app_server_deployment_id()}
     resolved_home = sqlite_home if sqlite_home is not None else _default_sqlite_home()
     if resolved_home is not None:
         env[_CODEX_SQLITE_HOME_ENV] = os.fspath(resolved_home)
@@ -2499,11 +1697,11 @@ def _launch_worker_process(
             _WORKER_ISOLATION_SYSTEMD,
         ):
             raise ValueError(f"invalid CODEX_WORKER_ISOLATION: {requested_isolation!r}")
-        systemd_run = _systemd_run_for_isolation(requested_isolation)
+        systemd_run = systemd_isolation._systemd_run_for_isolation(requested_isolation)
         if systemd_run is None:
             proc = _popen_detached(argv, env=env, stderr=stderr)
             return WorkerLaunch(pid=proc.pid, proc=proc)
-        return _launch_systemd_worker(
+        return systemd_isolation._launch_systemd_worker(
             systemd_run=systemd_run,
             scope_unit=_scope_unit_for_instance(instance_id),
             worker_argv=argv,
@@ -2536,184 +1734,9 @@ def _write_worker_log_marker(log_file: BinaryIO, message: str) -> None:
         log_file.write(line)
 
 
-def _systemd_run_for_isolation(requested_isolation: str) -> str | None:
-    systemd_run = shutil.which("systemd-run")
-    if systemd_run is None:
-        if requested_isolation == _WORKER_ISOLATION_SYSTEMD:
-            raise RuntimeError("systemd-run is required for Codex worker isolation")
-        return None
-    if requested_isolation == _WORKER_ISOLATION_AUTO and not _systemd_user_manager_available():
-        return None
-    return systemd_run
-
-
-def _systemd_user_manager_available() -> bool:
-    systemctl = shutil.which("systemctl")
-    if systemctl is None:
-        return False
-    try:
-        result = subprocess.run(
-            [systemctl, "--user", "show-environment"],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=0.5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
-
-
-def _launch_systemd_worker(
-    *,
-    systemd_run: str,
-    scope_unit: str,
-    worker_argv: list[str],
-    env: dict[str, str],
-    stderr: Any = subprocess.DEVNULL,
-    stderr_capture: BinaryIO | None = None,
-) -> WorkerLaunch:
-    _ensure_systemd_worker_slice()
-    if stderr_capture is not None:
-        stderr_offset = stderr_capture.tell()
-        proc = _popen_detached(
-            _systemd_scope_argv(
-                systemd_run=systemd_run,
-                scope_unit=scope_unit,
-                worker_argv=worker_argv,
-                env=env,
-                stderr_log_path=_stderr_log_path(stderr_capture),
-            ),
-            env=env,
-            stderr=stderr,
-        )
-        client_exited = _check_systemd_run_start_result(
-            proc,
-            scope_unit,
-            stderr_capture,
-            stderr_offset=stderr_offset,
-        )
-        return WorkerLaunch(
-            pid=0,
-            proc=None if client_exited else proc,
-            scope_unit=scope_unit,
-        )
-    with tempfile.TemporaryFile() as stderr_file:
-        proc = _popen_detached(
-            _systemd_scope_argv(
-                systemd_run=systemd_run,
-                scope_unit=scope_unit,
-                worker_argv=worker_argv,
-                env=env,
-            ),
-            env=env,
-            stderr=stderr_file,
-        )
-        client_exited = _check_systemd_run_start_result(proc, scope_unit, stderr_file)
-    return WorkerLaunch(
-        pid=0,
-        proc=None if client_exited else proc,
-        scope_unit=scope_unit,
-    )
-
-
-def _stderr_log_path(stderr_capture: BinaryIO) -> str | None:
-    name = getattr(stderr_capture, "name", None)
-    return name if isinstance(name, str) else None
-
-
-def _worker_slice() -> str:
-    return str(getattr(settings, "CODEX_WORKER_SLICE", "") or "").strip()
-
-
-def _is_finite_limit(value: str) -> bool:
-    """Whether a cgroup limit value actually bounds the unit.
-
-    systemd treats an empty value as "unset" and ``infinity`` as "no limit", so
-    neither is a real ceiling the swap cap can make "true".
-    """
-    return bool(value) and value.strip().lower() != "infinity"
-
-
-def _limit_property(name: str, value: str, *, declarative: bool) -> str | None:
-    """Render a single cgroup limit property, or ``None`` to omit it.
-
-    A configured value is rendered as-is. A cleared value is omitted by default
-    — fine for a fresh transient scope — but in ``declarative`` mode it renders
-    as ``infinity`` instead. The slice is configured with the *stateful*
-    ``systemctl set-property --runtime``, which only changes the properties it
-    is handed, so omitting a cleared cap would leave a previously-applied value
-    lingering on the runtime unit; emitting ``infinity`` resets it to unlimited.
-    """
-    if value:
-        return f"{name}={value}"
-    if declarative:
-        return f"{name}=infinity"
-    return None
-
-
-def _memory_cgroup_properties(
-    high_setting: str, max_setting: str, swap_setting: str, *, declarative: bool = False
-) -> list[str]:
-    """Build systemd memory-cgroup properties for the named settings.
-
-    ``MemoryAccounting=yes`` must accompany any ``MemoryHigh``/``MemoryMax``:
-    hosts with ``DefaultMemoryAccounting=no`` (or a legacy cgroup v1 hierarchy)
-    silently ignore the limits unless accounting is explicitly enabled on the
-    unit, so the cap would not actually bound the worker.
-
-    ``MemorySwapMax`` rides along with the *hard* ``MemoryMax`` because cgroup
-    v2 counts only RAM toward ``MemoryMax``: without a swap cap a runaway worker
-    is reclaimed to swap instead of OOM-killed, so the hard cap never fires and
-    the turn thrashes the host indefinitely rather than failing. It is gated on
-    a *finite* ``MemoryMax`` rather than any limit: ``MemoryHigh`` is a soft
-    throttle that usage may exceed (graceful degradation, no OOM) and
-    ``MemoryMax=infinity`` is no limit at all, so neither gives the swap cap a
-    hard ceiling to make "true" — capping swap there would silently deny swap
-    to a config that deliberately has no OOM ceiling.
-
-    ``declarative`` makes cleared caps render as ``infinity`` rather than being
-    omitted, so a stateful ``set-property`` target (the slice) fully resets to
-    the configured state instead of inheriting stale runtime values. The
-    per-worker unit and the aggregate slice share this builder so their
-    accounting/limit/swap handling cannot drift apart.
-    """
-    high = str(getattr(settings, high_setting, "") or "").strip()
-    hard = str(getattr(settings, max_setting, "") or "").strip()
-    swap = str(getattr(settings, swap_setting, "") or "").strip()
-    # Swap is only a real cap below a finite hard ceiling; otherwise it is
-    # unset (and, in declarative mode, reset to unlimited rather than left at a
-    # stale value).
-    swap_value = swap if _is_finite_limit(hard) else ""
-    properties: list[str] = []
-    if _is_finite_limit(high) or _is_finite_limit(hard):
-        properties.append("MemoryAccounting=yes")
-    for prop in (
-        _limit_property("MemoryHigh", high, declarative=declarative),
-        _limit_property("MemoryMax", hard, declarative=declarative),
-        _limit_property("MemorySwapMax", swap_value, declarative=declarative),
-    ):
-        if prop is not None:
-            properties.append(prop)
-    return properties
-
-
-def _systemd_worker_slice_properties() -> list[str]:
-    # The slice is configured with the stateful ``set-property --runtime``, so
-    # build it declaratively: a cleared cap resets to ``infinity`` rather than
-    # leaving a stale runtime value (and misleading the hierarchy warning).
-    return _memory_cgroup_properties(
-        "CODEX_WORKER_SLICE_MEMORY_HIGH",
-        "CODEX_WORKER_SLICE_MEMORY_MAX",
-        "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
-        declarative=True,
-    )
-
-
 # cgroup-v2 cpu.weight bounds (CPUWeight=1..10000, default 100).
-_CPU_WEIGHT_MIN = 1
-_CPU_WEIGHT_MAX = 10000
+
+
 _CPU_WEIGHT_DEFAULT = 100
 
 
@@ -2742,13 +1765,13 @@ def _systemd_parent_slice_properties() -> list[str]:
             "ignoring CODEX_PARENT_SLICE_CPU_WEIGHT=%r: not an integer", raw
         )
         return []
-    if not _CPU_WEIGHT_MIN <= weight <= _CPU_WEIGHT_MAX:
+    if not systemd_isolation._CPU_WEIGHT_MIN <= weight <= systemd_isolation._CPU_WEIGHT_MAX:
         logger.warning(
             "ignoring CODEX_PARENT_SLICE_CPU_WEIGHT=%r: outside the cgroup-v2 "
             "range %d-%d",
             raw,
-            _CPU_WEIGHT_MIN,
-            _CPU_WEIGHT_MAX,
+            systemd_isolation._CPU_WEIGHT_MIN,
+            systemd_isolation._CPU_WEIGHT_MAX,
         )
         return []
     return [f"CPUWeight={weight}"]
@@ -2801,7 +1824,7 @@ def _effective_swap_cap(max_setting: str, swap_setting: str) -> str | None:
     """
     hard = str(getattr(settings, max_setting, "") or "").strip()
     swap = str(getattr(settings, swap_setting, "") or "").strip()
-    if swap and _is_finite_limit(hard):
+    if swap and systemd_isolation._is_finite_limit(hard):
         return swap
     return None
 
@@ -2826,14 +1849,14 @@ def _warn_on_swap_cap_hierarchy() -> None:
     )
     # No enforced, finite slice cap means the slice imposes no swap restriction
     # the worker could be surprised by.
-    if slice_swap is None or not _is_finite_limit(slice_swap):
+    if slice_swap is None or not systemd_isolation._is_finite_limit(slice_swap):
         return
 
     worker_swap = _effective_swap_cap(
         "CODEX_WORKER_MEMORY_MAX",
         "CODEX_WORKER_MEMORY_SWAP_MAX",
     )
-    if worker_swap is not None and _is_finite_limit(worker_swap):
+    if worker_swap is not None and systemd_isolation._is_finite_limit(worker_swap):
         # The worker imposes its own finite swap cap.
         if worker_swap == "0":
             return  # Worker denies swap too; consistent with the slice cap.
@@ -2862,7 +1885,7 @@ def _warn_on_swap_cap_hierarchy() -> None:
     worker_swap_raw = str(
         getattr(settings, "CODEX_WORKER_MEMORY_SWAP_MAX", "") or ""
     ).strip()
-    if _is_finite_limit(worker_hard) and not _is_finite_limit(worker_swap_raw):
+    if systemd_isolation._is_finite_limit(worker_hard) and not systemd_isolation._is_finite_limit(worker_swap_raw):
         logger.warning(
             "CODEX_WORKER_MEMORY_SWAP_MAX=%r leaves the worker's swap uncapped, "
             "but the enclosing slice still enforces "
@@ -2920,7 +1943,7 @@ def _apply_slice_properties(slice_unit: str, properties: list[str]) -> None:
 
 def _ensure_systemd_worker_slice() -> None:
     global _swap_hierarchy_warned
-    slice_unit = _worker_slice()
+    slice_unit = systemd_isolation._worker_slice()
     if not slice_unit:
         # Without a worker slice, `_systemd_scope_argv` omits `--slice`, so
         # workers land in systemd-run's default slice rather than under the
@@ -2934,7 +1957,7 @@ def _ensure_systemd_worker_slice() -> None:
     if not _swap_hierarchy_warned:
         _swap_hierarchy_warned = True
         _warn_on_swap_cap_hierarchy()
-    _apply_slice_properties(slice_unit, _systemd_worker_slice_properties())
+    _apply_slice_properties(slice_unit, systemd_isolation._systemd_worker_slice_properties())
     # Bias the parent slice so the user-facing runserver wins CPU contests
     # against the worker pool. The CPU weight belongs on the parent (sibling to
     # the runserver's slice), not on the leaf workers slice, which the workers
@@ -3045,7 +2068,7 @@ def _systemd_scope_argv(
         "--service-type=exec",
         f"--unit={unit_name}",
     ]
-    worker_slice = _worker_slice()
+    worker_slice = systemd_isolation._worker_slice()
     if worker_slice:
         argv.append(f"--slice={worker_slice}")
     if env is not None:
@@ -3055,7 +2078,7 @@ def _systemd_scope_argv(
         argv.append(f"--property=StandardError=append:{stderr_log_path}")
     else:
         argv.append("--property=StandardError=null")
-    for property_value in _memory_cgroup_properties(
+    for property_value in systemd_isolation._memory_cgroup_properties(
         "CODEX_WORKER_MEMORY_HIGH",
         "CODEX_WORKER_MEMORY_MAX",
         "CODEX_WORKER_MEMORY_SWAP_MAX",
@@ -3117,4 +2140,4 @@ def _popen_detached(
 # Imported last: the pool and error-detail submodules reach back into this
 # module for the path/config helpers, so they need its namespace to be
 # fully initialized.
-from hitch.main.runtime import app_server_pool, worker_errors  # noqa: E402
+from hitch.main.runtime import app_server_pool, reconciliation, systemd_isolation  # noqa: E402
