@@ -11,26 +11,42 @@ from __future__ import annotations
 from typing import Any
 
 from hitch.main.models import SessionMetadata, SystemWorkflow
+from hitch.main.workflows import engine
 from hitch.main.workflows.agent_io import _CONFIDENCE_RANK
 
 
+def _checked_state_key(workflow: SystemWorkflow, key: str) -> str:
+    """Refuse to read a state key the workflow's kind does not declare.
+
+    Catches a typo'd key (or a read wired to the wrong workflow object) at
+    the call site instead of silently returning the type's default.
+    """
+    declared = engine.declared_state_keys(workflow.kind)
+    if declared is not None and key not in declared:
+        raise KeyError(
+            f"undeclared state key {key!r} for workflow kind {workflow.kind!r}; "
+            "declare it on the kind's WorkflowHandler.state_keys"
+        )
+    return key
+
+
 def _state_dict(workflow: SystemWorkflow, key: str) -> dict[str, Any]:
-    value = workflow.state.get(key)
+    value = workflow.state.get(_checked_state_key(workflow, key))
     return dict(value) if isinstance(value, dict) else {}
 
 
 def _state_string(workflow: SystemWorkflow, key: str) -> str:
-    value = workflow.state.get(key)
+    value = workflow.state.get(_checked_state_key(workflow, key))
     return value if isinstance(value, str) else ""
 
 
 def _state_int(workflow: SystemWorkflow, key: str) -> int:
-    value = workflow.state.get(key)
+    value = workflow.state.get(_checked_state_key(workflow, key))
     return value if isinstance(value, int) and value >= 0 else 0
 
 
 def _state_bool(workflow: SystemWorkflow, key: str) -> bool:
-    return workflow.state.get(key) is True
+    return workflow.state.get(_checked_state_key(workflow, key)) is True
 
 
 def _confidence_meets_threshold(confidence: str, threshold: str) -> bool:

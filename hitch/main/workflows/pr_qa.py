@@ -315,6 +315,33 @@ def start_user_steering_turn(
         )
         raise
 
+# Top-level SystemWorkflow.state keys the PR-QA/monitor machine reads and
+# writes (the engine-shared turn-config/failure keys live in
+# engine.SHARED_STATE_KEYS).
+_PR_QA_STATE_KEYS = frozenset(
+    {
+        "auto_merge_branch",
+        "auto_merge_to_local_branch",
+        "auto_merge_result",
+        "auto_merge_reviewed_diff",
+        "auto_merge_reviewed_target_sha",
+        "auto_merge_session_base_sha",
+        "hitch_pr_handoff",
+        "last_feedback",
+        "last_pr_monitor",
+        "open_pr_on_lgtm",
+        "pr_gates",
+        "pr_handoff",
+        "pr_monitor_backoff",
+        "pr_pending_checks",
+        "pr_prompt",
+        "pr_stage_refresh",
+        "qa_approval_insert_index",
+        "qa_design_synthesis_gate",
+        "qa_review_revision",
+    }
+)
+
 _PR_QA_STEPS = frozenset(
     {
         system_agents.STEP_QA_RUNNING,
@@ -337,6 +364,7 @@ _PR_QA_STEPS = frozenset(
 class _PrMonitorHandler(engine.WorkflowHandler):
     kind = SystemWorkflow.KIND_PR_QA
     steps = _PR_QA_STEPS
+    state_keys = _PR_QA_STATE_KEYS
 
     @override
     def matches_run(self, run: SystemAgentRun, instance: CodexInstance) -> bool:
@@ -355,6 +383,7 @@ class _PrMonitorHandler(engine.WorkflowHandler):
 class _PrQaHandler(engine.WorkflowHandler):
     kind = SystemWorkflow.KIND_PR_QA
     steps = _PR_QA_STEPS
+    state_keys = _PR_QA_STATE_KEYS
 
     @override
     def spawn_recovery_specs(self) -> tuple[engine.SpawnRecoverySpec, ...]:

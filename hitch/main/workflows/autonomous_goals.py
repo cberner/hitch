@@ -868,6 +868,40 @@ class _AutonomousGoalHandler(engine.WorkflowHandler):
             system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED,
         }
     )
+    # Top-level SystemWorkflow.state keys this machine reads and writes (the
+    # engine-shared turn-config/failure keys live in engine.SHARED_STATE_KEYS).
+    state_keys = frozenset(
+        {
+            "auto_merge_branch",
+            "auto_merge_to_local_branch",
+            "auto_pr_enabled",
+            "auto_proposal",
+            "auto_qa_enabled",
+            "autonomous_goal_id",
+            "autonomous_goal_updated_at",
+            "autonomy",
+            "candidate",
+            "candidate_session_id",
+            "default_branch_sha",
+            "history_files",
+            "judge_session_id",
+            "judgment",
+            "proposal_budget",
+            "proposal_budget_failed_attempts",
+            "proposal_budget_last_failure",
+            "proposal_budget_no_progress_retries",
+            "proposal_budget_token_totals",
+            "proposal_budget_tokens_used",
+            "proposal_id",
+            "session_cwd",
+            "stacked_diff_continuation_error",
+            "stacked_diff_depth",
+            "stacked_diff_fork_from_cwd",
+            "stacked_diff_iteration",
+            "stacked_diff_stopped_reason",
+            "use_worktrees",
+        }
+    )
 
     @override
     def on_agent_finished(

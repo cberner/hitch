@@ -22,6 +22,27 @@ from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
 # long-blocked rows to ``archived``.
 ADMINISTRATIVE_STEPS = frozenset({"blocked", "archived"})
 
+# State keys the shared engine reads/writes for every kind: the per-turn
+# config snapshot the spawn helpers replay, plus failure bookkeeping.
+SHARED_STATE_KEYS = frozenset(
+    {
+        "model",
+        "reasoning_effort",
+        "sandbox_policy",
+        "approval_mode",
+        "web_search_mode",
+        "base_instructions",
+        "developer_instructions",
+        "enable_memories",
+        "next_user_message_index",
+        "archived_from_blocked",
+        "error",
+        "failure_owner",
+        "failure_surfaced",
+        "workflow_turn_death_retries",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SpawnRecoverySpec:
@@ -56,6 +77,11 @@ class WorkflowHandler:
 
     kind: ClassVar[str]
     steps: ClassVar[frozenset[str] | None]
+    # Top-level SystemWorkflow.state keys this kind reads/writes, or None to
+    # opt out of state-key validation. The typed readers in workflow_state
+    # reject undeclared keys so a typo'd key fails loudly instead of
+    # silently reading a default.
+    state_keys: ClassVar[frozenset[str] | None] = None
 
     def matches_run(self, run: SystemAgentRun, instance: CodexInstance) -> bool:
         return True
@@ -150,3 +176,24 @@ def spawn_recovery_spec(kind: str, step: str) -> SpawnRecoverySpec | None:
             if spec.step == step:
                 return spec
     return None
+
+
+def declared_state_keys(kind: str) -> frozenset[str] | None:
+    """State keys workflows of ``kind`` may read, or None when unvalidated.
+
+    The union of every registered handler's declared keys for the kind plus
+    the engine-shared keys. Returns None for unregistered kinds and for
+    kinds whose handlers opt out.
+    """
+    declared: set[str] = set()
+    known = False
+    for handler in _HANDLERS:
+        if handler.kind != kind:
+            continue
+        if handler.state_keys is None:
+            return None
+        declared.update(handler.state_keys)
+        known = True
+    if not known:
+        return None
+    return frozenset(declared) | SHARED_STATE_KEYS
