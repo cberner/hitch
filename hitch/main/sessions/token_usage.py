@@ -29,7 +29,7 @@ from hitch.main.models import (
     Project,
     SessionMetadata,
 )
-from hitch.main.runtime import codex_pool, rollout
+from hitch.main.runtime import app_server_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _rollout_path_for,
@@ -602,7 +602,7 @@ def _refresh_usage_token_cache_best_effort(
                         if rollout_state is None:
                             if codex is None:
                                 codex = stack.enter_context(
-                                    codex_pool.borrow_codex(
+                                    app_server_pool.borrow_codex(
                                         Codex, enable_memories=False
                                     )
                                 )

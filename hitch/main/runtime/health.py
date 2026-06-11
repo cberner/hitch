@@ -27,7 +27,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_pool, disk_cleanup, host_probes
+from hitch.main.runtime import app_server_pool, codex_pool, disk_cleanup, host_probes
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import discover_managed_worktrees
 
@@ -52,11 +52,11 @@ _SEVERITY_LABEL = {
 }
 
 # A running/starting turn legitimately owns ~1 app-server, plus a warm pool
-# bounded by codex_pool._SHARED_POOL_MAX, so only flag a surplus beyond that
+# bounded by app_server_pool._SHARED_POOL_MAX, so only flag a surplus beyond that
 # healthy ceiling as a likely leak. (The app-server count is now per logical
 # app-server, not the doubled node-wrapper + native-child pid pair.)
-_APP_SERVER_LEAK_WARN = codex_pool._SHARED_POOL_MAX + 2
-_APP_SERVER_LEAK_DANGER = codex_pool._SHARED_POOL_MAX + 5
+_APP_SERVER_LEAK_WARN = app_server_pool._SHARED_POOL_MAX + 2
+_APP_SERVER_LEAK_DANGER = app_server_pool._SHARED_POOL_MAX + 5
 # A turn still "running" after this long is almost certainly a leaked row whose
 # worker process is gone.
 _STUCK_TURN_AGE = timedelta(hours=6)

@@ -740,7 +740,7 @@ class SessionViewTests(TestCase):
         self.assertFalse(metadata.project_cleared)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
     def test_set_session_project_falls_back_without_metadata_cwd(
         self, mock_run_borrowed: MagicMock
     ) -> None:

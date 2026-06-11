@@ -77,7 +77,7 @@ from hitch.main.models import (
     UserSettings,
 )
 from hitch.main.repos import git_common_dir, same_repo_or_worktree
-from hitch.main.runtime import codex_events, codex_pool, health, rollout, streaming
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool, health, rollout, streaming
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.runtime.input_images import (
     _INPUT_IMAGE_ACCEPT,
@@ -1558,7 +1558,7 @@ def _session_list_page_from_codex_or_warm_index(
     system_only: bool,
 ) -> SessionListPage:
     try:
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=current_settings.enable_memories
         ) as codex:
             return _session_list_page(
@@ -2351,7 +2351,7 @@ def _render_session_detail(
         # lazily migrates a foreign thread's rows and is idempotent, so a retry
         # (or the warm->cold fallback re-running it) is safe.
         resumed, thread, models_data, resolved_settings, plan_model = (
-            codex_pool.run_borrowed_op_with_retry(
+            app_server_pool.run_borrowed_op_with_retry(
                 Codex,
                 _resume_for_detail,
                 enable_memories=initial_settings.enable_memories,
@@ -3220,7 +3220,7 @@ def _refresh_usage_session_index_best_effort(
         )
         if not refresh_active and not refresh_archived:
             return
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=enable_memories
         ) as codex:
             # Web-triggered catch-up must not ask Codex to scan rollouts: on a
@@ -3512,7 +3512,7 @@ def _developer_instructions_for_project(
 def _associate_existing_sessions_with_project(project: Project, request: HttpRequest) -> None:
     settings = _stored_settings(request)
     try:
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories
         ) as codex:
             threads = _all_threads(codex)
@@ -3695,7 +3695,7 @@ def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
         if models_data:
             return _resolved_settings(request, models_data)
 
-    with codex_pool.borrow_codex(Codex, enable_memories=enable_memories) as codex:
+    with app_server_pool.borrow_codex(Codex, enable_memories=enable_memories) as codex:
         models_data = list(codex.models().data)
     caches._store_models_cache(enable_memories=enable_memories, models_data=models_data)
     return _resolved_settings(request, models_data)
@@ -3820,7 +3820,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         if cache_has_value:
             caches._schedule_models_refresh(enable_memories=enable_memories_value)
         else:
-            with codex_pool.borrow_codex(
+            with app_server_pool.borrow_codex(
                 Codex, enable_memories=enable_memories_value
             ) as codex:
                 models_data = list(codex.models().data)
@@ -4007,7 +4007,7 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
         settings = _stored_settings(request)
-        resumed = codex_pool.run_borrowed_op_with_retry(
+        resumed = app_server_pool.run_borrowed_op_with_retry(
             Codex,
             lambda codex: codex._client.thread_resume(session_id),
             enable_memories=settings.enable_memories,
@@ -4033,7 +4033,7 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
         settings = _stored_settings(request)
-        resumed = codex_pool.run_borrowed_op_with_retry(
+        resumed = app_server_pool.run_borrowed_op_with_retry(
             Codex,
             lambda codex: codex._client.thread_resume(session_id),
             enable_memories=settings.enable_memories,
@@ -4452,7 +4452,7 @@ def _rename_codex_thread_from_proposal(
     if not title:
         return False
     try:
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories
         ) as codex:
             codex._client.thread_set_name(session_metadata.thread_id, title)
@@ -4513,7 +4513,7 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     if len(name) > _NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
     settings = _stored_settings(request)
-    with codex_pool.borrow_codex(
+    with app_server_pool.borrow_codex(
         Codex, enable_memories=settings.enable_memories
     ) as codex:
         codex._client.thread_set_name(session_id, name)
@@ -4531,7 +4531,7 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
     settings = _stored_settings(request)
-    with codex_pool.borrow_codex(
+    with app_server_pool.borrow_codex(
         Codex, enable_memories=settings.enable_memories
     ) as codex:
         if archived == "true":
@@ -4583,7 +4583,7 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     ).exists():
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
-    resumed = codex_pool.run_borrowed_op_with_retry(
+    resumed = app_server_pool.run_borrowed_op_with_retry(
         Codex,
         lambda codex: codex._client.thread_resume(session_id),
         enable_memories=settings.enable_memories,
@@ -4916,7 +4916,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             )
         else:
             used_disk_resume = False
-            with codex_pool.borrow_codex(
+            with app_server_pool.borrow_codex(
                 Codex, enable_memories=settings.enable_memories
             ) as codex:
                 try:
@@ -4991,7 +4991,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             )
             and not string_value(getattr(resumed, "model", None))
         ):
-            with codex_pool.borrow_codex(
+            with app_server_pool.borrow_codex(
                 Codex, enable_memories=settings.enable_memories
             ) as codex:
                 resumed = codex._client.thread_resume(session_id)
@@ -5423,7 +5423,7 @@ def _is_allowed_session_cwd(cwd: str) -> bool:
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
-    resumed = codex_pool.run_borrowed_op_with_retry(
+    resumed = app_server_pool.run_borrowed_op_with_retry(
         Codex,
         lambda codex: codex._client.thread_resume(thread_id),
         enable_memories=settings.enable_memories,

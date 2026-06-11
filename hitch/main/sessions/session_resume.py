@@ -26,7 +26,7 @@ from hitch.main.models import (
     SessionMetadata,
     SystemWorkflow,
 )
-from hitch.main.runtime import codex_pool, rollout
+from hitch.main.runtime import app_server_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _ARCHIVED_SESSIONS_DIR,
     _rollout_path_from_value,
@@ -102,7 +102,7 @@ def _unarchive_session_for_turn(
     session_id: str, settings: SettingsValues, *, codex: Codex | None = None
 ) -> None:
     if codex is None:
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories
         ) as borrowed:
             borrowed.thread_unarchive(session_id)
@@ -111,7 +111,7 @@ def _unarchive_session_for_turn(
 
 
 def _archive_session_for_turn(session_id: str, settings: SettingsValues) -> None:
-    with codex_pool.borrow_codex(
+    with app_server_pool.borrow_codex(
         Codex, enable_memories=settings.enable_memories
     ) as codex:
         codex.thread_archive(session_id)

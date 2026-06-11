@@ -463,7 +463,7 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
 class SchedulerCodexReuseTests(SimpleTestCase):
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
     def test_get_reuses_one_app_server(
         self, mock_start: MagicMock, mock_config: MagicMock
     ) -> None:
@@ -479,7 +479,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         mock_start.assert_called_once_with(mock_config.return_value)
 
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
     def test_reset_closes_and_reconnects(
         self, mock_start: MagicMock, _mock_config: MagicMock
     ) -> None:
@@ -495,7 +495,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
 
     @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
     def test_best_effort_reuses_held_codex_across_ticks(
         self,
         mock_start: MagicMock,
@@ -519,7 +519,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
 
     @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.start_codex")
+    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
     def test_best_effort_resets_codex_on_failure(
         self,
         mock_start: MagicMock,

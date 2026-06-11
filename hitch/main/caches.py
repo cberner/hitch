@@ -22,7 +22,7 @@ from openai_codex.generated.v2_all import (
     RateLimitSnapshot,
 )
 
-from hitch.main.runtime import codex_pool, rate_limit
+from hitch.main.runtime import app_server_pool, rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
     models_data: list[Any] = []
     try:
         close_old_connections()
-        with codex_pool.borrow_codex(
+        with app_server_pool.borrow_codex(
             Codex, enable_memories=enable_memories
         ) as codex:
             models_data = list(codex.models().data)
@@ -197,7 +197,7 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
         # the cross-process guard the per-process TTL cannot provide.
         if rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY):
             close_old_connections()
-            with codex_pool.borrow_codex(
+            with app_server_pool.borrow_codex(
                 Codex, enable_memories=enable_memories
             ) as codex:
                 rate_limits = _fetch_rate_limits(codex)
