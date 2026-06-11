@@ -48,6 +48,18 @@ def _workflow_maintenance_scheduler_enabled() -> bool:
 
 
 def _workflow_maintenance_scheduler_loop() -> None:
+    # One-shot at startup: app-servers left behind by the previous server
+    # process (pooled servers checked out across a restart, workers killed
+    # before their cgroup reap) each hold a CODEX_HOME state-DB connection
+    # and surface as "database is locked" on the first turns after boot.
+    # Runs before this process warms its own pool, so only ownerless
+    # servers can match.
+    try:
+        reconciliation.reap_orphaned_app_servers()
+    except Exception:
+        logger.exception("failed to reap orphaned codex app-servers at startup")
+    finally:
+        close_old_connections()
     stop = threading.Event()
     start = time.monotonic()
     next_stale_blocked_archive_at = start + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS

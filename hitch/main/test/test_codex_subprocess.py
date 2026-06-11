@@ -4188,6 +4188,132 @@ class NukeCodexAppServersTests(SimpleTestCase):
             )
 
 
+class ReapOrphanedAppServersTests(TestCase):
+    def _write_app_server(
+        self, proc_root: Path, pid: int, *, ppid: int
+    ) -> None:
+        marker = (
+            f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}="
+            f"{reconciliation._app_server_deployment_id()}"
+        ).encode()
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(
+            b"\0".join(
+                [b"/usr/local/bin/codex", b"app-server", b"--listen", b"stdio://"]
+            )
+            + b"\0"
+        )
+        (pid_dir / "environ").write_bytes(marker + b"\0")
+        (pid_dir / "stat").write_text(f"{pid} (codex) S {ppid} 0 0\n")
+
+    def _write_owner_proc(self, proc_root: Path, pid: int, *, cwd: Path) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(b"python\0manage.py\0runserver\0")
+        (pid_dir / "stat").write_text(f"{pid} (python) S 1 0 0\n")
+        (pid_dir / "cwd").symlink_to(cwd)
+
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_kills_orphaned_wrapper_and_native_pair(
+        self, mock_kill: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            # Wrapper reparented to init; native child still parented to the
+            # wrapper. Both halves are ownerless and must die.
+            self._write_app_server(proc_root, 111, ppid=1)
+            self._write_app_server(proc_root, 112, ppid=111)
+
+            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 2)
+        self.assertEqual(
+            sorted(call.args[0] for call in mock_kill.call_args_list), [111, 112]
+        )
+
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_keeps_server_owned_by_live_worker(self, mock_kill: MagicMock) -> None:
+        instance = CodexInstance.objects.create(
+            pid=4242,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="p",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch(
+                "hitch.main.runtime.codex_pool.worker_is_alive", return_value=True
+            ) as alive,
+        ):
+            proc_root = Path(tmp)
+            # Wrapper parented to the live worker; native child to the wrapper.
+            self._write_app_server(proc_root, 111, ppid=4242)
+            self._write_app_server(proc_root, 112, ppid=111)
+
+            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 0)
+        mock_kill.assert_not_called()
+        self.assertEqual(alive.call_args[0][0].pk, instance.pk)
+
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_keeps_server_owned_by_deployment_process(
+        self, mock_kill: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            # A sibling server process of this checkout (cwd == BASE_DIR) owns
+            # a pooled app-server; it must survive the sweep.
+            self._write_owner_proc(
+                proc_root, 900, cwd=Path(settings.BASE_DIR)
+            )
+            self._write_app_server(proc_root, 111, ppid=900)
+
+            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 0)
+        mock_kill.assert_not_called()
+
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_keeps_server_owned_by_current_process(
+        self, mock_kill: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 111, ppid=os.getpid())
+
+            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 0)
+        mock_kill.assert_not_called()
+
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_kills_server_whose_dead_worker_left_a_terminal_row(
+        self, mock_kill: MagicMock
+    ) -> None:
+        CodexInstance.objects.create(
+            pid=4242,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="p",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_FAILED,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            # The worker died (row terminal, process gone); its app-server was
+            # reparented and must be reaped.
+            self._write_app_server(proc_root, 111, ppid=4242)
+
+            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 1)
+        mock_kill.assert_called_once()
+
+
 class CountRunningCodexAppServersTests(SimpleTestCase):
     def _write_app_server(
         self, proc_root: Path, pid: int, ppid: int | None = None
@@ -4399,6 +4525,7 @@ class InterruptActiveTests(TestCase):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            timeout=5,
         )
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)

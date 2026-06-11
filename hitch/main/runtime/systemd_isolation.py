@@ -35,8 +35,12 @@ def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            # Bound the user-manager round trip: this probe runs on the
+            # reconcile and force-kill paths, and a wedged dbus would
+            # otherwise hang the scheduler tick (or a Stop click) forever.
+            timeout=2,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     if result.returncode != 0:
         return False

@@ -849,20 +849,29 @@ def _force_kill_instance(instance: CodexInstance) -> None:
         systemctl = shutil.which("systemctl")
         if systemctl is None:
             raise OSError("systemctl is required to kill systemd Codex workers")
-        result = subprocess.run(
-            [
-                systemctl,
-                "--user",
-                "kill",
-                "--kill-whom=all",
-                "--signal=SIGKILL",
-                instance.systemd_scope_unit,
-            ],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    systemctl,
+                    "--user",
+                    "kill",
+                    "--kill-whom=all",
+                    "--signal=SIGKILL",
+                    instance.systemd_scope_unit,
+                ],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                # Bound the user-manager round trip: this runs on the Stop
+                # request path, and a wedged dbus would otherwise hang the
+                # request thread forever (and stack one thread per retry click).
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise OSError(
+                "systemctl timed out killing systemd Codex worker"
+            ) from exc
         if result.returncode == 0:
             return
         if systemd_isolation._systemd_scope_is_missing(systemctl, instance.systemd_scope_unit):
