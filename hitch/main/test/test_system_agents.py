@@ -250,6 +250,32 @@ def _raw_events_file(test: TestCase, events: list[dict[str, object]]) -> str:
     return events_path
 
 
+def _rollout_token_file(test: TestCase, total_tokens: int) -> str:
+    """Write a rollout file whose token_count event reports ``total_tokens``."""
+    line = {
+        "timestamp": "2026-01-05T12:00:00Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": total_tokens,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": total_tokens,
+                },
+                "last_token_usage": {"total_tokens": total_tokens},
+                "model_context_window": 200000,
+            },
+        },
+    }
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+        fh.write(json.dumps(line) + "\n")
+        rollout_path = fh.name
+    test.addCleanup(Path(rollout_path).unlink, missing_ok=True)
+    return rollout_path
+
+
 def _pr_tool_event(
     *,
     thread_id: str,
@@ -15095,6 +15121,148 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "judge-thread": 200,
             },
         )
+
+    def test_instance_tokens_used_reads_rollout_totals(self) -> None:
+        # Codex only emits thread/goal/updated when the model sets a thread
+        # goal, which hidden candidate/judge sessions normally never do -- the
+        # rollout file's TokenCount totals are the reliable source and goal
+        # events are only a fallback (the larger of the two wins when both
+        # exist, since each is a cumulative thread total).
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+            codex_path=_rollout_token_file(self, 700),
+        )
+        no_goal_events = _instance(
+            thread_id="candidate-thread",
+            events_path=_raw_events_file(self, []),
+        )
+        self.assertEqual(
+            autonomous_goals._autonomous_goal_instance_tokens_used(no_goal_events),
+            700,
+        )
+        with_goal_events = _instance(
+            thread_id="candidate-thread",
+            events_path=_events_file(
+                self, {}, thread_id="candidate-thread", tokens_used=900
+            ),
+        )
+        self.assertEqual(
+            autonomous_goals._autonomous_goal_instance_tokens_used(with_goal_events),
+            900,
+        )
+        goal_events_only = _instance(
+            thread_id="other-thread",
+            events_path=_events_file(
+                self, {}, thread_id="other-thread", tokens_used=120
+            ),
+        )
+        self.assertEqual(
+            autonomous_goals._autonomous_goal_instance_tokens_used(goal_events_only),
+            120,
+        )
+        no_sources = _instance(
+            thread_id="other-thread",
+            events_path=_raw_events_file(self, []),
+        )
+        self.assertIsNone(
+            autonomous_goals._autonomous_goal_instance_tokens_used(no_sources)
+        )
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_candidate_budget_tokens_recorded_from_rollout_without_goal_events(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        # Regression: production candidate threads have no goal events, so
+        # budget tracking stayed at zero ("Tokens used: 0" on the inbox tile)
+        # and every retry counted against the no-progress cap, ending stacks
+        # long before the configured budget was spent.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+            codex_path=_rollout_token_file(self, 350),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_raw_events_file(
+                self,
+                [
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "a1",
+                                "type": "agentMessage",
+                                "text": "not json",
+                            }
+                        },
+                    },
+                ],
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        retry_instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.return_value = retry_instance
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+            ],
+            350,
+        )
+        failure = workflow.state[
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY
+        ]
+        self.assertEqual(failure["tokens_used"], 350)
+        # Token progress was visible, so the attempt must not consume the
+        # no-progress retry allowance.
+        self.assertNotIn(
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+            workflow.state,
+        )
+        retry_run = SystemAgentRun.objects.get(instance=retry_instance)
+        self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 350)
 
     def test_proposal_budget_helper_edges(self) -> None:
         workflow = SystemWorkflow.objects.create(

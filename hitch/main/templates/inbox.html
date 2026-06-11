@@ -370,7 +370,7 @@
                         {{ proposed_session.autonomous_goal.title }} - {{ proposed_session.autonomous_goal.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence{% if proposed_session.stack_label %} - {{ proposed_session.stack_label }}{% endif %}
                         {% else %}
                         From coding agent - {{ proposed_session.get_confidence_display }} confidence
-                        {% endif %}{% if proposed_session.tokens_used_display %} - Tokens used: {{ proposed_session.tokens_used_display }}{% endif %}
+                        {% endif %}{% if proposed_session.tokens_used_display %} - Tokens used: {{ proposed_session.tokens_used_display }}{% endif %}{% if proposed_session.stack_stopped_display %} - Stack stopped: {{ proposed_session.stack_stopped_display }}{% endif %}
                     </p>
                     {% if proposed_session.summary %}
                     <p>{{ proposed_session.summary }}</p>

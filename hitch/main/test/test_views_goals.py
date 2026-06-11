@@ -1170,6 +1170,7 @@ class AutonomousGoalViewTests(TestCase):
                 "stacked_diff_depth": 3,
                 "stacked_diff_iteration": 2,
                 "proposal_budget_tokens_used": 1250,
+                "stacked_diff_continuation_stopped_reason": "candidate_no_proposal",
             },
         )
 
@@ -1181,6 +1182,7 @@ class AutonomousGoalViewTests(TestCase):
             "Improve tests - High ambition - High confidence - Stack 2 of 3",
         )
         self.assertContains(response, "Tokens used: 1,250 tokens")
+        self.assertContains(response, "Stack stopped: no further proposal found")
 
     def test_proposed_session_stack_label_omits_invalid_iteration(self) -> None:
         proposed_session = ProposedSession(
