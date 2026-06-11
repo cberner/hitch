@@ -12,6 +12,7 @@ from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
     _auto_merge_source_base_ref,
+    _fast_forward_target_branch,
     _run_git,
     _source_worktree_tree,
     build_auto_merge_review_patch,
@@ -29,7 +30,11 @@ def _init_repo(repo: Path) -> None:
 def _merge_reviewed_patch(source_cwd: Path, branch: str) -> LocalBranchMergeResult:
     review = build_auto_merge_review_patch(source_cwd, branch)
     return merge_worktree_diff_to_branch(
-        source_cwd, branch, review.patch, review.target_sha
+        source_cwd,
+        branch,
+        review.patch,
+        review.target_sha,
+        review.source_tree_sha,
     )
 
 
@@ -295,6 +300,144 @@ class LocalMergeTests(SimpleTestCase):
             self.assertEqual(second_review.patch, "")
             self.assertFalse(second.changed)
             self.assertEqual(second.commit_sha, first.commit_sha)
+
+    def test_edits_during_review_window_stay_in_next_review_patch(self) -> None:
+        # The merge must record the *reviewed* source tree as the next base.
+        # Recording the merge-time worktree tree instead would bake edits made
+        # during the QA-review window into the base, so they'd never appear in
+        # (or be merged by) any later review cycle.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\napproved\n")
+
+            review = build_auto_merge_review_patch(session, "main")
+            (session / "late.txt").write_text("added after review\n")
+            merge_worktree_diff_to_branch(
+                session,
+                "main",
+                review.patch,
+                review.target_sha,
+                review.source_tree_sha,
+            )
+            follow_up = build_auto_merge_review_patch(session, "main")
+
+            self.assertIn("late.txt", follow_up.patch)
+            second = merge_worktree_diff_to_branch(
+                session,
+                "main",
+                follow_up.patch,
+                follow_up.target_sha,
+                follow_up.source_tree_sha,
+            )
+            self.assertTrue(second.changed)
+            self.assertEqual(
+                _git(repo, "show", "main:late.txt"), "added after review"
+            )
+
+    def test_merge_fails_when_reviewed_source_tree_is_pruned(self) -> None:
+        # A recorded-but-pruned reviewed tree must fail the merge before the
+        # branch moves; falling back to the merge-time snapshot would mark
+        # post-review edits as merged without applying them.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\napproved\n")
+            review = build_auto_merge_review_patch(session, "main")
+            main_sha = _git(repo, "rev-parse", "main")
+
+            with self.assertRaisesRegex(
+                LocalBranchMergeError, "reviewed source tree is no longer available"
+            ):
+                merge_worktree_diff_to_branch(
+                    session,
+                    "main",
+                    review.patch,
+                    review.target_sha,
+                    "0" * 40,
+                )
+            self.assertEqual(_git(repo, "rev-parse", "main"), main_sha)
+
+    def test_review_patch_round_trips_non_utf8_text_file(self) -> None:
+        # git classifies NUL-free latin-1 content as text and emits its bytes
+        # verbatim in ``diff --binary`` output; strict UTF-8 decoding raised
+        # UnicodeDecodeError out of subprocess.run, crashing review and merge.
+        latin1_content = b"caf\xe9 cr\xe8me\n"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "menu.txt").write_bytes(latin1_content)
+
+            result = _merge_reviewed_patch(session, "main")
+
+            self.assertTrue(result.changed)
+            self.assertEqual((repo / "menu.txt").read_bytes(), latin1_content)
+
+    def test_conflict_guard_uses_literal_pathspecs(self) -> None:
+        # File names with glob metacharacters are legal; fed back to git as a
+        # plain pathspec they match *other* index entries, which tripped the
+        # multi-stage "unresolved merge conflicts" guard.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            (repo / "abc.txt").write_text("committed\n")
+            _git(repo, "add", "abc.txt")
+            _git(repo, "commit", "-m", "add abc")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "a*.txt").write_text("glob name\n")
+
+            result = _merge_reviewed_patch(session, "main")
+
+            self.assertTrue(result.changed)
+            self.assertEqual(_git(repo, "show", "main:a*.txt"), "glob name")
+
+    def test_merge_aborts_when_target_worktree_switched_branches(self) -> None:
+        # The branch-to-worktree match is sampled at merge start; if the user
+        # switches that worktree during the apply window, the final ff-merge
+        # must not advance whatever branch HEAD now points at.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            target = root / "target"
+            _init_repo(repo)
+            _git(repo, "branch", "feature")
+            _git(repo, "worktree", "add", str(target), "feature")
+            head_sha = _git(repo, "rev-parse", "HEAD")
+            new_sha = _git(
+                repo,
+                "commit-tree",
+                f"{head_sha}^{{tree}}",
+                "-p",
+                head_sha,
+                "-m",
+                "advance",
+            )
+            _git(target, "checkout", "-b", "elsewhere")
+
+            with self.assertRaisesRegex(
+                LocalBranchMergeError, "no longer checked out"
+            ):
+                _fast_forward_target_branch(
+                    repo,
+                    "feature",
+                    head_sha,
+                    new_sha,
+                    checked_out_path=target,
+                    hooks_path=root / "hooks",
+                )
+            self.assertEqual(_git(repo, "rev-parse", "feature"), head_sha)
+            self.assertEqual(_git(repo, "rev-parse", "elsewhere"), head_sha)
 
     def test_follow_up_review_can_revert_previously_merged_change(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

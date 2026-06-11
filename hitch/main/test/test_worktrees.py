@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,7 +11,6 @@ from django.test import SimpleTestCase, override_settings
 from hitch.main import worktrees
 from hitch.main.test.support import _git, _init_repo
 from hitch.main.worktrees import (
-    WorktreeCleanupError,
     WorktreeCreationError,
     cleanup_managed_worktree_path,
     cleanup_worktree,
@@ -336,7 +336,10 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertFalse(cleaned)
             self.assertTrue(unmanaged.exists())
 
-    def test_cleanup_reports_git_failure(self) -> None:
+    def test_cleanup_is_idempotent_after_worktree_already_removed(self) -> None:
+        # A failed ``git worktree remove`` (here: the path is already gone)
+        # falls back to reaping the directory and pruning the admin entry, so
+        # repeated cleanup converges instead of raising forever.
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             repo = root / "source"
@@ -346,8 +349,103 @@ class ManagedWorktreeTests(SimpleTestCase):
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
                 cleanup_worktree(managed_worktree)
-                with self.assertRaises(WorktreeCleanupError):
-                    cleanup_worktree(managed_worktree)
+                cleanup_worktree(managed_worktree)
+            self.assertFalse(managed_worktree.path.exists())
+            self.assertEqual(
+                _git(repo, "branch", "--list", managed_worktree.branch), ""
+            )
+
+    def test_cleanup_managed_worktree_path_reaps_directory_without_gitlink(
+        self,
+    ) -> None:
+        # A worktree half-deleted out-of-band loses its .git link, so the
+        # source repo can't be located; cleanup must still free the directory
+        # instead of returning False forever.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(str(repo))
+                (managed_worktree.path / ".git").unlink()
+
+                self.assertTrue(
+                    cleanup_managed_worktree_path(str(managed_worktree.path))
+                )
+            self.assertFalse(managed_worktree.path.exists())
+
+    def test_cleanup_managed_worktree_path_reaps_when_source_repo_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(str(repo))
+                shutil.rmtree(repo)
+
+                self.assertTrue(
+                    cleanup_managed_worktree_path(str(managed_worktree.path))
+                )
+            self.assertFalse(managed_worktree.path.exists())
+
+    def test_cleanup_managed_worktree_path_never_reaps_non_leaf_directories(
+        self,
+    ) -> None:
+        # The gitlink-missing fallback must only delete a branch-addressable
+        # <base>/<slug>/<suffix> leaf: a stale cwd naming the managed base or
+        # a slug directory must not wipe the live worktrees beneath it.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(str(repo))
+                slug_dir = managed_worktree.path.parent
+
+                self.assertFalse(cleanup_managed_worktree_path(str(managed)))
+                self.assertFalse(cleanup_managed_worktree_path(str(slug_dir)))
+            self.assertTrue(managed_worktree.path.is_dir())
+
+    def test_create_worktree_cleans_up_after_add_failure(self) -> None:
+        # ``worktree add -b`` creates the branch and admin entry before the
+        # checkout; a failure mid-add (e.g. a timeout SIGKILLing git) must not
+        # strand them, or every retry leaks another branch.
+        def _fail_after_partial_add(
+            repo: Path, args: list[str], *, disable_hooks: bool
+        ) -> None:
+            branch = args[args.index("-b") + 1]
+            path = Path(args[args.index("-b") + 2])
+            _git(repo, "branch", branch)
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "partial.txt").write_text("partial checkout\n")
+            raise WorktreeCreationError("simulated timeout")
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+
+            with (
+                override_settings(HITCH_WORKTREES_DIR=managed),
+                patch.object(worktrees, "_add_worktree", _fail_after_partial_add),
+                self.assertRaisesRegex(WorktreeCreationError, "simulated timeout"),
+            ):
+                create_worktree_for_session(str(repo))
+
+            self.assertEqual(_git(repo, "branch", "--list", "hitch/*"), "")
+            leftovers = [
+                child
+                for repo_dir in (managed.iterdir() if managed.is_dir() else [])
+                for child in repo_dir.iterdir()
+            ]
+            self.assertEqual(leftovers, [])
 
     def test_git_wrapper_reports_spawn_failure(self) -> None:
         with (
