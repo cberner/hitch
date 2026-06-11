@@ -1121,12 +1121,13 @@
                             if (!response.ok) throw new Error("rename request failed");
                             if (input) input.value = name;
                             // Mirror session_index.display_title_for: the server
-                            // stores the title truncated to 80 chars, so the
-                            // optimistic update must match or the visible title
-                            // shifts on the next reload.
+                            // stores the title truncated to display_title_max_len,
+                            // so the optimistic update must match or the visible
+                            // title shifts on the next reload.
                             if (title) {
-                                title.textContent = name.length > 80
-                                    ? name.slice(0, 80).replace(/\s+$/, "") + "..."
+                                const maxLen = {{ display_title_max_len }};
+                                title.textContent = name.length > maxLen
+                                    ? name.slice(0, maxLen).replace(/\s+$/, "") + "..."
                                     : name;
                             }
                             if (renamePanel) renamePanel.hidden = true;
