@@ -66,11 +66,13 @@ from hitch.main.models import (
     CodexInstance,
     Project,
     ProposedSession,
+    SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
 )
 from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
-from hitch.main.runtime import app_server_pool, codex_events, codex_pool
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
+from hitch.main.runtime.rollout_state import _rollout_path_from_value
 from hitch.main.runtime.sdk_values import truncate_for_prompt
 from hitch.main.sessions import session_index
 from hitch.main.workflows import engine, system_agents
@@ -979,7 +981,7 @@ def _handle_autonomous_goal_agent_finished(
     # read+parse. Mirrors the QA/spec-critic finish handlers, which all read
     # ``_final_agent_text`` before their locked section.
     raw_output = system_agents._final_agent_text(instance.events_path)
-    tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
+    tokens_used = _autonomous_goal_instance_tokens_used(instance)
     with transaction.atomic():
         autonomous_goal = (
             AutonomousGoal.objects.select_related("project")
@@ -1429,6 +1431,42 @@ def _autonomous_goal_current_stack_proposal_resolution(
             system_agents._resolved_stack_proposal_candidate_cleanup_cwd(proposal),
         )
     return "", ""
+
+def _autonomous_goal_instance_tokens_used(instance: CodexInstance) -> int | None:
+    """Cumulative thread token usage for an autonomous-goal worker.
+
+    Codex only emits ``thread/goal/updated`` (and its ``tokensUsed`` counter)
+    when the model itself sets a thread goal, which the hidden candidate and
+    judge sessions normally never do -- reading only goal events left budget
+    tracking at ``None`` forever, so proposals displayed zero tokens and every
+    budgeted retry counted against the no-progress cap instead of the budget.
+    Prefer the rollout file's per-turn TokenCount totals, which Codex always
+    persists, keeping goal events as a fallback when no rollout is readable.
+    """
+    rollout_tokens = _rollout_total_tokens_for_thread(instance.thread_id)
+    goal_tokens = codex_events.latest_goal_tokens_for_instance(instance)
+    if rollout_tokens is None:
+        return goal_tokens
+    if goal_tokens is None:
+        return rollout_tokens
+    return max(rollout_tokens, goal_tokens)
+
+def _rollout_total_tokens_for_thread(thread_id: str) -> int | None:
+    if not thread_id:
+        return None
+    codex_path = (
+        SessionMetadata.objects.filter(thread_id=thread_id)
+        .exclude(codex_path="")
+        .values_list("codex_path", flat=True)
+        .first()
+    )
+    rollout_path = _rollout_path_from_value(codex_path)
+    if rollout_path is None:
+        return None
+    usage = rollout.latest_token_usage(rollout_path)
+    if usage is None:
+        return None
+    return usage["total_tokens"]
 
 def _record_autonomous_goal_proposal_budget_tokens(
     workflow: SystemWorkflow, instance: CodexInstance, tokens_used: int | None

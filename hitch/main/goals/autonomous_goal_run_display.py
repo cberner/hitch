@@ -24,7 +24,6 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.runtime import codex_events
 from hitch.main.sessions import token_usage
 from hitch.main.sessions.session_settings import (
     _active_project_from_request,
@@ -438,7 +437,7 @@ def _autonomous_goal_running_token_count(
     persisted_tokens = _workflow_state_int(
         workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
     )
-    current_tokens = codex_events.latest_goal_tokens_for_instance(instance)
+    current_tokens = autonomous_goals._autonomous_goal_instance_tokens_used(instance)
     if current_tokens is None:
         return persisted_tokens
     previous_tokens = _autonomous_goal_recorded_thread_tokens(workflow, instance)
@@ -581,6 +580,9 @@ def _attach_proposed_session_display_state(
         proposed_session.tokens_used_display = _proposed_session_tokens_used_display(  # type: ignore[attr-defined]
             proposed_session
         )
+        proposed_session.stack_stopped_display = (  # type: ignore[attr-defined]
+            _proposed_session_stack_stopped_display(proposed_session)
+        )
 
 
 def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
@@ -614,6 +616,26 @@ def _proposed_session_tokens_used_display(proposed_session: ProposedSession) -> 
     if tokens is None:
         return ""
     return f"{token_usage._format_token_count(tokens)} tokens"
+
+
+# Short tile-level explanations for why a stacked-diff chain ended on this
+# proposal instead of continuing. Without them the goal badge just says the
+# proposal is waiting for review and the only trace of the stop is workflow
+# state, so a stack that quietly ended looks like a continuation bug.
+_STACK_STOP_REASON_DISPLAY = {
+    "candidate_no_proposal": "no further proposal found",
+    "judge_confidence_below_threshold": "judge confidence below threshold",
+    "stacked_diff_continuation_failed": "continuation failed",
+}
+
+
+def _proposed_session_stack_stopped_display(proposed_session: ProposedSession) -> str:
+    reason = _proposal_metadata(proposed_session).get(
+        autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+    )
+    if not isinstance(reason, str) or not reason:
+        return ""
+    return _STACK_STOP_REASON_DISPLAY.get(reason, reason.replace("_", " "))
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
