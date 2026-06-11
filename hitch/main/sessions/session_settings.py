@@ -26,25 +26,14 @@ from hitch.main.runtime import disk_cleanup
 from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
 from hitch.main.sessions.session_pr_plan import _PR_SLASH_PROMPT
 from hitch.main.sessions.settings_cookies import (
-    _APPROVAL_COOKIE,
-    _AUTO_PR_COOKIE,
-    _AUTO_QA_COOKIE,
-    _CODING_AGENT_COOKIE,
     _DEFAULT_APPROVAL_MODE,
     _EFFORT_COOKIE,
-    _ENABLE_MEMORIES_COOKIE,
-    _LAST_SELECTED_REPO_COOKIE,
     _MANAGED_WORKTREE_DEFAULT_SANDBOX_POLICY,
     _MODEL_COOKIE,
-    _SANDBOX_COOKIE,
-    _SHOW_ARCHIVED_COOKIE,
-    _SHOW_NO_PROJECT_SESSIONS_COOKIE,
-    _SPEC_CRITIC_COOKIE,
-    _USE_WORKTREES_COOKIE,
+    _SETTING_SPECS,
     _VALID_APPROVAL_MODES,
     _VALID_SANDBOX_POLICIES,
     _VALID_WEB_SEARCH_MODES,
-    _WEB_SEARCH_COOKIE,
     _WEB_SEARCH_MODE_OPTIONS,
     ResolvedSettings,
     SessionProjectVisibility,
@@ -52,11 +41,7 @@ from hitch.main.sessions.settings_cookies import (
     _effective_coding_agent,
     _option_label,
     _read_cookie,
-    _read_extra_system_prompt_cookie,
-    _read_selected_project_cookie,
-    _read_visible_session_project_ids_cookie,
     _settings_cookie_updates,
-    _valid_visible_session_project_ids,
     _web_search_mode_label,
 )
 from hitch.main.workflows import system_agents
@@ -385,25 +370,10 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
     if user is not None:
         return _settings_values_for_user(_settings_for_user(user))
     return SettingsValues(
-        model=_read_cookie(request, _MODEL_COOKIE),
-        reasoning_effort=_read_cookie(request, _EFFORT_COOKIE),
-        sandbox_policy=_read_cookie(request, _SANDBOX_COOKIE),
-        approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
-        coding_agent=_read_cookie(request, _CODING_AGENT_COOKIE),
-        extra_system_prompt=_read_extra_system_prompt_cookie(request),
-        use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
-        auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
-        auto_qa_enabled=_read_cookie(request, _AUTO_QA_COOKIE) == "true",
-        spec_critic_enabled=_read_cookie(request, _SPEC_CRITIC_COOKIE) == "true",
-        web_search_mode=_read_cookie(request, _WEB_SEARCH_COOKIE),
-        show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
-        last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
-        selected_project_id=_read_selected_project_cookie(request),
-        visible_session_project_ids=_read_visible_session_project_ids_cookie(request),
-        show_no_project_sessions=(
-            _read_cookie(request, _SHOW_NO_PROJECT_SESSIONS_COOKIE) != "false"
-        ),
-        enable_memories=_read_cookie(request, _ENABLE_MEMORIES_COOKIE) == "true",
+        **{
+            spec.field: spec.from_cookie(_read_cookie(request, spec.cookie))
+            for spec in _SETTING_SPECS
+        }
     )
 
 
@@ -414,58 +384,21 @@ def _settings_for_user(user: Any) -> UserSettings:
 
 def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
     return SettingsValues(
-        model=settings.model,
-        reasoning_effort=settings.reasoning_effort,
-        sandbox_policy=settings.sandbox_policy,
-        approval_mode=settings.approval_mode,
-        coding_agent=settings.coding_agent,
-        extra_system_prompt=settings.extra_system_prompt,
-        use_worktrees=settings.use_worktrees,
-        auto_pr_enabled=settings.auto_pr_enabled,
-        auto_qa_enabled=settings.auto_qa_enabled,
-        spec_critic_enabled=settings.spec_critic_enabled,
-        web_search_mode=settings.web_search_mode,
-        show_archived_sessions=settings.show_archived_sessions,
-        last_selected_repo=settings.last_selected_repo,
-        selected_project_id=settings.selected_project_id,
-        visible_session_project_ids=_valid_visible_session_project_ids(
-            settings.visible_session_project_ids
-        ),
-        show_no_project_sessions=settings.show_no_project_sessions,
-        enable_memories=settings.enable_memories,
+        **{
+            spec.field: spec.from_model(getattr(settings, spec.field))
+            for spec in _SETTING_SPECS
+        }
     )
 
 
 def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
     settings = _settings_for_user(user)
     updates: list[str] = []
-    visible_session_project_ids = (
-        list(values.visible_session_project_ids)
-        if values.visible_session_project_ids is not None
-        else None
-    )
-    for field, value in (
-        ("model", values.model),
-        ("reasoning_effort", values.reasoning_effort),
-        ("sandbox_policy", values.sandbox_policy),
-        ("approval_mode", values.approval_mode),
-        ("coding_agent", values.coding_agent),
-        ("extra_system_prompt", values.extra_system_prompt),
-        ("use_worktrees", values.use_worktrees),
-        ("auto_pr_enabled", values.auto_pr_enabled),
-        ("auto_qa_enabled", values.auto_qa_enabled),
-        ("spec_critic_enabled", values.spec_critic_enabled),
-        ("web_search_mode", values.web_search_mode),
-        ("show_archived_sessions", values.show_archived_sessions),
-        ("last_selected_repo", values.last_selected_repo),
-        ("selected_project_id", values.selected_project_id),
-        ("visible_session_project_ids", visible_session_project_ids),
-        ("show_no_project_sessions", values.show_no_project_sessions),
-        ("enable_memories", values.enable_memories),
-    ):
-        if getattr(settings, field) != value:
-            setattr(settings, field, value)
-            updates.append(field)
+    for spec in _SETTING_SPECS:
+        value = spec.to_model(getattr(values, spec.field))
+        if getattr(settings, spec.field) != value:
+            setattr(settings, spec.field, value)
+            updates.append(spec.field)
     if updates:
         settings.save(update_fields=[*updates, "updated_at"])
     return settings

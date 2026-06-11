@@ -1,7 +1,8 @@
 import base64
 import binascii
 import json
-from typing import NamedTuple
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 from django.core import signing
 from django.http import HttpRequest, HttpResponse
@@ -170,31 +171,8 @@ def _valid_web_search_mode_or_default(value: str) -> str:
 
 def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
     return {
-        _MODEL_COOKIE: values.model,
-        _EFFORT_COOKIE: values.reasoning_effort,
-        _SANDBOX_COOKIE: values.sandbox_policy,
-        _APPROVAL_COOKIE: values.approval_mode,
-        _CODING_AGENT_COOKIE: _effective_coding_agent(values),
-        _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
-            values.extra_system_prompt
-        ),
-        _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
-        _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
-        _AUTO_QA_COOKIE: "true" if values.auto_qa_enabled else "false",
-        _SPEC_CRITIC_COOKIE: "true" if values.spec_critic_enabled else "false",
-        _WEB_SEARCH_COOKIE: values.web_search_mode,
-        _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
-        _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
-        _SELECTED_PROJECT_COOKIE: (
-            str(values.selected_project_id) if values.selected_project_id is not None else ""
-        ),
-        _VISIBLE_SESSION_PROJECTS_COOKIE: _encode_visible_session_project_ids_cookie(
-            values.visible_session_project_ids
-        ),
-        _SHOW_NO_PROJECT_SESSIONS_COOKIE: (
-            "true" if values.show_no_project_sessions else "false"
-        ),
-        _ENABLE_MEMORIES_COOKIE: "true" if values.enable_memories else "false",
+        spec.cookie: spec.to_cookie(getattr(values, spec.field))
+        for spec in _SETTING_SPECS
     }
 
 
@@ -202,81 +180,13 @@ def _valid_cookie_setting_updates(
     request: HttpRequest,
 ) -> dict[str, str | bool | int | list[int] | None]:
     updates: dict[str, str | bool | int | list[int] | None] = {}
-    model = _read_signed_cookie_if_present(request, _MODEL_COOKIE)
-    if model is not None and len(model) <= _MODEL_MAX_LEN:
-        updates["model"] = model
-    effort = _read_signed_cookie_if_present(request, _EFFORT_COOKIE)
-    if effort is not None and (not effort or effort in {e.value for e in ReasoningEffort}):
-        updates["reasoning_effort"] = effort
-    sandbox = _read_signed_cookie_if_present(request, _SANDBOX_COOKIE)
-    if sandbox is not None:
-        updates["sandbox_policy"] = sandbox if sandbox in _VALID_SANDBOX_POLICIES else ""
-    approval = _read_signed_cookie_if_present(request, _APPROVAL_COOKIE)
-    if approval is not None:
-        updates["approval_mode"] = (
-            approval if approval in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
-        )
-    coding_agent = _read_signed_cookie_if_present(request, _CODING_AGENT_COOKIE)
-    if coding_agent is not None:
-        updates["coding_agent"] = (
-            coding_agent
-            if coding_agent in coding_agents.VALID_CODING_AGENTS
-            else coding_agents.DEFAULT_CODING_AGENT
-        )
-    extra_prompt = _read_signed_cookie_if_present(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
-    if extra_prompt is not None:
-        decoded = _decode_extra_system_prompt_value(extra_prompt)
-        if len(decoded) <= _EXTRA_SYSTEM_PROMPT_MAX_LEN:
-            updates["extra_system_prompt"] = decoded
-    show_archived = _read_signed_cookie_if_present(request, _SHOW_ARCHIVED_COOKIE)
-    if show_archived in {"true", "false"}:
-        updates["show_archived_sessions"] = show_archived == "true"
-    use_worktrees = _read_signed_cookie_if_present(request, _USE_WORKTREES_COOKIE)
-    if use_worktrees in {"true", "false"}:
-        updates["use_worktrees"] = use_worktrees == "true"
-    auto_pr = _read_signed_cookie_if_present(request, _AUTO_PR_COOKIE)
-    if auto_pr in {"true", "false"}:
-        updates["auto_pr_enabled"] = auto_pr == "true"
-    auto_qa = _read_signed_cookie_if_present(request, _AUTO_QA_COOKIE)
-    if auto_qa in {"true", "false"}:
-        updates["auto_qa_enabled"] = auto_qa == "true"
-    spec_critic = _read_signed_cookie_if_present(request, _SPEC_CRITIC_COOKIE)
-    if spec_critic in {"true", "false"}:
-        updates["spec_critic_enabled"] = spec_critic == "true"
-    web_search = _read_signed_cookie_if_present(request, _WEB_SEARCH_COOKIE)
-    if web_search is not None:
-        updates["web_search_mode"] = (
-            web_search if web_search in _VALID_WEB_SEARCH_MODES else ""
-        )
-    last_selected_repo = _read_signed_cookie_if_present(
-        request, _LAST_SELECTED_REPO_COOKIE
-    )
-    if (
-        last_selected_repo is not None
-        and len(last_selected_repo) <= _LAST_SELECTED_REPO_MAX_LEN
-    ):
-        updates["last_selected_repo"] = last_selected_repo
-    selected_project_raw = _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
-    if selected_project_raw is not None:
-        updates["selected_project_id"] = _valid_selected_project_id(selected_project_raw)
-    visible_projects_raw = _read_signed_cookie_if_present(
-        request, _VISIBLE_SESSION_PROJECTS_COOKIE
-    )
-    if visible_projects_raw is not None:
-        visible_project_ids = _valid_visible_session_project_ids(
-            _decode_visible_session_project_ids_cookie(visible_projects_raw)
-        )
-        updates["visible_session_project_ids"] = (
-            list(visible_project_ids) if visible_project_ids is not None else None
-        )
-    show_no_project = _read_signed_cookie_if_present(
-        request, _SHOW_NO_PROJECT_SESSIONS_COOKIE
-    )
-    if show_no_project in {"true", "false"}:
-        updates["show_no_project_sessions"] = show_no_project == "true"
-    enable_memories = _read_signed_cookie_if_present(request, _ENABLE_MEMORIES_COOKIE)
-    if enable_memories in {"true", "false"}:
-        updates["enable_memories"] = enable_memories == "true"
+    for spec in _SETTING_SPECS:
+        raw = _read_signed_cookie_if_present(request, spec.cookie)
+        if raw is None:
+            continue
+        value = spec.import_value(raw)
+        if value is not _SKIP_IMPORT:
+            updates[spec.field] = value
     return updates
 
 
@@ -288,23 +198,6 @@ def _read_signed_cookie_if_present(request: HttpRequest, name: str) -> str | Non
     except Exception:
         return None
     return (value or "").strip()
-
-
-def _read_selected_project_cookie(request: HttpRequest) -> int | None:
-    return _valid_selected_project_id(
-        _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
-    )
-
-
-def _read_visible_session_project_ids_cookie(
-    request: HttpRequest,
-) -> tuple[int, ...] | None:
-    raw = _read_signed_cookie_if_present(request, _VISIBLE_SESSION_PROJECTS_COOKIE)
-    if raw is None:
-        return None
-    return _valid_visible_session_project_ids(
-        _decode_visible_session_project_ids_cookie(raw)
-    )
 
 
 def _encode_visible_session_project_ids_cookie(values: tuple[int, ...] | None) -> str:
@@ -365,13 +258,6 @@ def _read_cookie(request: HttpRequest, name: str) -> str:
     return (value or "").strip()
 
 
-def _read_extra_system_prompt_cookie(request: HttpRequest) -> str:
-    encoded = _read_cookie(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
-    if not encoded:
-        return ""
-    return _decode_extra_system_prompt_value(encoded)
-
-
 def _decode_extra_system_prompt_value(encoded: str) -> str:
     try:
         decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode()
@@ -385,6 +271,179 @@ def _encode_extra_system_prompt_cookie(value: str) -> str:
     if not value:
         return ""
     return base64.urlsafe_b64encode(value.encode()).decode("ascii")
+
+
+class _SettingSpec(NamedTuple):
+    """One settings field, declared once.
+
+    Owns every representation of the field: the ``SettingsValues`` attribute
+    (which doubles as the ``UserSettings`` column name), the signed cookie,
+    and the codecs between them. The cookie write, the anonymous cookie
+    read, the login-time cookie import, and the UserSettings load/save are
+    all derived from ``_SETTING_SPECS``, so adding a setting means adding
+    one spec here (plus the model column and the settings-dialog form
+    handling) instead of hand-editing five parallel enumerations.
+
+    ``import_value`` validates a raw cookie for the login-time import and
+    returns a model-ready value, or ``_SKIP_IMPORT`` to drop the update
+    (matching the historical per-field skip-vs-coerce semantics).
+    """
+
+    field: str
+    cookie: str
+    to_cookie: Callable[[Any], str]
+    from_cookie: Callable[[str], Any]
+    import_value: Callable[[str], Any]
+    to_model: Callable[[Any], Any] = lambda value: value
+    from_model: Callable[[Any], Any] = lambda value: value
+
+
+_SKIP_IMPORT = object()
+
+
+def _bool_to_cookie(value: Any) -> str:
+    return "true" if value else "false"
+
+
+def _bool_import(raw: str) -> Any:
+    return raw == "true" if raw in ("true", "false") else _SKIP_IMPORT
+
+
+def _bool_spec(field: str, cookie: str, *, default_true: bool = False) -> _SettingSpec:
+    return _SettingSpec(
+        field=field,
+        cookie=cookie,
+        to_cookie=_bool_to_cookie,
+        from_cookie=(
+            (lambda raw: raw != "false") if default_true else (lambda raw: raw == "true")
+        ),
+        import_value=_bool_import,
+    )
+
+
+def _import_extra_system_prompt(raw: str) -> Any:
+    decoded = _decode_extra_system_prompt_value(raw)
+    return decoded if len(decoded) <= _EXTRA_SYSTEM_PROMPT_MAX_LEN else _SKIP_IMPORT
+
+
+def _import_visible_session_project_ids(raw: str) -> Any:
+    valid = _valid_visible_session_project_ids(
+        _decode_visible_session_project_ids_cookie(raw)
+    )
+    return list(valid) if valid is not None else None
+
+
+_SETTING_SPECS: tuple[_SettingSpec, ...] = (
+    _SettingSpec(
+        "model",
+        _MODEL_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: raw if len(raw) <= _MODEL_MAX_LEN else _SKIP_IMPORT,
+    ),
+    _SettingSpec(
+        "reasoning_effort",
+        _EFFORT_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: (
+            raw
+            if not raw or raw in {effort.value for effort in ReasoningEffort}
+            else _SKIP_IMPORT
+        ),
+    ),
+    _SettingSpec(
+        "sandbox_policy",
+        _SANDBOX_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: raw if raw in _VALID_SANDBOX_POLICIES else "",
+    ),
+    _SettingSpec(
+        "approval_mode",
+        _APPROVAL_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: (
+            raw if raw in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+        ),
+    ),
+    _SettingSpec(
+        "coding_agent",
+        _CODING_AGENT_COOKIE,
+        to_cookie=lambda value: (
+            value
+            if value in coding_agents.VALID_CODING_AGENTS
+            else coding_agents.DEFAULT_CODING_AGENT
+        ),
+        from_cookie=str,
+        import_value=lambda raw: (
+            raw
+            if raw in coding_agents.VALID_CODING_AGENTS
+            else coding_agents.DEFAULT_CODING_AGENT
+        ),
+    ),
+    _SettingSpec(
+        "extra_system_prompt",
+        _EXTRA_SYSTEM_PROMPT_COOKIE,
+        to_cookie=_encode_extra_system_prompt_cookie,
+        from_cookie=_decode_extra_system_prompt_value,
+        import_value=_import_extra_system_prompt,
+    ),
+    _bool_spec("use_worktrees", _USE_WORKTREES_COOKIE),
+    _bool_spec("auto_pr_enabled", _AUTO_PR_COOKIE),
+    _bool_spec("auto_qa_enabled", _AUTO_QA_COOKIE),
+    _bool_spec("spec_critic_enabled", _SPEC_CRITIC_COOKIE),
+    _SettingSpec(
+        "web_search_mode",
+        _WEB_SEARCH_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: raw if raw in _VALID_WEB_SEARCH_MODES else "",
+    ),
+    _bool_spec("show_archived_sessions", _SHOW_ARCHIVED_COOKIE),
+    _SettingSpec(
+        "last_selected_repo",
+        _LAST_SELECTED_REPO_COOKIE,
+        to_cookie=str,
+        from_cookie=str,
+        import_value=lambda raw: (
+            raw if len(raw) <= _LAST_SELECTED_REPO_MAX_LEN else _SKIP_IMPORT
+        ),
+    ),
+    _SettingSpec(
+        "selected_project_id",
+        _SELECTED_PROJECT_COOKIE,
+        to_cookie=lambda value: str(value) if value is not None else "",
+        from_cookie=_valid_selected_project_id,
+        import_value=_valid_selected_project_id,
+    ),
+    _SettingSpec(
+        "visible_session_project_ids",
+        _VISIBLE_SESSION_PROJECTS_COOKIE,
+        to_cookie=_encode_visible_session_project_ids_cookie,
+        from_cookie=lambda raw: _valid_visible_session_project_ids(
+            _decode_visible_session_project_ids_cookie(raw)
+        ),
+        import_value=_import_visible_session_project_ids,
+        to_model=lambda value: list(value) if value is not None else None,
+        from_model=_valid_visible_session_project_ids,
+    ),
+    _bool_spec(
+        "show_no_project_sessions",
+        _SHOW_NO_PROJECT_SESSIONS_COOKIE,
+        default_true=True,
+    ),
+    _bool_spec("enable_memories", _ENABLE_MEMORIES_COOKIE),
+)
+
+# Completeness guarantee: every SettingsValues field has exactly one spec.
+# Forgetting to register a new setting fails at import time instead of
+# silently dropping the field from one of the derived code paths.
+assert {spec.field for spec in _SETTING_SPECS} == set(SettingsValues._fields), (
+    "settings registry out of sync with SettingsValues"
+)
+
 
 
 def _signed_cookie_fits(name: str, value: str) -> bool:
