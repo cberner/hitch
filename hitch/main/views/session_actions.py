@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from openai_codex.errors import InvalidRequestError
 
 from hitch.main import demo
 from hitch.main.models import (
@@ -52,6 +53,25 @@ def _apply_live_session_approval_mode(
         effective_approval_mode,
     )
 
+
+def _resumed_thread_cwd(request: HttpRequest, session_id: str) -> str | None:
+    """Resolve a session's cwd via thread_resume; None for archived/unknown.
+
+    The app-server raises InvalidRequestError for archived and nonexistent
+    threads -- expected states the rest of the codebase handles, so these
+    endpoints must answer 400 instead of 500ing on it.
+    """
+    settings = _stored_settings(request)
+    try:
+        resumed = app_server_pool.run_borrowed_op_with_retry(
+            common.Codex,
+            lambda codex: codex._client.thread_resume(session_id),
+            enable_memories=settings.enable_memories,
+        )
+    except InvalidRequestError:
+        return None
+    return common._thread_cwd(resumed.thread) or ""
+
 @require_http_methods(["POST"])
 def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     project, error = common._posted_project(request.POST.get("project", ""))
@@ -60,13 +80,10 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
-        settings = _stored_settings(request)
-        resumed = app_server_pool.run_borrowed_op_with_retry(
-            common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
-            enable_memories=settings.enable_memories,
-        )
-        cwd = common._thread_cwd(resumed.thread) or ""
+        resumed_cwd = _resumed_thread_cwd(request, session_id)
+        if resumed_cwd is None:
+            return HttpResponseBadRequest("session is archived or unknown")
+        cwd = resumed_cwd
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -85,13 +102,10 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
-        settings = _stored_settings(request)
-        resumed = app_server_pool.run_borrowed_op_with_retry(
-            common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
-            enable_memories=settings.enable_memories,
-        )
-        cwd = common._thread_cwd(resumed.thread) or ""
+        resumed_cwd = _resumed_thread_cwd(request, session_id)
+        if resumed_cwd is None:
+            return HttpResponseBadRequest("session is archived or unknown")
+        cwd = resumed_cwd
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -180,11 +194,14 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     ).exists():
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
-    resumed = app_server_pool.run_borrowed_op_with_retry(
-        common.Codex,
-        lambda codex: codex._client.thread_resume(session_id),
-        enable_memories=settings.enable_memories,
-    )
+    try:
+        resumed = app_server_pool.run_borrowed_op_with_retry(
+            common.Codex,
+            lambda codex: codex._client.thread_resume(session_id),
+            enable_memories=settings.enable_memories,
+        )
+    except InvalidRequestError:
+        return HttpResponseBadRequest("session is archived or unknown")
     thread = resumed.thread
     cwd = common._thread_cwd(thread)
     if not cwd:

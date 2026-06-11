@@ -256,7 +256,12 @@ def _cached_token_usage_matches_rollout_state(
 def _cached_token_usage_has_daily_usage(
     cache: ArchivedSessionTokenUsage, rollout_path: Path | None
 ) -> bool:
-    return rollout_path is None or bool(_daily_token_usage_from_cache(cache))
+    if rollout_path is None or _daily_token_usage_from_cache(cache):
+        return True
+    # An all-zero row (a rollout with no token_count events) legitimately has
+    # no per-day history; demanding a non-empty daily map would skip the cache
+    # and re-parse such rollouts on every single read, forever.
+    return not _cached_token_usage_has_counts(cache)
 
 
 def _cached_token_usage_has_counts(cache: ArchivedSessionTokenUsage) -> bool:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Literal, NamedTuple
 
+from django.db import models
 from django.http import Http404, HttpRequest
 from django.urls import reverse
 from django.utils import timezone
@@ -77,19 +78,28 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         any(goal.auto_proposal_enabled for goal in goals)
         and autonomous_goals._auto_proposals_paused_by_usage_quota_throttled()
     )
-    workflows = (
+    # Only the newest workflow per goal is displayed, but auto-proposal
+    # creates a workflow per scheduler run and nothing prunes terminal rows
+    # -- materializing the full history (each row carrying a multi-KB state
+    # blob) made this page slower with every passing week. Resolve the
+    # newest ids first, then fetch just those rows.
+    main_thread_ids = [
+        autonomous_goals._autonomous_goal_main_thread_id(goal_id)
+        for goal_id in goal_ids
+    ]
+    latest_workflow_ids = (
         SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id__in=[
-                autonomous_goals._autonomous_goal_main_thread_id(goal_id)
-                for goal_id in goal_ids
-            ],
+            main_thread_id__in=main_thread_ids,
         )
-        .order_by("main_thread_id", "-created_at")
+        .values("main_thread_id")
+        .annotate(latest_id=models.Max("id"))
+        .values_list("latest_id", flat=True)
     )
-    workflows_by_thread: dict[str, SystemWorkflow] = {}
-    for workflow in workflows:
-        workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
+    workflows_by_thread: dict[str, SystemWorkflow] = {
+        workflow.main_thread_id: workflow
+        for workflow in SystemWorkflow.objects.filter(pk__in=list(latest_workflow_ids))
+    }
     latest_workflows = list(workflows_by_thread.values())
     log_urls_by_workflow_id = _autonomous_goal_log_urls(latest_workflows)
     running_tokens_by_workflow_id = _autonomous_goal_running_token_counts(
