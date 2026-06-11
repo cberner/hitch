@@ -1,4 +1,5 @@
 """send_message: steering, workflow activation, and turn spawning."""
+import logging
 import os
 import uuid
 from collections.abc import Iterable
@@ -72,6 +73,8 @@ from hitch.main.sessions.settings_cookies import (
 )
 from hitch.main.views import common
 from hitch.main.workflows import pr_qa, spec_critic, system_agents
+
+logger = logging.getLogger(__name__)
 
 _PLAN_ACTION_APPROVE = "approve"
 
@@ -273,7 +276,18 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         def record_session_unarchived_for_accepted_turn() -> None:
             if not session_unarchived_for_turn:
                 return
-            _record_session_unarchived(session_id)
+            # Runs after the turn is already spawned: a transient failure here
+            # (e.g. "database is locked") must not 500 the request -- that
+            # would re-archive the session underneath the live worker and
+            # delete the input images it was handed.
+            try:
+                _record_session_unarchived(session_id)
+            except Exception:
+                logger.exception(
+                    "failed to record session %s unarchived for accepted turn",
+                    session_id,
+                )
+                return
             if metadata is not None:
                 metadata.codex_archived = False
                 metadata.codex_archived_at = None
@@ -596,8 +610,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         codex_pool.spawn_turn(**spawn_kwargs)
-        record_session_unarchived_for_accepted_turn()
+        # Ownership transfers the moment the spawn succeeds (matching
+        # new_session): any bookkeeping failure after this point must not
+        # delete files the worker was handed.
         input_images_owned = True
+        record_session_unarchived_for_accepted_turn()
         return redirect("session", session_id=session_id)
     except _TurnRejectedError as rejected:
         restore_archived_session_for_rejected_turn()

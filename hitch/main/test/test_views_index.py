@@ -5646,6 +5646,30 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 120_000)
         self.assertEqual(cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION)
 
+    def test_zero_usage_cache_short_circuits_rollout_reparse(self) -> None:
+        # A rollout with no token_count events caches an all-zero row with an
+        # empty daily map; that row must satisfy the cache gate -- demanding a
+        # non-empty daily history meant every later read re-parsed the whole
+        # file forever while still serving the same zeros.
+        rollout_path = _make_rollout(self, ["{}"], archived=True)
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="archived",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=rollout_path.stat().st_mtime_ns,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        thread = _session("archived", path=str(rollout_path))
+
+        with patch(
+            "hitch.main.sessions.token_usage._parse_token_usage_and_daily",
+            side_effect=AssertionError("zero-usage cache row must short-circuit"),
+        ):
+            snapshot = token_usage._token_usage_snapshot_for(thread)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["usage"]["total_tokens"], 0)
+        self.assertEqual(snapshot["daily_usage"], {})
+
     def test_cached_token_usage_matches_rollout_state_requires_current_version(
         self,
     ) -> None:

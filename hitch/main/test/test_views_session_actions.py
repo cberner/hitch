@@ -15,6 +15,7 @@ from django.test import (
 )
 from django.urls import reverse
 from openai_codex import Codex
+from openai_codex.errors import InvalidRequestError
 
 from hitch.main import demo, views
 from hitch.main.models import (
@@ -126,6 +127,24 @@ class SetSessionApprovalModeViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         metadata.refresh_from_db()
         self.assertEqual(metadata.approval_mode, "")
+
+    def test_archived_session_without_cached_cwd_returns_400(self) -> None:
+        # The cwd fallback resumes the thread; the app-server raises
+        # InvalidRequestError for archived/unknown threads -- an expected
+        # state that must answer 400 rather than 500.
+        with patch(
+            "hitch.main.views.session_actions.app_server_pool.run_borrowed_op_with_retry",
+            side_effect=InvalidRequestError(
+                code=-32600, message="thread is archived"
+            ),
+        ):
+            response = self.client.post(
+                reverse("set_session_approval_mode", kwargs={"session_id": "abc"}),
+                data={"approval_mode": "prompt_user"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SessionMetadata.objects.filter(thread_id="abc").exists())
 
     def test_rejects_invalid_session_approval_mode(self) -> None:
         metadata = SessionMetadata.objects.create(
