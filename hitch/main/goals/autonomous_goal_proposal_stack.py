@@ -8,7 +8,7 @@ Leaf module: imports nothing from ``system_agents`` to avoid an import cycle.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,6 +26,9 @@ AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
 _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
     "stacked_diff_continuation_stopped_reason"
+)
+_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY = (
+    "proposal_budget_tokens_used"
 )
 
 
@@ -191,12 +194,42 @@ def _autonomous_goal_proposal_allows_stack_continuation(
     metadata = _proposal_outcome_metadata(proposal, {})
     if metadata.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY):
         return False
+    if not _autonomous_goal_proposal_budget_allows_stack_continuation(
+        proposal, autonomous_goal, metadata=metadata
+    ):
+        return False
     return (
         _autonomous_goal_proposal_stack_continuation_metadata(
             proposal, autonomous_goal
         )
         is not None
     )
+
+
+def _autonomous_goal_proposal_budget_allows_stack_continuation(
+    proposal: ProposedSession,
+    autonomous_goal: AutonomousGoal,
+    *,
+    metadata: Mapping[str, object] | None = None,
+) -> bool:
+    budget = autonomous_goal.proposal_budget or 0
+    if budget <= 0:
+        return True
+    if metadata is None:
+        metadata = _proposal_outcome_metadata(proposal, {})
+    tokens_used = _proposal_metadata_non_negative_int(
+        metadata, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY
+    )
+    return tokens_used is None or tokens_used < budget
+
+
+def _proposal_metadata_non_negative_int(
+    metadata: Mapping[str, object], key: str
+) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 def _autonomous_goal_proposal_stack_continuation_metadata(

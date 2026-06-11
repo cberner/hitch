@@ -58,6 +58,7 @@ from hitch.main.goals.autonomous_goal_proposal_stack import (
     _autonomous_goal_stack_continuation_proposal,
     _autonomous_goal_unresolved_failure_notice_exists,
     _claim_autonomous_goal_stack_continuation_proposal,
+    _proposal_metadata_non_negative_int,
     _proposal_outcome_metadata,
 )
 from hitch.main.models import (
@@ -577,6 +578,9 @@ def _create_autonomous_goal_workflow_record(
         )
         if stack_metadata is None:
             raise ValueError("stack continuation proposal missing stack metadata")
+        _seed_stack_continuation_proposal_budget_state(
+            state, stack_continuation_proposal
+        )
         state[_AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY] = stack_metadata.depth
         state[_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY] = (
             stack_metadata.iteration + 1
@@ -608,6 +612,21 @@ def _create_autonomous_goal_workflow_record(
         return existing_workflow, False
 
     return workflow, True
+
+def _seed_stack_continuation_proposal_budget_state(
+    state: dict[str, Any], proposal: ProposedSession
+) -> None:
+    if _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY not in state:
+        return
+    metadata = _proposal_outcome_metadata(proposal, {})
+    for key in (
+        _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
+        _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
+    ):
+        value = _proposal_metadata_non_negative_int(metadata, key)
+        if value is not None:
+            state[key] = value
+
 
 def _spawn_autonomous_goal_candidate_or_block(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal

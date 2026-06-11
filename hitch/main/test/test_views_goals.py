@@ -685,6 +685,51 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
+    def test_page_treats_budget_exhausted_stack_proposal_as_review(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+            proposal_budget=1000,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+                "proposal_budget_tokens_used": 1000,
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+        self.assertNotContains(response, ">Ready</button>", html=False)
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
     def test_page_treats_legacy_stopped_stack_proposal_as_ready(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -1124,6 +1169,7 @@ class AutonomousGoalViewTests(TestCase):
             outcome_metadata={
                 "stacked_diff_depth": 3,
                 "stacked_diff_iteration": 2,
+                "proposal_budget_tokens_used": 1250,
             },
         )
 
@@ -1134,6 +1180,7 @@ class AutonomousGoalViewTests(TestCase):
             response,
             "Improve tests - High ambition - High confidence - Stack 2 of 3",
         )
+        self.assertContains(response, "Tokens used: 1,250 tokens")
 
     def test_proposed_session_stack_label_omits_invalid_iteration(self) -> None:
         proposed_session = ProposedSession(
