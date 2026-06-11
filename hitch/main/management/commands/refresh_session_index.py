@@ -7,7 +7,7 @@ from django.core.management.base import BaseCommand
 from openai_codex import Codex
 
 from hitch.main.models import Project
-from hitch.main.runtime import codex_pool
+from hitch.main.runtime import app_server_pool, codex_pool
 from hitch.main.sessions import session_index
 
 
@@ -31,7 +31,7 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         projects = list(Project.objects.all())
         config = codex_pool.app_server_config(enable_memories=False)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with app_server_pool.open_codex(lambda: Codex(config=config)) as codex:
             result = session_index.refresh_from_codex(
                 codex,
                 projects=projects,

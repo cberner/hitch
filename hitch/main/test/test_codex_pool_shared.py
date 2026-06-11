@@ -16,7 +16,7 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
 
-from hitch.main.runtime import codex_pool
+from hitch.main.runtime import app_server_pool, codex_pool
 
 _LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
 
@@ -82,10 +82,10 @@ def _counting_factory() -> tuple[Callable[[], Any], list[Any]]:
 class SharedCodexPoolTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        self.key = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
+        self.key = app_server_pool._pool_key(enable_memories=False, web_search_mode=None)
 
     def test_checkout_reuses_returned_instance(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
 
         first = pool.checkout(self.key, factory)
@@ -96,9 +96,9 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(len(built), 1)
 
     def test_distinct_config_keys_do_not_share_instances(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
-        key_mem = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
+        key_mem = app_server_pool._pool_key(enable_memories=True, web_search_mode=None)
 
         no_mem = pool.checkout(self.key, factory)
         with_mem = pool.checkout(key_mem, factory)
@@ -112,7 +112,7 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(len(built), 2)
 
     def test_unhealthy_release_drops_and_closes(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
 
         first = pool.checkout(self.key, factory)
@@ -125,7 +125,7 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(len(built), 2)
 
     def test_idle_never_exceeds_cap(self) -> None:
-        pool = codex_pool._SharedCodexPool(max_size=2)
+        pool = app_server_pool._SharedCodexPool(max_size=2)
         factory, built = _counting_factory()
 
         # Three concurrent checkouts force three constructions (idle is empty).
@@ -141,7 +141,7 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(sum(1 for c in built if _closed(c)), len(built) - idle_count)
 
     def test_concurrent_checkout_is_exclusive(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, _built = _counting_factory()
         barrier = threading.Barrier(2)
         held: list[Any] = []
@@ -163,7 +163,7 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertIsNot(held[0], held[1])
 
     def test_close_all_closes_idle_instances(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
 
         first = pool.checkout(self.key, factory)
@@ -174,7 +174,7 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(pool._idle, {})
 
     def test_checkout_drops_dead_idle_and_reconnects(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
 
         first = pool.checkout(self.key, factory)
@@ -190,13 +190,13 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(len(built), 2)
 
     def test_checkout_warm_only_returns_none_when_empty(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         # No warm server: must not construct one (that is the contended init).
         self.assertIsNone(pool.checkout_warm_only(self.key))
         self.assertEqual(pool._in_use, 0)
 
     def test_checkout_warm_only_reuses_and_skips_dead(self) -> None:
-        pool = codex_pool._SharedCodexPool()
+        pool = app_server_pool._SharedCodexPool()
         factory, built = _counting_factory()
         dead = pool.checkout(self.key, factory)
         live = pool.checkout(self.key, factory)
@@ -216,9 +216,9 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertEqual(len(built), 2)
 
     def test_full_pool_evicts_other_key_rather_than_starving(self) -> None:
-        pool = codex_pool._SharedCodexPool(max_size=2)
+        pool = app_server_pool._SharedCodexPool(max_size=2)
         factory, built = _counting_factory()
-        key_mem = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
+        key_mem = app_server_pool._pool_key(enable_memories=True, web_search_mode=None)
 
         # Fill the pool with two idle servers for the default key.
         a = pool.checkout(self.key, factory)
@@ -239,15 +239,15 @@ class BorrowCodexTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
         # borrow_codex uses the module-level singleton; isolate each test.
-        saved_pool = codex_pool._SHARED_POOL
-        codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()
+        saved_pool = app_server_pool._SHARED_POOL
+        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
         self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
 
     def test_testing_bypass_opens_and_closes_per_borrow(self) -> None:
         # Under TESTING the pool is bypassed: borrow_codex behaves like
         # open_codex so each patched Codex constructs fresh and is closed.
         factory, built = _counting_factory()
-        with codex_pool.borrow_codex(lambda **_: factory()) as codex:
+        with app_server_pool.borrow_codex(lambda **_: factory()) as codex:
             self.assertFalse(_closed(codex))
         self.assertTrue(_closed(codex))
         self.assertEqual(len(built), 1)
@@ -257,9 +257,9 @@ class BorrowCodexTests(SimpleTestCase):
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
 
-        with codex_pool.borrow_codex(codex_class) as first:
+        with app_server_pool.borrow_codex(codex_class) as first:
             self.assertFalse(_closed(first))
-        with codex_pool.borrow_codex(codex_class) as second:
+        with app_server_pool.borrow_codex(codex_class) as second:
             pass
 
         self.assertIs(second, first)
@@ -273,13 +273,13 @@ class BorrowCodexTests(SimpleTestCase):
 
         with (
             self.assertRaises(TransportClosedError),
-            codex_pool.borrow_codex(codex_class) as codex,
+            app_server_pool.borrow_codex(codex_class) as codex,
         ):
             raise TransportClosedError(_LOCKED)
 
         self.assertTrue(_closed(codex))
         # The dead transport is dropped; the next borrow reconstructs.
-        with codex_pool.borrow_codex(codex_class) as replacement:
+        with app_server_pool.borrow_codex(codex_class) as replacement:
             self.assertIsNot(replacement, codex)
         self.assertEqual(len(built), 2)
 
@@ -299,8 +299,8 @@ class _ProbeCodex(_FakeCodex):
 class RunBorrowedOpWithRetryTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        saved_pool = codex_pool._SHARED_POOL
-        codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()
+        saved_pool = app_server_pool._SHARED_POOL
+        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
         self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
 
     @override_settings(TESTING=False)
@@ -308,7 +308,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
         # Pre-warm one server, then return it to the idle pool.
-        with codex_pool.borrow_codex(codex_class) as warm:
+        with app_server_pool.borrow_codex(codex_class) as warm:
             pass
 
         seen: list[Any] = []
@@ -317,7 +317,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
             seen.append(codex)
             return "ok"
 
-        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+        result = app_server_pool.run_borrowed_op_with_retry(codex_class, operation)
 
         self.assertEqual(result, "ok")
         # Reused the warm server; no second construction and no init write.
@@ -336,7 +336,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
             seen.append(codex)
             return "ok"
 
-        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+        result = app_server_pool.run_borrowed_op_with_retry(codex_class, operation)
 
         self.assertEqual(result, "ok")
         # Empty pool: one cold open, run, and close (the cold path owns the server).
@@ -347,7 +347,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
     def test_warm_locked_op_drops_server_and_falls_back(self) -> None:
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
-        with codex_pool.borrow_codex(codex_class) as warm:
+        with app_server_pool.borrow_codex(codex_class) as warm:
             pass
 
         calls = {"n": 0}
@@ -358,7 +358,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
                 raise TransportClosedError(_LOCKED)
             return "ok"
 
-        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+        result = app_server_pool.run_borrowed_op_with_retry(codex_class, operation)
 
         self.assertEqual(result, "ok")
         self.assertEqual(calls["n"], 2)
@@ -370,14 +370,14 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
     def test_warm_non_locked_transport_error_propagates(self) -> None:
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
-        with codex_pool.borrow_codex(codex_class) as warm:
+        with app_server_pool.borrow_codex(codex_class) as warm:
             pass
 
         def operation(_codex: Any) -> str:
             raise TransportClosedError("app-server closed stdout. crash")
 
         with self.assertRaises(TransportClosedError):
-            codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+            app_server_pool.run_borrowed_op_with_retry(codex_class, operation)
 
         # A non-locked transport error drops the warm server but does not retry.
         self.assertTrue(_closed(warm))
@@ -387,14 +387,14 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
     def test_warm_non_locked_error_propagates_without_fallback(self) -> None:
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
-        with codex_pool.borrow_codex(codex_class) as warm:
+        with app_server_pool.borrow_codex(codex_class) as warm:
             pass
 
         def operation(_codex: Any) -> str:
             raise ValueError("boom")
 
         with self.assertRaises(ValueError):
-            codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+            app_server_pool.run_borrowed_op_with_retry(codex_class, operation)
 
         # The warm server is dropped, but a non-locked error does not retry.
         self.assertTrue(_closed(warm))
@@ -404,25 +404,24 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
 class CodexPoolKeepaliveTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        saved_pool = codex_pool._SHARED_POOL
-        codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()
+        saved_pool = app_server_pool._SHARED_POOL
+        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
         self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
 
     def test_disabled_under_testing(self) -> None:
-        self.assertFalse(codex_pool.start_codex_pool_keepalive())
+        self.assertFalse(app_server_pool.start_codex_pool_keepalive())
 
     def test_starts_one_daemon_thread(self) -> None:
-        self.addCleanup(codex_pool._keepalive.reset_for_tests)
-        codex_pool._keepalive.reset_for_tests()
+        self.addCleanup(app_server_pool._keepalive.reset_for_tests)
+        app_server_pool._keepalive.reset_for_tests()
         with (
-            mock.patch.object(
-                codex_pool, "_codex_pool_keepalive_enabled", return_value=True
+            mock.patch.object(app_server_pool, "_codex_pool_keepalive_enabled", return_value=True
             ),
             mock.patch("hitch.main.runtime.server_lifecycle.threading.Thread") as thread_cls,
         ):
-            started = codex_pool.start_codex_pool_keepalive()
+            started = app_server_pool.start_codex_pool_keepalive()
             # Idempotent: a second call does not start another thread.
-            again = codex_pool.start_codex_pool_keepalive()
+            again = app_server_pool.start_codex_pool_keepalive()
 
         self.assertTrue(started)
         self.assertFalse(again)
@@ -432,24 +431,24 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
     @override_settings(TESTING=False)
     def test_keepalive_enabled_only_for_server_processes(self) -> None:
         with mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "test"]):
-            self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
+            self.assertFalse(app_server_pool._codex_pool_keepalive_enabled())
         with mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["gunicorn", "hitch.wsgi"]):
-            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
+            self.assertTrue(app_server_pool._codex_pool_keepalive_enabled())
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "runserver"]),
         ):
-            self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
+            self.assertFalse(app_server_pool._codex_pool_keepalive_enabled())
         with (
             mock.patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True),
             mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "runserver"]),
         ):
-            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
+            self.assertTrue(app_server_pool._codex_pool_keepalive_enabled())
         with mock.patch(
             "hitch.main.runtime.codex_pool.sys.argv",
             ["manage.py", "runserver", "--noreload"],
         ):
-            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
+            self.assertTrue(app_server_pool._codex_pool_keepalive_enabled())
 
     @override_settings(TESTING=False)
     def test_tick_warms_and_probes_a_server(self) -> None:
@@ -460,8 +459,8 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
             built.append(codex)
             return codex
 
-        with mock.patch.object(codex_pool, "Codex", codex_class):
-            codex_pool._codex_pool_keepalive_tick()
+        with mock.patch.object(app_server_pool, "Codex", codex_class):
+            app_server_pool._codex_pool_keepalive_tick()
 
         # One warm server constructed and exercised with a cheap read.
         self.assertEqual(len(built), 1)
@@ -478,18 +477,18 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
             return _FakeCodex()
 
         with (
-            mock.patch.object(codex_pool, "borrow_codex", side_effect=RuntimeError),
+            mock.patch.object(app_server_pool, "borrow_codex", side_effect=RuntimeError),
             mock.patch.object(codex_pool, "Codex", codex_class),
         ):
             # Must not raise: a failed probe is logged and retried next tick.
-            codex_pool._codex_pool_keepalive_tick()
+            app_server_pool._codex_pool_keepalive_tick()
 
     @override_settings(TESTING=False)
     def test_tick_warms_every_used_key(self) -> None:
         # A memories-enabled session uses a distinct pool key; once seen, the
         # keepalive must keep it warm too, not just the default key.
-        mem_key = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
-        codex_pool._SHARED_POOL.checkout_warm_only(mem_key)  # records the key
+        mem_key = app_server_pool._pool_key(enable_memories=True, web_search_mode=None)
+        app_server_pool._SHARED_POOL.checkout_warm_only(mem_key)  # records the key
         built: list[_ProbeCodex] = []
 
         def codex_class(**_kwargs: Any) -> _ProbeCodex:
@@ -497,8 +496,8 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
             built.append(codex)
             return codex
 
-        with mock.patch.object(codex_pool, "Codex", codex_class):
-            codex_pool._codex_pool_keepalive_tick()
+        with mock.patch.object(app_server_pool, "Codex", codex_class):
+            app_server_pool._codex_pool_keepalive_tick()
 
         # One probe for the default key and one for the memories-enabled key.
         self.assertEqual(len(built), 2)
@@ -507,19 +506,19 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
 
 class SharedPoolSeenKeyTests(SimpleTestCase):
     def test_warm_target_keys_includes_default_and_seen(self) -> None:
-        pool = codex_pool._SharedCodexPool()
-        default = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
+        pool = app_server_pool._SharedCodexPool()
+        default = app_server_pool._pool_key(enable_memories=False, web_search_mode=None)
         # Empty pool still warms the default key so a fresh process keeps one warm.
         self.assertEqual(pool.warm_target_keys(), [default])
 
-        mem_key = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
+        mem_key = app_server_pool._pool_key(enable_memories=True, web_search_mode=None)
         pool.checkout_warm_only(mem_key)  # records the key without constructing
         self.assertIn(mem_key, pool.warm_target_keys())
         self.assertIn(default, pool.warm_target_keys())
 
     def test_warm_target_keys_capped_at_pool_capacity(self) -> None:
-        pool = codex_pool._SharedCodexPool(max_size=2)
-        default = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
+        pool = app_server_pool._SharedCodexPool(max_size=2)
+        default = app_server_pool._pool_key(enable_memories=False, web_search_mode=None)
         # More distinct keys than the pool can hold; warming them all would just
         # evict each other and cold-open every tick.
         for mode in ("a", "b", "c", "d"):

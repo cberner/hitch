@@ -302,7 +302,7 @@ class UsageModelCacheTests(SimpleTestCase):
             caches._MODELS_REFRESH_IN_FLIGHT = {False}
 
         with (
-            patch("hitch.main.caches.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.runtime.codex_pool.app_server_config", return_value=object()),
             patch("hitch.main.caches.Codex", side_effect=RuntimeError("codex down")),
             patch("hitch.main.caches.logger.exception") as log_exception,
         ):
@@ -315,7 +315,7 @@ class UsageModelCacheTests(SimpleTestCase):
             self.assertNotIn(False, caches._MODELS_REFRESH_IN_FLIGHT)
         self.assertTrue(caches._models_refresh_needed(enable_memories=False))
 
-    @patch("hitch.main.caches.codex_pool.app_server_config", return_value=object())
+    @patch("hitch.main.runtime.codex_pool.app_server_config", return_value=object())
     @patch("hitch.main.caches.Codex")
     def test_successful_empty_model_refresh_marks_cache_fresh(
         self, mock_codex: MagicMock, _mock_config: MagicMock
@@ -378,7 +378,7 @@ class UsageRateLimitCacheTests(SimpleTestCase):
             caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
 
         with (
-            patch("hitch.main.caches.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.runtime.codex_pool.app_server_config", return_value=object()),
             patch("hitch.main.caches.Codex"),
             patch("hitch.main.caches._fetch_rate_limits", return_value=None),
         ):

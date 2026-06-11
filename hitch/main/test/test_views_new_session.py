@@ -1275,7 +1275,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_worktree_resumes_thread_when_latest_local_index_failed(
         self,

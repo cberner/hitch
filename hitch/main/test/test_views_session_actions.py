@@ -782,7 +782,7 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn(
         self,
         mock_run_borrowed: MagicMock,
@@ -861,7 +861,7 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos", return_value=[])
-    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn_uses_managed_worktree_sandbox(
         self,
         mock_run_borrowed: MagicMock,

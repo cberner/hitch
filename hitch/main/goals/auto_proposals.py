@@ -11,7 +11,7 @@ from django.db import close_old_connections
 from openai_codex import Codex
 
 from hitch.main.models import Project
-from hitch.main.runtime import codex_pool, server_lifecycle
+from hitch.main.runtime import app_server_pool, codex_pool, server_lifecycle
 from hitch.main.sessions import session_index
 from hitch.main.workflows import autonomous_goals, pr_qa
 
@@ -58,7 +58,7 @@ class _SchedulerCodex:
 
     def get(self) -> Codex:
         if self._codex is None:
-            self._codex = codex_pool.start_codex(codex_pool.app_server_config())
+            self._codex = app_server_pool.start_codex(codex_pool.app_server_config())
         return self._codex
 
     def reset(self) -> None:
@@ -176,7 +176,7 @@ def refresh_unarchived_session_state(
             )
         else:
             config = codex_pool.app_server_config()
-            with codex_pool.open_codex(lambda: Codex(config=config)) as opened:
+            with app_server_pool.open_codex(lambda: Codex(config=config)) as opened:
                 window = session_index.refresh_active_window(
                     opened,
                     projects=projects,

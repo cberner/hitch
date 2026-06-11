@@ -14,7 +14,6 @@ re-implementing Django bootstrap.
 
 from __future__ import annotations
 
-import atexit
 import contextlib
 import fcntl
 import json
@@ -27,9 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
-from collections import deque
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -38,13 +35,12 @@ from typing import Any, BinaryIO, TypeVar, cast
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from openai_codex import AppServerConfig, Codex, TransportClosedError
+from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
-from hitch.main.runtime import rate_limit, server_lifecycle
+from hitch.main.runtime import rate_limit
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
-from hitch.main.runtime.db import is_database_locked_error
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +174,7 @@ def spawn_new_session(
     # is safe even though ``thread_start`` is not idempotent: that failure means
     # the app-server exited *before* the thread was persisted to disk, so the
     # discarded in-memory thread leaves nothing behind to duplicate.
-    thread_id, thread_path = run_codex_op_with_retry(
+    thread_id, thread_path = app_server_pool.run_codex_op_with_retry(
         lambda: Codex(config=config), _create_and_persist
     )
     instance = _spawn_worker(
@@ -250,7 +246,7 @@ def create_session_thread(
     # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
     # non-idempotent ``thread_start`` because a locked persist exits the
     # app-server before anything reaches disk.
-    return run_codex_op_with_retry(lambda: Codex(config=config), _create_and_persist)
+    return app_server_pool.run_codex_op_with_retry(lambda: Codex(config=config), _create_and_persist)
 
 
 # Upper bound for the auto-derived thread name. Matches the
@@ -1668,7 +1664,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
     for instance in pending:
         if worker_is_alive(instance):
             continue
-        error = _dead_worker_error(instance)
+        error = worker_errors._dead_worker_error(instance)
         # Conditional UPDATE keyed on the active statuses so a worker that
         # reached a terminal state in the gap between the queryset read and this
         # write is preserved rather than retroactively rewritten as failed (and
@@ -1711,181 +1707,6 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         cleanup_requested_input_images_for(instance)
         updated += 1
     return updated
-
-
-def _dead_worker_error(instance: CodexInstance) -> str:
-    if instance.error:
-        return instance.error
-    detail = _dead_worker_last_event_detail(instance.events_path)
-    log_detail = _dead_worker_log_detail(instance.pk)
-    if detail:
-        message = f"worker process exited before reporting completion; last event: {detail}"
-        if log_detail:
-            message = f"{message}; worker log: {log_detail}"
-        return message
-    if log_detail:
-        return (
-            "worker process exited before reporting completion; "
-            f"worker log: {log_detail}"
-        )
-    return "worker process exited before reporting completion"
-
-
-def _dead_worker_last_event_detail(events_path: str) -> str:
-    if not events_path:
-        return ""
-    try:
-        with Path(events_path).open(encoding="utf-8") as events_file:
-            recent_lines = deque(events_file, maxlen=200)
-    except OSError:
-        return ""
-
-    auto_approval_started_detail = ""
-    completed_auto_approval_keys: set[str] = set()
-    failed_command_detail = ""
-    fallback_detail = ""
-    for line in reversed(recent_lines):
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        method = event.get("method")
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        if method == "item/autoApprovalReview/completed":
-            completed_auto_approval_keys.add(_auto_approval_event_key(payload))
-            detail = _auto_approval_event_detail(payload)
-            if detail:
-                return detail
-        if (
-            method == "item/autoApprovalReview/started"
-            and _auto_approval_event_key(payload) not in completed_auto_approval_keys
-        ):
-            detail = _auto_approval_event_detail(payload)
-            if detail and not auto_approval_started_detail:
-                auto_approval_started_detail = detail
-        if method == "error":
-            detail = _error_event_detail(payload)
-            if detail:
-                return detail
-        if method == "item/completed" and not failed_command_detail:
-            failed_command_detail = _failed_command_event_detail(payload)
-        if not fallback_detail:
-            fallback_detail = _last_visible_event_detail(method, payload)
-    return failed_command_detail or auto_approval_started_detail or fallback_detail
-
-
-def _auto_approval_event_detail(payload: dict[str, Any]) -> str:
-    review = payload.get("review")
-    if not isinstance(review, dict):
-        return ""
-    status = str(review.get("status") or "").strip()
-    if not status or status == "approved":
-        return ""
-    action = payload.get("action")
-    command = ""
-    if isinstance(action, dict):
-        command = _compact_error_detail(str(action.get("command") or ""), limit=160)
-    rationale = _compact_error_detail(str(review.get("rationale") or ""), limit=240)
-    status_text = _approval_status_text(status)
-    if command and rationale:
-        return f"auto-approval review {status_text} for `{command}`: {rationale}"
-    if command:
-        return f"auto-approval review {status_text} for `{command}`"
-    if rationale:
-        return f"auto-approval review {status_text}: {rationale}"
-    return f"auto-approval review {status_text}"
-
-
-def _auto_approval_event_key(payload: dict[str, Any]) -> str:
-    action = payload.get("action")
-    if not isinstance(action, dict):
-        return ""
-    try:
-        return json.dumps(action, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return str(action)
-
-
-def _error_event_detail(payload: dict[str, Any]) -> str:
-    error = payload.get("error")
-    if not isinstance(error, dict):
-        return ""
-    message = _compact_error_detail(str(error.get("message") or ""), limit=160)
-    details = _compact_error_detail(
-        str(error.get("additionalDetails") or ""), limit=240
-    )
-    if message and details:
-        return f"{message}: {details}"
-    return message or details
-
-
-def _failed_command_event_detail(payload: dict[str, Any]) -> str:
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return ""
-    if item.get("type") != "commandExecution" or item.get("status") != "failed":
-        return ""
-    command = _compact_error_detail(str(item.get("command") or ""), limit=200)
-    if command:
-        return f"command failed: `{command}`"
-    return "command failed"
-
-
-def _last_visible_event_detail(method: object, payload: dict[str, Any]) -> str:
-    if method not in ("item/started", "item/completed"):
-        return ""
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return ""
-    item_type = item.get("type")
-    if item_type == "commandExecution":
-        command = _compact_error_detail(str(item.get("command") or ""), limit=200)
-        if not command:
-            return ""
-        status = str(item.get("status") or "").strip()
-        if method == "item/started" or status == "inProgress":
-            return f"command started: `{command}`"
-        if status == "completed":
-            return f"command completed: `{command}`"
-        return f"command {status}: `{command}`" if status else f"command: `{command}`"
-    if item_type == "agentMessage":
-        text = _compact_error_detail(str(item.get("text") or ""), limit=240)
-        if text:
-            return f"agent last said: {text}"
-    return ""
-
-
-def _dead_worker_log_detail(instance_id: int) -> str:
-    if not worker_log_io_enabled():
-        return ""
-    try:
-        with worker_log_path(instance_id).open(encoding="utf-8", errors="replace") as log_file:
-            recent_lines = deque(log_file, maxlen=20)
-    except OSError:
-        return ""
-    tail = [line.strip() for line in recent_lines if line.strip()]
-    if not tail:
-        return ""
-    return _compact_error_detail(" | ".join(tail[-3:]), limit=500)
-
-
-def _approval_status_text(status: str) -> str:
-    if status == "inProgress":
-        return "in progress"
-    if status == "timedOut":
-        return "timed out"
-    return status
-
-
-def _compact_error_detail(value: str, *, limit: int) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= limit:
-        return compact
-    return f"{compact[: limit - 3]}..."
 
 
 def _prune_reaped_workers() -> None:
@@ -2378,239 +2199,11 @@ def prune_worker_logs_db(
 # hang for minutes, while detached worker starts get a longer budget: a worker
 # sitting behind Codex's own long state/log maintenance is much less harmful than
 # failing the whole turn or system-agent workflow.
-_APPSERVER_START_MAX_ATTEMPTS = 10
-_APPSERVER_WORKER_START_MAX_ATTEMPTS = 24
-_APPSERVER_START_BACKOFF_BASE_SECONDS = 0.2
+
+
 # Capped per-attempt backoff; request-path callers spend about 26s in Hitch
 # backoff before giving up, on top of Codex's own 5s SQLite busy timeout per
 # failed attempt. Detached workers use a larger attempt count.
-_APPSERVER_START_BACKOFF_MAX_SECONDS = 5.0
-
-
-def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
-    """Call ``factory`` to construct a ``Codex``, retrying a locked init.
-
-    ``factory`` is a zero-arg closure (typically ``lambda: Codex(config=...)``)
-    so the call site keeps referencing its own module-local ``Codex`` symbol --
-    important both for clarity and so tests that patch ``<module>.Codex`` still
-    intercept construction. Only a ``TransportClosedError`` carrying the state
-    DB's "database is locked" message is retried (the transient state-DB
-    migration race); any other startup failure propagates immediately.
-    """
-    last_error: TransportClosedError | None = None
-    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
-        try:
-            return factory()
-        except TransportClosedError as exc:
-            if not is_database_locked_error(exc):
-                raise
-            last_error = exc
-            logger.warning(
-                "Codex app-server state DB locked on start (attempt %s/%s)",
-                attempt + 1,
-                _APPSERVER_START_MAX_ATTEMPTS,
-            )
-        if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
-            backoff = min(
-                _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
-                _APPSERVER_START_BACKOFF_MAX_SECONDS,
-            )
-            time.sleep(backoff)
-    assert last_error is not None
-    raise last_error
-
-
-def run_codex_op_with_retry(
-    factory: Callable[[], Codex],
-    operation: Callable[[Codex], T],
-) -> T:
-    """Open a fresh app-server, run ``operation`` against it, and retry the whole
-    open+operation when a contended CODEX_HOME state DB surfaces.
-
-    ``_start_codex_with_retry`` only guards *construction*. But the Codex
-    runtime's state-DB migration/backfill path (no SQLITE_BUSY retry,
-    openai/codex#20213) is also reached lazily by operations like
-    ``thread_resume`` -- resuming a thread persisted by another worker migrates
-    that thread's rows -- and a lock there *exits the app-server mid-operation*,
-    surfacing as a ``TransportClosedError`` the construction-only retry never
-    sees. Because the server is gone, recovery means reconstructing it, so this
-    is a single retry loop spanning both construction and the operation: each
-    attempt builds a fresh app-server and then runs ``operation`` against it. A
-    locked ``TransportClosedError`` from *either* phase is retried by this one
-    loop, bounded at ``_APPSERVER_START_MAX_ATTEMPTS`` rather than nesting
-    ``_start_codex_with_retry``'s loop inside this one. ``operation`` must
-    therefore be idempotent (it may run more than once) -- safe for reads like
-    ``thread_resume``/``thread_list``, not for turn starts. Non-locked errors
-    (including ``Http404`` the operation may raise) propagate immediately.
-    """
-    last_error: TransportClosedError | None = None
-    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
-        try:
-            codex = factory()
-            with codex as entered:
-                return operation(entered)
-        except TransportClosedError as exc:
-            if not is_database_locked_error(exc):
-                raise
-            last_error = exc
-            logger.warning(
-                "Codex app-server state DB locked during open+operation "
-                "(attempt %s/%s)",
-                attempt + 1,
-                _APPSERVER_START_MAX_ATTEMPTS,
-            )
-        if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
-            backoff = min(
-                _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
-                _APPSERVER_START_BACKOFF_MAX_SECONDS,
-            )
-            time.sleep(backoff)
-    assert last_error is not None
-    raise last_error
-
-
-def run_borrowed_op_with_retry(
-    codex_factory: Callable[..., Codex],
-    operation: Callable[[Codex], T],
-    *,
-    enable_memories: bool = False,
-    web_search_mode: str | None = None,
-) -> T:
-    """Run ``operation`` against a *warm* pooled app-server when one exists,
-    falling back to a retrying cold open only when the pool is empty.
-
-    ``run_codex_op_with_retry`` always cold-opens a fresh app-server, so every
-    call pays the CODEX_HOME init write that contends on the state-DB writer lock
-    -- the failure mode behind "failed to initialize sqlite state runtime ...
-    database is locked" on request paths like the session-detail resume. This
-    instead borrows an already-initialized server from the shared pool first, so
-    the steady-state request does *no* init write at all. ``operation`` must be
-    idempotent (a warm server that dies on a locked op is dropped and the call
-    falls back to the cold path, so it may run more than once) -- safe for reads
-    like ``thread_resume``/``thread_list``, not for turn starts.
-    """
-    config = app_server_config(
-        enable_memories=enable_memories, web_search_mode=web_search_mode
-    )
-    if _shared_pool_enabled():
-        key = _pool_key(enable_memories, web_search_mode)
-        warm = _SHARED_POOL.checkout_warm_only(key)
-        if warm is not None:
-            healthy = True
-            try:
-                return operation(warm)
-            except TransportClosedError as exc:
-                healthy = False
-                if not is_database_locked_error(exc):
-                    raise
-                # The warm server exited on a locked op; drop it and fall through
-                # to a fresh cold open (which retries the locked init itself).
-                logger.warning(
-                    "warm app-server state DB locked during borrowed op; "
-                    "falling back to a fresh open"
-                )
-            except BaseException:
-                healthy = False
-                raise
-            finally:
-                _SHARED_POOL.release(key, warm, healthy=healthy)
-    return run_codex_op_with_retry(lambda: codex_factory(config=config), operation)
-
-
-def start_codex(config: AppServerConfig) -> Codex:
-    """Construct a long-lived Codex app-server with ``_start_codex_with_retry``.
-
-    For callers that own and reuse one app-server across many operations (e.g.
-    the background scheduler) rather than opening a fresh one per use; the
-    caller is responsible for ``close()``. Reusing a single app-server keeps its
-    state DB initialized once instead of racing a new init on every operation.
-    """
-    return _start_codex_with_retry(lambda: Codex(config=config))
-
-
-@contextlib.contextmanager
-def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
-    """Open a Codex app-server, tolerating a contended state-DB init.
-
-    Replaces ``with Codex(config=config) as codex`` with
-    ``with open_codex(lambda: Codex(config=config)) as codex``: a locked
-    state-DB init is retried (see ``_start_codex_with_retry``), then the
-    constructed session's own ``__enter__``/``__exit__`` run as usual so it is
-    closed on exit.
-    """
-    codex = _start_codex_with_retry(factory)
-    with codex as entered:
-        yield entered
-
-
-@contextlib.contextmanager
-def open_codex_resumed(
-    factory: Callable[[], Codex],
-    *,
-    thread_id: str,
-    resume_kwargs: dict[str, Any] | None = None,
-    configure: Callable[[Codex], None] | None = None,
-) -> Generator[tuple[Codex, Any]]:
-    """Open an app-server, run ``configure`` then ``thread_resume``, retrying a
-    locked CODEX_HOME state DB across the whole sequence, and yield the live
-    ``(codex, thread)`` so the caller can start a (non-idempotent) turn.
-
-    ``open_codex`` only retries *construction*. But the state-DB
-    migration/backfill path (no SQLITE_BUSY retry, openai/codex#20213) is also
-    reached lazily by ``thread_resume`` -- resuming a thread another worker
-    persisted migrates its rows -- and a lock there exits the app-server
-    mid-resume as a ``TransportClosedError`` the construction-only retry never
-    sees. This retries construction+configure+resume together. ``thread_resume``
-    is idempotent, so re-running it is safe. ``configure`` runs once per attempt
-    against the attempt's fresh server (e.g. to install approval/notification
-    handlers); a retried attempt discards its server, so any helper threads
-    ``configure`` starts must tolerate that server closing under them (the
-    worker's goal forwarder exits cleanly when its source transport closes).
-    """
-    resume_kwargs = resume_kwargs or {}
-    last_error: TransportClosedError | None = None
-    for attempt in range(_APPSERVER_WORKER_START_MAX_ATTEMPTS):
-        codex = None
-        entered = None
-        try:
-            codex = factory()
-            entered = codex.__enter__()
-            if configure is not None:
-                configure(entered)
-            thread = entered.thread_resume(thread_id, **resume_kwargs)
-        except TransportClosedError as exc:
-            if entered is not None and codex is not None:
-                codex.__exit__(type(exc), exc, exc.__traceback__)
-            if not is_database_locked_error(exc):
-                raise
-            last_error = exc
-            logger.warning(
-                "Codex app-server state DB locked during worker open+resume "
-                "(attempt %s/%s)",
-                attempt + 1,
-                _APPSERVER_WORKER_START_MAX_ATTEMPTS,
-            )
-            if attempt + 1 < _APPSERVER_WORKER_START_MAX_ATTEMPTS:
-                time.sleep(
-                    min(
-                        _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
-                        _APPSERVER_START_BACKOFF_MAX_SECONDS,
-                    )
-            )
-            continue
-        except BaseException as exc:
-            if entered is not None and codex is not None:
-                codex.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        try:
-            yield entered, thread
-        except BaseException as exc:
-            codex.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        codex.__exit__(None, None, None)
-        return
-    assert last_error is not None
-    raise last_error
 
 
 # The Django web process used to open (and so re-init the CODEX_HOME state DB
@@ -2623,306 +2216,17 @@ def open_codex_resumed(
 # app-server) and steady-state borrows do not even spawn a subprocess. Bursts
 # past the cap still construct a private server (retrying a locked init) rather
 # than blocking or failing, so this only ever reduces init churn.
-_SHARED_POOL_MAX = 4
+
 
 # (enable_memories, normalized web_search_mode). In practice every web call uses
 # the default web_search_mode, so the live key space is just enable_memories.
-_ConfigKey = tuple[bool, str | None]
 
 
-def _pool_key(enable_memories: bool, web_search_mode: str | None) -> _ConfigKey:
-    return (enable_memories, _normalized_web_search_mode(web_search_mode))
-
-
-def _close_quietly(codex: Codex) -> None:
-    with contextlib.suppress(Exception):
-        codex.close()
-
-
-def _codex_is_alive(codex: Codex) -> bool:
-    """Best-effort check that the app-server subprocess is still running.
-
-    A pooled server is long-lived, so an idle one may have exited (crash, OOM
-    kill) since it was returned -- or been returned looking healthy by a borrow
-    whose helper swallowed the ``TransportClosedError``. Handing such a dead
-    server back would surface an error to a single request that the old
-    open-per-call path never hit, so the pool drops it on checkout and reuses a
-    live one instead. Reaches into the SDK client's process handle the way our
-    call sites already reach into ``codex._client``; ``poll()`` is a cheap,
-    non-blocking liveness probe (no app-server round-trip).
-    """
-    proc = getattr(getattr(codex, "_client", None), "_proc", None)
-    if proc is None:
-        return False
-    try:
-        return proc.poll() is None
-    except Exception:
-        return False
-
-
-class _SharedCodexPool:
-    """Bounded pool of long-lived app-servers with exclusive checkout.
-
-    Only one borrower drives a given ``Codex`` at a time, so reuse never relies
-    on the SDK being safe for concurrent stdin writes from multiple request
-    threads. Checkout skips (and closes) idle servers whose subprocess has died
-    so a stale transport never reaches a borrower; a borrow that dies mid-use
-    drops its instance -- mirroring ``_SchedulerCodex.reset`` -- so the next
-    borrow reconnects. The cap bounds total warm servers; a full pool evicts an
-    idle server from *another* config key rather than refusing to keep this
-    key's, so no key is starved of a warm server. Checkouts past the cap
-    construct (and on return close) a private server rather than blocking.
-    """
-
-    def __init__(self, max_size: int = _SHARED_POOL_MAX) -> None:
-        self._lock = threading.Lock()
-        self._idle: dict[_ConfigKey, deque[Codex]] = {}
-        self._in_use = 0
-        self._max = max_size
-        # Config keys borrowed recently, in LRU order (oldest first), so the
-        # keepalive knows which keys to keep warm -- a memories-enabled session
-        # uses a different key than the default and would otherwise cold-open on
-        # its first render after idle. A dict is used as an ordered set.
-        self._seen_keys: dict[_ConfigKey, None] = {}
-
-    def _note_key(self, key: _ConfigKey) -> None:
-        """Record ``key`` as most-recently used. Caller holds ``self._lock``."""
-        self._seen_keys.pop(key, None)
-        self._seen_keys[key] = None
-
-    def _total_warm(self) -> int:
-        return self._in_use + sum(len(idle) for idle in self._idle.values())
-
-    def warm_target_keys(self) -> list[_ConfigKey]:
-        """Keys the keepalive should keep warm, capped at pool capacity.
-
-        Warming more keys than the pool can hold (``_max``) would have each tick
-        cold-open the keys that the previous tick evicted -- reintroducing the
-        init churn the keepalive exists to avoid. So return the default key
-        (always kept warm) plus the most-recently-used other keys, up to ``_max``
-        total.
-        """
-        default = _pool_key(enable_memories=False, web_search_mode=None)
-        with self._lock:
-            recent = [k for k in reversed(self._seen_keys) if k != default]
-        return [default, *recent[: max(self._max - 1, 0)]]
-
-    def _pop_idle_other_key(self, key: _ConfigKey) -> Codex | None:
-        """Pop the oldest idle server belonging to a different config key."""
-        for other_key, servers in self._idle.items():
-            if other_key != key and servers:
-                return servers.pop()
-        return None
-
-    def checkout(self, key: _ConfigKey, factory: Callable[[], Codex]) -> Codex:
-        dead: list[Codex] = []
-        with self._lock:
-            self._note_key(key)
-            idle = self._idle.get(key)
-            reused: Codex | None = None
-            while idle:
-                candidate = idle.pop()
-                if _codex_is_alive(candidate):
-                    reused = candidate
-                    break
-                dead.append(candidate)
-            self._in_use += 1
-        for stale in dead:
-            _close_quietly(stale)
-        if reused is not None:
-            return reused
-        # Construct outside the structure lock: a cold start spawns a
-        # subprocess and may retry a locked state-DB init.
-        try:
-            return _start_codex_with_retry(factory)
-        except BaseException:
-            with self._lock:
-                self._in_use -= 1
-            raise
-
-    def checkout_warm_only(self, key: _ConfigKey) -> Codex | None:
-        """Check out a live idle server without ever constructing one.
-
-        Returns ``None`` when no warm server is available rather than cold-opening
-        (and so re-initializing the CODEX_HOME state DB). Lets callers prefer a
-        warm server on the request path and fall back to their own retrying cold
-        open only when the pool is empty -- the construction write is exactly what
-        contends on the state-DB writer lock, so skipping it when a warm server
-        exists avoids the lock entirely.
-        """
-        dead: list[Codex] = []
-        reused: Codex | None = None
-        with self._lock:
-            self._note_key(key)
-            idle = self._idle.get(key)
-            while idle:
-                candidate = idle.pop()
-                if _codex_is_alive(candidate):
-                    reused = candidate
-                    break
-                dead.append(candidate)
-            if reused is not None:
-                self._in_use += 1
-        for stale in dead:
-            _close_quietly(stale)
-        return reused
-
-    def release(self, key: _ConfigKey, codex: Codex, *, healthy: bool) -> None:
-        to_close: Codex | None = None
-        with self._lock:
-            self._in_use -= 1
-            if healthy:
-                if self._total_warm() < self._max:
-                    self._idle.setdefault(key, deque()).appendleft(codex)
-                    return
-                # Pool full: keep this key's server by evicting an idle server
-                # from another key. If only this key is idle we are already at
-                # our share, so close the returning server instead.
-                to_close = self._pop_idle_other_key(key)
-                if to_close is not None:
-                    self._idle.setdefault(key, deque()).appendleft(codex)
-            if to_close is None:
-                to_close = codex
-        _close_quietly(to_close)
-
-    def close_all(self) -> None:
-        with self._lock:
-            idle, self._idle = self._idle, {}
-        for servers in idle.values():
-            for codex in servers:
-                _close_quietly(codex)
-
-
-_SHARED_POOL = _SharedCodexPool()
-atexit.register(_SHARED_POOL.close_all)
-
-
-def _shared_pool_enabled() -> bool:
-    # Under tests each case patches ``Codex`` fresh and expects construction per
-    # call, so caching pooled instances across cases would leak mocks. The pool
-    # itself is covered directly by test_codex_pool_shared.
-    return not getattr(settings, "TESTING", False)
 
 
 # How often the keepalive exercises a warm pooled server. Short relative to any
 # plausible app-server idle timeout so the server stays warm, long enough not to
 # add meaningful load.
-_KEEPALIVE_INTERVAL_SECONDS = 30
-_keepalive = server_lifecycle.SchedulerHandle(
-    thread_name="hitch-codex-pool-keepalive"
-)
-
-
-def _codex_pool_keepalive_enabled() -> bool:
-    """Whether this process serves requests (and so uses the shared pool).
-
-    Independent of the background schedulers: the keepalive must run wherever the
-    request-path pool is enabled, even on a server that disabled the maintenance
-    scheduler (e.g. ``HITCH_WORKFLOW_MAINTENANCE_SCHEDULER=0`` because maintenance
-    runs elsewhere). Mirrors the schedulers' "real server process" gate so it
-    never starts under management commands, migrations, or tests.
-    """
-    return server_lifecycle.background_work_enabled(
-        include_wsgi_server_commands=True
-    )
-
-
-def start_codex_pool_keepalive() -> bool:
-    """Start a daemon that keeps one warm pooled app-server present and healthy.
-
-    The shared pool only fills when a request borrows, and an idle pooled server
-    can die (laptop sleep, OOM, a Codex-side idle exit) with nothing noticing
-    until the next checkout cold-opens a replacement. After an idle stretch that
-    makes the first request -- and the session-detail resume -- cold-open and
-    race the per-turn worker on the CODEX_HOME init write, which is the
-    "database is locked" users hit first thing in the morning. This periodically
-    borrows each used config key and runs one cheap read, so an initialized
-    server is already warm when the user returns and a dead one is rebuilt
-    *before* they hit it rather than on their request.
-    """
-    if not _codex_pool_keepalive_enabled():
-        return False
-    return _keepalive.start(_codex_pool_keepalive_loop)
-
-
-def _codex_pool_keepalive_loop() -> None:
-    stop = threading.Event()
-    while True:
-        _codex_pool_keepalive_tick()
-        stop.wait(_KEEPALIVE_INTERVAL_SECONDS)
-
-
-def _codex_pool_keepalive_tick() -> None:
-    """Borrow and exercise one server per used config key with a cheap read.
-
-    Borrowing reconstructs a dead pooled server (checkout drops one whose
-    subprocess has exited) and the read both keeps the app-server from idling out
-    and surfaces a wedged-but-alive server -- a failed probe makes ``borrow_codex``
-    drop it, so the next tick rebuilds a healthy one. Every key ever borrowed is
-    kept warm, not just the default: a memories-enabled session uses a different
-    pool key and would otherwise cold-open (and race the state-DB init lock) on
-    its first detail render after idle. Best-effort: a failure on one key is
-    logged and retried next tick rather than killing the daemon.
-    """
-    for enable_memories, web_search_mode in _SHARED_POOL.warm_target_keys():
-        try:
-            with borrow_codex(
-                Codex,
-                enable_memories=enable_memories,
-                web_search_mode=web_search_mode,
-            ) as codex:
-                codex.thread_list(limit=1, use_state_db_only=True)
-        except Exception:
-            logger.warning(
-                "codex pool keepalive probe failed for key "
-                "(enable_memories=%s, web_search_mode=%s)",
-                enable_memories,
-                web_search_mode,
-                exc_info=True,
-            )
-
-
-@contextlib.contextmanager
-def borrow_codex(
-    codex_factory: Callable[..., Codex],
-    *,
-    enable_memories: bool = False,
-    web_search_mode: str | None = None,
-) -> Generator[Codex]:
-    """Borrow a warm, already-initialized app-server from the shared pool.
-
-    ``codex_factory`` is the caller's ``Codex`` symbol (constructed as
-    ``codex_factory(config=...)``); keeping construction at the call site lets
-    callers tune the config and keeps test patches on the caller's module
-    effective. Steady-state borrows reuse an idle long-lived server with no
-    subprocess spawn; cold construction still goes through
-    ``_start_codex_with_retry`` so a genuine state-DB init race is retried. The
-    pool owns the server's lifecycle, so -- unlike ``open_codex`` -- the yielded
-    server is not entered/closed per borrow.
-    """
-    config = app_server_config(
-        enable_memories=enable_memories, web_search_mode=web_search_mode
-    )
-
-    def factory() -> Codex:
-        return codex_factory(config=config)
-
-    if not _shared_pool_enabled():
-        with open_codex(factory) as codex:
-            yield codex
-        return
-
-    key = _pool_key(enable_memories, web_search_mode)
-    codex = _SHARED_POOL.checkout(key, factory)
-    healthy = True
-    try:
-        yield codex
-    except BaseException:
-        # A failed borrow may have killed the transport; drop rather than reuse.
-        healthy = False
-        raise
-    finally:
-        _SHARED_POOL.release(key, codex, healthy=healthy)
 
 
 def _normalized_input_image_paths(input_image_paths: Any) -> list[str]:
@@ -3808,3 +3112,9 @@ def _popen_detached(
         env=env,
         close_fds=True,
     )
+
+
+# Imported last: the pool and error-detail submodules reach back into this
+# module for the path/config helpers, so they need its namespace to be
+# fully initialized.
+from hitch.main.runtime import app_server_pool, worker_errors  # noqa: E402

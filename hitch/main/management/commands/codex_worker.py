@@ -82,6 +82,7 @@ from pydantic import BaseModel
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime import disk_cleanup
+from hitch.main.runtime.app_server_pool import open_codex_resumed
 from hitch.main.runtime.codex_events import GOAL_METHODS
 from hitch.main.runtime.codex_pool import (
     WorkerSqliteHome,
@@ -91,7 +92,6 @@ from hitch.main.runtime.codex_pool import (
     codex_home_dir,
     control_path_for,
     discard_input_attachment_paths,
-    open_codex_resumed,
     prune_worker_logs_db,
     resolve_dangling_requests_for_instance,
     worker_log_io_enabled,

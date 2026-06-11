@@ -69,7 +69,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
-from hitch.main.runtime import codex_events, codex_pool
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool
 from hitch.main.runtime.sdk_values import truncate_for_prompt
 from hitch.main.sessions import session_index
 from hitch.main.workflows import engine, system_agents
@@ -280,7 +280,7 @@ def _auto_proposals_paused_by_usage_quota_throttled() -> bool:
 
 def _auto_proposals_paused_by_usage_quota() -> bool:
     try:
-        with codex_pool.borrow_codex(Codex) as codex:
+        with app_server_pool.borrow_codex(Codex) as codex:
             response = codex._client.request(
                 "account/rateLimits/read",
                 None,

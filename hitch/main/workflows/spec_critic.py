@@ -37,7 +37,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_pool
+from hitch.main.runtime import app_server_pool, codex_pool
 from hitch.main.workflows import engine, system_agents
 from hitch.main.workflows.agent_io import (
     SPEC_REQUIREMENTS_AGENT_KIND,
@@ -99,7 +99,7 @@ def _classify_spec_critic_prompt_with_codex(
     prompt: str, *, cwd: str | None
 ) -> bool | None:
     try:
-        with codex_pool.borrow_codex(Codex, enable_memories=False) as codex:
+        with app_server_pool.borrow_codex(Codex, enable_memories=False) as codex:
             model = _smallest_available_codex_model(list(codex.models().data))
             thread = codex.thread_start(
                 cwd=cwd or os.getcwd(),
