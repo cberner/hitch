@@ -407,6 +407,110 @@ def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
         codex_pool.logger.warning("nuked %s codex app-server process(es)", killed)
     return killed
 
+def reap_orphaned_app_servers(*, proc_root: Path = Path("/proc")) -> int:
+    """SIGKILL this deployment's app-servers that no live owner is driving.
+
+    Every Codex app-server this deployment spawns is owned by a live process:
+    a detached worker (an ACTIVE ``CodexInstance`` whose pid still belongs to
+    that worker), or a web/scheduler process of this checkout. When an owner
+    dies without closing its app-server -- a web-server restart with pooled
+    servers checked out, a worker SIGKILLed mid-turn before its cgroup reap --
+    the app-server lives on, holding a CODEX_HOME state-DB connection and
+    contending on its single writer lock, which surfaces as "database is
+    locked" on the first turns after a restart. The manual nuke
+    (``nuke_codex_app_servers``) kills every deployment-matched server
+    including owned ones, so it cannot run unattended; this sweep kills only
+    the ownerless ones and runs automatically when the maintenance scheduler
+    starts.
+
+    A matched server is kept when walking its parent chain (through the node
+    wrapper half of the wrapper/native pair) reaches a live owner: a verified
+    ACTIVE worker pid, this process, or any live process whose working
+    directory is this checkout (a sibling web process of whatever server
+    flavor). Pid identity is re-verified immediately before signaling, the
+    same discipline as the nuke.
+    """
+    deployment_id = _app_server_deployment_id()
+    matched = _matched_app_server_pids(
+        proc_root=proc_root, deployment_id=deployment_id
+    )
+    if not matched:
+        return 0
+    owner_pids = {os.getpid()}
+    for instance in CodexInstance.objects.filter(
+        status__in=CodexInstance.ACTIVE_STATUSES
+    ):
+        if instance.pid > 0 and codex_pool.worker_is_alive(instance):
+            owner_pids.add(instance.pid)
+    killed = 0
+    for pid in list(matched):
+        if _app_server_has_live_owner(
+            pid, matched=matched, owner_pids=owner_pids, proc_root=proc_root
+        ):
+            continue
+        if not _proc_is_our_app_server(proc_root / str(pid), deployment_id):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            codex_pool.logger.warning(
+                "failed to SIGKILL orphaned codex app-server pid %s", pid
+            )
+            continue
+        killed += 1
+    if killed:
+        codex_pool.logger.warning(
+            "reaped %s orphaned codex app-server process(es)", killed
+        )
+    return killed
+
+
+def _app_server_has_live_owner(
+    pid: int,
+    *,
+    matched: dict[int, Path],
+    owner_pids: set[int],
+    proc_root: Path,
+) -> bool:
+    """Whether ``pid``'s parent chain reaches a live owner of this deployment.
+
+    The chain is walked through other matched app-server processes (the node
+    wrapper parents its native child) and ends at the first non-matched
+    parent, which must be an owner. A vanished parent entry means the chain
+    was cut by an exited process -- exactly the orphan case.
+    """
+    current = pid
+    for _ in range(4):
+        ppid = _proc_ppid(proc_root / str(current))
+        if ppid is None or ppid <= 1:
+            return False
+        if ppid in owner_pids:
+            return True
+        if _proc_cwd_is_this_checkout(proc_root / str(ppid)):
+            return True
+        if ppid in matched:
+            current = ppid
+            continue
+        return False
+    return False
+
+
+def _proc_cwd_is_this_checkout(pid_dir: Path) -> bool:
+    """Whether the process's working directory is this deployment's checkout.
+
+    Identifies sibling server processes of any flavor (runserver, gunicorn
+    workers) without relying on their argv: they all run from ``BASE_DIR``.
+    Workers do not (they run in session cwds) but are owned via their ACTIVE
+    rows instead.
+    """
+    try:
+        return (pid_dir / "cwd").resolve() == Path(settings.BASE_DIR).resolve()
+    except OSError:
+        return False
+
+
 def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
     """Number of *logical* ``codex app-server`` processes this deployment is running.
 
