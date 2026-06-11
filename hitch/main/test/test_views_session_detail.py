@@ -50,7 +50,7 @@ from hitch.main.workflows import system_agents
 
 class SessionDetailFastPathTests(TestCase):
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_renders_indexed_rollout_without_resume(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -150,7 +150,7 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_next_message_config_uses_managed_worktree_sandbox(
         self,
         mock_codex: MagicMock,
@@ -193,7 +193,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_uses_session_approval_mode_override(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -242,7 +242,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_uses_archived_rollout_for_stale_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -305,7 +305,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_recovers_missing_rollout_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -365,7 +365,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.codex_path, "")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_keeps_archived_flag_for_recovered_active_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -403,7 +403,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_reuses_loaded_rollout_data(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -465,7 +465,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_hides_fix_pr_after_pr_epoch_clears(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -539,7 +539,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_falls_back_when_rollout_fast_path_raises(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -572,11 +572,11 @@ class SessionDetailFastPathTests(TestCase):
 
         with (
             patch(
-                "hitch.main.views.rollout.session_detail_data",
+                "hitch.main.runtime.rollout.session_detail_data",
                 side_effect=ValueError("unexpected rollout shape"),
             ),
-            patch("hitch.main.views._models_for_plan_mode_fallback", return_value=[]),
-            patch("hitch.main.views._entries_for", return_value=sdk_entries),
+            patch("hitch.main.views.common._models_for_plan_mode_fallback", return_value=[]),
+            patch("hitch.main.views.common._entries_for", return_value=sdk_entries),
         ):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "schema-drift"})
@@ -587,7 +587,7 @@ class SessionDetailFastPathTests(TestCase):
         codex._client.thread_resume.assert_called_once_with("schema-drift")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_lazy_loads_intermediate_body(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -660,7 +660,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_intermediate_derives_demo_visibility_from_signed_context(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -752,7 +752,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_derives_done_stage_from_pr_state(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -835,7 +835,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_uses_pr_workflow_failure_observation_for_pr_link(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -935,7 +935,7 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
         self,
         mock_codex: MagicMock,
@@ -1025,7 +1025,7 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
         self,
         mock_codex: MagicMock,
@@ -1088,7 +1088,7 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
         self,
         mock_codex: MagicMock,
@@ -1181,7 +1181,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_stamps_stage_cache_with_pre_read_mtime(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1258,7 +1258,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_session_detail_does_not_cache_forced_stage(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1344,7 +1344,7 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_session_detail_does_not_flag_pr_workflow_refreshing(
         self,
         mock_codex: MagicMock,
@@ -1425,7 +1425,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_schedule.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_ignores_stale_completed_pr_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1513,7 +1513,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_prefers_newer_main_pr_over_stale_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1596,7 +1596,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_prefers_newer_main_pr_state_over_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1679,7 +1679,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_ignores_workflow_only_stale_pr_handoff(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1741,7 +1741,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_keeps_server_created_pr_handoff(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -1813,7 +1813,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_shows_button_for_plan_request_followup(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1873,7 +1873,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, 'name="plan_action" value="approve"')
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_falls_back_when_indexed_rollout_has_no_transcript(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1907,7 +1907,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "Resumed session")
         client._client.thread_resume.assert_called_once_with("indexed-empty")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_sdk_fallback_recognizes_previous_pr_prompt(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1978,7 +1978,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         client._client.thread_resume.assert_called_once_with("previous-pr-prompt")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_falls_back_when_metadata_missing(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1992,7 +1992,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         client._client.thread_resume.assert_called_once_with("missing")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_detail_falls_back_for_active_session(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2364,7 +2364,7 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
-    @patch("hitch.main.views.reconciliation.reconcile_dead_if_due", return_value=0)
+    @patch("hitch.main.runtime.reconciliation.reconcile_dead_if_due", return_value=0)
     def test_reconciles_dead_active_worker_before_stream_routing(
         self, mock_global_reconcile: MagicMock
     ) -> None:
@@ -2456,8 +2456,8 @@ class SessionViewApprovalContextTests(TestCase):
     browser prompts. Pin them so a URL refactor can't quietly break the
     streaming approval or structured-input loops."""
 
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     def test_session_template_renders_prompt_url_templates(
         self, _mock_worker_alive: MagicMock, mock_codex: MagicMock
     ) -> None:

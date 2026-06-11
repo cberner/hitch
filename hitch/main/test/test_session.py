@@ -455,7 +455,7 @@ class SessionViewTests(TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_primary_nav_menu_instead_of_back_link(
         self, mock_codex: MagicMock
     ) -> None:
@@ -491,7 +491,7 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_selected_project_session_nav_includes_project_links(
         self, mock_codex: MagicMock
     ) -> None:
@@ -511,7 +511,7 @@ class SessionViewTests(TestCase):
         self.assertIn(">auto goals</a>", nav_html)
         self.assertContains(response, "@media (max-width: 900px)")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_settings_page_uses_resolved_settings(
         self, mock_codex: MagicMock
     ) -> None:
@@ -542,7 +542,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(_cookie_value(response, "hitch_model"), "gpt-current")
         self.assertEqual(_cookie_value(response, "hitch_reasoning_effort"), "medium")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
         """The edit form is pre-populated with the current name when set, and
         empty when not — so the user can revise without retyping from scratch."""
@@ -569,7 +569,7 @@ class SessionViewTests(TestCase):
                 self.assertNotContains(response, ">Edit</button>")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/demo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_action_menu_includes_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -611,7 +611,7 @@ class SessionViewTests(TestCase):
         "hitch.main.repos.discover_repos",
         return_value=[Path("/tmp/other"), Path("/tmp/hitch")],
     )
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_action_menu_prefers_hitch_project_for_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -632,7 +632,7 @@ class SessionViewTests(TestCase):
         self.assertNotEqual(query["project"], [str(session_project.pk)])
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/other")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_action_menu_ignores_undiscovered_hitch_project_for_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -655,7 +655,7 @@ class SessionViewTests(TestCase):
         self.assertNotEqual(query["project"], [str(hitch_project.pk)])
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/demo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_action_menu_includes_cwd_for_bare_repo_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -674,7 +674,7 @@ class SessionViewTests(TestCase):
         self.assertNotIn("project", query)
         self.assertEqual(query["cwd"], ["/tmp/demo"])
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_move_to_project_menu_and_dialog(self, mock_codex: MagicMock) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
         SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/demo", project=project)
@@ -692,7 +692,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'name="project"')
         self.assertContains(response, f'value="{project.pk}" selected')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_set_session_project_moves_and_clears_project(
         self, mock_codex: MagicMock
     ) -> None:
@@ -721,7 +721,7 @@ class SessionViewTests(TestCase):
         self.assertIsNone(metadata.project)
         self.assertTrue(metadata.project_cleared)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_set_session_project_uses_metadata_cwd_without_resume(
         self, mock_codex: MagicMock
     ) -> None:
@@ -740,7 +740,7 @@ class SessionViewTests(TestCase):
         self.assertFalse(metadata.project_cleared)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.app_server_pool.run_borrowed_op_with_retry")
+    @patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry")
     def test_set_session_project_falls_back_without_metadata_cwd(
         self, mock_run_borrowed: MagicMock
     ) -> None:
@@ -780,7 +780,7 @@ class SessionViewTests(TestCase):
             {"enable_memories": False},
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_open_pr_menu_link_when_detected(
         self, mock_codex: MagicMock
     ) -> None:
@@ -807,7 +807,7 @@ class SessionViewTests(TestCase):
             html=True,
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_stage_reads_sdk_mcp_result_model(self, mock_codex: MagicMock) -> None:
         url = "https://github.com/cberner/hitch/pull/94"
         sdk_result = SimpleNamespace(
@@ -845,7 +845,7 @@ class SessionViewTests(TestCase):
             '<span class="stage-badge" data-tone="done">Done: Closed</span>',
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_hides_open_pr_menu_link_without_detected_pr(
         self, mock_codex: MagicMock
     ) -> None:
@@ -857,7 +857,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "Open PR")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_stage_clears_sdk_pr_snapshot_when_latest_pr_turn_has_no_pr(
         self, mock_codex: MagicMock
     ) -> None:
@@ -904,7 +904,7 @@ class SessionViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">Implementation</span>',
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_local_image_entries_redact_server_paths(self, mock_codex: MagicMock) -> None:
         local_image_message = _root(
             SimpleNamespace(
@@ -929,7 +929,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "[image]")
         self.assertNotContains(response, "/tmp/private/screen.png")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_next_message_settings_render_under_title(
         self, mock_codex: MagicMock
     ) -> None:
@@ -960,7 +960,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, ">approval<")
         self.assertContains(response, "Always prompt for approval")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_system_feedback_renders_with_display_author(
         self, mock_codex: MagicMock
     ) -> None:
@@ -985,7 +985,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, '<span class="role">QA agent</span>')
         self.assertNotContains(response, '<span class="role">User</span>')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_system_feedback_author_uses_turn_index_not_text(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1015,7 +1015,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, '<span class="role">QA agent</span>', count=1)
         self.assertContains(response, '<span class="role">User</span>', count=1)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_demo_agent_turn_is_hidden_from_transcript(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1054,7 +1054,7 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, "Registration token: secret")
         self.assertNotContains(response, "Registered the demo container")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_demo_agent_filter_ignores_stale_user_message_index(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1081,7 +1081,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "Done")
         self.assertNotContains(response, "Registration token: secret")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_demo_agent_filter_preserves_inserted_qa_approval(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1146,7 +1146,7 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, "Registration token: secret")
         self.assertNotContains(response, "Registered container")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_demo_worker_renders_live_transcript_without_prompt(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1191,7 +1191,7 @@ class SessionViewTests(TestCase):
             html,
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_demo_worker_sanitizes_sensitive_live_details(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1452,7 +1452,7 @@ class SessionViewTests(TestCase):
         self.assertIn("Demo setup file change approval requested. 2 files", body)
         self.assertIn("Demo setup file change", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_registered_demo_status_renders_logs(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1474,7 +1474,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "hitch-demo-thread-1-abcd")
         self.assertContains(response, "installing dependencies")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_failed_demo_status_renders_error_without_approval_ui(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1497,7 +1497,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "traceback")
         self.assertNotContains(response, "Start demo?")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_failed_demo_links_to_system_session_with_full_demo_history(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1585,7 +1585,7 @@ class SessionViewTests(TestCase):
         self.assertContains(system_response, "Registration token: secret")
         self.assertContains(system_response, "container failed")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1603,8 +1603,8 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'data-normal-value="Unknown"')
         self.assertContains(response, 'data-plan-value="gpt-stale"')
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_diff_viewer_entry_points_and_modal(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -1621,8 +1621,8 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "hitch/main/views.py")
         self.assertContains(response, '<span class="k">return</span> 2', html=False)
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_diff_menu_item_is_disabled_without_changes(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -1635,7 +1635,7 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, 'class="diff-fab"')
         self.assertNotContains(response, '<dialog class="diff-modal"', html=False)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_session_menu_offers_unarchive(self, mock_codex: MagicMock) -> None:
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -1664,7 +1664,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'role="menuitem">Unarchive</button>')
         self.assertNotContains(response, 'role="menuitem">Archive</button>')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_archived_menu_label_does_not_depend_on_thread_list(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1679,7 +1679,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'role="menuitem">Archive</button>')
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_menu_offers_demo_actions(self, mock_codex: MagicMock) -> None:
         SessionDemo.objects.create(
             thread_id="thread-1",
@@ -1701,7 +1701,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'href="http://testserver/sessions/thread-1/demo/"')
         self.assertContains(response, 'role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_start_demo_menu_item_disabled_during_system_workflow(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1718,7 +1718,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "disabled>Start demo</button>")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_start_demo_menu_item_disabled_during_active_turn(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1737,7 +1737,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "disabled>Start demo</button>")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_topbar_title_truncates_long_preview(self, mock_codex: MagicMock) -> None:
         # The session page topbar title uses the same `_display_title` as the
         # index, so an unnamed thread with a long preview gets clipped here too.
@@ -1751,7 +1751,7 @@ class SessionViewTests(TestCase):
         # The topbar title contains the clipped title, not the full 200-char preview.
         self.assertIn('<div class="topbar-title">' + "x" * 80 + "...</div>", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_session_template_receives_slim_thread_context(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1767,7 +1767,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(template_thread.updated_at, 1700000000)
         self.assertFalse(hasattr(template_thread, "turns"))
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_renders_messages_tool_calls_and_timestamps(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1824,7 +1824,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "formatTimestamps(document);")
         self.assertContains(response, "formatTimestamps(body);")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_sdk_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
         memory_citation = SimpleNamespace(
             entries=[
@@ -1865,7 +1865,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "function renderMemoryCitation")
         self.assertContains(response, "item.memoryCitation || item.memory_citation")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_messages_are_copyable_by_long_press(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
@@ -1902,7 +1902,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'document.addEventListener("pointerdown"')
         self.assertContains(response, 'msg.dataset.copyableMessage = "";')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_trailing_tool_calls_are_rendered(self, mock_codex: MagicMock) -> None:
         # Mid-turn agent commentary followed by a tool call (no final agent
         # message) still surfaces the tool call.
@@ -1924,7 +1924,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "rg --files")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_failed_tool_calls_show_status(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
@@ -1943,7 +1943,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "failed")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_empty_session_shows_placeholder(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
@@ -1961,7 +1961,7 @@ class RolloutFileViewTests(TestCase):
     bubbling the error to the response.
     """
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_prefers_rollout_file_when_path_is_set(self, mock_codex: MagicMock) -> None:
         rollout_lines = [
             _rollout_line(
@@ -2003,7 +2003,7 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, '<details class="intermediate">')
         self.assertContains(response, "1 thinking message and 1 tool call")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rollout_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
         raw_text = (
             "Used prior context."
@@ -2041,7 +2041,7 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "repo preference")
         self.assertNotContains(response, "oai-mem-citation")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rejected_command_renders_approval_choice(self, mock_codex: MagicMock) -> None:
         rejection = (
             "exec_command failed for `/bin/bash -lc 'printf Reason: command && git push origin master'`: "
@@ -2092,7 +2092,7 @@ class RolloutFileViewTests(TestCase):
         self.assertLess(body.index("</details>"), body.index("Approval declined"))
         self.assertLess(body.index("Approval declined"), body.index("Please confirm explicitly."))
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_plan_mode_rollout_renders_final_plan_card(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2191,7 +2191,7 @@ class RolloutFileViewTests(TestCase):
         self.assertNotContains(response, '<details class="intermediate">')
         self.assertIn("Debug the login CSRF issue", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_resolved_plan_card_hides_approval_actions(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2249,7 +2249,7 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, 'data-initial-plan-mode="false"')
         self.assertContains(response, 'name="default_plan_mode" value=""')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_falls_back_to_sdk_on_rollout_failure_modes(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2299,7 +2299,7 @@ class RolloutFileViewTests(TestCase):
                 if "tool-only" in label:
                     self.assertNotContains(response, "uname -a")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_empty_rollout_with_no_sdk_turns_renders_placeholder(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2314,7 +2314,7 @@ class RolloutFileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No messages in this session yet.")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_token_usage_renders_under_title(self, mock_codex: MagicMock) -> None:
         # The most recent token_count event's non-cached input and output
         # surface under the session title with thousands separators, while
@@ -2375,7 +2375,7 @@ class RolloutFileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'class="usage"')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rollout_groups_multiple_turns_separately(self, mock_codex: MagicMock) -> None:
         # Two user messages in the rollout should produce two independent
         # intermediate blocks — one per turn — rather than one giant block.
@@ -2411,7 +2411,7 @@ class RolloutFileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content.decode().count('<details class="intermediate">'), 2)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rollout_turn_with_only_tool_calls_has_no_final_agent(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2441,7 +2441,7 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, '<details class="intermediate">')
         self.assertNotContains(response, ">Agent<")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rollout_commentary_phase_never_treated_as_final(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2478,7 +2478,7 @@ class RolloutFileViewTests(TestCase):
         self.assertNotContains(response, ">Agent<")
         self.assertContains(response, "2 thinking messages and 1 tool call")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_rollout_final_answer_phase_wins_over_later_unphased(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2514,7 +2514,7 @@ class IntermediateCollapseTests(TestCase):
     """Non-final agent messages and tool calls fold into a <details> block so
     the page renders only the user/final-agent conversation by default."""
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_intermediate_thinking_and_tool_calls_collapse(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2547,7 +2547,7 @@ class IntermediateCollapseTests(TestCase):
         # <details> appears before the final agent message in source order.
         self.assertLess(body.index("<details"), body.index("Here is the answer."))
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_no_collapse_when_nothing_intermediate(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2559,7 +2559,7 @@ class IntermediateCollapseTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, '<details class="intermediate"')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_summary_pluralization(self, mock_codex: MagicMock) -> None:
         """The summary shows just the relevant kind(s) and pluralizes
         correctly: 1 tool call, 1 thinking message, etc."""
@@ -2587,7 +2587,7 @@ class IntermediateCollapseTests(TestCase):
                 self.assertContains(response, expected, html=False)
                 self.assertNotContains(response, must_not_contain)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_phase_final_answer_wins_over_position(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2618,7 +2618,7 @@ class IntermediateCollapseTests(TestCase):
         # The trailing message lives inside an intermediate block.
         self.assertContains(response, ">Agent (thinking)<")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_commentary_phase_is_never_final(self, mock_codex: MagicMock) -> None:
         """All-commentary turns (in-progress) collapse entirely; no top-level
         Agent block."""
@@ -2643,7 +2643,7 @@ class IntermediateCollapseTests(TestCase):
         self.assertNotContains(response, ">Agent<")
         self.assertContains(response, ">Agent (thinking)<")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_phase_accepts_raw_string_shape(self, mock_codex: MagicMock) -> None:
         """Robustness: phase as a raw wire string (e.g. data deserialized
         without pydantic) is still recognized."""
@@ -2670,7 +2670,7 @@ class FinalAgentMarkdownTests(TestCase):
     messages always stay plain-text.
     """
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_final_agent_markdown_is_rendered(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
@@ -2691,7 +2691,7 @@ class FinalAgentMarkdownTests(TestCase):
         self.assertContains(response, "<li>step one</li>", html=False)
         self.assertContains(response, '<div class="body markdown">', html=False)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_plain_final_agent_is_not_treated_as_markdown(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2704,7 +2704,7 @@ class FinalAgentMarkdownTests(TestCase):
         self.assertContains(response, "Hello, friend.")
         self.assertNotContains(response, '<div class="body markdown">')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_markdown_styling_is_only_for_final_agent(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2732,7 +2732,7 @@ class FinalAgentMarkdownTests(TestCase):
         self.assertNotContains(response, "<h1>my heading</h1>")
         self.assertNotContains(response, "<h1>Thinking")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_agent_html_is_escaped(self, mock_codex: MagicMock) -> None:
         # Even when the body is detected as markdown, raw HTML in the
         # source is escaped, so an agent reply can't smuggle a <script>
@@ -2881,7 +2881,7 @@ class SessionViewActiveWorkerTests(TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_thread_renders_status_pill_idle_with_no_live_root(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2905,7 +2905,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotContains(response, ">Codex is working")
         self.assertNotContains(response, 'class="jump-latest" data-jump-latest')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_connection_indicator_retries_before_showing_fatal_loss(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2923,8 +2923,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "const seenEvents = new Set()")
         self.assertContains(response, "if (seenEvents.has(key)) return;")
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_renders_status_pill_working(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -2951,8 +2951,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotContains(response, 'class="diff-fab"')
         self.assertNotContains(response, 'aria-label="Settings for the next message"')
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_qa_worker_renders_token_progress(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -2990,8 +2990,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "QA agent working...1.2K tokens")
         self.assertContains(response, 'data-working-text="QA agent working...1.2K tokens"')
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_qa_feedback_message_renders_timestamp(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3018,8 +3018,8 @@ class SessionViewActiveWorkerTests(TestCase):
             count=1,
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_renders_latest_goal_near_status_pill(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3055,8 +3055,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Goal<")
         self.assertContains(response, "Keep the live goal visible")
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_renders_latest_task_plan_after_refresh(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3111,8 +3111,8 @@ class SessionViewActiveWorkerTests(TestCase):
             html=False,
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_finished_worker_rebuilds_task_plan_on_page_load(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3165,8 +3165,8 @@ class SessionViewActiveWorkerTests(TestCase):
             html=False,
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_planless_latest_turn_does_not_resurrect_prior_task_plan(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3230,8 +3230,8 @@ class SessionViewActiveWorkerTests(TestCase):
             r'<aside class="task-plan"[\s\S]*?aria-label="Current task plan"\s+hidden>',
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_does_not_inherit_prior_worker_task_plan(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3290,8 +3290,8 @@ class SessionViewActiveWorkerTests(TestCase):
             r'<aside class="task-plan"[\s\S]*?aria-label="Current task plan"\s+hidden>',
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_preserves_cleared_task_plan_order_after_refresh(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3357,8 +3357,8 @@ class SessionViewActiveWorkerTests(TestCase):
             html=False,
         )
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_preserves_fallback_task_plan_order_after_refresh(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -3412,7 +3412,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "Fallback latest task")
         self.assertNotIn("Fallback stale task", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_renders_live_section_and_stream_url(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3462,7 +3462,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'document.querySelectorAll("[data-composer-stop]")')
         self.assertContains(response, "if (inner.text) parts.push(inner.text)")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_thread_omits_stop_button(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3477,7 +3477,7 @@ class SessionViewActiveWorkerTests(TestCase):
             response, reverse("stop_session", kwargs={"session_id": "thread-1"})
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_hidden_system_workflow_renders_busy_state(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3539,7 +3539,7 @@ class SessionViewActiveWorkerTests(TestCase):
             f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;demo="',
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_workflow_system_feedback_worker_keeps_composer_locked(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3570,7 +3570,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Waiting</button>")
         self.assertNotContains(response, ">Steer</button>")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_completed_qa_approval_is_shown_in_transcript(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3630,7 +3630,7 @@ class SessionViewActiveWorkerTests(TestCase):
             body.index(system_agents.PR_SLASH_PROMPT),
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_monitored_pr_qa_approval_keeps_original_prompt_order(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3700,7 +3700,7 @@ class SessionViewActiveWorkerTests(TestCase):
             body.index("Address monitor feedback"),
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_completed_qa_only_approval_is_appended_to_transcript(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3746,7 +3746,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "No qualifying findings.")
         self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_qa_approval_feedback_renders_markdown_findings(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3799,7 +3799,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotIn("**CRITICAL**", body)
         self.assertNotIn("- **MAJOR**", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_qa_approval_feedback_renders_single_finding_markdown(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3846,7 +3846,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertIn("<code>views.py</code>", body)
         self.assertNotIn("**P1**", body)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_completed_local_merge_approval_shows_branch_and_commit(
         self, mock_codex: MagicMock
     ) -> None:
@@ -3907,7 +3907,7 @@ class SessionViewActiveWorkerTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -3979,7 +3979,7 @@ class SessionViewActiveWorkerTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_indicator_stream_url_lives_on_composer_form(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4012,7 +4012,7 @@ class SessionViewActiveWorkerTests(TestCase):
             f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow=&amp;demo="',
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_composer_supports_super_enter_submit(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
@@ -4024,7 +4024,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'event.getModifierState("OS")')
         self.assertContains(response, "requestSubmit(composer, submit)")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_composer_adjusts_for_mobile_keyboard(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
@@ -4043,7 +4043,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "document.documentElement.style.setProperty")
         self.assertContains(response, "scheduleComposerKeyboardOffset")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_composer_exposes_plan_slash_command(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
@@ -4075,7 +4075,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'other.placeholder = "Other"')
         self.assertContains(response, "delete entry.answers[key]")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_live_task_plan_uses_responsive_panel(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
@@ -4105,8 +4105,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "taskPlan.dataset.expanded")
         self.assertNotContains(response, "ensurePlanView(turnId, null)")
 
-    @patch("hitch.main.views.build_worktree_diff")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.build_worktree_diff")
+    @patch("hitch.main.views.common.Codex")
     def test_open_slash_menu_offsets_live_status_pill(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -4126,7 +4126,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "syncSlashMenuStatusOffset")
         self.assertContains(response, 'liveWork.dataset.slashMenuOpen = "true"')
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_stream_url_carries_baseline_and_active_when_worker_present(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4149,7 +4149,7 @@ class SessionViewActiveWorkerTests(TestCase):
             f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;demo="',
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_in_progress_turn_is_trimmed_when_worker_active(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4191,7 +4191,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "run tests")
         self.assertContains(response, "data-live-root")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_in_progress_image_only_turn_is_trimmed_when_worker_active(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4235,7 +4235,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "[image]")
         self.assertContains(response, "data-live-root")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.common.Codex")
     def test_active_worker_picked_over_newer_terminal_row(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4271,8 +4271,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "still running")
         self.assertNotContains(response, "bailed fast")
 
-    @patch("hitch.main.views.reconciliation.reconcile_dead_if_due", return_value=0)
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.runtime.reconciliation.reconcile_dead_if_due", return_value=0)
+    @patch("hitch.main.views.common.Codex")
     def test_dead_worker_is_reconciled_before_render(
         self, mock_codex: MagicMock, mock_global_reconcile: MagicMock
     ) -> None:
