@@ -67,7 +67,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, codex_pool, streaming
+from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -170,8 +170,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(
             config.env,
             {
-                codex_pool._APP_SERVER_DEPLOYMENT_ENV: (
-                    codex_pool._app_server_deployment_id()
+                reconciliation._APP_SERVER_DEPLOYMENT_ENV: (
+                    reconciliation._app_server_deployment_id()
                 )
             },
         )
@@ -1654,7 +1654,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_which.assert_called_once_with("systemd-run")
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=False)
+    @patch("hitch.main.runtime.systemd_isolation._systemd_user_manager_available", return_value=False)
     @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_auto_launch_falls_back_to_direct_when_user_manager_unavailable(
@@ -1675,7 +1675,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_user_manager.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.runtime.systemd_isolation._systemd_user_manager_available", return_value=True)
     @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
@@ -1701,7 +1701,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_ensure_slice.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.runtime.systemd_isolation._systemd_user_manager_available", return_value=True)
     @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
@@ -2176,7 +2176,7 @@ class ReconcileAndLookupTests(TestCase):
         completed = self._make(pid=12, status=CodexInstance.STATUS_COMPLETED)
         mock_worker_alive.side_effect = lambda instance: instance.pk == live_running.pk
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         dead_running.refresh_from_db()
@@ -2191,7 +2191,7 @@ class ReconcileAndLookupTests(TestCase):
 
     @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
     @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_mark_dead_instances_failed_does_not_fan_out_disk_cleanup(
         self,
@@ -2210,7 +2210,7 @@ class ReconcileAndLookupTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED
         )
 
-        n = codex_pool._mark_dead_instances_failed(pending)
+        n = reconciliation._mark_dead_instances_failed(pending)
 
         self.assertEqual(n, 1)
         mock_disk_cleanup.assert_not_called()
@@ -2246,7 +2246,7 @@ class ReconcileAndLookupTests(TestCase):
                 events_path=str(events_path),
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2295,7 +2295,7 @@ class ReconcileAndLookupTests(TestCase):
                 events_path=str(events_path),
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2354,7 +2354,7 @@ class ReconcileAndLookupTests(TestCase):
                 events_path=str(events_path),
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2389,7 +2389,7 @@ class ReconcileAndLookupTests(TestCase):
                 events_path=str(events_path),
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2424,7 +2424,7 @@ class ReconcileAndLookupTests(TestCase):
                 encoding="utf-8",
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2452,7 +2452,7 @@ class ReconcileAndLookupTests(TestCase):
             log_path.parent.mkdir(parents=True)
             log_path.write_text("stale host log\n", encoding="utf-8")
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2482,7 +2482,7 @@ class ReconcileAndLookupTests(TestCase):
             params={},
         )
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2508,7 +2508,7 @@ class ReconcileAndLookupTests(TestCase):
             decision=ApprovalRequest.DECISION_ACCEPT,
         )
 
-        codex_pool.reconcile_dead()
+        reconciliation.reconcile_dead()
 
         approval.refresh_from_db()
         self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
@@ -2526,7 +2526,7 @@ class ReconcileAndLookupTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED
         )
 
-        n = codex_pool._mark_dead_instances_failed(pending)
+        n = reconciliation._mark_dead_instances_failed(pending)
 
         instance.refresh_from_db()
         self.assertEqual(n, 0)
@@ -2535,7 +2535,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(instance.ended_at)
 
     @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_still_routes_instance_that_completed_during_sweep(
         self,
@@ -2553,7 +2553,7 @@ class ReconcileAndLookupTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED
         )
 
-        n = codex_pool._mark_dead_instances_failed(pending)
+        n = reconciliation._mark_dead_instances_failed(pending)
 
         self.assertEqual(n, 0)
         mock_notify.assert_called_once()
@@ -2570,7 +2570,7 @@ class ReconcileAndLookupTests(TestCase):
         # routes system-agent workers through their workflow's failure handler.
         starting = self._make(pid=0, status=CodexInstance.STATUS_STARTING)
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         starting.refresh_from_db()
         self.assertEqual(starting.status, CodexInstance.STATUS_STARTING)
@@ -2588,7 +2588,7 @@ class ReconcileAndLookupTests(TestCase):
             started_at=timezone.now() - timedelta(minutes=10)
         )
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
@@ -2628,7 +2628,7 @@ class ReconcileAndLookupTests(TestCase):
         )
         CodexInstance.objects.filter(pk=other.pk).update(workflow_id=other_workflow.pk)
 
-        n = codex_pool.reconcile_dead_for_workflow(
+        n = reconciliation.reconcile_dead_for_workflow(
             target_workflow.pk,
             main_thread_id=target_workflow.main_thread_id,
         )
@@ -2643,7 +2643,7 @@ class ReconcileAndLookupTests(TestCase):
             workflow_id=target_workflow.pk,
         )
 
-    @patch("hitch.main.runtime.codex_pool.reconcile_orphaned_workers", return_value=0)
+    @patch("hitch.main.runtime.reconciliation.reconcile_orphaned_workers", return_value=0)
     @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
     def test_reconcile_dead_for_workflow_reaps_orphans(
         self, _mock_reconcile: MagicMock, mock_reap: MagicMock
@@ -2656,7 +2656,7 @@ class ReconcileAndLookupTests(TestCase):
             cwd="/repo",
         )
 
-        codex_pool.reconcile_dead_for_workflow(
+        reconciliation.reconcile_dead_for_workflow(
             workflow.pk, main_thread_id=workflow.main_thread_id
         )
 
@@ -2677,7 +2677,7 @@ class ReconcileAndLookupTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        codex_pool.reconcile_dead()
+        reconciliation.reconcile_dead()
 
         mock_notify.assert_not_called()
 
@@ -2721,7 +2721,7 @@ class ReconcileAndLookupTests(TestCase):
                 lambda instance: instance.pk == live_running.pk
             )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
             self.assertEqual(n, 1)
             self.assertTrue(dead_path.exists())
@@ -2900,7 +2900,7 @@ class ReconcileAndLookupTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         mock_notify.assert_called_once()
@@ -2926,7 +2926,7 @@ class ReconcileAndLookupTests(TestCase):
         system_agent.agent_kind = demo.DEMO_AGENT_KIND
         system_agent.save(update_fields=["agent_kind"])
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         mock_system_notify.assert_called_once()
@@ -2949,7 +2949,7 @@ class ReconcileAndLookupTests(TestCase):
         system_agent.agent_kind = demo.DEMO_AGENT_KIND
         system_agent.save(update_fields=["agent_kind"])
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         mock_system_notify.assert_called_once()
@@ -2962,7 +2962,7 @@ class ReconcileAndLookupTests(TestCase):
     ) -> None:
         instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
 
-        n = codex_pool.reconcile_dead()
+        n = reconciliation.reconcile_dead()
 
         self.assertEqual(n, 1)
         instance.refresh_from_db()
@@ -2986,7 +2986,7 @@ class ReconcileAndLookupTests(TestCase):
             codex_pool._track_worker_process(instance.pk, proc)
             _wait_for_process_exit(proc)
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
             self.assertEqual(n, 1)
             self.assertEqual(proc.returncode, 0)
@@ -3013,7 +3013,7 @@ class ReconcileAndLookupTests(TestCase):
                     cast(subprocess.Popen[bytes], proc),
                 )
 
-            n = codex_pool.reconcile_dead()
+            n = reconciliation.reconcile_dead()
 
             self.assertEqual(n, 1)
             proc.wait.assert_called_once_with(timeout=0)
@@ -3093,14 +3093,14 @@ class ReapScopeCgroupTests(TestCase):
             systemd_scope_unit=systemd_scope_unit,
         )
 
-    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=False)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_kills_cgroup_of_scoped_worker(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
         instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
-        codex_pool._reap_scope_cgroup(instance)
+        systemd_isolation._reap_scope_cgroup(instance)
 
         mock_force_kill.assert_called_once_with(instance)
 
@@ -3108,11 +3108,11 @@ class ReapScopeCgroupTests(TestCase):
     def test_skips_non_scoped_worker(self, mock_force_kill: MagicMock) -> None:
         # A direct launch has no cgroup to sweep, and its already-dead pid must
         # never be re-signaled (it may have been recycled).
-        codex_pool._reap_scope_cgroup(self._make(systemd_scope_unit=""))
+        systemd_isolation._reap_scope_cgroup(self._make(systemd_scope_unit=""))
 
         mock_force_kill.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=True)
+    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_skips_scope_reused_by_a_live_worker(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
@@ -3122,11 +3122,11 @@ class ReapScopeCgroupTests(TestCase):
         # signaling it would kill that launch, so skip.
         instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
-        codex_pool._reap_scope_cgroup(instance)
+        systemd_isolation._reap_scope_cgroup(instance)
 
         mock_force_kill.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=False)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_swallows_missing_scope(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
@@ -3136,9 +3136,9 @@ class ReapScopeCgroupTests(TestCase):
         mock_force_kill.side_effect = ProcessLookupError
         instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
-        codex_pool._reap_scope_cgroup(instance)  # must not raise
+        systemd_isolation._reap_scope_cgroup(instance)  # must not raise
 
-    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=False)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_swallows_kill_failure(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
@@ -3146,9 +3146,9 @@ class ReapScopeCgroupTests(TestCase):
         mock_force_kill.side_effect = OSError("boom")
         instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
-        codex_pool._reap_scope_cgroup(instance)  # best-effort: must not raise
+        systemd_isolation._reap_scope_cgroup(instance)  # best-effort: must not raise
 
-    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=False)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_reaps_dead_systemd_worker_cgroup(
@@ -3175,7 +3175,7 @@ class ReapScopeCgroupTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        codex_pool._mark_dead_instances_failed(
+        reconciliation._mark_dead_instances_failed(
             list(CodexInstance.objects.filter(pk__in=[scoped.pk, direct.pk]))
         )
 
@@ -3222,7 +3222,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             }
         )
         self.assertTrue(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
@@ -3237,7 +3237,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             }
         )
         self.assertTrue(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.scope", proc_root=proc_root
             )
         )
@@ -3254,7 +3254,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             }
         )
         self.assertFalse(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
@@ -3269,7 +3269,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             }
         )
         self.assertFalse(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
@@ -3278,7 +3278,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
         proc_root = MagicMock()
         proc_root.exists.return_value = False
         self.assertFalse(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
@@ -3296,7 +3296,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             }
         )
         self.assertFalse(
-            codex_pool._scope_has_live_worker(
+            systemd_isolation._scope_has_live_worker(
                 "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
@@ -3309,7 +3309,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
                 b"0::/user.slice/hitch-codex-worker-7.service\n"
             )
 
-            unit = codex_pool._worker_unit_from_pid_cgroup(
+            unit = systemd_isolation._worker_unit_from_pid_cgroup(
                 700, 7, proc_root=Path(proc_root)
             )
 
@@ -3323,7 +3323,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
                 b"0::/user.slice/hitch-codex-worker-7.scope\n"
             )
 
-            unit = codex_pool._worker_unit_from_pid_cgroup(
+            unit = systemd_isolation._worker_unit_from_pid_cgroup(
                 701, 7, proc_root=Path(proc_root)
             )
 
@@ -3337,7 +3337,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
                 b"0::/user.slice/hitch-codex-worker-99.scope\n"
             )
 
-            unit = codex_pool._worker_unit_from_pid_cgroup(
+            unit = systemd_isolation._worker_unit_from_pid_cgroup(
                 702, 7, proc_root=Path(proc_root)
             )
 
@@ -3363,36 +3363,36 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_worker_whose_instance_is_terminal(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
         done = self._make(pid=5001, status=CodexInstance.STATUS_COMPLETED)
         mock_iter.return_value = [(5001, done.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5001, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_worker_with_no_instance_row(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
         mock_iter.return_value = [(5002, 999999)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5002, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
+    @patch("hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup", return_value=None)
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_systemd_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
@@ -3409,7 +3409,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         )
         mock_iter.return_value = [(5002, 999999)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_not_called()
@@ -3422,11 +3422,11 @@ class ReconcileOrphanedWorkersTests(TestCase):
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch(
-        "hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup",
+        "hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup",
         return_value="hitch-codex-worker-999999.scope",
     )
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_legacy_scope_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
@@ -3440,7 +3440,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         )
         mock_iter.return_value = [(5002, 999999)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_not_called()
@@ -3450,9 +3450,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
+    @patch("hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup", return_value=None)
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_systemd_worker_when_row_lacks_unit(
         self,
         mock_iter: MagicMock,
@@ -3471,7 +3471,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         )
         mock_iter.return_value = [(5006, done.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_not_called()
@@ -3484,7 +3484,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_legacy_scope_worker_when_row_lacks_unit(
         self,
         mock_iter: MagicMock,
@@ -3498,10 +3498,10 @@ class ReconcileOrphanedWorkersTests(TestCase):
         )
         mock_iter.return_value = [(5006, done.pk)]
         with patch(
-            "hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup",
+            "hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup",
             return_value=f"hitch-codex-worker-{done.pk}.scope",
         ):
-            killed = codex_pool.reconcile_orphaned_workers()
+            killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_not_called()
@@ -3513,7 +3513,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_spares_running_user_and_system_workers(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3531,14 +3531,14 @@ class ReconcileOrphanedWorkersTests(TestCase):
             (5005, system.pk),
         ]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_reaps_only_the_orphan_among_a_mix(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3546,14 +3546,14 @@ class ReconcileOrphanedWorkersTests(TestCase):
         leaked = self._make(pid=5007, status=CodexInstance.STATUS_FAILED)
         mock_iter.return_value = [(5006, live.pk), (5007, leaked.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5007, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_does_not_kill_when_identity_recheck_fails(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3561,7 +3561,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         done = self._make(pid=5008, status=CodexInstance.STATUS_COMPLETED)
         mock_iter.return_value = [(5008, done.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
@@ -3569,7 +3569,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_scoped_worker_killed_via_force_kill_instance(
         self,
         mock_iter: MagicMock,
@@ -3582,7 +3582,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         scoped.save(update_fields=["systemd_scope_unit"])
         mock_iter.return_value = [(5009, scoped.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         # Scoped workers are killed through systemctl, not a raw killpg -- but
@@ -3593,7 +3593,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_spares_terminal_worker_within_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3605,32 +3605,32 @@ class ReconcileOrphanedWorkersTests(TestCase):
         done.save(update_fields=["ended_at"])
         mock_iter.return_value = [(5011, done.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_terminal_worker_past_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
         done = self._make(pid=5012, status=CodexInstance.STATUS_COMPLETED)
-        done.ended_at = timezone.now() - codex_pool._ORPHAN_REAP_GRACE - timedelta(
+        done.ended_at = timezone.now() - reconciliation._ORPHAN_REAP_GRACE - timedelta(
             seconds=5
         )
         done.save(update_fields=["ended_at"])
         mock_iter.return_value = [(5012, done.pk)]
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5012, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_spares_supervised_worker_mid_terminal_commit(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3643,14 +3643,14 @@ class ReconcileOrphanedWorkersTests(TestCase):
             codex_pool._TRACKED_WORKER_PROCS[5013] = (done.pk, cast(Any, MagicMock()))
         self.addCleanup(_forget_worker_pid, 5013)
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_reaps_supervised_worker_wedged_past_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3658,7 +3658,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         # is the exact same-process process holding the lock: it MUST be killed,
         # not exempted forever by the tracked check.
         done = self._make(pid=5015, status=CodexInstance.STATUS_COMPLETED)
-        done.ended_at = timezone.now() - codex_pool._ORPHAN_REAP_GRACE - timedelta(
+        done.ended_at = timezone.now() - reconciliation._ORPHAN_REAP_GRACE - timedelta(
             seconds=5
         )
         done.save(update_fields=["ended_at"])
@@ -3667,14 +3667,14 @@ class ReconcileOrphanedWorkersTests(TestCase):
             codex_pool._TRACKED_WORKER_PROCS[5015] = (done.pk, cast(Any, MagicMock()))
         self.addCleanup(_forget_worker_pid, 5015)
 
-        killed = codex_pool.reconcile_orphaned_workers()
+        killed = reconciliation.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5015, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.killpg", side_effect=ProcessLookupError)
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kill_already_gone_counts_as_not_killed(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, _mock_killpg: MagicMock
     ) -> None:
@@ -3682,10 +3682,10 @@ class ReconcileOrphanedWorkersTests(TestCase):
         done = self._make(pid=5014, status=CodexInstance.STATUS_COMPLETED)
         mock_iter.return_value = [(5014, done.pk)]
 
-        self.assertEqual(codex_pool.reconcile_orphaned_workers(), 0)
+        self.assertEqual(reconciliation.reconcile_orphaned_workers(), 0)
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_kills_nothing_when_expected_set_unreadable(
         self, mock_iter: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3697,16 +3697,16 @@ class ReconcileOrphanedWorkersTests(TestCase):
             "filter",
             side_effect=Exception("db down"),
         ):
-            killed = codex_pool.reconcile_orphaned_workers()
+            killed = reconciliation.reconcile_orphaned_workers()
 
         # Never act on incomplete information.
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool._finalize_reaped_instance")
+    @patch("hitch.main.runtime.reconciliation._finalize_reaped_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
     def test_finalizes_each_reaped_instance(
         self,
         mock_iter: MagicMock,
@@ -3717,7 +3717,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         done = self._make(pid=5016, status=CodexInstance.STATUS_COMPLETED)
         mock_iter.return_value = [(5016, done.pk)]
 
-        codex_pool.reconcile_orphaned_workers()
+        reconciliation.reconcile_orphaned_workers()
 
         mock_finalize.assert_called_once_with(done.pk)
 
@@ -3754,12 +3754,12 @@ class FinalizeReapedInstanceTests(TestCase):
     ) -> None:
         failed = self._make(status=CodexInstance.STATUS_FAILED)
 
-        codex_pool._finalize_reaped_instance(failed.pk)
+        reconciliation._finalize_reaped_instance(failed.pk)
 
         mock_resolve.assert_called_once_with(failed.pk)
 
     @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
     def test_routes_finish_hooks_for_reaped_terminal_turn(
         self, mock_notify: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -3771,7 +3771,7 @@ class FinalizeReapedInstanceTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        codex_pool._finalize_reaped_instance(agent.pk)
+        reconciliation._finalize_reaped_instance(agent.pk)
 
         self.assertEqual(mock_notify.call_args.args[0].pk, agent.pk)
         self.assertEqual(mock_cleanup.call_args.args[0].pk, agent.pk)
@@ -3779,7 +3779,7 @@ class FinalizeReapedInstanceTests(TestCase):
     def test_non_terminal_instance_is_a_noop(self) -> None:
         running = self._make(status=CodexInstance.STATUS_RUNNING, auto_pr_enabled=True)
 
-        codex_pool._finalize_reaped_instance(running.pk)
+        reconciliation._finalize_reaped_instance(running.pk)
 
         running.refresh_from_db()
         self.assertEqual(running.status, CodexInstance.STATUS_RUNNING)
@@ -3792,7 +3792,7 @@ class FinalizeReapedInstanceTests(TestCase):
         # not trigger it — the 10-minute scheduler owns that cadence.
         done = self._make(status=CodexInstance.STATUS_COMPLETED)
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         mock_disk_cleanup.assert_not_called()
 
@@ -3807,7 +3807,7 @@ class FinalizeReapedInstanceTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
         )
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         done.refresh_from_db()
         self.assertEqual(done.status, CodexInstance.STATUS_FAILED)
@@ -3827,7 +3827,7 @@ class FinalizeReapedInstanceTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
         )
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         done.refresh_from_db()
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
@@ -3846,7 +3846,7 @@ class FinalizeReapedInstanceTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
         )
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         done.refresh_from_db()
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
@@ -3855,7 +3855,7 @@ class FinalizeReapedInstanceTests(TestCase):
     def test_completed_without_auto_review_is_untouched(self) -> None:
         done = self._make(status=CodexInstance.STATUS_COMPLETED)
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         done.refresh_from_db()
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
@@ -3868,13 +3868,13 @@ class FinalizeReapedInstanceTests(TestCase):
             auto_pr_triggered_at=timezone.now(),
         )
 
-        codex_pool._finalize_reaped_instance(done.pk)
+        reconciliation._finalize_reaped_instance(done.pk)
 
         done.refresh_from_db()
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
 
     def test_missing_instance_is_a_noop(self) -> None:
-        codex_pool._finalize_reaped_instance(999999)  # must not raise
+        reconciliation._finalize_reaped_instance(999999)  # must not raise
 
 
 class IterRunningWorkerPidsTests(SimpleTestCase):
@@ -3914,7 +3914,7 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
             (proc_root / "104").mkdir()
 
             found = sorted(
-                codex_pool._iter_running_worker_pids(
+                reconciliation._iter_running_worker_pids(
                     proc_root=proc_root, manage_py=ours
                 )
             )
@@ -3937,7 +3937,7 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
             )
 
             found = list(
-                codex_pool._iter_running_worker_pids(
+                reconciliation._iter_running_worker_pids(
                     proc_root=proc_root, manage_py=ours
                 )
             )
@@ -3948,7 +3948,7 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
         missing = Path(tempfile.gettempdir()) / "definitely-not-here-12345"
         self.assertEqual(
             list(
-                codex_pool._iter_running_worker_pids(
+                reconciliation._iter_running_worker_pids(
                     proc_root=missing, manage_py="/srv/hitch/manage.py"
                 )
             ),
@@ -3958,7 +3958,7 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
 
 class IterCodexAppServerPidsTests(SimpleTestCase):
     _DEPLOYMENT = "/srv/hitch"
-    _MARKER = f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}={_DEPLOYMENT}".encode()
+    _MARKER = f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}={_DEPLOYMENT}".encode()
     _APP_SERVER_ARGV = [
         b"/usr/local/bin/codex",
         b"--config",
@@ -4000,7 +4000,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
                 101,
                 self._APP_SERVER_ARGV,
                 [
-                    f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}=/other/hitch".encode(),
+                    f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}=/other/hitch".encode(),
                 ],
             )
             # An app-server with no marker at all (e.g. pre-upgrade) -- ignored.
@@ -4017,7 +4017,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
             (proc_root / "105").mkdir()
 
             found = sorted(
-                codex_pool._iter_codex_app_server_pids(
+                reconciliation._iter_codex_app_server_pids(
                     proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
             )
@@ -4043,7 +4043,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
             )
 
             found = sorted(
-                codex_pool._iter_codex_app_server_pids(
+                reconciliation._iter_codex_app_server_pids(
                     proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
             )
@@ -4057,7 +4057,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
             self._write_proc(proc_root, 200, self._APP_SERVER_ARGV)
 
             found = list(
-                codex_pool._iter_codex_app_server_pids(
+                reconciliation._iter_codex_app_server_pids(
                     proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
             )
@@ -4068,13 +4068,13 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             marker = (
-                f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
-                f"{codex_pool._app_server_deployment_id()}"
+                f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}="
+                f"{reconciliation._app_server_deployment_id()}"
             ).encode()
             self._write_proc(proc_root, 300, self._APP_SERVER_ARGV, [marker])
 
             found = list(
-                codex_pool._iter_codex_app_server_pids(proc_root=proc_root)
+                reconciliation._iter_codex_app_server_pids(proc_root=proc_root)
             )
 
         self.assertEqual(found, [300])
@@ -4083,7 +4083,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
         missing = Path(tempfile.gettempdir()) / "definitely-not-here-67890"
         self.assertEqual(
             list(
-                codex_pool._iter_codex_app_server_pids(
+                reconciliation._iter_codex_app_server_pids(
                     proc_root=missing, deployment_id=self._DEPLOYMENT
                 )
             ),
@@ -4101,8 +4101,8 @@ class NukeCodexAppServersTests(SimpleTestCase):
         self, proc_root: Path, pid: int, ppid: int | None = None
     ) -> None:
         marker = (
-            f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
-            f"{codex_pool._app_server_deployment_id()}"
+            f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}="
+            f"{reconciliation._app_server_deployment_id()}"
         ).encode()
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir()
@@ -4123,7 +4123,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 111)
             self._write_app_server(proc_root, 222)
 
-            killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
+            killed = reconciliation.nuke_codex_app_servers(proc_root=proc_root)
 
         self.assertEqual(killed, 2)
         mock_kill.assert_any_call(111, signal.SIGKILL)
@@ -4142,7 +4142,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 111, ppid=50)
             self._write_app_server(proc_root, 222, ppid=111)
 
-            killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
+            killed = reconciliation.nuke_codex_app_servers(proc_root=proc_root)
 
         self.assertEqual(killed, 2)
         mock_kill.assert_any_call(111, signal.SIGKILL)
@@ -4159,10 +4159,10 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 111)
 
             with patch(
-                "hitch.main.runtime.codex_pool._iter_codex_app_server_pids",
+                "hitch.main.runtime.reconciliation._iter_codex_app_server_pids",
                 return_value=iter([111, 999]),
             ):
-                killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
+                killed = reconciliation.nuke_codex_app_servers(proc_root=proc_root)
 
         self.assertEqual(killed, 1)
         mock_kill.assert_called_once_with(111, signal.SIGKILL)
@@ -4174,7 +4174,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 111)
 
             self.assertEqual(
-                codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
+                reconciliation.nuke_codex_app_servers(proc_root=proc_root), 0
             )
 
     @patch("hitch.main.runtime.codex_pool.os.kill", side_effect=PermissionError)
@@ -4184,7 +4184,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 333)
 
             self.assertEqual(
-                codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
+                reconciliation.nuke_codex_app_servers(proc_root=proc_root), 0
             )
 
 
@@ -4193,8 +4193,8 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
         self, proc_root: Path, pid: int, ppid: int | None = None
     ) -> None:
         marker = (
-            f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
-            f"{codex_pool._app_server_deployment_id()}"
+            f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}="
+            f"{reconciliation._app_server_deployment_id()}"
         ).encode()
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir()
@@ -4218,7 +4218,7 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 300, ppid=51)  # wrapper B
             self._write_app_server(proc_root, 400, ppid=300)  # native child B
 
-            count = codex_pool.count_running_codex_app_servers(proc_root=proc_root)
+            count = reconciliation.count_running_codex_app_servers(proc_root=proc_root)
 
         self.assertEqual(count, 2)
 
@@ -4230,7 +4230,7 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 100)
 
             self.assertEqual(
-                codex_pool.count_running_codex_app_servers(proc_root=proc_root), 1
+                reconciliation.count_running_codex_app_servers(proc_root=proc_root), 1
             )
 
     def test_orphaned_native_child_is_counted(self) -> None:
@@ -4241,13 +4241,13 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 200, ppid=1)
 
             self.assertEqual(
-                codex_pool.count_running_codex_app_servers(proc_root=proc_root), 1
+                reconciliation.count_running_codex_app_servers(proc_root=proc_root), 1
             )
 
     def test_no_proc_root_counts_zero(self) -> None:
         missing = Path(tempfile.gettempdir()) / "definitely-not-here-13579"
         self.assertEqual(
-            codex_pool.count_running_codex_app_servers(proc_root=missing), 0
+            reconciliation.count_running_codex_app_servers(proc_root=missing), 0
         )
 
 
@@ -8497,9 +8497,9 @@ class StreamForInstanceTests(TestCase):
         with (
             patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
             patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch("hitch.main.runtime.streaming.codex_pool.reconcile_dead") as mock_global,
+            patch("hitch.main.runtime.streaming.reconciliation.reconcile_dead") as mock_global,
             patch(
-                "hitch.main.runtime.streaming.codex_pool.reconcile_dead_for_workflow"
+                "hitch.main.runtime.streaming.reconciliation.reconcile_dead_for_workflow"
             ) as mock_scoped,
         ):
             frames = list(

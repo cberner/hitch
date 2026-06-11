@@ -321,7 +321,7 @@ class NukeCodexViewTests(TestCase):
 
         self.assertNotContains(response, "Killed ")
 
-    @patch("hitch.main.views.codex_pool.nuke_codex_app_servers", return_value=3)
+    @patch("hitch.main.views.reconciliation.nuke_codex_app_servers", return_value=3)
     def test_nuke_kills_app_servers_and_redirects_with_count(
         self, mock_nuke: MagicMock
     ) -> None:
@@ -333,7 +333,7 @@ class NukeCodexViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], f"{reverse('profile')}?nuked=3")
 
-    @patch("hitch.main.views.codex_pool.nuke_codex_app_servers")
+    @patch("hitch.main.views.reconciliation.nuke_codex_app_servers")
     def test_nuke_requires_authentication(self, mock_nuke: MagicMock) -> None:
         response = self.client.post(reverse("nuke_codex"))
 

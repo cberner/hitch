@@ -55,7 +55,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         return_value=2,
     )
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.reconcile_dead")
+    @patch("hitch.main.goals.auto_proposals.reconciliation.reconcile_dead")
     def test_scheduler_tick_reconciles_and_starts_auto_proposals(
         self,
         mock_reconcile_dead: MagicMock,
@@ -71,7 +71,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
     @patch("hitch.main.goals.auto_proposals.logger.exception")
     @patch("hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.reconcile_dead")
+    @patch("hitch.main.goals.auto_proposals.reconciliation.reconcile_dead")
     def test_scheduler_tick_keeps_running_after_errors(
         self,
         mock_reconcile_dead: MagicMock,
@@ -362,7 +362,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_due_pr_monitor_backoffs",
         return_value=2,
     )
-    @patch("hitch.main.workflows.workflow_maintenance.codex_pool.reconcile_dead")
+    @patch("hitch.main.workflows.workflow_maintenance.reconciliation.reconcile_dead")
     def test_scheduler_tick_reconciles_and_refreshes_pr_monitor_backoffs(
         self,
         mock_reconcile_dead: MagicMock,

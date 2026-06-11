@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
 
-from hitch.main.runtime import app_server_pool, codex_pool
+from hitch.main.runtime import app_server_pool, reconciliation
 
 _LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
 
@@ -322,28 +322,28 @@ class ReconcileDeadIfDueTests(SimpleTestCase):
     @override_settings(TESTING=False)
     def test_runs_sweep_when_claim_wins(self) -> None:
         with (
-            patch("hitch.main.runtime.codex_pool.reconcile_dead", return_value=3) as sweep,
-            patch("hitch.main.runtime.codex_pool.rate_limit.claim", return_value=True) as claim,
+            patch("hitch.main.runtime.reconciliation.reconcile_dead", return_value=3) as sweep,
+            patch("hitch.main.runtime.reconciliation.rate_limit.claim", return_value=True) as claim,
         ):
-            self.assertEqual(codex_pool.reconcile_dead_if_due(), 3)
+            self.assertEqual(reconciliation.reconcile_dead_if_due(), 3)
         sweep.assert_called_once_with()
         claim.assert_called_once()
 
     @override_settings(TESTING=False)
     def test_skips_sweep_when_claim_loses(self) -> None:
         with (
-            patch("hitch.main.runtime.codex_pool.reconcile_dead") as sweep,
-            patch("hitch.main.runtime.codex_pool.rate_limit.claim", return_value=False),
+            patch("hitch.main.runtime.reconciliation.reconcile_dead") as sweep,
+            patch("hitch.main.runtime.reconciliation.rate_limit.claim", return_value=False),
         ):
-            self.assertEqual(codex_pool.reconcile_dead_if_due(), 0)
+            self.assertEqual(reconciliation.reconcile_dead_if_due(), 0)
         sweep.assert_not_called()
 
     @override_settings(TESTING=True)
     def test_always_sweeps_under_testing(self) -> None:
         with (
-            patch("hitch.main.runtime.codex_pool.reconcile_dead", return_value=1) as sweep,
-            patch("hitch.main.runtime.codex_pool.rate_limit.claim") as claim,
+            patch("hitch.main.runtime.reconciliation.reconcile_dead", return_value=1) as sweep,
+            patch("hitch.main.runtime.reconciliation.rate_limit.claim") as claim,
         ):
-            self.assertEqual(codex_pool.reconcile_dead_if_due(), 1)
+            self.assertEqual(reconciliation.reconcile_dead_if_due(), 1)
         sweep.assert_called_once_with()
         claim.assert_not_called()
