@@ -21,6 +21,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout, streaming
+from hitch.main.sessions import session_index
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
     render_entries,
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 # generate its own thread summaries, so for unnamed threads `Thread.preview`
 # (the full first user message) is what we get; that is often paragraphs
 # long and would overflow the list rows without a clip.
-_DISPLAY_TITLE_MAX_LEN = 80
 
 
 def _active_instance_for(session_id: str) -> CodexInstance | None:
@@ -386,20 +386,16 @@ def _display_title(thread: Any) -> str:
     """Return a short, single-line title for a thread.
 
     Falls back through `name` -> first line of `preview` -> `id`, clipping
-    to ``_DISPLAY_TITLE_MAX_LEN`` so a long auto-fallback preview cannot
-    overflow the row. Threads without any usable text degrade to the id
-    rather than to a blank link.
+    so a long auto-fallback preview cannot overflow the row. Threads
+    without any usable text degrade to the id rather than to a blank link.
+    One rule shared with the session index (and the optimistic rename in
+    the index page JS): see ``session_index.display_title_for``.
     """
-    name = getattr(thread, "name", None)
-    candidate = name.strip() if isinstance(name, str) else ""
-    if not candidate:
-        preview = getattr(thread, "preview", None) or ""
-        candidate = preview.split("\n", 1)[0].strip()
-    if not candidate:
-        return getattr(thread, "id", "") or ""
-    if len(candidate) > _DISPLAY_TITLE_MAX_LEN:
-        return candidate[:_DISPLAY_TITLE_MAX_LEN].rstrip() + "..."
-    return candidate
+    return session_index.display_title_for(
+        thread_id=getattr(thread, "id", "") or "",
+        name=getattr(thread, "name", None),
+        preview=getattr(thread, "preview", None) or "",
+    )
 
 
 def _entries_for(thread: Any) -> Iterator[dict[str, Any]]:

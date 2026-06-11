@@ -1643,6 +1643,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 session_project_visibility, projects
             ),
             "name_max_len": _NAME_MAX_LEN,
+            "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,
             "show_new_session_controls": True,
             **settings_context,
             **_session_project_visibility_context(
@@ -1692,6 +1693,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "current_show_archived_sessions": current_settings.show_archived_sessions,
             "name_max_len": _NAME_MAX_LEN,
+            "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,
             "system_session_list": True,
             "show_new_session_controls": False,
             **settings_context,
@@ -2579,6 +2581,7 @@ def _render_session_detail(
             "system_prompt": system_prompt,
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
+            "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "set_archived_url": reverse(
                 "set_session_archived", kwargs={"session_id": session_id}
