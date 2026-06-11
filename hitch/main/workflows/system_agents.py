@@ -194,6 +194,7 @@ QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
 AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
 AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
 AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
+AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY = "auto_merge_reviewed_source_tree"
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
 _PR_MONITOR_PENDING_POLL_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
 _PR_MONITOR_PENDING_POLL_MAX_SECONDS = 30 * _SECONDS_PER_MINUTE
@@ -1245,9 +1246,16 @@ def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
         AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: review_patch.patch,
         AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: review_patch.target_sha,
         AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY: review_patch.base_sha,
+        AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY: review_patch.source_tree_sha,
     }
     workflow.save(update_fields=["state", "updated_at"])
-    return review_patch.patch
+    # The lossless patch (surrogateescape-decoded bytes) is what gets applied
+    # from state; the copy embedded in the QA prompt must be valid UTF-8 for
+    # the app-server's JSON parser. Render any non-UTF-8 bytes as visible
+    # ``\xNN`` escapes so the QA agent reviews the exact byte values that
+    # will be merged, instead of a lossy substitution hiding them.
+    raw_patch = review_patch.patch.encode("utf-8", errors="surrogateescape")
+    return raw_patch.decode("utf-8", errors="backslashreplace")
 
 
 def _spawn_workflow_failure_turn(

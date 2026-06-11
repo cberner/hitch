@@ -1,3 +1,4 @@
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -5,6 +6,7 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from hitch.main import repos
+from hitch.main.git_support import hermetic_git_env
 from hitch.main.repos import (
     commit_hash_for_ref,
     default_branch_checkout_commit_hash,
@@ -13,7 +15,39 @@ from hitch.main.repos import (
     git_common_dir,
     same_repo_or_worktree,
 )
-from hitch.main.test.support import _git
+from hitch.main.test.support import _git, _init_repo
+
+
+class HermeticGitEnvTests(TestCase):
+    def test_strips_repo_discovery_overrides_and_disables_prompts(self) -> None:
+        # If the server inherits GIT_DIR & co. (e.g. launched from a git
+        # hook), every ``git -C <cwd>`` call would silently target a
+        # different repository than the one named on the command line.
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": "/elsewhere/.git",
+                "GIT_WORK_TREE": "/elsewhere",
+                "GIT_INDEX_FILE": "/elsewhere/index",
+                "GIT_SSH_COMMAND": "ssh -i key",
+            },
+        ):
+            env = hermetic_git_env({"EXTRA": "1"})
+
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_WORK_TREE", env)
+        self.assertNotIn("GIT_INDEX_FILE", env)
+        self.assertEqual(env["GIT_SSH_COMMAND"], "ssh -i key")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(env["EXTRA"], "1")
+
+    def test_repo_lookups_ignore_inherited_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            _init_repo(repo)
+            head = _git(repo, "rev-parse", "HEAD")
+            with patch.dict(os.environ, {"GIT_DIR": str(Path(raw) / "nowhere")}):
+                self.assertEqual(commit_hash_for_ref(repo, "HEAD"), head)
 
 
 class DiscoverReposTests(TestCase):

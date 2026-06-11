@@ -64,6 +64,11 @@ class AutoMergeReviewPatch:
     patch: str
     target_sha: str
     base_sha: str = ""
+    # Tree of the source worktree at the moment the patch was built. The merge
+    # records this -- not the merge-time worktree tree -- as the next source
+    # base, so edits made during the QA-review window stay un-merged deltas
+    # instead of silently vanishing from every future auto-merge cycle.
+    source_tree_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,11 +124,28 @@ def _auto_merge_source_base(
 
 
 def _record_auto_merge_source_base(
-    source_repo: Path, target_ref: str, target_sha: str, *, hooks_path: Path
+    source_repo: Path,
+    target_ref: str,
+    target_sha: str,
+    *,
+    hooks_path: Path,
+    reviewed_source_tree_sha: str = "",
 ) -> None:
     # The source-session tree is the authority for follow-up deltas; the target
     # branch may also contain unrelated commits that must not become deletions.
-    tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
+    # Record the tree the reviewed patch was actually built from: snapshotting
+    # the merge-time worktree instead would bake edits made during the QA
+    # review window into the base, cancelling them out of every future review
+    # patch without ever merging them. For the same reason a recorded-but-
+    # unverifiable tree (pruned during a long review window) must fail rather
+    # than fall back to the merge-time snapshot. The snapshot remains only for
+    # legacy reviews that predate the recorded tree.
+    if reviewed_source_tree_sha:
+        tree_sha = _verified_reviewed_source_tree(
+            source_repo, reviewed_source_tree_sha, hooks_path=hooks_path
+        )
+    else:
+        tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
     commit_sha = _git(
         source_repo,
         [
@@ -141,6 +163,23 @@ def _record_auto_merge_source_base(
         ["update-ref", _auto_merge_source_base_ref(source_repo, target_ref), commit_sha],
         hooks_path=hooks_path,
     )
+
+
+def _verified_reviewed_source_tree(
+    source_repo: Path, reviewed_source_tree_sha: str, *, hooks_path: Path
+) -> str:
+    reviewed_tree = _run_git(
+        source_repo,
+        ["rev-parse", "--verify", f"{reviewed_source_tree_sha}^{{tree}}"],
+        hooks_path=hooks_path,
+        check=False,
+    )
+    tree_sha = reviewed_tree.stdout.strip() if reviewed_tree.returncode == 0 else ""
+    if not tree_sha:
+        raise LocalBranchMergeError(
+            "reviewed source tree is no longer available; rerun QA before auto merge"
+        )
+    return tree_sha
 
 
 def _auto_merge_source_base_ref(source_repo: Path, target_ref: str) -> str:
@@ -220,7 +259,10 @@ def build_auto_merge_review_patch(
         )
     _validate_reviewable_patch(patch)
     return AutoMergeReviewPatch(
-        patch=patch, target_sha=target_sha, base_sha=base_sha
+        patch=patch,
+        target_sha=target_sha,
+        base_sha=base_sha,
+        source_tree_sha=source_tree_sha,
     )
 
 
@@ -229,6 +271,7 @@ def merge_worktree_diff_to_branch(
     branch: str,
     reviewed_patch: str,
     reviewed_target_sha: str,
+    reviewed_source_tree_sha: str = "",
 ) -> LocalBranchMergeResult:
     """Apply the QA-reviewed patch to ``branch`` and commit it."""
     branch = branch.strip()
@@ -248,6 +291,13 @@ def merge_worktree_diff_to_branch(
         target = Path(raw_tmp) / "target"
         hooks = Path(raw_tmp) / "hooks"
         hooks.mkdir()
+        if reviewed_source_tree_sha:
+            # Fail before the branch is touched if the reviewed tree was
+            # pruned during the review window: recording any other tree as
+            # the next source base would mark post-review edits as merged.
+            _verified_reviewed_source_tree(
+                source_repo, reviewed_source_tree_sha, hooks_path=hooks
+            )
         checked_out_path = _checked_out_worktree_for_branch(source_repo, branch)
         if checked_out_path is not None and _same_path(checked_out_path, source_repo):
             raise LocalBranchMergeError(
@@ -278,7 +328,11 @@ def merge_worktree_diff_to_branch(
                     hooks_path=hooks,
                 )
             _record_auto_merge_source_base(
-                source_repo, target_ref, commit_sha, hooks_path=hooks
+                source_repo,
+                target_ref,
+                commit_sha,
+                hooks_path=hooks,
+                reviewed_source_tree_sha=reviewed_source_tree_sha,
             )
             return LocalBranchMergeResult(
                 branch=branch,
@@ -489,9 +543,12 @@ def _worktree_index_entry(
 def _cached_index_entry(
     source_repo: Path, relpath: str, *, hooks_path: Path | None
 ) -> CachedIndexEntry | None:
+    # ``:(literal)`` -- relpath came from ``ls-files -z`` output, so it is a
+    # literal filename; as a plain pathspec, glob metacharacters in the name
+    # (``*``, ``?``, ``[``) would match *other* files' index entries.
     output = _git(
         source_repo,
-        ["ls-files", "-s", "-t", "--", relpath],
+        ["ls-files", "-s", "-t", "--", f":(literal){relpath}"],
         hooks_path=hooks_path,
     ).strip()
     if not output:
@@ -530,7 +587,13 @@ def _submodule_index_entry(
         raise LocalBranchMergeError("auto merge does not support submodule changes")
     status = _git(
         source_repo,
-        ["status", "--porcelain", "--ignore-submodules=none", "--", relpath],
+        [
+            "status",
+            "--porcelain",
+            "--ignore-submodules=none",
+            "--",
+            f":(literal){relpath}",
+        ],
         hooks_path=hooks_path,
     ).strip()
     if status:
@@ -630,6 +693,21 @@ def _fast_forward_target_branch(
     hooks_path: Path,
 ) -> None:
     if checked_out_path is not None:
+        # The worktree was matched to the branch at merge start, but the patch
+        # apply between then and now leaves a real window for the user to have
+        # switched it; an unconditional ff-merge would then advance whatever
+        # branch HEAD points at instead of the reviewed target.
+        head_ref = _run_git(
+            checked_out_path,
+            ["symbolic-ref", "--quiet", "HEAD"],
+            hooks_path=hooks_path,
+            check=False,
+        ).stdout.strip()
+        if head_ref != f"refs/heads/{branch}":
+            raise LocalBranchMergeError(
+                f"target branch {branch!r} is no longer checked out in "
+                f"{checked_out_path}; rerun QA before auto merge"
+            )
         _git(
             checked_out_path,
             ["merge", "--ff-only", commit_sha],

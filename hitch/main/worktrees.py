@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from os import environ
 from pathlib import Path
 
 from django.conf import settings
 
-from .git_support import GitCommandError, resolved_path, run_git
+from .git_support import GitCommandError, hermetic_git_env, resolved_path, run_git
 
 _resolved_path = resolved_path
 
 _GIT_TIMEOUT_SECONDS = 10
+# ``worktree add`` checks out the whole tree and ``worktree remove`` deletes
+# it; both scale with repo size, so the metadata-command timeout above would
+# SIGKILL git mid-checkout on any large repo and leak the partial worktree.
+_GIT_CHECKOUT_TIMEOUT_SECONDS = 300
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_REPO_SLUG_LEN = 48
 _SNAPSHOT_COMMIT_ENV = {
@@ -93,15 +97,19 @@ def create_worktree_for_session(
     except OSError as exc:
         raise WorktreeCreationError(str(exc)) from exc
     if _has_commit(repo, base_ref):
-        _add_worktree(
+        _checked_out_add_worktree(
             repo,
             ["worktree", "add", "-b", branch, str(path), base_ref],
+            branch=branch,
+            path=path,
             disable_hooks=disable_hooks,
         )
     elif base_ref == "HEAD":
-        _add_worktree(
+        _checked_out_add_worktree(
             repo,
             ["worktree", "add", "--orphan", "-b", branch, str(path)],
+            branch=branch,
+            path=path,
             disable_hooks=disable_hooks,
         )
     else:
@@ -111,11 +119,19 @@ def create_worktree_for_session(
 
 def cleanup_worktree(worktree: ManagedWorktree) -> None:
     """Remove a just-created managed worktree and its branch."""
-    _git(
-        worktree.source_repo,
-        ["worktree", "remove", "--force", str(worktree.path)],
-        error_cls=WorktreeCleanupError,
-    )
+    try:
+        _git(
+            worktree.source_repo,
+            ["worktree", "remove", "--force", str(worktree.path)],
+            error_cls=WorktreeCleanupError,
+            timeout=_GIT_CHECKOUT_TIMEOUT_SECONDS,
+        )
+    except WorktreeCleanupError:
+        # git refuses (locked / already-partial worktree) or the repo cannot
+        # express the removal; reap the directory directly and prune the stale
+        # .git/worktrees/<name> admin entry so retries don't accumulate state.
+        shutil.rmtree(worktree.path, ignore_errors=True)
+        _git(worktree.source_repo, ["worktree", "prune"], raise_on_error=False)
     if _branch_exists(worktree.source_repo, worktree.branch):
         _git(
             worktree.source_repo,
@@ -127,19 +143,35 @@ def cleanup_worktree(worktree: ManagedWorktree) -> None:
 def cleanup_managed_worktree_path(cwd: str) -> bool:
     """Remove a Hitch-managed worktree by path if ``cwd`` points at one."""
     path = Path(cwd).expanduser()
-    if not _is_managed_worktree_path(path):
+    if not _is_under_managed_worktree_base(path):
         return False
+    if not (path / ".git").exists():
+        # The worktree was deleted (or half-deleted) out-of-band, so the
+        # source repo can no longer be located through the gitlink. Free the
+        # directory rather than leaving cleanup wedged forever -- but only a
+        # branch-addressable leaf (<base>/<slug>/<suffix>): a stale cwd
+        # naming the managed base or a slug directory must never rmtree the
+        # sibling worktrees that live beneath it.
+        if not path.is_dir() or not _is_managed_worktree_leaf(path):
+            return False
+        shutil.rmtree(path, ignore_errors=True)
+        return True
     branch = _managed_branch_for_path(path)
     common_dir = (
         _git(
             path,
             ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            error_cls=WorktreeCleanupError,
+            raise_on_error=False,
         )
         or ""
     ).strip()
-    if not branch or not common_dir:
+    if not branch:
         raise WorktreeCleanupError("managed worktree metadata is incomplete")
+    if not common_dir:
+        # The source repository is gone or unreadable; its branch and admin
+        # entry died with it, so reclaiming the directory is all that's left.
+        shutil.rmtree(path, ignore_errors=True)
+        return True
     source_repo = _source_repo_from_common_dir(Path(common_dir))
     cleanup_worktree(ManagedWorktree(path=path, branch=branch, source_repo=source_repo))
     return True
@@ -185,13 +217,28 @@ def _child_dirs(path: Path) -> Iterator[Path]:
 
 
 def _is_managed_worktree_path(path: Path) -> bool:
+    return _is_under_managed_worktree_base(path) and (path / ".git").exists()
+
+
+def _is_under_managed_worktree_base(path: Path) -> bool:
     resolved_path = _resolved_path(path)
     resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
     try:
         resolved_path.relative_to(resolved_base)
     except ValueError:
         return False
-    return (path / ".git").exists()
+    return True
+
+
+def _is_managed_worktree_leaf(path: Path) -> bool:
+    """Whether ``path`` is a branch-addressable ``<base>/<slug>/<suffix>`` leaf."""
+    resolved_path = _resolved_path(path)
+    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
+    try:
+        relative = resolved_path.relative_to(resolved_base)
+    except ValueError:
+        return False
+    return len(relative.parts) == 2
 
 
 def _managed_branch_for_path(path: Path) -> str:
@@ -219,12 +266,34 @@ def _has_commit(repo: Path, ref: str) -> bool:
     )
 
 
+def _checked_out_add_worktree(
+    repo: Path, args: list[str], *, branch: str, path: Path, disable_hooks: bool
+) -> None:
+    try:
+        _add_worktree(repo, args, disable_hooks=disable_hooks)
+    except WorktreeCreationError:
+        # ``worktree add -b`` creates the branch and the .git/worktrees entry
+        # before populating the tree, so a failure (notably a timeout killing
+        # git mid-checkout) strands all three with no ManagedWorktree handle
+        # for the caller to clean up. Reap them here so a retry starts fresh.
+        shutil.rmtree(path, ignore_errors=True)
+        _git(repo, ["worktree", "prune"], raise_on_error=False)
+        if _branch_exists(repo, branch):
+            _git(repo, ["branch", "-D", branch], raise_on_error=False)
+        raise
+
+
 def _add_worktree(repo: Path, args: list[str], *, disable_hooks: bool) -> None:
     if disable_hooks:
         with tempfile.TemporaryDirectory(prefix="hitch-hooks-") as raw_hooks:
-            _git(repo, args, hooks_path=Path(raw_hooks))
+            _git(
+                repo,
+                args,
+                hooks_path=Path(raw_hooks),
+                timeout=_GIT_CHECKOUT_TIMEOUT_SECONDS,
+            )
         return
-    _git(repo, args)
+    _git(repo, args, timeout=_GIT_CHECKOUT_TIMEOUT_SECONDS)
 
 
 def _branch_exists(repo: Path, branch: str) -> bool:
@@ -254,14 +323,15 @@ def _git(
     error_cls: type[Exception] = WorktreeCreationError,
     hooks_path: Path | None = None,
     extra_env: dict[str, str] | None = None,
+    timeout: float = _GIT_TIMEOUT_SECONDS,
 ) -> str | None:
     try:
         result = run_git(
             cwd,
             args,
-            timeout=_GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
             hooks_path=hooks_path,
-            env={**environ, **(extra_env or {})},
+            env=hermetic_git_env(extra_env),
         )
     except GitCommandError as exc:
         if raise_on_error:

@@ -3578,7 +3578,9 @@ class SpecCriticWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        mock_merge.assert_called_once_with("/repo", "main", "diff --git", "base123")
+        mock_merge.assert_called_once_with(
+            "/repo", "main", "diff --git", "base123", ""
+        )
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
@@ -3659,7 +3661,9 @@ class SpecCriticWorkflowTests(TestCase):
     @patch(
         "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
         return_value=AutoMergeReviewPatch(
-            patch="diff --git final", target_sha="final-base"
+            patch="diff --git final",
+            target_sha="final-base",
+            source_tree_sha="final-tree",
         ),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -3737,11 +3741,15 @@ class SpecCriticWorkflowTests(TestCase):
             workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
             "final-base",
         )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY],
+            "final-tree",
+        )
 
         system_agents.on_codex_instance_finished(final_qa)
 
         mock_merge.assert_called_once_with(
-            "/repo", "main", "diff --git final", "final-base"
+            "/repo", "main", "diff --git final", "final-base", "final-tree"
         )
 
     @patch(

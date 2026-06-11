@@ -325,6 +325,7 @@ _PR_QA_STATE_KEYS = frozenset(
         "auto_merge_result",
         "auto_merge_reviewed_diff",
         "auto_merge_reviewed_target_sha",
+        "auto_merge_reviewed_source_tree",
         "auto_merge_session_base_sha",
         "hitch_pr_handoff",
         "last_feedback",
@@ -667,12 +668,16 @@ def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
             LocalBranchMergeError("reviewed target branch SHA is missing"),
         )
         return
+    reviewed_source_tree = workflow.state.get(
+        system_agents.AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY
+    )
     try:
         result = merge_worktree_diff_to_branch(
             workflow.cwd,
             branch,
             reviewed_patch,
             reviewed_target_sha,
+            reviewed_source_tree if isinstance(reviewed_source_tree, str) else "",
         )
     except LocalBranchMergeError as exc:
         _fail_local_branch_merge(workflow, branch, exc)

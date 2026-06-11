@@ -15,6 +15,7 @@ import subprocess
 from collections.abc import Iterable
 from typing import Any
 
+from hitch.main.git_support import hermetic_git_env
 from hitch.main.models import SystemWorkflow
 from hitch.main.runtime.sdk_values import string_from_any
 from hitch.main.workflows.gh_observations import _review_threads_page, _status_checks_page
@@ -274,6 +275,11 @@ def _run_git_cli(
             text=True,
             timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
             check=False,
+            # Inherited repo-discovery overrides (GIT_DIR & co.) would point
+            # the push at a different repo; the hermetic env also disables
+            # credential prompts so an unauthenticated push fails fast
+            # instead of stalling out the full timeout.
+            env=hermetic_git_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise _GhPrOpenError(f"`{' '.join(command)}` timed out") from exc
