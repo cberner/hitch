@@ -256,6 +256,11 @@ _AUTONOMOUS_GOAL_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+
+class _AutonomousGoalHistorySummaryStillRunningError(RuntimeError):
+    pass
+
+
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
     goals = AutonomousGoal.objects.select_related("project").filter(
         auto_proposal_enabled=True,
@@ -706,9 +711,14 @@ def _spawn_autonomous_goal_history_summary_or_fallback(
         return
     try:
         run = _spawn_autonomous_goal_history_summary_run(workflow, locked_goal)
+    except _AutonomousGoalHistorySummaryStillRunningError:
+        # Keep the history step owned by the attached summarizer rather than
+        # racing it with a fallback candidate.
+        system_agents._sync_workflow_instance(original_workflow, workflow)
+        return
     except Exception as exc:
-        # The spawn helper cancels any summarizer instance it created before
-        # re-raising, so the fallback candidate cannot race an orphan summary.
+        # The spawn helper either never created a summarizer or interrupted it
+        # before re-raising, so this fallback cannot race an orphan summary.
         workflow = _record_autonomous_goal_history_summary_fallback_if_active(
             workflow_id=workflow.pk,
             autonomous_goal_id=locked_goal.pk,
@@ -2287,11 +2297,16 @@ def _spawn_autonomous_goal_history_summary_run(
         workflow.save(update_fields=["state", "updated_at"])
     except Exception as exc:
         if instance is not None:
-            _cancel_partially_spawned_autonomous_goal_history_summary(
+            cancelled = _cancel_partially_spawned_autonomous_goal_history_summary(
                 instance=instance,
                 run=run,
                 error=f"failed to start autonomous goal history summarizer: {exc!r}",
             )
+            if not cancelled:
+                raise _AutonomousGoalHistorySummaryStillRunningError(
+                    "spawned autonomous goal history summarizer could not be "
+                    "interrupted after setup failed"
+                ) from exc
         raise
     assert run is not None
     return run
@@ -2302,18 +2317,23 @@ def _cancel_partially_spawned_autonomous_goal_history_summary(
     instance: CodexInstance,
     run: SystemAgentRun | None,
     error: str,
-) -> None:
-    codex_pool.interrupt_instance(instance.pk, expected_thread_id=instance.thread_id)
+) -> bool:
+    interrupted = codex_pool.interrupt_instance(
+        instance.pk, expected_thread_id=instance.thread_id
+    )
+    if interrupted is None:
+        return False
     if run is not None:
         run.status = SystemAgentRun.STATUS_FAILED
         run.error = error
         run.save(update_fields=["status", "error", "updated_at"])
-        return
+        return True
     CodexInstance.objects.filter(pk=instance.pk).update(
         workflow_id=None,
         agent_kind="",
         updated_at=timezone.now(),
     )
+    return True
 
 
 def _autonomous_goal_history_summary_model() -> str | None:

@@ -10285,6 +10285,62 @@ class AutonomousGoalWorkflowTests(TestCase):
             system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
+    @patch("hitch.main.workflows.autonomous_goals.session_index.upsert_local_session")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_spawn_failure_without_interrupt_keeps_summarizer(
+        self,
+        mock_spawn: MagicMock,
+        mock_interrupt: MagicMock,
+        mock_upsert: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        prior_candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            candidate_session=prior_candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        mock_spawn.return_value = summary
+        mock_interrupt.return_value = None
+        mock_upsert.side_effect = RuntimeError("index down")
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+        workflow.refresh_from_db()
+
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING
+        )
+        self.assertNotIn("proposal_history_summary_error", workflow.state)
+        mock_interrupt.assert_called_once_with(
+            summary.pk, expected_thread_id="summary-thread"
+        )
+        mock_spawn.assert_called_once()
+        summary_run = SystemAgentRun.objects.get(instance=summary)
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(summary_run.error, "")
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_failed_history_summary_worker_falls_back_to_candidate(
         self, mock_spawn: MagicMock
