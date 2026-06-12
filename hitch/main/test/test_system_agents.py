@@ -42,6 +42,7 @@ from hitch.main.runtime import codex_events, rate_limit, streaming
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
+    engine,
     gh_cli,
     gh_observations,
     pr_handoff,
@@ -17205,6 +17206,87 @@ class AutoReviewIntentionallySkippedTests(TestCase):
         # auto_review mode, no pending proposed plan -> would fire, not skipped.
         instance = _instance(approval_mode="auto_review", auto_pr_enabled=True)
         self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
+
+
+class ClaimWorkflowTransitionTests(TestCase):
+    def _workflow(self, **overrides: Any) -> SystemWorkflow:
+        defaults: dict[str, Any] = {
+            "kind": SystemWorkflow.KIND_PR_QA,
+            "main_thread_id": "main-thread",
+            "cwd": "/repo",
+            "status": SystemWorkflow.STATUS_RUNNING,
+            "step": system_agents.STEP_QA_RUNNING,
+            "state": {"qa_review_revision": 1},
+        }
+        defaults.update(overrides)
+        return SystemWorkflow.objects.create(**defaults)
+
+    def test_applies_against_locked_row_and_syncs_snapshot(self) -> None:
+        workflow = self._workflow()
+        # Stale snapshot: another writer changed state after this copy loaded.
+        snapshot = SystemWorkflow.objects.get(pk=workflow.pk)
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            state={"qa_review_revision": 1, "written_elsewhere": True}
+        )
+
+        def _advance(locked: SystemWorkflow) -> str:
+            locked.state = {**locked.state, "advanced": True}
+            locked.step = system_agents.STEP_FEEDBACK_RUNNING
+            locked.save(update_fields=["step", "state", "updated_at"])
+            return "feedback"
+
+        result = engine.claim_workflow_transition(
+            snapshot, _advance, expect_step=system_agents.STEP_QA_RUNNING
+        )
+
+        self.assertEqual(result, "feedback")
+        # The concurrent write survived: apply ran on the locked row, not the
+        # stale snapshot, and the snapshot was refreshed afterwards.
+        workflow.refresh_from_db()
+        self.assertTrue(workflow.state["written_elsewhere"])
+        self.assertTrue(workflow.state["advanced"])
+        self.assertEqual(snapshot.step, system_agents.STEP_FEEDBACK_RUNNING)
+        self.assertTrue(snapshot.state["written_elsewhere"])
+
+    def test_returns_none_without_applying_on_step_mismatch(self) -> None:
+        workflow = self._workflow(step=system_agents.STEP_FEEDBACK_RUNNING)
+        apply = MagicMock()
+
+        self.assertIsNone(
+            engine.claim_workflow_transition(
+                workflow, apply, expect_step=system_agents.STEP_QA_RUNNING
+            )
+        )
+        apply.assert_not_called()
+
+    def test_returns_none_for_inactive_unless_opted_out(self) -> None:
+        workflow = self._workflow(status=SystemWorkflow.STATUS_BLOCKED)
+        apply = MagicMock(return_value=True)
+
+        self.assertIsNone(engine.claim_workflow_transition(workflow, apply))
+        apply.assert_not_called()
+        self.assertTrue(
+            engine.claim_workflow_transition(workflow, apply, require_active=False)
+        )
+
+    def test_guard_runs_against_locked_row(self) -> None:
+        workflow = self._workflow()
+        snapshot = SystemWorkflow.objects.get(pk=workflow.pk)
+        # A concurrent steering claim bumped the revision after the snapshot.
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            state={"qa_review_revision": 2}
+        )
+        apply = MagicMock()
+
+        result = engine.claim_workflow_transition(
+            snapshot,
+            apply,
+            expect_step=system_agents.STEP_QA_RUNNING,
+            guard=lambda locked: locked.state.get("qa_review_revision") == 1,
+        )
+
+        self.assertIsNone(result)
+        apply.assert_not_called()
 
 
 class ArchiveStaleBlockedWorkflowsTests(TestCase):

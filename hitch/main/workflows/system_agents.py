@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, override
 
-from django.db import models, transaction
+from django.db import models
 from django.db.models import QuerySet
 from django.utils import timezone
 
@@ -603,16 +603,17 @@ def _claim_stale_workflow_step(
     Returns the locked row (with ``updated_at`` bumped so concurrent reconcilers
     back off for a fresh stale window) or ``None`` if it is not eligible.
     """
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != step
-            or locked.updated_at > stale_before
-        ):
-            return None
+
+    def _touch(locked: SystemWorkflow) -> SystemWorkflow:
         locked.save(update_fields=["updated_at"])
-    return locked
+        return locked
+
+    return engine.claim_workflow_transition(
+        workflow,
+        _touch,
+        expect_step=step,
+        guard=lambda locked: locked.updated_at <= stale_before,
+    )
 
 
 def _running_workflows_for_reconciliation(
@@ -1575,17 +1576,12 @@ def _block_workflow(
     surface_to_thread: bool = True,
     only_if: Callable[[SystemWorkflow], bool] | None = None,
 ) -> bool:
-    # Hidden system-agent callbacks can race when multiple workers finish or
-    # fail together. Lock and re-read the row (as the Spec Critic equivalents
-    # do) so the state-column overwrite cannot lose a concurrent write.
     # ``only_if`` runs against the locked row so a caller whose claim on the
     # workflow may have been superseded (a stale QA verdict racing a user
     # steering claim) makes the ownership check and the block one atomic
-    # decision; returns whether the workflow was blocked.
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if only_if is not None and not only_if(locked):
-            return False
+    # decision; returns whether the workflow was blocked. Blocking is legal
+    # from any status, so the claim does not require an active row.
+    def _block(locked: SystemWorkflow) -> bool:
         failure_owner = _workflow_failure_owner(locked, error)
         locked.status = SystemWorkflow.STATUS_BLOCKED
         locked.step = STEP_BLOCKED
@@ -1595,9 +1591,13 @@ def _block_workflow(
             _WORKFLOW_FAILURE_OWNER_STATE_KEY: failure_owner,
         }
         locked.save(update_fields=["status", "step", "state", "updated_at"])
-        workflow.status = locked.status
-        workflow.step = locked.step
-        workflow.state = locked.state
+        return True
+
+    blocked = engine.claim_workflow_transition(
+        workflow, _block, guard=only_if, require_active=False
+    )
+    if not blocked:
+        return False
     pr_qa._interrupt_orphaned_qa_review_runs(workflow, error)
     if surface_to_thread:
         _surface_workflow_failure(workflow, error)
@@ -1608,10 +1608,7 @@ def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
     # Make the check-then-set atomic per workflow so concurrent failure routes
     # cannot double-post the failure message or double-increment the user
     # message index. Mirrors _surface_spec_critic_failure.
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if locked.state.get("failure_surfaced") is True:
-            return
+    def _mark_surfaced(locked: SystemWorkflow) -> bool:
         failure_owner = _workflow_failure_owner(locked, error)
         locked.state = {
             **locked.state,
@@ -1619,7 +1616,16 @@ def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
             _WORKFLOW_FAILURE_OWNER_STATE_KEY: failure_owner,
         }
         locked.save(update_fields=["state", "updated_at"])
-        workflow.state = locked.state
+        return True
+
+    claimed = engine.claim_workflow_transition(
+        workflow,
+        _mark_surfaced,
+        guard=lambda locked: locked.state.get("failure_surfaced") is not True,
+        require_active=False,
+    )
+    if not claimed:
+        return
     try:
         _spawn_workflow_failure_turn(workflow, error)
     except Exception:
