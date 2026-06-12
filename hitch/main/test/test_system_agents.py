@@ -10420,6 +10420,160 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(summary_run.input["autonomous_goal_id"], autonomous_goal.pk)
 
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_spawn_failure_without_run_blocks_not_fallback(
+        self,
+        mock_spawn: MagicMock,
+        mock_interrupt: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        prior_candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            candidate_session=prior_candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        spawned: dict[str, CodexInstance] = {}
+
+        def spawn_summary(**kwargs: Any) -> CodexInstance:
+            summary = _instance(
+                thread_id="summary-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=int(kwargs["workflow_id"]),
+                agent_kind=str(kwargs["agent_kind"]),
+            )
+            spawned["summary"] = summary
+            return summary
+
+        mock_spawn.side_effect = spawn_summary
+        mock_interrupt.return_value = None
+
+        with patch.object(
+            SystemAgentRun.objects,
+            "get_or_create",
+            side_effect=RuntimeError("run table busy"),
+        ):
+            workflow = autonomous_goals.start_autonomous_goal_workflow(
+                autonomous_goal=autonomous_goal
+            )
+        workflow.refresh_from_db()
+        summary = spawned["summary"]
+        summary.refresh_from_db()
+
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("could not preserve a run", workflow.state["error"])
+        self.assertIsNone(summary.workflow_id)
+        self.assertEqual(summary.agent_kind, "")
+        self.assertFalse(SystemAgentRun.objects.filter(instance=summary).exists())
+        mock_interrupt.assert_called_once_with(
+            summary.pk, expected_thread_id="summary-thread"
+        )
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_preserved_run_interrupted_when_workflow_inactive(
+        self,
+        mock_spawn: MagicMock,
+        mock_interrupt: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        prior_candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            candidate_session=prior_candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        spawned: dict[str, CodexInstance] = {}
+
+        def spawn_summary(**kwargs: Any) -> CodexInstance:
+            summary = _instance(
+                thread_id="summary-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=int(kwargs["workflow_id"]),
+                agent_kind=str(kwargs["agent_kind"]),
+            )
+            spawned["summary"] = summary
+            return summary
+
+        interrupt_calls = 0
+
+        def interrupt_side_effect(
+            instance_id: int, *, expected_thread_id: str
+        ) -> CodexInstance | None:
+            nonlocal interrupt_calls
+            interrupt_calls += 1
+            if interrupt_calls == 1:
+                return None
+            return CodexInstance.objects.get(
+                pk=instance_id, thread_id=expected_thread_id
+            )
+
+        mock_spawn.side_effect = spawn_summary
+        mock_interrupt.side_effect = interrupt_side_effect
+        original_get_or_create = SystemAgentRun.objects.get_or_create
+        get_or_create_calls = 0
+
+        def flaky_get_or_create(*args: Any, **kwargs: Any) -> tuple[SystemAgentRun, bool]:
+            nonlocal get_or_create_calls
+            get_or_create_calls += 1
+            if get_or_create_calls == 1:
+                raise RuntimeError("run table busy")
+            run, created = original_get_or_create(*args, **kwargs)
+            system_agents._block_workflow(
+                run.workflow, "stopped", surface_to_thread=False
+            )
+            return run, created
+
+        with patch.object(
+            SystemAgentRun.objects,
+            "get_or_create",
+            side_effect=flaky_get_or_create,
+        ):
+            workflow = autonomous_goals.start_autonomous_goal_workflow(
+                autonomous_goal=autonomous_goal
+            )
+        workflow.refresh_from_db()
+        summary = spawned["summary"]
+        summary_run = SystemAgentRun.objects.get(instance=summary)
+
+        self.assertEqual(get_or_create_calls, 2)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(summary_run.error, "stopped")
+        self.assertEqual(mock_interrupt.call_count, 2)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_history_summary_partial_spawn_cancel_without_run_detaches_instance(
         self, mock_interrupt: MagicMock
     ) -> None:

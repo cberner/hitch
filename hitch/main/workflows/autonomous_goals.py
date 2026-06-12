@@ -257,7 +257,7 @@ _AUTONOMOUS_GOAL_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-class _AutonomousGoalHistorySummaryStillRunningError(RuntimeError):
+class _AutonomousGoalHistorySummaryUnownedError(RuntimeError):
     pass
 
 
@@ -711,9 +711,12 @@ def _spawn_autonomous_goal_history_summary_or_fallback(
         return
     try:
         run = _spawn_autonomous_goal_history_summary_run(workflow, locked_goal)
-    except _AutonomousGoalHistorySummaryStillRunningError:
-        # Keep the history step owned by the attached summarizer rather than
-        # racing it with a fallback candidate.
+    except _AutonomousGoalHistorySummaryUnownedError as exc:
+        workflow = _block_autonomous_goal_spawn_failure_if_active(
+            workflow_id=workflow.pk,
+            autonomous_goal_id=locked_goal.pk,
+            error=str(exc),
+        )
         system_agents._sync_workflow_instance(original_workflow, workflow)
         return
     except Exception as exc:
@@ -2311,11 +2314,13 @@ def _spawn_autonomous_goal_history_summary_run(
                             )
                         )
                         if detached:
-                            raise
-                raise _AutonomousGoalHistorySummaryStillRunningError(
-                    "spawned autonomous goal history summarizer could not be "
-                    "interrupted after setup failed"
-                ) from exc
+                            raise _AutonomousGoalHistorySummaryUnownedError(
+                                "failed to start autonomous goal history "
+                                "summarizer and could not preserve a run for "
+                                "the live summarizer"
+                            ) from exc
+                    assert run is not None
+                return run
         raise
     assert run is not None
     return run
