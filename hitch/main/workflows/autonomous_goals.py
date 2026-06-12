@@ -257,7 +257,7 @@ _AUTONOMOUS_GOAL_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-class _AutonomousGoalHistorySummaryUnownedError(RuntimeError):
+class _AutonomousGoalHistorySummaryUnpreservedError(RuntimeError):
     pass
 
 
@@ -711,7 +711,7 @@ def _spawn_autonomous_goal_history_summary_or_fallback(
         return
     try:
         run = _spawn_autonomous_goal_history_summary_run(workflow, locked_goal)
-    except _AutonomousGoalHistorySummaryUnownedError as exc:
+    except _AutonomousGoalHistorySummaryUnpreservedError as exc:
         workflow = _block_autonomous_goal_spawn_failure_if_active(
             workflow_id=workflow.pk,
             autonomous_goal_id=locked_goal.pk,
@@ -877,10 +877,6 @@ def _interrupt_spawned_autonomous_goal_run_if_inactive(
     error = _state_string(workflow, "error") or "autonomous goal no longer exists"
     interrupted_runs, terminal_instance_returned = _interrupt_autonomous_goal_runs([run])
     if not interrupted_runs:
-        # This run was preserved only after the workflow became inactive. If the
-        # launch race still cannot be interrupted, do not leave it RUNNING
-        # forever; terminal routing ignores active-workflow work after stops.
-        system_agents._mark_system_agent_runs_failed([run], error)
         return workflow
     system_agents._mark_system_agent_runs_failed(interrupted_runs, error)
     if terminal_instance_returned:
@@ -1151,6 +1147,13 @@ def _handle_autonomous_goal_agent_finished(
         ):
             return
         if not workflow.is_active:
+            run.status = SystemAgentRun.STATUS_FAILED
+            run.error = (
+                _state_string(workflow, "error")
+                or "autonomous goal workflow is no longer active"
+            )
+            run.raw_output = raw_output
+            run.save(update_fields=["status", "error", "raw_output", "updated_at"])
             return
         if autonomous_goal is None:
             system_agents._fail_run_and_block_workflow(
@@ -2312,17 +2315,11 @@ def _spawn_autonomous_goal_history_summary_run(
                         history_files=history_files,
                     )
                     if run is None:
-                        detached = (
-                            _detach_partially_spawned_autonomous_goal_history_summary(
-                                instance
-                            )
-                        )
-                        if detached:
-                            raise _AutonomousGoalHistorySummaryUnownedError(
-                                "failed to start autonomous goal history "
-                                "summarizer and could not preserve a run for "
-                                "the live summarizer"
-                            ) from exc
+                        raise _AutonomousGoalHistorySummaryUnpreservedError(
+                            "failed to start autonomous goal history "
+                            "summarizer and could not preserve a run for "
+                            "the live summarizer"
+                        ) from exc
                     assert run is not None
                 return run
         raise
