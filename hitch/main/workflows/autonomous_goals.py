@@ -2331,7 +2331,6 @@ def _cancel_partially_spawned_autonomous_goal_history_summary(
     CodexInstance.objects.filter(pk=instance.pk).update(
         workflow_id=None,
         agent_kind="",
-        updated_at=timezone.now(),
     )
     return True
 

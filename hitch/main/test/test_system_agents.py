@@ -10341,6 +10341,34 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(summary_run.status, SystemAgentRun.STATUS_RUNNING)
         self.assertEqual(summary_run.error, "")
 
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
+    def test_history_summary_partial_spawn_cancel_without_run_detaches_instance(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=123,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        mock_interrupt.return_value = summary
+
+        cancelled = (
+            autonomous_goals._cancel_partially_spawned_autonomous_goal_history_summary(
+                instance=summary,
+                run=None,
+                error="failed to start autonomous goal history summarizer",
+            )
+        )
+        summary.refresh_from_db()
+
+        self.assertTrue(cancelled)
+        mock_interrupt.assert_called_once_with(
+            summary.pk, expected_thread_id="summary-thread"
+        )
+        self.assertIsNone(summary.workflow_id)
+        self.assertEqual(summary.agent_kind, "")
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_failed_history_summary_worker_falls_back_to_candidate(
         self, mock_spawn: MagicMock
