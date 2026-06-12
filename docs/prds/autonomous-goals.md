@@ -71,9 +71,13 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
   at a time.
 - `AG-independent-lifecycles`: Queueing does not make AG lifecycles dependent. Each AG remains
   independent except for the shared one-at-a-time execution queue.
-- `AG-stack-continuation`: With stack depth greater than `1` and a token budget set, an AG may
-  continue from prior background work until it reaches stack depth, exhausts
-  token budget, produces a user-actionable Proposal, or hits a terminal failure.
+- `AG-stack-continuation`: A token budget allows repeated background attempts,
+  even when effective stack depth is `1`. If an attempt fails to produce a
+  Proposal, Hitch may retry until it produces a Proposal, exhausts token budget,
+  or hits a terminal failure. If a Proposal is produced and stack depth is
+  greater than `1`, Hitch may continue from prior background work until it
+  reaches stack depth, exhausts token budget, produces a user-actionable
+  Proposal, or hits a terminal failure.
 - `AG-stack-limit`: AGs must not continue past configured stack depth.
 - `AG-budget-limit`: AGs must not start another automatic background session when doing so
   would exceed the configured token budget.
@@ -116,13 +120,13 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 ### 4.6 UI State
 
 - `AG-state-badge`: Every AG row shows a state badge with a detailed reason.
-- `AG-state-taxonomy`: The UI distinguishes at least: ready, queued, running, low quota,
-  pending Proposal, accepted session active, accepted session inactive but not
-  Done/archived, continuing stack, stack reached, token budget reached, no
-  Proposal found, blocked, and failed.
+- `AG-state-taxonomy`: The UI distinguishes these primary states: Ready, No
+  Quota, Queued, Running, Waiting, Blocked, Stopped, and Failed. No Quota means
+  automatic work is paused by quota; Queued means the AG is waiting in the
+  one-at-a-time background queue; Waiting means a Proposal is in the Inbox.
 - `AG-state-detail`: State detail explains the next expected action, such as waiting for
-  quota recovery, waiting for Inbox action, waiting for accepted session
-  completion, or requiring manual retry.
+  quota recovery, waiting in the background queue, waiting for Inbox action,
+  waiting for accepted session completion, or requiring manual retry.
 
 ### 4.7 Cleanup and Failure Handling
 
@@ -140,8 +144,12 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-accept-stack-default`: An unset stack depth displays and behaves as stack depth `1`.
 - `AG-accept-no-budget-single-run`: An AG with no token budget runs exactly one background session for a
   no-proposal attempt, then shows a stopped/no-proposal state.
-- `AG-accept-stack-limit`: An AG with stack depth `3` and sufficient token budget runs no more
-  than three background system-session iterations.
+- `AG-accept-stack-depth-limit`: An AG with stack depth `3` creates or continues
+  no more than three stack levels. No-proposal retries consume token budget but
+  do not count as new stack levels.
+- `AG-accept-budget-retries`: An AG with stack depth `1` and a token budget can
+  retry no-proposal attempts until it produces a Proposal, exhausts token
+  budget, or hits a terminal failure.
 - `AG-accept-low-quota-auto`: Low quota prevents automatic AG starts and shows a low-quota reason.
 - `AG-accept-manual-quota-override`: Manual Run can start an AG below the automatic quota threshold.
 - `AG-accept-background-queue`: Multiple eligible AGs execute only one AG-owned background session at a
