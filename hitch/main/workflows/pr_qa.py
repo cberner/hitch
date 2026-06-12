@@ -125,9 +125,11 @@ def start_pr_qa_workflow(
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
     auto_merge_branch: str = "",
+    pr_title: str = "",
 ) -> SystemWorkflow:
     """Start a QA workflow before optionally running the work-agent PR prompt."""
     auto_merge_branch = auto_merge_branch.strip()
+    pr_title = " ".join(pr_title.split())
     open_pr_on_lgtm = open_pr_on_lgtm and not auto_merge_branch
     try:
         with transaction.atomic():
@@ -155,6 +157,7 @@ def start_pr_qa_workflow(
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": open_pr_on_lgtm,
                     "auto_merge_branch": auto_merge_branch,
+                    "pr_title": pr_title,
                 },
             )
     except IntegrityError:
@@ -337,6 +340,7 @@ _PR_QA_STATE_KEYS = frozenset(
         "pr_pending_checks",
         "pr_prompt",
         "pr_stage_refresh",
+        "pr_title",
         "qa_approval_insert_index",
         "qa_design_synthesis_gate",
         "qa_review_revision",
@@ -969,7 +973,10 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     if _pr_branch_has_no_new_commits(workflow):
         raise _PrWorkflowNoCommitsError()
 
-    created = _run_gh_cli(workflow, ["pr", "create", "--fill"])
+    create_args = ["pr", "create", "--fill"]
+    if pr_title := _state_string(workflow, "pr_title"):
+        create_args.extend(["--title", pr_title])
+    created = _run_gh_cli(workflow, create_args)
     if created.returncode != 0:
         raise _GhPrOpenError(f"`gh pr create --fill` failed: {_gh_error(created)}")
 

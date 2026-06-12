@@ -2577,6 +2577,41 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 3)
         mock_spawn.assert_called_once()
 
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_pr_uses_accepted_proposal_title_for_pr_title(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=metadata,
+            outcome_metadata={"auto_pr_enabled": True},
+        )
+        instance = _instance(thread_id="main-thread", auto_pr_enabled=True)
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
+        self.assertEqual(workflow.state["pr_title"], "Expand parser coverage")
+
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_waits_when_turn_finishes_with_proposed_plan(
         self, mock_start: MagicMock
@@ -4164,6 +4199,82 @@ class SpecCriticWorkflowTests(TestCase):
                 "repository_full_name": "cberner/hitch",
                 "pr_number": 170,
             },
+        )
+        mock_spawn.assert_called_once()
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 170}),
+    )
+    @patch("hitch.main.workflows.gh_cli.subprocess.run")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_passes_stored_pr_title_to_gh_cli(
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "next_user_message_index": 5,
+                "pr_title": "Expand parser coverage",
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/cberner/hitch/pull/170\n",
+                stderr="",
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/170",
+                        "number": 170,
+                        "state": "OPEN",
+                        "isDraft": False,
+                        "title": "Expand parser coverage",
+                        "baseRefName": "master",
+                        "headRefName": "feature",
+                        "headRefOid": "head123",
+                        "mergeable": "MERGEABLE",
+                        "mergeCommit": {"oid": "merge123"},
+                        "createdAt": "2026-06-01T00:00:00Z",
+                        "updatedAt": "2026-06-01T00:01:00Z",
+                        "closedAt": None,
+                        "mergedAt": None,
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[6],
+            ["gh", "pr", "create", "--fill", "--title", "Expand parser coverage"],
         )
         mock_spawn.assert_called_once()
 
@@ -10052,7 +10163,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["proposal_id"], first_proposal.pk)
         self.assertEqual(workflow.state["stacked_diff_iteration"], 2)
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
-        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        mock_snapshot.assert_called_once_with(
+            "/repo-worktree-1", message="Add parser coverage"
+        )
         self.assertIn("candidate round 2 of 2", mock_spawn.call_args.kwargs["prompt"])
 
         candidate_2.events_path = _events_file(
@@ -10742,7 +10855,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             proposal.outcome_metadata[stop_reason_key],
             "judge_confidence_below_threshold",
         )
-        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        mock_snapshot.assert_called_once_with(
+            "/repo-worktree-1", message="Add parser coverage"
+        )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
@@ -10827,7 +10942,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.state["stacked_diff_stopped_reason"],
             "stacked_diff_continuation_failed",
         )
-        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        mock_snapshot.assert_called_once_with(
+            "/repo-worktree-1", message="Add parser coverage"
+        )
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
@@ -11293,7 +11410,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["stacked_diff_iteration"], 2)
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
         self.assertEqual(workflow.state["default_branch_sha"], "a" * 40)
-        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        mock_snapshot.assert_called_once_with(
+            "/repo-worktree-1", message="Add parser coverage"
+        )
         self.mock_create_worktree.assert_called_with("/repo", base_ref="c" * 40)
         self.assertIn("candidate round 2 of 2", mock_spawn.call_args.kwargs["prompt"])
         previous_proposal.refresh_from_db()
@@ -11819,7 +11938,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["proposal_id"], proposal.pk)
         self.assertEqual(workflow.state["stacked_diff_iteration"], 2)
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
-        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        mock_snapshot.assert_called_once_with(
+            "/repo-worktree-1", message="Stopped stack proposal"
+        )
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertFalse(
