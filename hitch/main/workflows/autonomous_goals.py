@@ -1217,6 +1217,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             return _fallback_from_failed_autonomous_goal_history_summary(
                 run,
                 workflow,
+                autonomous_goal,
                 error=f"autonomous goal history summarizer failed: {instance.error}",
                 raw_output=raw_output,
             )
@@ -1262,6 +1263,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             return _fallback_from_failed_autonomous_goal_history_summary(
                 run,
                 workflow,
+                autonomous_goal,
                 error="autonomous goal history summarizer output was not valid JSON",
                 raw_output=raw_output,
             )
@@ -1276,6 +1278,10 @@ def _handle_autonomous_goal_agent_finished_locked(
             _AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_STATE_KEY: summary,
         }
         workflow.state.pop("proposal_history_summary_error", None)
+        if _autonomous_goal_proposal_budget_exhausted(workflow):
+            return _stop_autonomous_goal_after_history_summary_budget(
+                workflow, autonomous_goal
+            )
         system_agents._advance_workflow_step(
             workflow, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
         )
@@ -1742,6 +1748,25 @@ def _autonomous_goal_proposal_budget_allows_retry(
         < _AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
     )
 
+def _autonomous_goal_proposal_budget_exhausted(workflow: SystemWorkflow) -> bool:
+    budget = _autonomous_goal_workflow_proposal_budget(workflow)
+    return budget > 0 and _autonomous_goal_proposal_budget_tokens_used(workflow) >= budget
+
+def _stop_autonomous_goal_after_history_summary_budget(
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+) -> _AutonomousGoalPostCommitAction | None:
+    error = "autonomous goal proposal budget was exhausted by the history summarizer"
+    if _complete_autonomous_goal_with_current_stack_proposal(workflow, error=error):
+        cleanup_cwd = system_agents._candidate_session_cwd_from_state(
+            workflow, "candidate_session_id"
+        )
+        return _AutonomousGoalPostCommitAction(
+            cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
+        )
+    _block_autonomous_goal_workflow(workflow, autonomous_goal, error)
+    return None
+
 def _autonomous_goal_budget_token_progressed(
     *, tokens_used: int | None, token_delta: int
 ) -> bool:
@@ -1900,16 +1925,21 @@ def _dismiss_replaced_autonomous_goal_proposal(
 def _fallback_from_failed_autonomous_goal_history_summary(
     run: SystemAgentRun,
     workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
     *,
     error: str,
     raw_output: str,
-) -> _AutonomousGoalPostCommitAction:
+) -> _AutonomousGoalPostCommitAction | None:
     run.status = SystemAgentRun.STATUS_FAILED
     run.error = error
     run.raw_output = raw_output
     run.save(update_fields=["status", "error", "raw_output", "updated_at"])
     workflow.state = _state_without_proposal_history_summary(workflow.state)
     workflow.state["proposal_history_summary_error"] = truncate_for_prompt(error, 800)
+    if _autonomous_goal_proposal_budget_exhausted(workflow):
+        return _stop_autonomous_goal_after_history_summary_budget(
+            workflow, autonomous_goal
+        )
     system_agents._advance_workflow_step(
         workflow, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
     )
@@ -2193,50 +2223,84 @@ def _spawn_autonomous_goal_history_summary_run(
     if history_files:
         workflow.state = {**workflow.state, "proposal_history_files": history_files}
         workflow.save(update_fields=["state", "updated_at"])
-    instance = codex_pool.spawn_new_session(
-        cwd=session_cwd,
-        prompt=prompt,
-        approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
-        sandbox_policy="readOnly",
-        web_search_mode=system_agents._workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        workflow_id=workflow.pk,
-        agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
-        display_author=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR,
-        output_schema=_AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA,
-        model=_autonomous_goal_history_summary_model(),
-        reasoning_effort="low",
-    )
-    metadata = session_index.upsert_local_session(
-        thread_id=instance.thread_id,
-        cwd=session_cwd,
-        project=autonomous_goal.project,
-        preview=prompt,
-        auto_pr_enabled=False,
-        auto_qa_enabled=False,
-        auto_merge_to_local_branch=False,
-        auto_merge_branch="",
-        codex_path=codex_pool.thread_path_for_instance(instance),
-        is_hidden_system_session=True,
-    )
-    workflow.state = {**workflow.state, "proposal_history_summary_session_id": metadata.pk}
-    workflow.save(update_fields=["state", "updated_at"])
-    run, _created = SystemAgentRun.objects.get_or_create(
-        instance=instance,
-        defaults={
-            "workflow": workflow,
-            "agent_kind": system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
-            "thread_id": instance.thread_id,
-            "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {
-                "cwd": session_cwd,
-                "autonomous_goal_id": autonomous_goal.pk,
-                "history_files": history_files,
+    instance: CodexInstance | None = None
+    run: SystemAgentRun | None = None
+    try:
+        instance = codex_pool.spawn_new_session(
+            cwd=session_cwd,
+            prompt=prompt,
+            approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+            sandbox_policy="readOnly",
+            web_search_mode=system_agents._workflow_web_search_mode(workflow),
+            thread_source=ThreadSource.subagent,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+            display_author=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR,
+            output_schema=_AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA,
+            model=_autonomous_goal_history_summary_model(),
+            reasoning_effort="low",
+        )
+        run, _created = SystemAgentRun.objects.get_or_create(
+            instance=instance,
+            defaults={
+                "workflow": workflow,
+                "agent_kind": system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+                "thread_id": instance.thread_id,
+                "status": SystemAgentRun.STATUS_RUNNING,
+                "input": {
+                    "cwd": session_cwd,
+                    "autonomous_goal_id": autonomous_goal.pk,
+                    "history_files": history_files,
+                },
             },
-        },
-    )
+        )
+        metadata = session_index.upsert_local_session(
+            thread_id=instance.thread_id,
+            cwd=session_cwd,
+            project=autonomous_goal.project,
+            preview=prompt,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+            auto_merge_to_local_branch=False,
+            auto_merge_branch="",
+            codex_path=codex_pool.thread_path_for_instance(instance),
+            is_hidden_system_session=True,
+        )
+        workflow.state = {
+            **workflow.state,
+            "proposal_history_summary_session_id": metadata.pk,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+    except Exception as exc:
+        if instance is not None:
+            _cancel_partially_spawned_autonomous_goal_history_summary(
+                instance=instance,
+                run=run,
+                error=f"failed to start autonomous goal history summarizer: {exc!r}",
+            )
+        raise
+    assert run is not None
     return run
+
+
+def _cancel_partially_spawned_autonomous_goal_history_summary(
+    *,
+    instance: CodexInstance,
+    run: SystemAgentRun | None,
+    error: str,
+) -> None:
+    codex_pool.interrupt_instance(instance.pk, expected_thread_id=instance.thread_id)
+    if run is not None:
+        run.status = SystemAgentRun.STATUS_FAILED
+        run.error = error
+        run.save(update_fields=["status", "error", "updated_at"])
+        return
+    CodexInstance.objects.filter(pk=instance.pk).update(
+        workflow_id=None,
+        agent_kind="",
+        updated_at=timezone.now(),
+    )
 
 
 def _autonomous_goal_history_summary_model() -> str | None:

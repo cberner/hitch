@@ -10029,6 +10029,74 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Prior parser cleanup", prompt)
         self.assertIn("Recent proposal run references", prompt)
 
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_stops_when_it_exhausts_proposal_budget(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            proposal_budget=300,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "brief": "Prefer parser helpers.",
+                    "recent_stack": [],
+                    "accepted_lessons": [],
+                    "avoid_or_reconsider": [],
+                    "promising_next_directions": [],
+                    "important_files": [],
+                },
+                thread_id="summary-thread",
+                tokens_used=350,
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        mock_spawn.return_value = summary
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+        system_agents.on_codex_instance_finished(summary)
+        workflow.refresh_from_db()
+
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("budget", workflow.state["error"])
+        self.assertEqual(
+            workflow.state[
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+            ],
+            350,
+        )
+        run = SystemAgentRun.objects.get(thread_id="summary-thread")
+        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
+        notice = ProposedSession.objects.get(source_workflow=workflow)
+        self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
+        self.assertEqual(notice.outcome_metadata["proposal_budget_tokens_used"], 350)
+        mock_spawn.assert_called_once()
+
     @override_settings(AUTONOMOUS_GOAL_HISTORY_SUMMARY_MODEL="gpt-small")
     @patch(
         "hitch.main.workflows.autonomous_goals._write_autonomous_goal_history_files",
@@ -10140,6 +10208,77 @@ class AutonomousGoalWorkflowTests(TestCase):
             "spawn exploded", workflow.state["proposal_history_summary_error"]
         )
         self.assertEqual(mock_spawn.call_count, 2)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["agent_kind"],
+            system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+    @patch("hitch.main.workflows.autonomous_goals.session_index.upsert_local_session")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_spawn_failure_after_instance_cancels_summarizer(
+        self,
+        mock_spawn: MagicMock,
+        mock_interrupt: MagicMock,
+        mock_upsert: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        prior_candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            candidate_session=prior_candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        candidate = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        mock_spawn.side_effect = [summary, candidate]
+        mock_interrupt.return_value = summary
+        mock_upsert.side_effect = [RuntimeError("index down"), candidate_metadata]
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+        workflow.refresh_from_db()
+
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
+        mock_interrupt.assert_called_once_with(
+            summary.pk, expected_thread_id="summary-thread"
+        )
+        summary_run = SystemAgentRun.objects.get(instance=summary)
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("index down", summary_run.error)
+        self.assertIn(
+            "index down", workflow.state["proposal_history_summary_error"]
+        )
         self.assertEqual(
             mock_spawn.call_args.kwargs["agent_kind"],
             system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
