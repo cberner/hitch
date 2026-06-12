@@ -540,6 +540,27 @@ def _parse_autonomous_goal_candidate_proposal(
     }
 
 
+def _parse_autonomous_goal_history_summary_output(
+    raw_output: str,
+) -> dict[str, Any] | None:
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
+        return None
+    brief = parsed.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return None
+    return {
+        "brief": brief.strip(),
+        "recent_stack": _string_list(parsed.get("recent_stack")),
+        "accepted_lessons": _string_list(parsed.get("accepted_lessons")),
+        "avoid_or_reconsider": _string_list(parsed.get("avoid_or_reconsider")),
+        "promising_next_directions": _string_list(
+            parsed.get("promising_next_directions")
+        ),
+        "important_files": _string_list(parsed.get("important_files")),
+    }
+
+
 def _parse_autonomous_goal_judge_output(raw_output: str) -> dict[str, str] | None:
     parsed = _parse_json_object(raw_output)
     if parsed is None:
