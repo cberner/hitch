@@ -9703,6 +9703,37 @@ class AutonomousGoalWorkflowTests(TestCase):
             "Use the message as the durable summary.",
         )
 
+    def test_autonomous_goal_history_summary_parser(self) -> None:
+        parsed = agent_io._parse_autonomous_goal_history_summary_output(
+            json.dumps(
+                {
+                    "brief": "Use accepted parser helpers as precedent.",
+                    "recent_stack": ["#2 superseded #1."],
+                    "accepted_lessons": ["Parser helper extraction worked."],
+                    "avoid_or_reconsider": ["Avoid broad rewrites."],
+                    "promising_next_directions": ["Add focused parser tests."],
+                    "important_files": ["hitch/main/rollout.py"],
+                }
+            )
+        )
+
+        self.assertEqual(
+            parsed,
+            {
+                "brief": "Use accepted parser helpers as precedent.",
+                "recent_stack": ["#2 superseded #1."],
+                "accepted_lessons": ["Parser helper extraction worked."],
+                "avoid_or_reconsider": ["Avoid broad rewrites."],
+                "promising_next_directions": ["Add focused parser tests."],
+                "important_files": ["hitch/main/rollout.py"],
+            },
+        )
+        self.assertIsNone(
+            agent_io._parse_autonomous_goal_history_summary_output(
+                json.dumps({"brief": "   "})
+            )
+        )
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock
@@ -9773,7 +9804,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_candidate_prompt_includes_prior_proposal_descriptions(
+    def test_candidate_prompt_includes_summary_and_prior_run_references(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -9786,11 +9817,18 @@ class AutonomousGoalWorkflowTests(TestCase):
             thread_id="prior-candidate",
             cwd="/repo",
             project=project,
+            codex_path="/root/.codex/sessions/prior-candidate.jsonl",
         )
         accepted = SessionMetadata.objects.create(
             thread_id="accepted-thread",
             cwd="/repo",
             project=project,
+        )
+        judge = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo",
+            project=project,
+            codex_path="/root/.codex/sessions/judge-thread.jsonl",
         )
         ProposedSession.objects.create(
             project=project,
@@ -9805,31 +9843,125 @@ class AutonomousGoalWorkflowTests(TestCase):
             relevant_files=["hitch/main/rollout.py"],
             candidate_session=candidate,
             accepted_session=accepted,
+            judge_session=judge,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
-        mock_spawn.return_value = _instance(
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "brief": "Prefer parser helpers; do not repeat old setup.",
+                    "recent_stack": ["#1 Prior parser cleanup was accepted."],
+                    "accepted_lessons": ["Parser helper extraction worked."],
+                    "avoid_or_reconsider": ["Avoid vague parser rewrites."],
+                    "promising_next_directions": ["Add parser regression tests."],
+                    "important_files": ["hitch/main/rollout.py"],
+                },
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        candidate_instance = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
+        mock_spawn.side_effect = [summary, candidate_instance]
 
         workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING
+        )
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["agent_kind"],
+            system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(summary)
+        workflow.refresh_from_db()
 
         prompt = mock_spawn.call_args.kwargs["prompt"]
         self.assertIn(
-            "Accepted/dismissed proposal history for candidate planning", prompt
-        )
-        self.assertIn("Prior parser cleanup", prompt)
-        self.assertIn("Implemented: moved parser setup into a shared helper.", prompt)
-        self.assertIn(
-            "Continue from the parser helper and add focused regression tests.",
+            "Accepted/dismissed proposal history summary for candidate planning",
             prompt,
         )
-        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertIn("Prefer parser helpers", prompt)
+        self.assertIn("Recent proposal run references", prompt)
+        self.assertIn("Proposal #", prompt)
+        self.assertIn("Prior parser cleanup", prompt)
+        self.assertIn("prior-candidate", prompt)
+        self.assertIn("/root/.codex/sessions/prior-candidate.jsonl", prompt)
+        self.assertIn("judge-thread", prompt)
+        self.assertIn("/root/.codex/sessions/judge-thread.jsonl", prompt)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
+        run = SystemAgentRun.objects.get(thread_id="candidate-thread")
         self.assertEqual(run.input["proposal_history_count"], 1)
         self.assertFalse(run.input["proposal_history_compacted"])
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_history_summary_invalid_output_falls_back_to_candidate(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary="Cleaned up parser setup.",
+            prompt="Continue parser tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            relevant_files=["hitch/main/rollout.py"],
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        summary = _instance(
+            thread_id="summary-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(self, {"brief": ""}),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        candidate_instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.side_effect = [summary, candidate_instance]
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+        system_agents.on_codex_instance_finished(summary)
+        workflow.refresh_from_db()
+
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
+        self.assertNotIn(
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_STATE_KEY,
+            workflow.state,
+        )
+        self.assertIn(
+            "not valid JSON", workflow.state["proposal_history_summary_error"]
+        )
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("Prior parser cleanup", prompt)
+        self.assertIn("Recent proposal run references", prompt)
 
     @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 1)
     def test_candidate_proposal_history_uses_metadata_and_outcome_notes(self) -> None:

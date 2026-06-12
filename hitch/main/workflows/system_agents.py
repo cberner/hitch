@@ -65,12 +65,14 @@ logger = logging.getLogger(__name__)
 PR_QA_AGENT_KIND = "pr_qa"
 PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 AUTONOMOUS_GOAL_AGENT_KIND = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
+AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 QA_DISPLAY_AUTHOR = "QA agent"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
+AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR = "Autonomous goal history"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
 AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
 AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR = "Autonomous goal proposal accepted by user"
@@ -119,6 +121,7 @@ STEP_PR_NO_CHANGES = "pr_no_changes"
 STEP_ARCHIVED = "archived"
 STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
+STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING = "autonomous_goal_history_summarizing"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
 STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
@@ -679,6 +682,8 @@ def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str
             return (SPEC_SYNTHESIZER_AGENT_KIND,)
         return ()
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
+        if workflow.step == STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
+            return (AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,)
         if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
             return (AUTONOMOUS_GOAL_AGENT_KIND,)
         if workflow.step == STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:

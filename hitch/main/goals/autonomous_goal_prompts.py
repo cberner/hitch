@@ -46,6 +46,7 @@ _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY = "proposal_budget_last_failure"
 _AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY = (
     "proposal_budget_no_progress_retries"
 )
+_AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_STATE_KEY = "proposal_history_summary"
 
 _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS = 5_000
 _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS = 50
@@ -54,6 +55,8 @@ _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_OLDER_SUMMARY_CHARS = 260
 _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_PROMPT_CHARS = 260
 _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_LIMIT = 6
 _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_CHARS = 600
+_AUTONOMOUS_GOAL_RECENT_PROPOSAL_REFERENCE_LIMIT = 5
+_AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_CHARS = 5_000
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,101 @@ def _autonomous_goal_candidate_proposal_description(
 
 def _proposal_updated_date(proposal: ProposedSession) -> str:
     return timezone.localtime(proposal.updated_at).date().isoformat()
+
+
+def _autonomous_goal_candidate_proposal_history_prompt_text(
+    workflow: SystemWorkflow,
+    fallback_context: _AutonomousGoalProposalHistoryPromptContext,
+) -> str:
+    summary = _state_dict(workflow, _AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_STATE_KEY)
+    summary_text = _format_autonomous_goal_proposal_history_summary(summary)
+    return summary_text if summary_text else fallback_context.text
+
+
+def _format_autonomous_goal_proposal_history_summary(
+    summary: dict[str, Any],
+) -> str:
+    brief = summary.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return ""
+    parts = [f"Brief: {brief.strip()}"]
+    for label, key in (
+        ("Recent stack", "recent_stack"),
+        ("Accepted lessons", "accepted_lessons"),
+        ("Avoid or reconsider", "avoid_or_reconsider"),
+        ("Promising next directions", "promising_next_directions"),
+        ("Important files", "important_files"),
+    ):
+        values = _string_list(summary.get(key))
+        if values:
+            parts.append(f"{label}:\n" + "\n".join(f"- {value}" for value in values))
+    return truncate_for_prompt(
+        "\n\n".join(parts), _AUTONOMOUS_GOAL_PROPOSAL_HISTORY_SUMMARY_CHARS
+    )
+
+
+def _autonomous_goal_recent_proposal_run_references(
+    autonomous_goal: AutonomousGoal,
+    *,
+    limit: int = _AUTONOMOUS_GOAL_RECENT_PROPOSAL_REFERENCE_LIMIT,
+) -> str:
+    proposals = list(
+        autonomous_goal.proposed_sessions.filter(
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL
+        )
+        .exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
+        .select_related("candidate_session", "accepted_session", "judge_session")
+        .order_by("-updated_at", "-id")[:limit]
+    )
+    if not proposals:
+        return "(none)"
+    return "\n\n".join(_format_recent_proposal_run_reference(p) for p in proposals)
+
+
+def _format_recent_proposal_run_reference(proposal: ProposedSession) -> str:
+    metadata = (
+        proposal.outcome_metadata if isinstance(proposal.outcome_metadata, dict) else {}
+    )
+    stack_round = ""
+    iteration = metadata.get("stacked_diff_iteration")
+    depth = metadata.get("stacked_diff_depth")
+    if isinstance(iteration, int) and isinstance(depth, int):
+        stack_round = f", stack round {iteration} of {depth}"
+    files = _format_limited_strings(
+        _string_list(proposal.relevant_files), limit=8, max_chars=600
+    )
+    parts = [
+        (
+            f"Proposal #{proposal.pk}: {proposal.title or '(none)'} "
+            f"({proposal.outcome_status or '(none)'}{stack_round}, "
+            f"updated {_proposal_updated_date(proposal)})"
+        ),
+        _format_session_reference("Candidate", proposal.candidate_session),
+    ]
+    if (
+        proposal.accepted_session is not None
+        and proposal.accepted_session_id != proposal.candidate_session_id
+    ):
+        parts.append(_format_session_reference("Accepted", proposal.accepted_session))
+    if proposal.judge_session is not None:
+        parts.append(_format_session_reference("Judge", proposal.judge_session))
+    if files:
+        parts.append(f"Relevant files: {files}")
+    if proposal.outcome_notes.strip():
+        parts.append(
+            f"Outcome notes: {truncate_for_prompt(proposal.outcome_notes, 180)}"
+        )
+    return "\n".join(parts)
+
+
+def _format_session_reference(label: str, session: Any | None) -> str:
+    if session is None:
+        return f"{label}: (none)"
+    thread_id = session.thread_id or "(none)"
+    path = session.codex_path.strip() if session.codex_path else ""
+    if path:
+        return f"{label}: thread {thread_id}; session file {path}"
+    return f"{label}: thread {thread_id}; session file (none)"
 
 
 def _autonomous_goal_proposed_session_prompt(
@@ -356,6 +454,12 @@ def _autonomous_goal_candidate_prompt(
     proposal_history_context = _autonomous_goal_candidate_proposal_history_context(
         autonomous_goal
     )
+    proposal_history_text = _autonomous_goal_candidate_proposal_history_prompt_text(
+        workflow, proposal_history_context
+    )
+    proposal_run_references = _autonomous_goal_recent_proposal_run_references(
+        autonomous_goal
+    )
     session_cwd = _autonomous_goal_session_cwd(workflow)
     stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
         workflow, autonomous_goal
@@ -407,8 +511,10 @@ def _autonomous_goal_candidate_prompt(
         f"{autonomous_goal.goal}\n\n"
         "Autonomous goal memory from previous candidate runs:\n"
         f"{memory_context.text}\n\n"
-        "Accepted/dismissed proposal history for candidate planning:\n"
-        f"{proposal_history_context.text}\n\n"
+        "Accepted/dismissed proposal history summary for candidate planning:\n"
+        f"{proposal_history_text}\n\n"
+        "Recent proposal run references for optional deeper review:\n"
+        f"{proposal_run_references}\n\n"
         "Return only JSON matching this shape: "
         '{"proposal": {"title": string, "summary": string, "impact": string, '
         '"implemented_changes": string, "implementation_direction": string, '
