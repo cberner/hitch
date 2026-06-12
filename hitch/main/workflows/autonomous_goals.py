@@ -2264,19 +2264,12 @@ def _spawn_autonomous_goal_history_summary_run(
             model=_autonomous_goal_history_summary_model(),
             reasoning_effort="low",
         )
-        run, _created = SystemAgentRun.objects.get_or_create(
+        run = _get_or_create_autonomous_goal_history_summary_run(
             instance=instance,
-            defaults={
-                "workflow": workflow,
-                "agent_kind": system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
-                "thread_id": instance.thread_id,
-                "status": SystemAgentRun.STATUS_RUNNING,
-                "input": {
-                    "cwd": session_cwd,
-                    "autonomous_goal_id": autonomous_goal.pk,
-                    "history_files": history_files,
-                },
-            },
+            workflow=workflow,
+            autonomous_goal=autonomous_goal,
+            session_cwd=session_cwd,
+            history_files=history_files,
         )
         metadata = session_index.upsert_local_session(
             thread_id=instance.thread_id,
@@ -2303,6 +2296,22 @@ def _spawn_autonomous_goal_history_summary_run(
                 error=f"failed to start autonomous goal history summarizer: {exc!r}",
             )
             if not cancelled:
+                if run is None:
+                    run = _preserve_partially_spawned_autonomous_goal_history_summary_run(
+                        instance=instance,
+                        workflow=workflow,
+                        autonomous_goal=autonomous_goal,
+                        session_cwd=session_cwd,
+                        history_files=history_files,
+                    )
+                    if run is None:
+                        detached = (
+                            _detach_partially_spawned_autonomous_goal_history_summary(
+                                instance
+                            )
+                        )
+                        if detached:
+                            raise
                 raise _AutonomousGoalHistorySummaryStillRunningError(
                     "spawned autonomous goal history summarizer could not be "
                     "interrupted after setup failed"
@@ -2310,6 +2319,54 @@ def _spawn_autonomous_goal_history_summary_run(
         raise
     assert run is not None
     return run
+
+
+def _get_or_create_autonomous_goal_history_summary_run(
+    *,
+    instance: CodexInstance,
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    session_cwd: str,
+    history_files: list[str],
+) -> SystemAgentRun:
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": session_cwd,
+                "autonomous_goal_id": autonomous_goal.pk,
+                "history_files": history_files,
+            },
+        },
+    )
+    return run
+
+
+def _preserve_partially_spawned_autonomous_goal_history_summary_run(
+    *,
+    instance: CodexInstance,
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    session_cwd: str,
+    history_files: list[str],
+) -> SystemAgentRun | None:
+    try:
+        return _get_or_create_autonomous_goal_history_summary_run(
+            instance=instance,
+            workflow=workflow,
+            autonomous_goal=autonomous_goal,
+            session_cwd=session_cwd,
+            history_files=history_files,
+        )
+    except Exception:
+        system_agents.logger.exception(
+            "failed to preserve autonomous goal history summarizer run"
+        )
+        return None
 
 
 def _cancel_partially_spawned_autonomous_goal_history_summary(
@@ -2328,6 +2385,12 @@ def _cancel_partially_spawned_autonomous_goal_history_summary(
         run.error = error
         run.save(update_fields=["status", "error", "updated_at"])
         return True
+    return _detach_partially_spawned_autonomous_goal_history_summary(instance)
+
+
+def _detach_partially_spawned_autonomous_goal_history_summary(
+    instance: CodexInstance,
+) -> bool:
     CodexInstance.objects.filter(pk=instance.pk).update(
         workflow_id=None,
         agent_kind="",
