@@ -27,7 +27,13 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import app_server_pool, disk_cleanup, host_probes, reconciliation
+from hitch.main.runtime import (
+    app_server_pool,
+    disk_cleanup,
+    host_probes,
+    reconciliation,
+    server_lifecycle,
+)
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import discover_managed_worktrees
 
@@ -519,6 +525,85 @@ def _host_section() -> HealthSection:
     )
 
 
+# A scheduler whose last heartbeat is older than this many intervals has a
+# dead or wedged thread; until now that was indistinguishable from a healthy
+# quiet one (the loops only logged on failure).
+_SCHEDULER_STALE_INTERVALS = 3
+
+
+def _schedulers_section() -> HealthSection:
+    metrics = [
+        _scheduler_metric(status)
+        for status in server_lifecycle.scheduler_statuses()
+    ]
+    return HealthSection(title="Background schedulers", metrics=metrics)
+
+
+def _scheduler_metric(status: server_lifecycle.SchedulerStatus) -> HealthMetric:
+    def collect() -> HealthMetric:
+        now = timezone.now()
+        stale_after = timedelta(
+            seconds=status.tick_interval_seconds * _SCHEDULER_STALE_INTERVALS
+        )
+        if not status.started:
+            return HealthMetric(
+                key=f"scheduler_{status.name}",
+                label=status.name,
+                value="not started",
+                severity=SEVERITY_OK,
+                detail=(
+                    "Not started in this process: disabled by policy or env, or "
+                    "owned by another worker process."
+                ),
+            )
+        last_beat = status.last_tick_at or status.started_at
+        age = now - last_beat if last_beat is not None else None
+        if status.last_tick_at is None:
+            value = "started, no tick yet"
+        else:
+            value = f"tick {status.tick_count}, {_human_age(age)} ago"
+        severity = SEVERITY_OK
+        detail = ""
+        if age is not None and age > stale_after:
+            severity = SEVERITY_DANGER
+            detail = (
+                "No heartbeat for over "
+                f"{_SCHEDULER_STALE_INTERVALS}x the tick interval; the "
+                "scheduler thread looks dead or wedged."
+            )
+        elif status.last_tick_errored and status.last_error:
+            # Only the *latest* tick failing warns: a recovered scheduler
+            # must not keep the dashboard yellow on a stale error.
+            severity = SEVERITY_WARN
+            detail = f"Last tick error: {status.last_error}"
+        elif status.last_error and status.last_error_at is not None:
+            detail = (
+                f"Recovered; last error at "
+                f"{status.last_error_at:%Y-%m-%d %H:%M:%S}: {status.last_error}"
+            )
+        return HealthMetric(
+            key=f"scheduler_{status.name}",
+            label=status.name,
+            value=value,
+            severity=severity,
+            detail=detail,
+        )
+
+    return _safe_metric(f"scheduler_{status.name}", status.name, collect)
+
+
+def _human_age(age: timedelta | None) -> str:
+    if age is None:
+        return "unknown"
+    seconds = max(int(age.total_seconds()), 0)
+    if seconds < 120:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 120:
+        return f"{minutes}m"
+    return f"{minutes // 60}h"
+
+
 def _blocked_bucket_section() -> HealthSection:
     title = "Blocked workflow buckets"
     try:
@@ -639,6 +724,7 @@ def _recent_failure_section() -> HealthSection:
 def _build_health_report() -> HealthReport:
     sections = [
         _worker_scope_section(),
+        _schedulers_section(),
         _host_section(),
         _leak_section(),
         _blocked_bucket_section(),

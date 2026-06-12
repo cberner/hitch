@@ -29,7 +29,8 @@ _PR_MONITOR_BACKOFF_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
 _scheduler = server_lifecycle.SchedulerHandle(
-    thread_name="hitch-workflow-maintenance"
+    thread_name="hitch-workflow-maintenance",
+    tick_interval_seconds=_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS,
 )
 
 
@@ -79,29 +80,27 @@ def _workflow_maintenance_scheduler_loop() -> None:
 
 
 def _run_workflow_maintenance_scheduler_tick() -> None:
-    close_old_connections()
-    try:
-        reconciliation.reconcile_dead()
-        refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
-            limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
-        )
-        if refreshed:
-            logger.info("refreshed %s PR monitor backoff workflow(s)", refreshed)
-        # Converge GitHub-backed PR stages in the background. This scheduler
-        # runs under production server commands (gunicorn et al.), whereas the
-        # auto-proposal scheduler does not, so without this the per-session
-        # `gh pr view` stage refresh only ever fires from the session-list
-        # request path (capped at one row per render) -- dominating dashboard
-        # latency once a session's 5-minute refresh window elapses.
-        pr_stages = pr_qa.refresh_unarchived_session_pr_stages(
-            limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
-        )
-        if pr_stages:
-            logger.info("refreshed %s session PR stage(s)", pr_stages)
-    except Exception:
-        logger.exception("failed to run workflow maintenance scheduler tick")
-    finally:
-        close_old_connections()
+    _scheduler.run_tick(_workflow_maintenance_tick)
+
+
+def _workflow_maintenance_tick() -> None:
+    reconciliation.reconcile_dead()
+    refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
+        limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
+    )
+    if refreshed:
+        logger.info("refreshed %s PR monitor backoff workflow(s)", refreshed)
+    # Converge GitHub-backed PR stages in the background. This scheduler
+    # runs under production server commands (gunicorn et al.), whereas the
+    # auto-proposal scheduler does not, so without this the per-session
+    # `gh pr view` stage refresh only ever fires from the session-list
+    # request path (capped at one row per render) -- dominating dashboard
+    # latency once a session's 5-minute refresh window elapses.
+    pr_stages = pr_qa.refresh_unarchived_session_pr_stages(
+        limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
+    )
+    if pr_stages:
+        logger.info("refreshed %s session PR stage(s)", pr_stages)
 
 
 def _run_due_disk_usage_cleanup(

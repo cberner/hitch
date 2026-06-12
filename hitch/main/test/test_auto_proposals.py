@@ -68,7 +68,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         mock_refresh.assert_called_once_with(None, start_cursor="")
         mock_start.assert_called_once_with()
 
-    @patch("hitch.main.goals.auto_proposals.logger.exception")
+    @patch("hitch.main.runtime.server_lifecycle.logger.exception")
     @patch("hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
     @patch("hitch.main.goals.auto_proposals.reconciliation.reconcile_dead")
@@ -81,13 +81,41 @@ class AutoProposalSchedulerTests(SimpleTestCase):
     ) -> None:
         mock_reconcile_dead.side_effect = RuntimeError("boom")
 
-        auto_proposals._run_auto_proposal_scheduler_tick()
+        result = auto_proposals._run_auto_proposal_scheduler_tick()
 
+        # The shared run_tick wrapper swallows and records the failure so one
+        # bad tick cannot kill the scheduler thread; the cursor resets.
+        self.assertEqual(result, "")
         mock_refresh.assert_not_called()
         mock_start.assert_not_called()
         mock_log_exception.assert_called_once_with(
-            "failed to run auto-proposal scheduler tick"
+            "scheduler %s tick failed", "hitch-auto-proposals"
         )
+        status = auto_proposals._scheduler.status()
+        self.assertTrue(status.last_tick_errored)
+        self.assertIn("boom", status.last_error)
+        self.assertIsNotNone(status.last_error_at)
+
+    @patch("hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows")
+    @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
+    @patch("hitch.main.goals.auto_proposals.reconciliation.reconcile_dead")
+    def test_tick_keeps_refreshed_cursor_when_workflow_start_fails(
+        self,
+        mock_reconcile_dead: MagicMock,
+        mock_refresh: MagicMock,
+        mock_start: MagicMock,
+    ) -> None:
+        # A failure after the refresh must not reset the incremental scan to
+        # the front, or a repeated start failure would rescan only the first
+        # window of active sessions forever.
+        mock_refresh.return_value = "cursor-page-2"
+        mock_start.side_effect = RuntimeError("boom")
+
+        result = auto_proposals._run_auto_proposal_scheduler_tick(
+            None, start_cursor="cursor-page-1"
+        )
+
+        self.assertEqual(result, "cursor-page-2")
 
 
 class WorkflowMaintenanceSchedulerTests(SimpleTestCase):

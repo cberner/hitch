@@ -7,7 +7,6 @@ import logging
 import threading
 from typing import NamedTuple
 
-from django.db import close_old_connections
 from openai_codex import Codex
 
 from hitch.main.models import Project
@@ -30,7 +29,10 @@ _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 _SESSION_STATE_REFRESH_MAX_PAGES = 5
 _SCHEDULER_ENV = "HITCH_AUTO_PROPOSAL_SCHEDULER"
 
-_scheduler = server_lifecycle.SchedulerHandle(thread_name="hitch-auto-proposals")
+_scheduler = server_lifecycle.SchedulerHandle(
+    thread_name="hitch-auto-proposals",
+    tick_interval_seconds=_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS,
+)
 
 
 class SessionStateRefreshResult(NamedTuple):
@@ -104,9 +106,15 @@ def _run_auto_proposal_scheduler_tick(
     start_cursor: str = "",
 ) -> str:
     """Run one scheduler tick. Returns the active-index cursor for the next tick."""
-    close_old_connections()
+
+    # Captured by the closure so a failure in a later phase (e.g. the
+    # workflow starts) keeps the cursor the refresh already advanced --
+    # run_tick returns None on error, and resetting the scan to the front on
+    # every such tick would rescan only the first window forever.
     next_cursor = ""
-    try:
+
+    def _tick() -> None:
+        nonlocal next_cursor
         reconciliation.reconcile_dead()
         next_cursor = _refresh_unarchived_session_state_best_effort(
             scheduler_codex, start_cursor=start_cursor
@@ -114,10 +122,8 @@ def _run_auto_proposal_scheduler_tick(
         started = autonomous_goals.maybe_start_auto_proposal_workflows()
         if started:
             logger.info("started %s auto-proposal workflow(s)", started)
-    except Exception:
-        logger.exception("failed to run auto-proposal scheduler tick")
-    finally:
-        close_old_connections()
+
+    _scheduler.run_tick(_tick)
     return next_cursor
 
 
