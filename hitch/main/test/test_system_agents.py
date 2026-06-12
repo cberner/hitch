@@ -10377,6 +10377,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
                 workflow_id=int(kwargs["workflow_id"]),
                 agent_kind=str(kwargs["agent_kind"]),
+                status=CodexInstance.STATUS_RUNNING,
             )
             spawned["summary"] = summary
             return summary
@@ -10477,17 +10478,27 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
         self.assertIn("could not preserve a run", workflow.state["error"])
-        self.assertIsNone(summary.workflow_id)
-        self.assertEqual(summary.agent_kind, "")
+        self.assertEqual(summary.workflow_id, workflow.pk)
+        self.assertEqual(
+            summary.agent_kind,
+            system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
         self.assertFalse(SystemAgentRun.objects.filter(instance=summary).exists())
         mock_interrupt.assert_called_once_with(
             summary.pk, expected_thread_id="summary-thread"
         )
         mock_spawn.assert_called_once()
 
+        summary.status = CodexInstance.STATUS_COMPLETED
+        summary.save(update_fields=["status"])
+        self.assertTrue(system_agents.on_codex_instance_finished(summary))
+        summary_run = SystemAgentRun.objects.get(instance=summary)
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(summary_run.error, workflow.state["error"])
+
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_history_summary_preserved_run_failed_when_inactive_interrupt_pending(
+    def test_history_summary_preserved_run_terminal_fails_after_inactive_interrupt_pending(
         self,
         mock_spawn: MagicMock,
         mock_interrupt: MagicMock,
@@ -10521,6 +10532,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
                 workflow_id=int(kwargs["workflow_id"]),
                 agent_kind=str(kwargs["agent_kind"]),
+                status=CodexInstance.STATUS_RUNNING,
             )
             spawned["summary"] = summary
             return summary
@@ -10565,10 +10577,16 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(get_or_create_calls, 2)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(summary_run.error, "stopped")
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_RUNNING)
         self.assertEqual(mock_interrupt.call_count, 2)
         mock_spawn.assert_called_once()
+
+        summary.status = CodexInstance.STATUS_COMPLETED
+        summary.save(update_fields=["status"])
+        self.assertTrue(system_agents.on_codex_instance_finished(summary))
+        summary_run.refresh_from_db()
+        self.assertEqual(summary_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(summary_run.error, "stopped")
 
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_history_summary_partial_spawn_cancel_without_run_detaches_instance(
