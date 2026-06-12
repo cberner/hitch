@@ -432,7 +432,8 @@ def _shared_pool_enabled() -> bool:
 _KEEPALIVE_INTERVAL_SECONDS = 30
 
 _keepalive = server_lifecycle.SchedulerHandle(
-    thread_name="hitch-codex-pool-keepalive"
+    thread_name="hitch-codex-pool-keepalive",
+    tick_interval_seconds=_KEEPALIVE_INTERVAL_SECONDS,
 )
 
 def _codex_pool_keepalive_enabled() -> bool:
@@ -468,7 +469,7 @@ def start_codex_pool_keepalive() -> bool:
 def _codex_pool_keepalive_loop() -> None:
     stop = threading.Event()
     while True:
-        _codex_pool_keepalive_tick()
+        _keepalive.run_tick(_codex_pool_keepalive_tick)
         stop.wait(_KEEPALIVE_INTERVAL_SECONDS)
 
 def _codex_pool_keepalive_tick() -> None:

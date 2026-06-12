@@ -21,7 +21,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import disk_cleanup, health, host_probes, reconciliation
+from hitch.main.runtime import disk_cleanup, health, host_probes, reconciliation, server_lifecycle
 from hitch.main.runtime.disk_cleanup import HitchDiskUsage
 from hitch.main.runtime.host_probes import (
     LeakedScope,
@@ -79,6 +79,7 @@ class CollectHealthReportTests(TestCase):
             titles,
             [
                 "Worker units (leaks)",
+                "Background schedulers",
                 "Host / CPU",
                 "Leaks",
                 "Blocked workflow buckets",
@@ -332,6 +333,101 @@ class HealthHelperTests(TestCase):
         self.assertEqual(health._human_bytes(512), "512 B")
         self.assertEqual(health._human_bytes(1536), "1.5 KiB")
         self.assertEqual(health._human_bytes(5 * 1024 * 1024), "5.0 MiB")
+
+
+class SchedulerHeartbeatTests(TestCase):
+    def _status(self, **overrides: Any) -> server_lifecycle.SchedulerStatus:
+        now = timezone.now()
+        defaults: dict[str, Any] = {
+            "name": "hitch-test-scheduler",
+            "started": True,
+            "started_at": now - timedelta(seconds=300),
+            "tick_interval_seconds": 60,
+            "tick_count": 5,
+            "last_tick_at": now - timedelta(seconds=30),
+            "last_tick_errored": False,
+            "last_error": "",
+            "last_error_at": None,
+        }
+        defaults.update(overrides)
+        return server_lifecycle.SchedulerStatus(**defaults)
+
+    def test_run_tick_records_heartbeat_results_and_errors(self) -> None:
+        handle = server_lifecycle.SchedulerHandle(
+            thread_name="hitch-test-heartbeat", tick_interval_seconds=5
+        )
+        self.addCleanup(lambda: server_lifecycle._HANDLES.remove(handle))
+
+        self.assertEqual(handle.run_tick(lambda: "cursor"), "cursor")
+        status = handle.status()
+        self.assertEqual(status.tick_count, 1)
+        self.assertIsNotNone(status.last_tick_at)
+        self.assertEqual(status.last_error, "")
+
+        def _boom() -> str:
+            raise RuntimeError("boom")
+
+        # One bad tick is swallowed (the scheduler thread must survive) but
+        # recorded for the health page; the heartbeat still advances.
+        self.assertIsNone(handle.run_tick(_boom))
+        status = handle.status()
+        self.assertEqual(status.tick_count, 2)
+        self.assertTrue(status.last_tick_errored)
+        self.assertIn("boom", status.last_error)
+        self.assertIsNotNone(status.last_error_at)
+
+        # A successful tick marks recovery while keeping the error on record.
+        handle.run_tick(lambda: None)
+        status = handle.status()
+        self.assertFalse(status.last_tick_errored)
+        self.assertIn("boom", status.last_error)
+
+    def test_scheduler_metric_severities(self) -> None:
+        healthy = health._scheduler_metric(self._status())
+        self.assertEqual(healthy.severity, health.SEVERITY_OK)
+        self.assertIn("tick 5", healthy.value)
+
+        not_started = health._scheduler_metric(
+            self._status(started=False, started_at=None, tick_count=0, last_tick_at=None)
+        )
+        self.assertEqual(not_started.severity, health.SEVERITY_OK)
+        self.assertEqual(not_started.value, "not started")
+
+        stale = health._scheduler_metric(
+            self._status(last_tick_at=timezone.now() - timedelta(seconds=600))
+        )
+        self.assertEqual(stale.severity, health.SEVERITY_DANGER)
+        self.assertIn("dead or wedged", stale.detail)
+
+        never_ticked = health._scheduler_metric(
+            self._status(
+                started_at=timezone.now() - timedelta(seconds=600),
+                tick_count=0,
+                last_tick_at=None,
+            )
+        )
+        self.assertEqual(never_ticked.severity, health.SEVERITY_DANGER)
+
+        latest_tick_errored = health._scheduler_metric(
+            self._status(
+                last_tick_errored=True,
+                last_error="RuntimeError('boom')",
+                last_error_at=timezone.now() - timedelta(seconds=10),
+            )
+        )
+        self.assertEqual(latest_tick_errored.severity, health.SEVERITY_WARN)
+        self.assertIn("boom", latest_tick_errored.detail)
+
+        # A recovered scheduler (latest tick succeeded) is OK, with the old
+        # error kept visible in the detail only.
+        recovered = health._scheduler_metric(
+            self._status(
+                last_error="RuntimeError('boom')",
+                last_error_at=timezone.now() - timedelta(seconds=10),
+            )
+        )
+        self.assertEqual(recovered.severity, health.SEVERITY_OK)
+        self.assertIn("Recovered", recovered.detail)
 
 
 class HealthDashboardViewTests(TestCase):
