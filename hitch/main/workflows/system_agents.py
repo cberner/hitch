@@ -919,6 +919,10 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
             "web_search_mode": instance.web_search_mode or None,
             "initial_user_message_index": (instance.user_message_index or 0) + 1,
         }
+        if automation == "auto_pr":
+            pr_title = _accepted_auto_pr_proposal_title(instance.thread_id)
+            if pr_title:
+                workflow_kwargs["pr_title"] = pr_title
         if automation == "auto_qa":
             workflow_kwargs["open_pr_on_lgtm"] = False
         auto_merge_branch = (
@@ -937,6 +941,21 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
     except Exception:
         CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
         raise
+
+
+def _accepted_auto_pr_proposal_title(thread_id: str) -> str:
+    proposal = (
+        ProposedSession.objects.filter(
+            accepted_session__thread_id=thread_id,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata__auto_pr_enabled=True,
+        )
+        .order_by("-updated_at", "-pk")
+        .first()
+    )
+    if proposal is None:
+        return ""
+    return " ".join(proposal.title.split())
 
 
 def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:

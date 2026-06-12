@@ -1868,6 +1868,13 @@ def _autonomous_goal_next_stack_candidate_state(
         state.pop(key, None)
     return state
 
+
+def _autonomous_goal_stack_snapshot_message(workflow: SystemWorkflow) -> str:
+    proposal = _autonomous_goal_current_stack_proposal(workflow)
+    if proposal is None:
+        return ""
+    return " ".join(proposal.title.split())
+
 def _cleanup_autonomous_goal_candidate_cwd(cwd: str) -> None:
     if not cwd:
         return
@@ -1881,7 +1888,11 @@ def _prepare_autonomous_goal_candidate_cwd(
 ) -> tuple[str, ManagedWorktree | None]:
     fork_cwd = _state_string(workflow, _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY)
     if fork_cwd:
-        base_ref = snapshot_worktree_to_commit(fork_cwd)
+        snapshot_message = _autonomous_goal_stack_snapshot_message(workflow)
+        if snapshot_message:
+            base_ref = snapshot_worktree_to_commit(fork_cwd, message=snapshot_message)
+        else:
+            base_ref = snapshot_worktree_to_commit(fork_cwd)
         managed_worktree = create_worktree_for_session(
             autonomous_goal.project.repo_path,
             base_ref=base_ref,
