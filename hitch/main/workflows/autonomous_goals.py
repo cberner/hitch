@@ -707,6 +707,8 @@ def _spawn_autonomous_goal_history_summary_or_fallback(
     try:
         run = _spawn_autonomous_goal_history_summary_run(workflow, locked_goal)
     except Exception as exc:
+        # The spawn helper cancels any summarizer instance it created before
+        # re-raising, so the fallback candidate cannot race an orphan summary.
         workflow = _record_autonomous_goal_history_summary_fallback_if_active(
             workflow_id=workflow.pk,
             autonomous_goal_id=locked_goal.pk,
@@ -714,10 +716,16 @@ def _spawn_autonomous_goal_history_summary_or_fallback(
         )
         system_agents._sync_workflow_instance(original_workflow, workflow)
         if workflow is not None and workflow.is_active:
-            _spawn_autonomous_goal_candidate_or_block(workflow, locked_goal)
+            _spawn_candidate_after_history_summary_fallback(workflow, locked_goal)
         return
     workflow = _interrupt_spawned_autonomous_goal_run_if_inactive(run)
     system_agents._sync_workflow_instance(original_workflow, workflow)
+
+
+def _spawn_candidate_after_history_summary_fallback(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> None:
+    _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
 
 
 def _spawn_autonomous_goal_candidate_or_block(
@@ -1282,10 +1290,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             return _stop_autonomous_goal_after_history_summary_budget(
                 workflow, autonomous_goal
             )
-        system_agents._advance_workflow_step(
-            workflow, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
-        )
-        return _AutonomousGoalPostCommitAction(_AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION)
+        return _advance_to_candidate_after_history_summary(workflow)
 
     if workflow.step == system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
         candidate_output = _parse_autonomous_goal_candidate_output(raw_output)
@@ -1730,6 +1735,14 @@ def _retry_budgeted_unaccepted_autonomous_goal_candidate(
     return _AutonomousGoalPostCommitAction(
         _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION
     )
+
+def _advance_to_candidate_after_history_summary(
+    workflow: SystemWorkflow,
+) -> _AutonomousGoalPostCommitAction:
+    system_agents._advance_workflow_step(
+        workflow, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+    )
+    return _AutonomousGoalPostCommitAction(_AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION)
 
 def _autonomous_goal_proposal_budget_allows_retry(
     workflow: SystemWorkflow, *, tokens_used: int | None, token_delta: int
