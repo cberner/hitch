@@ -9,7 +9,7 @@ import time
 from django.db import close_old_connections
 from django.utils import timezone
 
-from hitch.main.runtime import disk_cleanup, reconciliation, server_lifecycle
+from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
 from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
 _DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
 _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS = 60 * 60
+# Row/file retention runs daily, but the first sweep happens shortly after
+# startup: this server restarts often enough that "a day after boot" could
+# mean never, and a backlogged first sweep is already bounded per pass.
+_ROW_RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
+_ROW_RETENTION_STARTUP_DELAY_SECONDS = 15 * 60
 # Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
 # view timeout, and this tick also owns reconcile_dead and PR-monitor backoff
 # polling, so an unbounded sweep over dozens of stale sessions would delay the
@@ -64,6 +69,7 @@ def _workflow_maintenance_scheduler_loop() -> None:
     start = time.monotonic()
     next_stale_blocked_archive_at = start + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS
     next_disk_cleanup_at = start + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
+    next_row_retention_at = start + _ROW_RETENTION_STARTUP_DELAY_SECONDS
     while True:
         _run_workflow_maintenance_scheduler_tick()
         # Archive stale blocked PR-QA workflows so they stop surfacing a stale
@@ -74,6 +80,9 @@ def _workflow_maintenance_scheduler_loop() -> None:
         )
         next_disk_cleanup_at = _run_due_disk_usage_cleanup(
             next_due_at=next_disk_cleanup_at
+        )
+        next_row_retention_at = _run_due_row_retention(
+            next_due_at=next_row_retention_at
         )
         stop.wait(_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS)
 
@@ -121,6 +130,30 @@ def _run_due_disk_usage_cleanup(
     finally:
         close_old_connections()
     return current + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
+
+
+def _run_due_row_retention(
+    *,
+    next_due_at: float,
+    now: float | None = None,
+) -> float:
+    """Reap stale rate-limit debounce rows when the daily tick is due."""
+    current = time.monotonic() if now is None else now
+    if current < next_due_at:
+        return next_due_at
+
+    close_old_connections()
+    try:
+        result = retention.run_retention_sweep()
+        if result.throttles_deleted:
+            logger.info(
+                "retention removed %s throttle row(s)", result.throttles_deleted
+            )
+    except Exception:
+        logger.exception("failed to run scheduled retention sweep")
+    finally:
+        close_old_connections()
+    return current + _ROW_RETENTION_INTERVAL_SECONDS
 
 
 def _run_due_stale_blocked_archive(
