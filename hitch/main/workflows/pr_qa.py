@@ -683,14 +683,8 @@ def _claim_qa_verdict_transition(
     terminal workflow status first would let a process death strand the run
     RUNNING forever (the reconcilers only revisit RUNNING workflows).
     """
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != system_agents.STEP_QA_RUNNING
-            or not _run_matches_current_qa_review(locked, run)
-        ):
-            return ""
+
+    def _commit_verdict(locked: SystemWorkflow) -> str:
         run.status = SystemAgentRun.STATUS_COMPLETED
         run.output = parsed
         run.raw_output = raw_output
@@ -700,36 +694,39 @@ def _claim_qa_verdict_transition(
             if _state_string(locked, "auto_merge_branch"):
                 # The merge runs git work post-commit and re-validates before
                 # completing the workflow; the step stays QA_RUNNING here.
-                action = "merge"
                 locked.save(update_fields=["state", "updated_at"])
-            elif locked.state.get("open_pr_on_lgtm", True) is not True:
-                action = "approved"
+                return "merge"
+            if locked.state.get("open_pr_on_lgtm", True) is not True:
                 system_agents._complete_workflow(locked, system_agents.STEP_QA_APPROVED)
-            else:
-                action = "pr_prompt"
-                system_agents._advance_workflow_step(
-                    locked, system_agents.STEP_PR_PROMPT_RUNNING
-                )
-        elif locked.iteration >= locked.max_iterations:
-            action = "maxed"
+                return "approved"
+            system_agents._advance_workflow_step(
+                locked, system_agents.STEP_PR_PROMPT_RUNNING
+            )
+            return "pr_prompt"
+        if locked.iteration >= locked.max_iterations:
             system_agents._complete_workflow(
                 locked,
                 system_agents.STEP_MAX_ITERATIONS_REACHED,
                 status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
             )
-        else:
-            action = "feedback"
-            if synthesis_gate is not None:
-                locked.state = {
-                    **locked.state,
-                    _QA_DESIGN_SYNTHESIS_STATE_KEY: synthesis_gate,
-                }
-            system_agents._advance_workflow_step(
-                locked, system_agents.STEP_FEEDBACK_RUNNING, bump_iteration=True
-            )
-        system_agents._sync_workflow_instance(workflow, locked)
-        workflow.iteration = locked.iteration
-        return action
+            return "maxed"
+        if synthesis_gate is not None:
+            locked.state = {
+                **locked.state,
+                _QA_DESIGN_SYNTHESIS_STATE_KEY: synthesis_gate,
+            }
+        system_agents._advance_workflow_step(
+            locked, system_agents.STEP_FEEDBACK_RUNNING, bump_iteration=True
+        )
+        return "feedback"
+
+    action = engine.claim_workflow_transition(
+        workflow,
+        _commit_verdict,
+        expect_step=system_agents.STEP_QA_RUNNING,
+        guard=lambda locked: _run_matches_current_qa_review(locked, run),
+    )
+    return action if action is not None else ""
 
 def _complete_local_branch_merge(
     workflow: SystemWorkflow, branch: str, run: SystemAgentRun
@@ -775,17 +772,20 @@ def _complete_local_branch_merge(
     # advanced), so the proposal metadata below is recorded regardless; a
     # superseded workflow simply continues and its next QA cycle sees an
     # already-applied patch.
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if _qa_verdict_owns_workflow(locked, run):
-            locked.state = {
-                **locked.state,
-                "auto_merge_result": _local_branch_merge_result_dict(result),
-            }
-            system_agents._complete_workflow(
-                locked, system_agents.STEP_LOCAL_BRANCH_MERGED
-            )
-            system_agents._sync_workflow_instance(workflow, locked)
+    def _record_merged(locked: SystemWorkflow) -> bool:
+        locked.state = {
+            **locked.state,
+            "auto_merge_result": _local_branch_merge_result_dict(result),
+        }
+        system_agents._complete_workflow(locked, system_agents.STEP_LOCAL_BRANCH_MERGED)
+        return True
+
+    engine.claim_workflow_transition(
+        workflow,
+        _record_merged,
+        expect_step=system_agents.STEP_QA_RUNNING,
+        guard=lambda locked: _run_matches_current_qa_review(locked, run),
+    )
     system_agents._record_auto_merge_result_for_proposals(
         workflow,
         {
@@ -1891,25 +1891,24 @@ def _run_matches_current_qa_review(
     return _system_agent_run_qa_review_revision(run) == _qa_review_revision(workflow)
 
 def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            locked.kind != SystemWorkflow.KIND_PR_QA
-            or not locked.is_active
-            or locked.step != system_agents.STEP_QA_RUNNING
-        ):
-            return False
+    def _claim(locked: SystemWorkflow) -> bool:
         next_revision = _state_int(locked, _QA_REVIEW_REVISION_STATE_KEY) + 1
-        state = {
+        locked.state = {
             **locked.state,
             _QA_REVIEW_REVISION_STATE_KEY: next_revision,
         }
         locked.step = system_agents.STEP_USER_STEERING_RUNNING
-        locked.state = state
         locked.save(update_fields=["step", "state", "updated_at"])
-        workflow.step = locked.step
-        workflow.state = locked.state
-    return True
+        return True
+
+    return bool(
+        engine.claim_workflow_transition(
+            workflow,
+            _claim,
+            expect_step=system_agents.STEP_QA_RUNNING,
+            guard=lambda locked: locked.kind == SystemWorkflow.KIND_PR_QA,
+        )
+    )
 
 def _interrupt_running_qa_runs_for_user_steer(workflow: SystemWorkflow) -> None:
     runs = list(

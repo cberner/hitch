@@ -13,14 +13,64 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import ClassVar
+from typing import ClassVar, TypeVar
+
+from django.db import transaction
 
 from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
+
+_ClaimResultT = TypeVar("_ClaimResultT")
 
 # Administrative steps any kind may occupy: ``_block_workflow`` parks a
 # failed workflow on ``blocked`` and the stale-workflow archiver moves
 # long-blocked rows to ``archived``.
 ADMINISTRATIVE_STEPS = frozenset({"blocked", "archived"})
+
+
+def claim_workflow_transition(
+    workflow: SystemWorkflow,
+    apply: Callable[[SystemWorkflow], _ClaimResultT],
+    *,
+    expect_step: str | None = None,
+    guard: Callable[[SystemWorkflow], bool] | None = None,
+    require_active: bool = True,
+) -> _ClaimResultT | None:
+    """Lock the workflow row, re-validate, apply one transition, sync the snapshot.
+
+    This is the engine's concurrency contract for every step/state writer,
+    made structural instead of conventional:
+
+    * Validation runs against the *locked* row, never the caller's snapshot.
+      An in-memory copy can be stale by the time the lock is granted -- a
+      concurrent claim (e.g. user steering) may have moved the step or bumped
+      a revision, and writing through the snapshot would silently revert it.
+    * ``apply`` runs inside the transaction. Row saves that must be atomic
+      with the transition (the finished run's terminal status, sibling-row
+      locks) belong in it; it must not spawn workers, run subprocesses, or
+      call out -- those side effects belong after this returns, keyed off the
+      returned action, so the SQLite write lock is never held across them.
+    * On success the caller's ``workflow`` snapshot is refreshed from the
+      locked row, so post-commit code never acts on pre-claim state. Work
+      that runs unlocked afterwards and then writes again must re-claim.
+
+    Returns ``apply``'s result, or ``None`` when the workflow was not
+    claimable (inactive unless ``require_active=False``, step mismatch, or
+    ``guard`` returned False against the locked row).
+    """
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if require_active and not locked.is_active:
+            return None
+        if expect_step is not None and locked.step != expect_step:
+            return None
+        if guard is not None and not guard(locked):
+            return None
+        result = apply(locked)
+        workflow.status = locked.status
+        workflow.step = locked.step
+        workflow.state = locked.state
+        workflow.iteration = locked.iteration
+        return result
 
 # State keys the shared engine reads/writes for every kind: the per-turn
 # config snapshot the spawn helpers replay, plus failure bookkeeping.

@@ -270,28 +270,20 @@ def _run_spec_critic_classification(workflow_id: int) -> None:
         close_old_connections()
 
 def _advance_spec_critic_to_analysis(workflow: SystemWorkflow) -> None:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != system_agents.STEP_SPEC_CRITIC_CLASSIFYING
-        ):
-            return
+    def _advance(locked: SystemWorkflow) -> bool:
         locked.step = system_agents.STEP_SPEC_CRITIC_ANALYZING
         locked.save(update_fields=["step", "updated_at"])
-        workflow.step = locked.step
-        workflow.state = locked.state
-    _begin_spec_critic_analysis(workflow)
+        return True
+
+    if engine.claim_workflow_transition(
+        workflow, _advance, expect_step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING
+    ):
+        _begin_spec_critic_analysis(workflow)
 
 def _skip_spec_critic_and_implement(workflow: SystemWorkflow) -> None:
     """Run the user's original prompt directly when no critique is warranted."""
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != system_agents.STEP_SPEC_CRITIC_CLASSIFYING
-        ):
-            return
+
+    def _skip(locked: SystemWorkflow) -> bool:
         # Claim the workflow before spawning so the turn cannot be double-started.
         # ``skipped_classification`` is recorded now (not on completion) so a
         # reconciler can tell a stranded IMPLEMENTATION_SPAWNED workflow apart
@@ -299,9 +291,12 @@ def _skip_spec_critic_and_implement(workflow: SystemWorkflow) -> None:
         locked.step = system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
         locked.state = {**locked.state, "skipped_classification": True}
         locked.save(update_fields=["step", "state", "updated_at"])
-        workflow.step = locked.step
-        workflow.state = locked.state
-    _finalize_spec_critic_skip(workflow)
+        return True
+
+    if engine.claim_workflow_transition(
+        workflow, _skip, expect_step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING
+    ):
+        _finalize_spec_critic_skip(workflow)
 
 def _finalize_spec_critic_skip(workflow: SystemWorkflow) -> None:
     """Spawn the original-prompt turn for a skipped workflow, then complete it.
@@ -480,13 +475,7 @@ def _maybe_advance_spec_critic_after_analysis(workflow: SystemWorkflow) -> None:
         )
 
 def _claim_spec_critic_analysis_advance(workflow: SystemWorkflow) -> tuple[str, str]:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != system_agents.STEP_SPEC_CRITIC_ANALYZING
-        ):
-            return "", ""
+    def _advance(locked: SystemWorkflow) -> tuple[str, str]:
         completed_kinds = set(
             locked.agent_runs.filter(
                 agent_kind__in=_SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
@@ -511,8 +500,6 @@ def _claim_spec_critic_analysis_advance(workflow: SystemWorkflow) -> tuple[str, 
             _create_spec_critic_clarification_request(
                 locked, run, required, safe_defaults
             )
-            workflow.step = locked.step
-            workflow.state = locked.state
             return "clarify", ""
         locked.state = {
             **locked.state,
@@ -521,9 +508,12 @@ def _claim_spec_critic_analysis_advance(workflow: SystemWorkflow) -> tuple[str, 
         }
         locked.step = system_agents.STEP_SPEC_CRITIC_SYNTHESIZING
         locked.save(update_fields=["step", "state", "updated_at"])
-        workflow.step = locked.step
-        workflow.state = locked.state
         return "synthesize", ""
+
+    result = engine.claim_workflow_transition(
+        workflow, _advance, expect_step=system_agents.STEP_SPEC_CRITIC_ANALYZING
+    )
+    return result if result is not None else ("", "")
 
 def on_user_input_resolved(input_request: UserInputRequest) -> None:
     """Resume workflows that created their own durable clarification prompt."""
@@ -566,13 +556,8 @@ def _claim_spec_critic_clarification_response(
     workflow: SystemWorkflow, input_request: UserInputRequest
 ) -> tuple[str, str]:
     answers = system_agents._answers_from_input_request(input_request)
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            not locked.is_active
-            or locked.step != system_agents.STEP_SPEC_CRITIC_CLARIFYING
-        ):
-            return "", ""
+
+    def _resolve(locked: SystemWorkflow) -> tuple[str, str]:
         questions = _spec_questions_from_state(locked, only_pending=True)
         safe_defaults = _spec_safe_defaults_from_state(locked)
         recorded_answers = {
@@ -601,19 +586,19 @@ def _claim_spec_critic_clarification_response(
             run = _spec_critic_clarification_run(locked)
             if run is None:
                 locked.save(update_fields=["state", "updated_at"])
-                workflow.state = locked.state
                 return "block", "Spec Critic could not create a clarification request"
             _create_spec_critic_clarification_request(
                 locked, run, missing, safe_defaults
             )
-            workflow.step = locked.step
-            workflow.state = locked.state
             return "clarify", ""
         locked.step = system_agents.STEP_SPEC_CRITIC_SYNTHESIZING
         locked.save(update_fields=["step", "state", "updated_at"])
-        workflow.step = locked.step
-        workflow.state = locked.state
         return "synthesize", ""
+
+    result = engine.claim_workflow_transition(
+        workflow, _resolve, expect_step=system_agents.STEP_SPEC_CRITIC_CLARIFYING
+    )
+    return result if result is not None else ("", "")
 
 def _complete_spec_critic_workflow(
     workflow: SystemWorkflow, run: SystemAgentRun
@@ -825,25 +810,30 @@ def _spawn_spec_critic_implementation_turn(
     )
 
 def _block_spec_critic_workflow(workflow: SystemWorkflow, error: str) -> None:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+    def _block(locked: SystemWorkflow) -> bool:
         locked.status = SystemWorkflow.STATUS_BLOCKED
         locked.step = system_agents.STEP_BLOCKED
         locked.state = {**locked.state, "error": error}
         locked.save(update_fields=["status", "step", "state", "updated_at"])
-        workflow.status = locked.status
-        workflow.step = locked.step
-        workflow.state = locked.state
+        return True
+
+    engine.claim_workflow_transition(workflow, _block, require_active=False)
     _surface_spec_critic_failure(workflow, error)
 
 def _surface_spec_critic_failure(workflow: SystemWorkflow, error: str) -> None:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if locked.state.get("failure_surfaced") is True:
-            return
+    def _mark_surfaced(locked: SystemWorkflow) -> bool:
         locked.state = {**locked.state, "failure_surfaced": True}
         locked.save(update_fields=["state", "updated_at"])
-        workflow.state = locked.state
+        return True
+
+    claimed = engine.claim_workflow_transition(
+        workflow,
+        _mark_surfaced,
+        guard=lambda locked: locked.state.get("failure_surfaced") is not True,
+        require_active=False,
+    )
+    if not claimed:
+        return
     try:
         _spawn_spec_critic_failure_turn(workflow, error)
     except Exception:
