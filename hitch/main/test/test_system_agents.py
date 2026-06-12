@@ -10487,7 +10487,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_history_summary_preserved_run_interrupted_when_workflow_inactive(
+    def test_history_summary_preserved_run_failed_when_inactive_interrupt_pending(
         self,
         mock_spawn: MagicMock,
         mock_interrupt: MagicMock,
@@ -10532,11 +10532,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         ) -> CodexInstance | None:
             nonlocal interrupt_calls
             interrupt_calls += 1
-            if interrupt_calls == 1:
-                return None
-            return CodexInstance.objects.get(
-                pk=instance_id, thread_id=expected_thread_id
-            )
+            CodexInstance.objects.get(pk=instance_id, thread_id=expected_thread_id)
+            return None
 
         mock_spawn.side_effect = spawn_summary
         mock_interrupt.side_effect = interrupt_side_effect

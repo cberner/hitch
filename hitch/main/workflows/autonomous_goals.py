@@ -877,6 +877,10 @@ def _interrupt_spawned_autonomous_goal_run_if_inactive(
     error = _state_string(workflow, "error") or "autonomous goal no longer exists"
     interrupted_runs, terminal_instance_returned = _interrupt_autonomous_goal_runs([run])
     if not interrupted_runs:
+        # This run was preserved only after the workflow became inactive. If the
+        # launch race still cannot be interrupted, do not leave it RUNNING
+        # forever; terminal routing ignores active-workflow work after stops.
+        system_agents._mark_system_agent_runs_failed([run], error)
         return workflow
     system_agents._mark_system_agent_runs_failed(interrupted_runs, error)
     if terminal_instance_returned:
