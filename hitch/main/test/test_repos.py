@@ -7,12 +7,13 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from hitch.main import repos
-from hitch.main.git_support import hermetic_git_env
+from hitch.main.git_support import GitCommandError, hermetic_git_env
 from hitch.main.repos import (
     AutoPullError,
     commit_hash_for_ref,
     default_branch_checkout_commit_hash,
     default_branch_commit_hash,
+    default_branch_name,
     discover_repos,
     git_common_dir,
     pull_default_branch_from_origin,
@@ -130,6 +131,7 @@ class DiscoverReposTests(TestCase):
             self.assertEqual(git_common_dir(repo), git_common_dir(worktree))
             self.assertEqual(repo_root(repo / "subdir"), repo)
             self.assertEqual(repo_root(worktree / "subdir"), worktree)
+            self.assertIsNone(repo_root(root / "missing"))
             self.assertTrue(same_repo_or_worktree(worktree, repo, str(git_common_dir(repo))))
             self.assertTrue(same_repo_or_worktree(repo, repo, str(git_common_dir(repo))))
 
@@ -156,6 +158,7 @@ class DiscoverReposTests(TestCase):
             )
             _git(repo, "checkout", "master")
 
+            self.assertEqual(default_branch_name(repo), "main")
             self.assertEqual(default_branch_commit_hash(repo), main_sha)
             self.assertIsNone(default_branch_checkout_commit_hash(repo))
             _git(repo, "checkout", "main")
@@ -191,6 +194,7 @@ class DiscoverReposTests(TestCase):
             (repo / "README.md").write_text("main\n")
             _git(repo, "commit", "-am", "main")
 
+            self.assertIsNone(default_branch_name(repo))
             self.assertIsNone(default_branch_commit_hash(repo))
 
     def test_default_branch_commit_hash_uses_single_local_custom_branch_before_remotes(
@@ -425,12 +429,31 @@ class DiscoverReposTests(TestCase):
             with self.assertRaises(AutoPullError):
                 pull_default_branch_from_origin(repo)
 
+    def test_auto_pull_wraps_git_spawn_failures(self) -> None:
+        with (
+            patch.object(
+                repos,
+                "run_git",
+                side_effect=GitCommandError("git missing"),
+            ),
+            self.assertRaisesRegex(AutoPullError, "git missing"),
+        ):
+            repos._run_git_for_auto_pull(Path("/repo"), ["pull"])
+
+    def test_empty_git_failure_message_is_generic(self) -> None:
+        self.assertEqual(
+            repos._git_failure_message(SimpleNamespace(stderr=b"", stdout=b"")),
+            "git pull failed",
+        )
+
     def test_pull_default_branch_from_origin_rejects_missing_repo(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw_root,
             self.assertRaisesRegex(AutoPullError, "repository is unavailable"),
         ):
-            pull_default_branch_from_origin(Path(raw_root) / "missing")
+            missing = Path(raw_root) / "missing"
+            self.assertIsNone(default_branch_name(missing))
+            pull_default_branch_from_origin(missing)
 
     def test_default_branch_checkout_rejects_ambiguous_local_named_branches(
         self,

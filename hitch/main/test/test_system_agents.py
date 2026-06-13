@@ -3871,6 +3871,75 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_before_pr_closed_step(self, mock_pull: MagicMock) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={},
+        )
+
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_when_session_has_no_project(
+        self, mock_pull: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_when_workflow_checkout_missing(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "skipped",
+                "reason": "workflow checkout is unavailable",
+            },
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_skips_active_session_checkout(
         self, mock_pull: MagicMock
     ) -> None:
@@ -4123,6 +4192,27 @@ class SpecCriticWorkflowTests(TestCase):
             "up_to_date",
         )
 
+    def test_record_auto_pull_result_logs_persistence_failure(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        with (
+            patch(
+                "hitch.main.workflows.system_agents.transaction.atomic",
+                side_effect=RuntimeError("database unavailable"),
+            ),
+            self.assertLogs(system_agents.logger, level="ERROR") as logs,
+        ):
+            system_agents._record_auto_pull_result(workflow, {"status": "running"})
+
+        self.assertIn("failed to record auto-pull result", "\n".join(logs.output))
+
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_records_expected_failure(self, mock_pull: MagicMock) -> None:
         project = Project.objects.create(
@@ -4196,6 +4286,49 @@ class SpecCriticWorkflowTests(TestCase):
                 "error": "boom",
             },
         )
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    @patch("hitch.main.workflows.pr_qa.codex_events.latest_pr_snapshot_for_instance")
+    def test_pr_prompt_completion_finishes_existing_terminal_handoff(
+        self, mock_latest_snapshot: MagicMock, mock_auto_pull: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/201",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 201,
+                    "state": "merged",
+                    "merged": True,
+                }
+            },
+        )
+        instance = _instance(
+            thread_id="pr-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        mock_latest_snapshot.return_value = {
+            "url": "https://github.com/cberner/hitch/pull/201",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 201,
+            "state": "open",
+        }
+
+        pr_qa._handle_pr_prompt_finished(instance, workflow)
+
+        mock_auto_pull.assert_called_once_with(workflow)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
     @patch(
         "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
