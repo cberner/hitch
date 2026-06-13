@@ -515,6 +515,35 @@ class AutonomousGoalViewTests(TestCase):
             autonomous_goal=pending_goal,
             title="Review me",
         )
+        accepted_block_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Accepted session goal",
+            goal="Wait for accepted work to finish.",
+            auto_proposal_enabled=True,
+        )
+        accepted_session = SessionMetadata.objects.create(
+            thread_id="accepted-session-thread",
+            cwd="/repo",
+            project=project,
+            derived_stage="implementation",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=accepted_block_goal,
+            title="Accepted work",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=accepted_session,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                accepted_block_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": accepted_block_goal.pk},
+        )
         AutonomousGoal.objects.create(
             project=project,
             title="No change goal",
@@ -563,6 +592,12 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response,
             "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+        self.assertContains(response, ">Waiting</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because an accepted session from this goal is not "
+            "Done or archived yet.",
         )
         self.assertContains(response, 'data-state="waiting"')
         self.assertContains(response, ">No change</button>", html=False)
@@ -959,7 +994,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_shows_queued_when_accepted_automation_is_in_flight(
+    def test_page_keeps_other_goal_ready_when_accepted_automation_is_in_flight(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1002,14 +1037,16 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-state="queued"')
-        self.assertContains(response, ">Queued</button>", html=False)
+        self.assertContains(response, 'data-state="ready"')
+        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertContains(response, 'data-state="waiting"')
+        self.assertContains(response, ">Waiting</button>", html=False)
         self.assertContains(
             response,
-            "Not running because accepted autonomous-goal automation "
-            "is still active for this project.",
+            "Not running because an accepted session from this goal is not "
+            "Done or archived yet.",
         )
-        self.assertNotContains(response, ">Ready</button>", html=False)
+        self.assertNotContains(response, ">Queued</button>", html=False)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -2780,6 +2817,36 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
+
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    def test_run_single_skips_goal_blocked_by_accepted_session(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/repo",
+            project=project,
+            derived_stage="implementation",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            title="Accepted proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=accepted,
+        )
+
+        response = self.client.post(reverse("run_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        mock_start.assert_not_called()
 
     @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
     def test_run_single_is_scoped_to_selected_project(

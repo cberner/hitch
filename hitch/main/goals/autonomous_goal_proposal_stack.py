@@ -2,7 +2,8 @@
 
 Pure query/metadata helpers that decide whether an autonomous goal has a
 pending proposal blocking its start, whether a single pending proposal is a
-valid stacked-diff continuation, and whether in-flight automation exists.
+valid stacked-diff continuation, and whether accepted session work blocks the
+producing goal.
 Leaf module: imports nothing from ``system_agents`` to avoid an import cycle.
 """
 
@@ -12,14 +13,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from django.db import models
 from django.utils import timezone
 
 from hitch.main.models import (
     AutonomousGoal,
-    CodexInstance,
     ProposedSession,
-    SystemWorkflow,
 )
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
@@ -30,6 +28,7 @@ _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY = (
     "proposal_budget_tokens_used"
 )
+_DONE_ACCEPTED_SESSION_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 
 
 @dataclass(frozen=True)
@@ -277,66 +276,48 @@ def _autonomous_goal_unresolved_failure_notice_exists(
     ).exists()
 
 
-def _autonomous_goal_start_claim_exists(autonomous_goal: AutonomousGoal) -> bool:
+def _autonomous_goal_accepted_session_blocks_start(
+    autonomous_goal: AutonomousGoal,
+) -> bool:
+    return bool(_autonomous_goal_accepted_session_blocking_ids([autonomous_goal]))
+
+
+def _autonomous_goal_accepted_session_blocking_ids(
+    autonomous_goals: Iterable[AutonomousGoal],
+) -> set[int]:
+    goal_ids = [goal.pk for goal in autonomous_goals if goal.pk is not None]
+    if not goal_ids:
+        return set()
+    blocking_ids: set[int] = set()
     claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
     claim_lookup = f"outcome_metadata__{claim_key}__isnull"
-    claimed_metadatas = (
+    now = timezone.now()
+    claimed_proposals = (
         ProposedSession.objects.filter(
-            project=autonomous_goal.project,
+            autonomous_goal_id__in=goal_ids,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=True,
             **{claim_lookup: False},
         )
-        .filter(_autonomous_goal_in_flight_proposal_criteria())
-        .values_list("outcome_metadata", flat=True)
+        .values_list("autonomous_goal_id", "outcome_metadata")
     )
-    now = timezone.now()
-    return any(
-        ProposedSession.accepted_session_start_claim_is_active(metadata, now=now)
-        for metadata in claimed_metadatas
-    )
+    for goal_id, metadata in claimed_proposals:
+        if isinstance(goal_id, int) and ProposedSession.accepted_session_start_claim_is_active(
+            metadata, now=now
+        ):
+            blocking_ids.add(goal_id)
 
-
-def _autonomous_goal_in_flight_proposal_criteria() -> models.Q:
-    return (
-        models.Q(outcome_metadata__accepted_by=AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY)
-        | models.Q(
-            outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
-        )
-        | models.Q(
-            autonomous_goal__isnull=False,
-            outcome_metadata__accepted_by="user",
-        )
-        | (
-            models.Q(autonomous_goal__isnull=False)
-            & (
-                models.Q(outcome_metadata__auto_pr_enabled=True)
-                | models.Q(outcome_metadata__auto_qa_enabled=True)
-            )
-        )
-    )
-
-
-def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal) -> bool:
-    if _autonomous_goal_start_claim_exists(autonomous_goal):
-        return True
-    accepted_thread_ids = (
+    unfinished_session_goal_ids = (
         ProposedSession.objects.filter(
-            project=autonomous_goal.project,
+            autonomous_goal_id__in=goal_ids,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=False,
+            accepted_session__codex_archived=False,
         )
-        .filter(_autonomous_goal_in_flight_proposal_criteria())
-        .exclude(accepted_session__thread_id="")
-        .values_list("accepted_session__thread_id", flat=True)
+        .exclude(accepted_session__derived_stage__in=_DONE_ACCEPTED_SESSION_STAGE_KEYS)
+        .values_list("autonomous_goal_id", flat=True)
     )
-    if CodexInstance.objects.filter(
-        thread_id__in=accepted_thread_ids,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    ).exists():
-        return True
-    return SystemWorkflow.objects.filter(
-        kind=SystemWorkflow.KIND_PR_QA,
-        main_thread_id__in=accepted_thread_ids,
-        status=SystemWorkflow.STATUS_RUNNING,
-    ).exists()
+    blocking_ids.update(
+        goal_id for goal_id in unfinished_session_goal_ids if isinstance(goal_id, int)
+    )
+    return blocking_ids

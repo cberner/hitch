@@ -19,7 +19,10 @@ from hitch.main.goals.autonomous_goal_form import (
     _attach_autonomous_goal_display_state,
     _validated_autonomous_goal_values,
 )
-from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
+from hitch.main.goals.autonomous_goal_proposal_stack import (
+    _autonomous_goal_accepted_session_blocks_start,
+    _proposal_outcome_metadata,
+)
 from hitch.main.goals.autonomous_goal_run_display import (
     _attach_autonomous_goal_run_state,
     _autonomous_goal_workflow_for_log,
@@ -288,6 +291,8 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
     ).first()
     if autonomous_goal is None:
         raise Http404("autonomous goal not found")
+    if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+        return redirect("autonomous_goals")
     goal_workflows.start_autonomous_goal_workflow(
         autonomous_goal=autonomous_goal,
         use_worktrees=True,
@@ -303,6 +308,8 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
         project=project,
         deleted_at__isnull=True,
     ):
+        if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+            continue
         goal_workflows.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
