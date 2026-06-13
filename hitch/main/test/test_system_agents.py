@@ -4291,7 +4291,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
     )
     @patch("hitch.main.workflows.pr_qa.codex_events.latest_pr_snapshot_for_instance")
-    def test_pr_prompt_completion_finishes_existing_terminal_handoff(
+    def test_pr_prompt_completion_with_terminal_handoff_does_not_auto_pull(
         self, mock_latest_snapshot: MagicMock, mock_auto_pull: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -4325,7 +4325,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         pr_qa._handle_pr_prompt_finished(instance, workflow)
 
-        mock_auto_pull.assert_called_once_with(workflow)
+        mock_auto_pull.assert_not_called()
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
