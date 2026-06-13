@@ -364,6 +364,8 @@ def _non_cached_input_tokens(usage: Mapping[str, int]) -> int:
 
 def _lifetime_token_usage_for_metadata(
     metadata_rows: list[SessionMetadata],
+    *,
+    selected_project_id: int | None = None,
 ) -> dict[str, Any]:
     accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
     hidden_thread_ids = system_agents.hidden_thread_ids(
@@ -381,6 +383,8 @@ def _lifetime_token_usage_for_metadata(
     total_usage = _empty_lifetime_token_usage()
     session_usage = _empty_lifetime_token_usage()
     system_usage = _empty_lifetime_token_usage()
+    selected_project_usage = _empty_lifetime_token_usage()
+    selected_project_system_usage = _empty_lifetime_token_usage()
     total_by_date: dict[str, dict[str, int]] = {}
     session_by_date: dict[str, dict[str, int]] = {}
     system_by_date: dict[str, dict[str, int]] = {}
@@ -402,6 +406,21 @@ def _lifetime_token_usage_for_metadata(
         bucket["input"] += _non_cached_input_tokens(usage)
         bucket["output"] += usage.get("output_tokens", 0)
         bucket["cached"] += usage.get("cached_input_tokens", 0)
+        if (
+            selected_project_id is not None
+            and metadata.project_id == selected_project_id
+        ):
+            selected_project_usage["input"] += _non_cached_input_tokens(usage)
+            selected_project_usage["output"] += usage.get("output_tokens", 0)
+            selected_project_usage["cached"] += usage.get("cached_input_tokens", 0)
+            if is_system:
+                selected_project_system_usage["input"] += _non_cached_input_tokens(
+                    usage
+                )
+                selected_project_system_usage["output"] += usage.get("output_tokens", 0)
+                selected_project_system_usage["cached"] += usage.get(
+                    "cached_input_tokens", 0
+                )
         _merge_daily_token_usage(total_by_date, daily_usage)
         _merge_daily_token_usage(
             system_by_date if is_system else session_by_date,
@@ -415,6 +434,11 @@ def _lifetime_token_usage_for_metadata(
         session_by_date=session_by_date,
         system_by_date=system_by_date,
     )
+    if selected_project_id is not None:
+        lifetime_usage["selected_project"] = {
+            "total": _format_lifetime_token_usage(selected_project_usage),
+            "system": _format_lifetime_token_usage(selected_project_system_usage),
+        }
     lifetime_usage["refresh_pending"] = refresh_pending_count > 0
     lifetime_usage["refresh_pending_count"] = refresh_pending_count
     return lifetime_usage
@@ -814,10 +838,15 @@ def _empty_lifetime_token_usage() -> dict[str, int]:
 
 def _format_lifetime_token_usage(usage: Mapping[str, int]) -> dict[str, str]:
     return {
+        "total": formatting.format_token_count(_lifetime_token_usage_total(usage)),
         "input": formatting.format_token_count(usage["input"]),
         "output": formatting.format_token_count(usage["output"]),
         "cached": formatting.format_token_count(usage["cached"]),
     }
+
+
+def _lifetime_token_usage_total(usage: Mapping[str, int]) -> int:
+    return usage["input"] + usage["output"] + usage["cached"]
 
 
 def _merge_daily_token_usage(

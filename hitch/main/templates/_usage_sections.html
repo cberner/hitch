@@ -64,6 +64,54 @@
                     {% endif %}
                 </div>
             </div>
+            {% if show_project_usage_summary and current_project and lifetime_usage.selected_project %}
+            <div class="project-usage-summary" aria-labelledby="active-project-usage-title">
+                <div class="usage-subheader">
+                    <h3 id="active-project-usage-title">Active project</h3>
+                    <p class="usage-plan">{{ current_project.name }}</p>
+                </div>
+                <div class="project-usage-stats" aria-label="{{ current_project.name }} token usage">
+                    <div class="project-usage-card">
+                        <span class="lifetime-label">All sessions</span>
+                        <span class="project-usage-total">{{ lifetime_usage.selected_project.total.total }}</span>
+                        <span class="project-usage-total-label">total tokens</span>
+                        <div class="lifetime-breakdown">
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Input</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.total.input }}</span>
+                            </span>
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Output</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.total.output }}</span>
+                            </span>
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Cached</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.total.cached }}</span>
+                            </span>
+                        </div>
+                    </div>
+                    <div class="project-usage-card">
+                        <span class="lifetime-label">System sessions</span>
+                        <span class="project-usage-total">{{ lifetime_usage.selected_project.system.total }}</span>
+                        <span class="project-usage-total-label">total tokens</span>
+                        <div class="lifetime-breakdown">
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Input</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.input }}</span>
+                            </span>
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Output</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.output }}</span>
+                            </span>
+                            <span class="lifetime-metric">
+                                <span class="lifetime-metric-label">Cached</span>
+                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.cached }}</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
             {% else %}
             <div class="empty">
                 <p>All sessions usage unavailable.</p>

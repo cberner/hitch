@@ -102,6 +102,7 @@ def profile(request: HttpRequest) -> HttpResponse:
             "health_url": reverse("health_dashboard") if user is not None else "",
             "nuked_count": _parse_nuked_count(request.GET.get("nuked")),
             **usage_context.template_context,
+            "show_project_usage_summary": True,
         },
     )
     _apply_cookie_updates(response, usage_context.cookie_updates)

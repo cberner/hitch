@@ -6271,6 +6271,100 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
+    def test_profile_shows_selected_project_token_usage(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
+        session_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=250,
+                    total_tokens=700,
+                )
+            ],
+        )
+        system_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=200,
+                    cached_input_tokens=20,
+                    output_tokens=80,
+                    total_tokens=300,
+                )
+            ],
+        )
+        other_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=3_000,
+                    cached_input_tokens=200,
+                    output_tokens=2_000,
+                    total_tokens=5_000,
+                )
+            ],
+        )
+        _seed_usage_metadata("session", path=session_path, project=project)
+        _seed_usage_metadata(
+            "system",
+            path=system_path,
+            project=project,
+            thread_source=ThreadSource.subagent.value,
+        )
+        _seed_usage_metadata("other", path=other_path, project=other_project)
+        _cache_token_usage(
+            "session",
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=250,
+            total_tokens=700,
+            path=session_path,
+        )
+        _cache_token_usage(
+            "system",
+            input_tokens=200,
+            cached_input_tokens=20,
+            output_tokens=80,
+            total_tokens=300,
+            path=system_path,
+        )
+        _cache_token_usage(
+            "other",
+            input_tokens=3_000,
+            cached_input_tokens=200,
+            output_tokens=2_000,
+            total_tokens=5_000,
+            path=other_path,
+        )
+        client = _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Active project")
+        self.assertContains(response, "Hitch")
+        self.assertContains(response, "System sessions")
+        self.assertContains(response, 'class="project-usage-card"', count=2)
+        self.assertContains(response, "total tokens", count=2)
+        lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
+        project_usage = lifetime_usage["selected_project"]
+        self.assertEqual(project_usage["total"]["total"], "930")
+        self.assertEqual(project_usage["total"]["input"], "530")
+        self.assertEqual(project_usage["total"]["output"], "330")
+        self.assertEqual(project_usage["total"]["cached"], "70")
+        self.assertEqual(project_usage["system"]["total"], "280")
+        self.assertEqual(project_usage["system"]["input"], "180")
+        self.assertEqual(project_usage["system"]["output"], "80")
+        self.assertEqual(project_usage["system"]["cached"], "20")
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
     def test_usage_page_buckets_orphan_hitch_system_prompt_threads(
         self, mock_codex: MagicMock
     ) -> None:

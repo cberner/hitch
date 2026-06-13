@@ -364,17 +364,23 @@ def _usage_context(request: HttpRequest) -> UsageContext:
         enable_memories=current_settings.enable_memories,
         index_state=session_index_state,
     )
+    settings_context = _settings_context(current_settings, models_data)
+    current_project = settings_context["current_project"]
     usage_metadata = (
         _metadata_rows_for_usage() if session_index_state.totals_available else []
     )
     lifetime_usage = (
-        token_usage._lifetime_token_usage_for_metadata(usage_metadata)
+        token_usage._lifetime_token_usage_for_metadata(
+            usage_metadata,
+            selected_project_id=(
+                current_project.pk if current_project is not None else None
+            ),
+        )
         if session_index_state.totals_available
         else None
     )
     if session_index_state.totals_available:
         token_usage._schedule_usage_token_refresh(usage_metadata)
-    settings_context = _settings_context(current_settings, models_data)
     return UsageContext(
         template_context={
             "login_url": reverse("login"),
@@ -963,6 +969,7 @@ def _metadata_rows_for_usage() -> list[SessionMetadata]:
             "thread_id",
             "codex_path",
             "codex_thread_source",
+            "project",
             "usage_last_checked_at",
         )
     )
