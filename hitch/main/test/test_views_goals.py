@@ -1713,7 +1713,7 @@ class AutonomousGoalViewTests(TestCase):
                 "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PR,
                 "auto_qa": "true",
                 "auto_proposal": "true",
-                "stacked_diff_depth": "3",
+                "stacked_diff_depth": "100",
                 "proposal_budget": "25",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
@@ -1727,7 +1727,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.ambition, AutonomousGoal.AMBITION_YOLO)
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
         self.assertFalse(goal.auto_qa_enabled)
-        self.assertEqual(goal.stacked_diff_depth, 3)
+        self.assertEqual(goal.stacked_diff_depth, 100)
         self.assertEqual(goal.proposal_budget, 25_000_000)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertTrue(goal.auto_proposal_enabled)
@@ -2153,6 +2153,17 @@ class AutonomousGoalViewTests(TestCase):
                     "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "stacked_diff_depth": "0",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "stacked diff depth is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+                    "stacked_diff_depth": "101",
                     "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "stacked diff depth is invalid",

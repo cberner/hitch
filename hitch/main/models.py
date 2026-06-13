@@ -106,7 +106,7 @@ class AutonomousGoal(models.Model):
         {AUTONOMY_DRAFT_PATCH, AUTONOMY_DRAFT_PR}
     )
     STACKED_DIFF_DEPTH_MIN: ClassVar[int] = 1
-    STACKED_DIFF_DEPTH_MAX: ClassVar[int] = 5
+    STACKED_DIFF_DEPTH_MAX: ClassVar[int] = 100
 
     project = models.ForeignKey(
         Project,
