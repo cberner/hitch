@@ -90,7 +90,10 @@ acknowledge notices from Hitch background systems.
 
 - `INBOX-notice-purpose`: A Notice is an Inbox message that informs the user
   about automation state but cannot be accepted as a session.
-- `INBOX-notice-dismiss-only`: A Notice can only be dismissed from the Inbox.
+- `INBOX-notice-dismiss-only`: The Inbox UI exposes only Dismiss for Notice
+  items.
+- `INBOX-notice-system-cleanup`: System cleanup may also resolve Notice items
+  when their source automation is deleted or otherwise cleaned up.
 - `INBOX-notice-logs`: Notices may link to candidate or judge logs when those
   logs help explain the automation result.
 
@@ -112,10 +115,16 @@ acknowledge notices from Hitch background systems.
 
 ### 4.5 Outcomes and Concurrency
 
-- `INBOX-outcome-one-way`: Inbox item outcomes are one-way transitions from
-  unresolved to accepted, rejected, or dismissed.
+- `INBOX-outcome-one-way`: Final Inbox item outcomes are one-way transitions
+  from unresolved to accepted, rejected, or dismissed.
+- `INBOX-accept-start-claim`: Starting a Proposal may use a provisional accepted
+  claim while the session is being created.
+- `INBOX-accept-rollback`: If a provisional accepted claim expires or session
+  creation fails, Hitch may roll the item back to unresolved so it remains
+  actionable.
 - `INBOX-no-reopen`: The Inbox must not allow a resolved item to be reopened by
-  submitting an unresolved outcome.
+  submitting an unresolved outcome, except for the provisional claim rollback in
+  `INBOX-accept-rollback`.
 - `INBOX-race-safe`: Concurrent accept/reject/dismiss attempts must resolve an
   item exactly once.
 - `INBOX-accepted-metadata`: Accepted items record the user resolution and the
@@ -126,9 +135,10 @@ acknowledge notices from Hitch background systems.
 
 ### 4.6 Automation Integration
 
-- `INBOX-ag-reference`: AG-created Proposals and Notices appear in the Inbox,
-  but AG-specific proposal, notice, blocking, retry, and cleanup behavior is
-  owned by [Autonomous Goals PRD](autonomous-goals.md).
+- `INBOX-ag-reference`: User-actionable, published AG-created Proposals and
+  Notices appear in the Inbox, but AG-specific proposal, notice, blocking,
+  retry, hidden intermediate stack records, and cleanup behavior is owned by
+  [Autonomous Goals PRD](autonomous-goals.md).
 
 ### 4.7 UX Requirements
 
@@ -152,6 +162,10 @@ acknowledge notices from Hitch background systems.
   allowed.
 - `INBOX-notice-dismiss`: A Notice can be dismissed but cannot be accepted or
   rejected.
+- `INBOX-notice-cleanup-success`: System cleanup can dismiss unresolved Notice
+  items without requiring an Inbox UI action.
+- `INBOX-accept-rollback-success`: If Proposal session creation fails or a
+  provisional start claim expires, the item returns to the active Inbox.
 - `INBOX-tool-creates-item`: A valid `hitch.propose_session` call creates a
   visible Proposal tied to the current Hitch project and source thread.
 - `INBOX-resolution-race`: If two tabs resolve the same Inbox item, exactly one
