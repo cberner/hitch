@@ -26,6 +26,19 @@
             color: var(--text-muted);
             font-size: 0.86rem;
         }
+        .usage-subheader {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 1.25rem 0 0.65rem;
+        }
+        .usage-subheader h3 {
+            margin: 0;
+            font-size: 0.98rem;
+            font-weight: 650;
+            overflow-wrap: anywhere;
+        }
         .usage-title-button {
             display: inline-flex;
             align-items: center;
@@ -138,6 +151,39 @@
         }
         .lifetime-stat.is-expanded .lifetime-chart {
             display: block;
+        }
+        .project-usage-stats {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.65rem;
+        }
+        .project-usage-card {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            min-width: 0;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 0.85rem 0.95rem;
+        }
+        .project-usage-total {
+            display: block;
+            color: var(--text);
+            font-size: 1.35rem;
+            font-weight: 700;
+            line-height: 1.15;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .project-usage-total-label {
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            line-height: 1.2;
+        }
+        .project-usage-card .lifetime-breakdown {
+            margin-top: 0.25rem;
         }
         .lifetime-chart-plot {
             display: grid;

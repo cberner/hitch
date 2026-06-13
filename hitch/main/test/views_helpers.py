@@ -19,6 +19,7 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main.models import (
     ArchivedSessionTokenUsage,
+    Project,
     SessionMetadata,
 )
 from hitch.main.sessions import (
@@ -196,6 +197,7 @@ def _seed_usage_metadata(
     thread_id: str,
     *,
     path: str | Path = "",
+    project: Project | None = None,
     thread_source: str = "",
     mark_index_complete: bool = True,
 ) -> SessionMetadata:
@@ -205,6 +207,7 @@ def _seed_usage_metadata(
     return SessionMetadata.objects.create(
         thread_id=thread_id,
         codex_path=str(path),
+        project=project,
         codex_thread_source=thread_source,
         codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
     )
@@ -274,5 +277,3 @@ def _session(
         updated_at=updated_at,
         thread_source=thread_source,
     )
-
-
