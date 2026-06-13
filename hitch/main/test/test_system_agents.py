@@ -13465,20 +13465,15 @@ class AutonomousGoalWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        AutonomousGoal.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        blocker_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve docs",
-            goal="Find useful documentation increments.",
-        )
         ProposedSession.objects.create(
             project=project,
-            autonomous_goal=blocker_goal,
+            autonomous_goal=autonomous_goal,
             title="Accepted proposal start",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             outcome_metadata={
@@ -13652,30 +13647,25 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_blocks_in_flight_autonomous_goal_automation(
+    def test_auto_proposal_blocks_own_unfinished_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        AutonomousGoal.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            auto_proposal_enabled=True,
-        )
-        blocker_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve docs",
-            goal="Find useful documentation increments.",
             auto_proposal_enabled=True,
         )
         implementation = SessionMetadata.objects.create(
             thread_id="implementation-thread",
             cwd="/repo",
             project=project,
+            derived_stage="implementation",
         )
         ProposedSession.objects.create(
             project=project,
-            autonomous_goal=blocker_goal,
+            autonomous_goal=autonomous_goal,
             title="Automated proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
@@ -13697,11 +13687,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_blocks_legacy_in_flight_autonomous_goal_automation(
+    def test_auto_proposal_does_not_block_other_goal_for_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        AutonomousGoal.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -13733,11 +13723,20 @@ class AutonomousGoalWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_USER,
             status=CodexInstance.STATUS_RUNNING,
         )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
-        self.assertEqual(started, 0)
-        mock_spawn.assert_not_called()
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
+        )
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
@@ -13748,26 +13747,21 @@ class AutonomousGoalWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        AutonomousGoal.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            auto_proposal_enabled=True,
-        )
-        blocker_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve docs",
-            goal="Find useful documentation increments.",
             auto_proposal_enabled=True,
         )
         implementation = SessionMetadata.objects.create(
             thread_id="implementation-thread",
             cwd="/repo",
             project=project,
+            derived_stage="implementation",
         )
         ProposedSession.objects.create(
             project=project,
-            autonomous_goal=blocker_goal,
+            autonomous_goal=autonomous_goal,
             title="Accepted auto-QA proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
@@ -13796,35 +13790,25 @@ class AutonomousGoalWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        AutonomousGoal.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            auto_proposal_enabled=True,
-        )
-        blocker_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve docs",
-            goal="Find useful documentation increments.",
             auto_proposal_enabled=True,
         )
         implementation = SessionMetadata.objects.create(
             thread_id="implementation-thread",
             cwd="/repo",
             project=project,
+            derived_stage="implementation",
         )
         ProposedSession.objects.create(
             project=project,
-            autonomous_goal=blocker_goal,
+            autonomous_goal=autonomous_goal,
             title="Accepted proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
             outcome_metadata={"accepted_by": "user"},
-        )
-        _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            status=CodexInstance.STATUS_RUNNING,
         )
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
@@ -13877,6 +13861,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 thread_id=f"completed-implementation-{index}",
                 cwd="/repo",
                 project=project,
+                derived_stage="done_merged",
             )
             ProposedSession.objects.create(
                 project=project,
@@ -13886,11 +13871,20 @@ class AutonomousGoalWorkflowTests(TestCase):
                 accepted_session=session,
                 outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
             )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
-        self.assertEqual(started, 0)
-        mock_spawn.assert_not_called()
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get(kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND)
+        self.assertEqual(
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
+        )
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",

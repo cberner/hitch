@@ -14,7 +14,6 @@ from typing import Literal, NamedTuple
 from django.db import models
 from django.http import Http404, HttpRequest
 from django.urls import reverse
-from django.utils import timezone
 
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.models import (
@@ -67,8 +66,10 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     project_running_auto_proposal_ids = _autonomous_goal_running_auto_proposal_project_ids(
         goals
     )
-    project_in_flight_automation_ids = _autonomous_goal_in_flight_automation_project_ids(
-        goals
+    accepted_session_blocking_goal_ids = (
+        autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
+            goals
+        )
     )
     no_change_goal_ids = _autonomous_goal_no_change_ids(
         goals,
@@ -130,8 +131,8 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
                 pending_proposal_state.continuable_stack_goal_ids
             ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
+            accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
             project_running_auto_proposal_ids=project_running_auto_proposal_ids,
-            project_in_flight_automation_ids=project_in_flight_automation_ids,
             no_change_goal_ids=no_change_goal_ids,
             auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
         )
@@ -175,69 +176,6 @@ def _autonomous_goal_running_auto_proposal_project_ids(
     }
 
 
-def _autonomous_goal_in_flight_automation_project_ids(
-    goals: list[AutonomousGoal],
-) -> set[int]:
-    project_ids = {goal.project_id for goal in goals}
-    if not project_ids:
-        return set()
-    in_flight_project_ids: set[int] = set()
-    claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
-    claim_lookup = f"outcome_metadata__{claim_key}__isnull"
-    now = timezone.now()
-    claimed_metadatas = (
-        ProposedSession.objects.filter(
-            project_id__in=project_ids,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            accepted_session__isnull=True,
-            **{claim_lookup: False},
-        )
-        .filter(autonomous_goal_proposal_stack._autonomous_goal_in_flight_proposal_criteria())
-        .values_list("project_id", "outcome_metadata")
-    )
-    for project_id, metadata in claimed_metadatas:
-        if not isinstance(project_id, int):
-            continue
-        if ProposedSession.accepted_session_start_claim_is_active(metadata, now=now):
-            in_flight_project_ids.add(project_id)
-
-    accepted_thread_project_ids: dict[str, int] = {}
-    accepted_threads = (
-        ProposedSession.objects.filter(
-            project_id__in=project_ids,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            accepted_session__isnull=False,
-        )
-        .filter(autonomous_goal_proposal_stack._autonomous_goal_in_flight_proposal_criteria())
-        .exclude(accepted_session__thread_id="")
-        .values_list("project_id", "accepted_session__thread_id")
-    )
-    for project_id, thread_id in accepted_threads:
-        if isinstance(project_id, int) and isinstance(thread_id, str):
-            accepted_thread_project_ids[thread_id] = project_id
-    if not accepted_thread_project_ids:
-        return in_flight_project_ids
-
-    active_thread_ids = set(
-        CodexInstance.objects.filter(
-            thread_id__in=list(accepted_thread_project_ids),
-            status__in=CodexInstance.ACTIVE_STATUSES,
-        ).values_list("thread_id", flat=True)
-    )
-    active_thread_ids.update(
-        SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id__in=list(accepted_thread_project_ids),
-            status=SystemWorkflow.STATUS_RUNNING,
-        ).values_list("main_thread_id", flat=True)
-    )
-    for thread_id in active_thread_ids:
-        active_project_id = accepted_thread_project_ids.get(thread_id)
-        if active_project_id is not None:
-            in_flight_project_ids.add(active_project_id)
-    return in_flight_project_ids
-
-
 def _autonomous_goal_no_change_ids(
     goals: list[AutonomousGoal], *, continuable_stack_goal_ids: set[int]
 ) -> set[int]:
@@ -263,11 +201,21 @@ def _autonomous_goal_run_badge(
     pending_proposal_goal_ids: set[int],
     continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
+    accepted_session_blocking_goal_ids: set[int],
     project_running_auto_proposal_ids: set[int],
-    project_in_flight_automation_ids: set[int],
     no_change_goal_ids: set[int],
     auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
+    if goal.pk in accepted_session_blocking_goal_ids:
+        return AutonomousGoalRunBadge(
+            state="waiting",
+            label="Waiting",
+            title="Autonomous goal is waiting for an accepted session",
+            detail=(
+                "Not running because an accepted session from this goal is not "
+                "Done or archived yet."
+            ),
+        )
     if workflow is not None:
         if workflow.is_active:
             return AutonomousGoalRunBadge(
@@ -330,19 +278,6 @@ def _autonomous_goal_run_badge(
             label="Queued",
             title="Autonomous goal is queued",
             detail="Not running because another auto-proposal run is active for this project.",
-        )
-    if (
-        goal.auto_proposal_enabled
-        and goal.project_id in project_in_flight_automation_ids
-    ):
-        return AutonomousGoalRunBadge(
-            state="queued",
-            label="Queued",
-            title="Autonomous goal is queued",
-            detail=(
-                "Not running because accepted autonomous-goal automation "
-                "is still active for this project."
-            ),
         )
     if goal.pk in no_change_goal_ids:
         return AutonomousGoalRunBadge(

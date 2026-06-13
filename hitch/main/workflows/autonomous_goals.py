@@ -54,7 +54,7 @@ from hitch.main.goals.autonomous_goal_prompts import (
 )
 from hitch.main.goals.autonomous_goal_proposal_stack import (
     _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY,
-    _autonomous_goal_in_flight_automation_exists,
+    _autonomous_goal_accepted_session_blocks_start,
     _autonomous_goal_pending_proposal_blocks_start,
     _autonomous_goal_proposal_stack_continuation_metadata,
     _autonomous_goal_stack_continuation_proposal,
@@ -433,7 +433,7 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
         return False
-    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
+    if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return False
     if _project_running_auto_proposal_workflow_exists(autonomous_goal):
         return False
@@ -495,7 +495,7 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
     if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
         return None
-    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
+    if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return None
     if _project_running_auto_proposal_workflow_exists(autonomous_goal):
         return None
