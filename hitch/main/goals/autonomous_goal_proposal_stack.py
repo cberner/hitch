@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import cast
 
 from django.utils import timezone
@@ -47,6 +48,13 @@ class _AutonomousGoalProposalStackMetadata:
 class _AutonomousGoalPendingProposalState:
     blocking_goal_ids: set[int]
     continuable_stack_goal_ids: set[int]
+
+
+@dataclass(frozen=True)
+class _AcceptedSessionRolloutEvidence:
+    done: bool
+    superseded_by_lifecycle: bool
+    mtime_ns: int
 
 
 def _proposal_outcome_metadata(
@@ -324,29 +332,58 @@ def _autonomous_goal_accepted_session_blocking_ids(
             "autonomous_goal_id",
             "accepted_session__thread_id",
             "accepted_session__derived_stage",
+            "accepted_session__derived_stage_source_mtime_ns",
+            "accepted_session__codex_updated_at",
             "accepted_session__codex_path",
         )
     )
     accepted_thread_ids = [
         thread_id
-        for _goal_id, thread_id, _derived_stage, _codex_path in accepted_session_rows
+        for (
+            _goal_id,
+            thread_id,
+            _derived_stage,
+            _derived_stage_source_mtime_ns,
+            _codex_updated_at,
+            _codex_path,
+        ) in accepted_session_rows
         if isinstance(thread_id, str) and thread_id
     ]
     live_thread_ids = _accepted_session_live_thread_ids(accepted_thread_ids)
-    done_workflow_thread_ids = _accepted_session_done_workflow_thread_ids(
+    done_workflows_by_thread_id = _accepted_session_done_workflows_by_thread_id(
         accepted_thread_ids
     )
-    for goal_id, thread_id, derived_stage, codex_path in accepted_session_rows:
+    for (
+        goal_id,
+        thread_id,
+        derived_stage,
+        derived_stage_source_mtime_ns,
+        codex_updated_at,
+        codex_path,
+    ) in accepted_session_rows:
         if not isinstance(goal_id, int):
             continue
         if isinstance(thread_id, str) and thread_id in live_thread_ids:
             blocking_ids.add(goal_id)
             continue
-        if isinstance(thread_id, str) and thread_id in done_workflow_thread_ids:
+        rollout_evidence = _accepted_session_rollout_evidence(codex_path)
+        if rollout_evidence is not None and rollout_evidence.done:
             continue
-        if derived_stage in _DONE_ACCEPTED_SESSION_STAGE_KEYS:
+        if rollout_evidence is not None and rollout_evidence.superseded_by_lifecycle:
+            blocking_ids.add(goal_id)
             continue
-        if _accepted_session_rollout_is_done(codex_path):
+        workflow = (
+            done_workflows_by_thread_id.get(thread_id)
+            if isinstance(thread_id, str)
+            else None
+        )
+        if workflow is not None and _accepted_session_workflow_is_current(
+            workflow, codex_updated_at
+        ):
+            continue
+        if _accepted_session_cached_stage_is_done(
+            derived_stage, derived_stage_source_mtime_ns, rollout_evidence
+        ):
             continue
         blocking_ids.add(goal_id)
     return blocking_ids
@@ -371,11 +408,13 @@ def _accepted_session_live_thread_ids(thread_ids: Iterable[str]) -> set[str]:
     return {thread_id for thread_id in live_thread_ids if isinstance(thread_id, str)}
 
 
-def _accepted_session_done_workflow_thread_ids(thread_ids: Iterable[str]) -> set[str]:
+def _accepted_session_done_workflows_by_thread_id(
+    thread_ids: Iterable[str],
+) -> dict[str, SystemWorkflow]:
     ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
     if not ids:
-        return set()
-    done_thread_ids: set[str] = set()
+        return {}
+    done_workflows: dict[str, SystemWorkflow] = {}
     seen_thread_ids: set[str] = set()
     workflows = (
         SystemWorkflow.objects.filter(
@@ -389,8 +428,8 @@ def _accepted_session_done_workflow_thread_ids(thread_ids: Iterable[str]) -> set
             continue
         seen_thread_ids.add(workflow.main_thread_id)
         if _accepted_session_workflow_is_done(workflow):
-            done_thread_ids.add(workflow.main_thread_id)
-    return done_thread_ids
+            done_workflows[workflow.main_thread_id] = workflow
+    return done_workflows
 
 
 def _accepted_session_workflow_is_done(workflow: SystemWorkflow) -> bool:
@@ -400,17 +439,52 @@ def _accepted_session_workflow_is_done(workflow: SystemWorkflow) -> bool:
     return _pr_snapshot_done_stage_key(state.get(_PR_HANDOFF_STATE_KEY)) is not None
 
 
-def _accepted_session_rollout_is_done(codex_path: object) -> bool:
+def _accepted_session_workflow_is_current(
+    workflow: SystemWorkflow, codex_updated_at: object
+) -> bool:
+    if workflow.updated_at is None or not isinstance(codex_updated_at, datetime):
+        return True
+    return workflow.updated_at >= codex_updated_at
+
+
+def _accepted_session_cached_stage_is_done(
+    derived_stage: object,
+    derived_stage_source_mtime_ns: object,
+    rollout_evidence: _AcceptedSessionRolloutEvidence | None,
+) -> bool:
+    if derived_stage not in _DONE_ACCEPTED_SESSION_STAGE_KEYS:
+        return False
+    if rollout_evidence is None:
+        return True
+    return derived_stage_source_mtime_ns == rollout_evidence.mtime_ns
+
+
+def _accepted_session_rollout_evidence(
+    codex_path: object,
+) -> _AcceptedSessionRolloutEvidence | None:
     rollout_state = _rollout_file_state_from_value(codex_path)
     if rollout_state is None:
-        return False
+        return None
     try:
         stage_data = rollout.session_stage_data(rollout_state.path)
     except Exception:
-        return False
+        return _AcceptedSessionRolloutEvidence(
+            done=False,
+            superseded_by_lifecycle=False,
+            mtime_ns=rollout_state.mtime_ns,
+        )
     if stage_data is None:
-        return False
-    return _pr_snapshot_done_stage_key(stage_data.pr_observation.snapshot) is not None
+        return _AcceptedSessionRolloutEvidence(
+            done=False,
+            superseded_by_lifecycle=False,
+            mtime_ns=rollout_state.mtime_ns,
+        )
+    return _AcceptedSessionRolloutEvidence(
+        done=_pr_snapshot_done_stage_key(stage_data.pr_observation.snapshot)
+        is not None,
+        superseded_by_lifecycle=stage_data.pr_observation.superseded_by_lifecycle,
+        mtime_ns=rollout_state.mtime_ns,
+    )
 
 
 def _pr_snapshot_done_stage_key(snapshot: object) -> str | None:
