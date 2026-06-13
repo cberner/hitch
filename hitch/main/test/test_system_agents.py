@@ -39,6 +39,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, rate_limit, streaming
+from hitch.main.test.support import _rollout_line
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
@@ -13681,6 +13682,208 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_cached_done_accepted_session_with_live_pr_workflow(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+            derived_stage="done_merged",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="implementation-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_allows_uncached_done_accepted_session_from_workflow(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="implementation-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/94",
+                    "state": "closed",
+                    "merged": True,
+                }
+            },
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
+        )
+        self.assertEqual(
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_allows_uncached_done_accepted_session_from_rollout(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        rollout_path = Path(temp_dir.name) / "rollout.jsonl"
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path.write_text(
+            "\n".join(
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {
+                            "type": "user_message",
+                            "message": system_agents.PR_SLASH_PROMPT,
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call",
+                            "name": "github_fetch_pr",
+                            "arguments": json.dumps(
+                                {
+                                    "repo_full_name": "cberner/hitch",
+                                    "pr_number": 94,
+                                }
+                            ),
+                            "call_id": "call-fetch",
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call-fetch",
+                            "output": json.dumps(
+                                {
+                                    "url": pr_url,
+                                    "state": "closed",
+                                    "merged": True,
+                                }
+                            ),
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "Merged."}
+                            ],
+                            "phase": "final_answer",
+                        },
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+            codex_path=str(rollout_path),
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
+        )
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
