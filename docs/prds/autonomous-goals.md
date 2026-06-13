@@ -59,6 +59,8 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-config`: Each AG stores goal text, autonomy, ambition, confidence threshold,
   web search, auto-QA, auto-proposal, stack depth, and optional token budget.
 - `AG-stack-default`: If stack depth is unset, the effective stack depth is `1`.
+- `AG-stack-depth-range`: Supported stack depth values are integers from `1`
+  through `100`. Hitch must reject stack depth values above `100`.
 - `AG-no-budget-single-run`: If token budget is unset, Hitch runs at most one background system
   session for a no-proposal attempt, then stops.
 

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from django.test import SimpleTestCase
 
-from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.models import AutonomousGoal, CodexInstance, SystemWorkflow
+
+
+class AutonomousGoalStackDepthTests(SimpleTestCase):
+    def test_supported_max_stack_depth_is_100(self) -> None:
+        self.assertEqual(AutonomousGoal.STACKED_DIFF_DEPTH_MAX, 100)
+
+    def test_effective_stacked_diff_depth_clamps_to_supported_max(self) -> None:
+        goal = AutonomousGoal(
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=101,
+        )
+
+        self.assertEqual(goal.effective_stacked_diff_depth, 100)
 
 
 class CodexInstanceActiveTests(SimpleTestCase):
