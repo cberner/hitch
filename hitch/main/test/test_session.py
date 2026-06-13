@@ -79,6 +79,10 @@ class AutoPullTextTests(TestCase):
             "Auto-pull skipped: default checkout is the active session checkout",
         )
         self.assertEqual(
+            session_entry_display._auto_pull_text({"status": "skipped"}),
+            "Auto-pull skipped.",
+        )
+        self.assertEqual(
             session_entry_display._auto_pull_text({"status": "running"}),
             "Auto-pull started but did not finish.",
         )
