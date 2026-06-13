@@ -17,8 +17,12 @@ from django.utils import timezone
 
 from hitch.main.models import (
     AutonomousGoal,
+    CodexInstance,
     ProposedSession,
+    SystemWorkflow,
 )
+from hitch.main.runtime import rollout
+from hitch.main.runtime.rollout_state import _rollout_file_state_from_value
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
@@ -29,6 +33,8 @@ _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY = (
     "proposal_budget_tokens_used"
 )
 _DONE_ACCEPTED_SESSION_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
+_DONE_ACCEPTED_SESSION_WORKFLOW_STEPS = frozenset({"local_branch_merged"})
+_PR_HANDOFF_STATE_KEY = "pr_handoff"
 
 
 @dataclass(frozen=True)
@@ -307,17 +313,120 @@ def _autonomous_goal_accepted_session_blocking_ids(
         ):
             blocking_ids.add(goal_id)
 
-    unfinished_session_goal_ids = (
+    accepted_session_rows = tuple(
         ProposedSession.objects.filter(
             autonomous_goal_id__in=goal_ids,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=False,
             accepted_session__codex_archived=False,
         )
-        .exclude(accepted_session__derived_stage__in=_DONE_ACCEPTED_SESSION_STAGE_KEYS)
-        .values_list("autonomous_goal_id", flat=True)
+        .values_list(
+            "autonomous_goal_id",
+            "accepted_session__thread_id",
+            "accepted_session__derived_stage",
+            "accepted_session__codex_path",
+        )
     )
-    blocking_ids.update(
-        goal_id for goal_id in unfinished_session_goal_ids if isinstance(goal_id, int)
+    accepted_thread_ids = [
+        thread_id
+        for _goal_id, thread_id, _derived_stage, _codex_path in accepted_session_rows
+        if isinstance(thread_id, str) and thread_id
+    ]
+    live_thread_ids = _accepted_session_live_thread_ids(accepted_thread_ids)
+    done_workflow_thread_ids = _accepted_session_done_workflow_thread_ids(
+        accepted_thread_ids
     )
+    for goal_id, thread_id, derived_stage, codex_path in accepted_session_rows:
+        if not isinstance(goal_id, int):
+            continue
+        if isinstance(thread_id, str) and thread_id in live_thread_ids:
+            blocking_ids.add(goal_id)
+            continue
+        if isinstance(thread_id, str) and thread_id in done_workflow_thread_ids:
+            continue
+        if derived_stage in _DONE_ACCEPTED_SESSION_STAGE_KEYS:
+            continue
+        if _accepted_session_rollout_is_done(codex_path):
+            continue
+        blocking_ids.add(goal_id)
     return blocking_ids
+
+
+def _accepted_session_live_thread_ids(thread_ids: Iterable[str]) -> set[str]:
+    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    if not ids:
+        return set()
+    live_thread_ids = set(
+        CodexInstance.objects.filter(
+            thread_id__in=ids,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+        ).values_list("thread_id", flat=True)
+    )
+    live_thread_ids.update(
+        SystemWorkflow.objects.filter(
+            main_thread_id__in=ids,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).values_list("main_thread_id", flat=True)
+    )
+    return {thread_id for thread_id in live_thread_ids if isinstance(thread_id, str)}
+
+
+def _accepted_session_done_workflow_thread_ids(thread_ids: Iterable[str]) -> set[str]:
+    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    if not ids:
+        return set()
+    done_thread_ids: set[str] = set()
+    seen_thread_ids: set[str] = set()
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id__in=ids,
+        )
+        .order_by("main_thread_id", "-updated_at", "-pk")
+    )
+    for workflow in workflows:
+        if workflow.main_thread_id in seen_thread_ids:
+            continue
+        seen_thread_ids.add(workflow.main_thread_id)
+        if _accepted_session_workflow_is_done(workflow):
+            done_thread_ids.add(workflow.main_thread_id)
+    return done_thread_ids
+
+
+def _accepted_session_workflow_is_done(workflow: SystemWorkflow) -> bool:
+    if workflow.step in _DONE_ACCEPTED_SESSION_WORKFLOW_STEPS:
+        return True
+    state = workflow.state if isinstance(workflow.state, Mapping) else {}
+    return _pr_snapshot_done_stage_key(state.get(_PR_HANDOFF_STATE_KEY)) is not None
+
+
+def _accepted_session_rollout_is_done(codex_path: object) -> bool:
+    rollout_state = _rollout_file_state_from_value(codex_path)
+    if rollout_state is None:
+        return False
+    try:
+        stage_data = rollout.session_stage_data(rollout_state.path)
+    except Exception:
+        return False
+    if stage_data is None:
+        return False
+    return _pr_snapshot_done_stage_key(stage_data.pr_observation.snapshot) is not None
+
+
+def _pr_snapshot_done_stage_key(snapshot: object) -> str | None:
+    if not isinstance(snapshot, Mapping):
+        return None
+    state = _string(snapshot.get("state")).lower()
+    if (
+        snapshot.get("merged") is True
+        or _string(snapshot.get("merged_at"))
+        or state == "merged"
+    ):
+        return "done_merged"
+    if state == "closed":
+        return "done_closed"
+    return None
+
+
+def _string(value: object) -> str:
+    return value if isinstance(value, str) else ""
