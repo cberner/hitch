@@ -1,8 +1,8 @@
 """Autonomous-goal form validation and budget-display formatting.
 
 Leaf helpers extracted from ``views.py``: they validate POSTed
-autonomous-goal form fields and format proposal-budget values for
-display. Depend only on models and stdlib — never on ``views``.
+autonomous-goal form fields and attach formatted display fields. They stay
+independent from ``views`` so the page layer only wires context together.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from django.http import HttpRequest
 
+from hitch.main.formatting import render_markdown
 from hitch.main.models import AutonomousGoal
 from hitch.main.runtime.codex_pool import _VALID_WEB_SEARCH_MODES
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
@@ -218,6 +219,7 @@ def _posted_autonomous_goal_bool(
 
 def _attach_autonomous_goal_display_state(goals: list[AutonomousGoal]) -> None:
     for goal in goals:
+        goal.goal_html = render_markdown(goal.goal)  # type: ignore[attr-defined]
         goal.proposal_budget_form_value = _autonomous_goal_budget_millions_value(  # type: ignore[attr-defined]
             goal.proposal_budget
         )
