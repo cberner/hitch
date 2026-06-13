@@ -498,6 +498,9 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "data-project-edit-dialog")
         self.assertContains(response, 'name="auto_pr_mode"')
         self.assertContains(response, "Follow global")
+        self.assertContains(response, 'name="auto_pull"')
+        self.assertContains(response, "Auto-pull")
+        self.assertContains(response, "After the PR monitor sees a GitHub PR merge")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -837,6 +840,7 @@ class SettingsPageRenderTests(TestCase):
             name="Hitch",
             repo_path="/repo",
             auto_pr_mode=Project.AUTO_PR_OFF,
+            auto_pull_enabled=True,
         )
         _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
         _configure_codex(
@@ -848,7 +852,9 @@ class SettingsPageRenderTests(TestCase):
         response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'data-project-auto-pr-mode="off"')
+        self.assertContains(response, 'data-project-auto-pull-enabled="true"')
         self.assertContains(response, 'value="off" selected')
+        self.assertContains(response, 'checked data-project-edit-auto-pull')
         self.assertContains(response, 'data-project-edit-open')
 
     @patch("hitch.main.repos.discover_repos")

@@ -269,19 +269,55 @@ def _apply_qa_approval_messages(
 ) -> list[dict[str, Any]]:
     approvals = sorted(_qa_approval_entries(session_id), key=lambda item: item[0])
     if not approvals:
+        result = entries
+    else:
+        result = []
+        user_message_index = 0
+        pending = approvals.copy()
+        for entry in entries:
+            if entry.get("kind") == "user":
+                while pending and pending[0][0] == user_message_index:
+                    _index, approval = pending.pop(0)
+                    result.append(approval)
+                user_message_index += 1
+            result.append(entry)
+        result.extend(approval for _index, approval in pending)
+    return _apply_workflow_auto_pull_messages(result, session_id)
+
+
+def _apply_workflow_auto_pull_messages(
+    entries: list[dict[str, Any]], session_id: str
+) -> list[dict[str, Any]]:
+    additions = list(_workflow_auto_pull_entries(session_id))
+    if not additions:
         return entries
-    result: list[dict[str, Any]] = []
-    user_message_index = 0
-    pending = approvals.copy()
-    for entry in entries:
-        if entry.get("kind") == "user":
-            while pending and pending[0][0] == user_message_index:
-                _index, approval = pending.pop(0)
-                result.append(approval)
-            user_message_index += 1
-        result.append(entry)
-    result.extend(approval for _index, approval in pending)
-    return result
+    return [*entries, *additions]
+
+
+def _workflow_auto_pull_entries(session_id: str) -> Iterator[dict[str, Any]]:
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=session_id,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+        )
+        .order_by("created_at")
+        .prefetch_related("agent_runs")
+    )
+    for workflow in workflows:
+        text = _auto_pull_text(
+            workflow.state.get(system_agents.AUTO_PULL_RESULT_STATE_KEY)
+        )
+        if not text:
+            continue
+        yield {
+            "kind": "agent",
+            "display_author": system_agents.PR_WORKFLOW_DISPLAY_AUTHOR,
+            "text": text,
+            "html": render_markdown(text),
+            "timestamp": int(workflow.updated_at.timestamp()),
+        }
 
 
 def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -357,6 +393,33 @@ def _qa_approval_text(workflow: SystemWorkflow) -> str:
     if isinstance(commit_sha, str) and commit_sha.strip():
         text = f"{text}\n\nCommit: {commit_sha.strip()}"
     return text
+
+
+def _auto_pull_text(result: object) -> str:
+    if not isinstance(result, dict):
+        return ""
+    status = result.get("status")
+    branch = result.get("branch")
+    if status == "pulled" and isinstance(branch, str) and branch.strip():
+        return f"Auto-pull: pulled origin/{branch.strip()} into the default repo."
+    if status == "up_to_date" and isinstance(branch, str) and branch.strip():
+        return (
+            f"Auto-pull: the default repo was already up to date with "
+            f"origin/{branch.strip()}."
+        )
+    if status == "failed":
+        error = result.get("error")
+        if isinstance(error, str) and error.strip():
+            return f"Auto-pull failed: {error.strip()}"
+        return "Auto-pull failed."
+    if status == "skipped":
+        reason = result.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return f"Auto-pull skipped: {reason.strip()}"
+        return "Auto-pull skipped."
+    if status == "running":
+        return "Auto-pull started but did not finish."
+    return ""
 
 
 def _approved_qa_run(workflow: SystemWorkflow) -> SystemAgentRun | None:
@@ -453,4 +516,3 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
         )
         return None
     return entries
-

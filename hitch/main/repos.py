@@ -1,13 +1,29 @@
-"""Discover and identify local git repositories."""
+"""Discover, identify, and update local git repositories."""
 
+import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from .git_support import GitCommandError, run_git
 from .git_support import resolved_path as _resolved_path
 
 _GIT_TIMEOUT_SECONDS = 10
+_GIT_PULL_TIMEOUT_SECONDS = 120
 _DEFAULT_BRANCH_NAMES = ("main", "master", "trunk", "develop")
 _DEFAULT_BRANCH_HEAD_REFS = ("refs/remotes/origin/HEAD",)
+
+
+class AutoPullError(Exception):
+    """Raised when Hitch cannot fast-forward the default branch from origin."""
+
+
+@dataclass(frozen=True)
+class AutoPullResult:
+    branch: str
+    before_sha: str
+    after_sha: str
+    changed: bool
 
 
 def discover_repos(home: Path | None = None, *, max_depth: int = 2) -> list[Path]:
@@ -58,6 +74,12 @@ def git_common_dir(cwd: str | Path) -> Path | None:
     return _resolved_path(common)
 
 
+def repo_root(cwd: str | Path) -> Path | None:
+    """Return the resolved git worktree root for ``cwd``, or None if unavailable."""
+    repo = _repo_root(Path(cwd).expanduser())
+    return _resolved_path(repo) if repo is not None else None
+
+
 def default_branch_commit_hash(cwd: str | Path) -> str | None:
     """Return the current commit hash for the repository's default branch."""
     repo = _repo_root(Path(cwd).expanduser())
@@ -75,6 +97,64 @@ def commit_hash_for_ref(cwd: str | Path, ref: str) -> str | None:
     if repo is None:
         return None
     return _commit_hash_for_ref(repo, ref)
+
+
+def default_branch_name(cwd: str | Path) -> str | None:
+    """Return the repository default branch name when it can be resolved."""
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    ref = _default_branch_ref(repo)
+    if ref is None:
+        return None
+    return _branch_name_from_ref(ref) or None
+
+
+def pull_default_branch_from_origin(cwd: str | Path) -> AutoPullResult:
+    """Fast-forward the default branch in ``cwd`` from ``origin``.
+
+    This intentionally runs in the repository checkout named by ``cwd`` and
+    refuses to pull when that checkout is not currently on the default branch.
+    Otherwise ``git pull origin <default>`` would update whichever branch the
+    user had checked out.
+    """
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        raise AutoPullError("project repository is unavailable")
+    branch = _origin_default_branch_name(repo)
+    if not branch:
+        raise AutoPullError("project default branch is unavailable")
+    current_branch = _current_branch_name(repo)
+    if current_branch != branch:
+        checkout = current_branch or "detached HEAD"
+        raise AutoPullError(
+            f"project repository is on {checkout}, not default branch {branch}"
+        )
+    if not _worktree_is_clean(repo):
+        raise AutoPullError("project repository has uncommitted changes")
+    before_sha = _commit_hash_for_ref(repo, "HEAD") or ""
+    with tempfile.TemporaryDirectory(prefix="hitch-hooks-") as raw_hooks:
+        result = _run_git_for_auto_pull(
+            repo,
+            [
+                "pull",
+                "--ff-only",
+                "--no-recurse-submodules",
+                "--no-tags",
+                "origin",
+                branch,
+            ],
+            hooks_path=Path(raw_hooks),
+        )
+    if result.returncode != 0:
+        raise AutoPullError(_git_failure_message(result))
+    after_sha = _commit_hash_for_ref(repo, "HEAD") or ""
+    return AutoPullResult(
+        branch=branch,
+        before_sha=before_sha,
+        after_sha=after_sha,
+        changed=bool(before_sha and after_sha and before_sha != after_sha),
+    )
 
 
 def default_branch_checkout_commit_hash(cwd: str | Path) -> str | None:
@@ -123,6 +203,30 @@ def _git_output(cwd: Path, args: list[str]) -> str | None:
     return result.stdout.decode("utf-8", errors="replace")
 
 
+def _run_git_for_auto_pull(
+    cwd: Path, args: list[str], *, hooks_path: Path | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return run_git(
+            cwd,
+            args,
+            timeout=_GIT_PULL_TIMEOUT_SECONDS,
+            hooks_path=hooks_path,
+        )
+    except GitCommandError as exc:
+        raise AutoPullError(str(exc)) from exc
+
+
+def _git_failure_message(result: object) -> str:
+    stdout = getattr(result, "stdout", b"")
+    stderr = getattr(result, "stderr", b"")
+    output = b"\n".join(part for part in (stderr, stdout) if isinstance(part, bytes))
+    message = output.decode("utf-8", errors="replace").strip()
+    if not message:
+        return "git pull failed"
+    return message.splitlines()[-1]
+
+
 def _commit_hash_for_ref(repo: Path, ref: str) -> str | None:
     output = _git_output(repo, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
     if not output:
@@ -144,6 +248,14 @@ def _default_branch_ref(repo: Path) -> str | None:
     if named_refs:
         return None
     return None
+
+
+def _origin_default_branch_name(repo: Path) -> str | None:
+    ref = _explicit_default_branch_ref(repo)
+    if ref is None or not ref.startswith("refs/remotes/origin/"):
+        return None
+    branch = ref.removeprefix("refs/remotes/origin/")
+    return branch or None
 
 
 def _explicit_default_branch_ref(repo: Path) -> str | None:

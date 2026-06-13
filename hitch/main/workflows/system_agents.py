@@ -9,12 +9,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, override
 
-from django.db import models
+from django.db import models, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
 from hitch.main import demo
 from hitch.main.diffs import build_worktree_diff_text
+from hitch.main.git_support import resolved_path
 from hitch.main.goals.autonomous_goal_proposal_stack import (
     _proposal_outcome_metadata,
 )
@@ -23,11 +24,19 @@ from hitch.main.local_merges import (
 )
 from hitch.main.models import (
     CodexInstance,
+    Project,
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
+)
+from hitch.main.repos import (
+    AutoPullError,
+    AutoPullResult,
+    pull_default_branch_from_origin,
+    repo_root,
+    same_repo_or_worktree,
 )
 from hitch.main.runtime import codex_pool, rollout
 from hitch.main.runtime.sdk_values import (
@@ -198,6 +207,7 @@ AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
 AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
 AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
 AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY = "auto_merge_reviewed_source_tree"
+AUTO_PULL_RESULT_STATE_KEY = "auto_pull_result"
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
 _PR_MONITOR_PENDING_POLL_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
 _PR_MONITOR_PENDING_POLL_MAX_SECONDS = 30 * _SECONDS_PER_MINUTE
@@ -1047,6 +1057,117 @@ def _record_auto_merge_result_for_proposals(
     for proposal in ProposedSession.objects.filter(accepted_session=metadata):
         proposal.outcome_metadata = _proposal_outcome_metadata(proposal, updates)
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
+
+
+def _maybe_auto_pull_default_repo_after_pr_monitor_merge(
+    workflow: SystemWorkflow,
+) -> None:
+    if workflow.step != STEP_PR_CLOSED:
+        return
+    project = _auto_pull_project_for_workflow(workflow)
+    if project is None or not project.auto_pull_enabled:
+        return
+    skip_reason = _auto_pull_skip_reason(workflow, project)
+    if skip_reason:
+        _record_auto_pull_result(
+            workflow,
+            {
+                "status": "skipped",
+                "reason": skip_reason,
+            },
+        )
+        return
+    _record_auto_pull_result(workflow, {"status": "running"})
+    try:
+        result = pull_default_branch_from_origin(project.repo_path)
+    except AutoPullError as exc:
+        logger.warning(
+            "auto-pull failed for project %s after workflow %s: %s",
+            project.pk,
+            workflow.pk,
+            exc,
+        )
+        _record_auto_pull_result(
+            workflow,
+            {
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
+        return
+    except Exception as exc:
+        logger.exception(
+            "unexpected auto-pull failure for project %s after workflow %s",
+            project.pk,
+            workflow.pk,
+        )
+        _record_auto_pull_result(
+            workflow,
+            {
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
+        return
+    _record_auto_pull_result(workflow, _auto_pull_result_dict(result))
+
+
+def _auto_pull_project_for_workflow(workflow: SystemWorkflow) -> Project | None:
+    metadata = (
+        SessionMetadata.objects.select_related("project")
+        .filter(thread_id=workflow.main_thread_id)
+        .first()
+    )
+    if metadata is None:
+        return None
+    return metadata.project
+
+
+def _auto_pull_skip_reason(workflow: SystemWorkflow, project: Project) -> str:
+    cwd = workflow.cwd.strip()
+    if not cwd:
+        return "workflow checkout is unavailable"
+    if _same_checkout(cwd, project.repo_path):
+        return "default checkout is the active session checkout"
+    if not same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir):
+        return "project repository does not match workflow checkout"
+    return ""
+
+
+def _same_checkout(cwd: str, repo_path: str) -> bool:
+    cwd_root = repo_root(cwd)
+    cwd_path = cwd_root if cwd_root is not None else Path(cwd).expanduser()
+    return resolved_path(cwd_path) == resolved_path(
+        Path(repo_path).expanduser()
+    )
+
+
+def _auto_pull_result_dict(result: AutoPullResult) -> dict[str, object]:
+    return {
+        "status": "pulled" if result.changed else "up_to_date",
+        "branch": result.branch,
+        "before_sha": result.before_sha,
+        "after_sha": result.after_sha,
+        "changed": result.changed,
+    }
+
+
+def _record_auto_pull_result(
+    workflow: SystemWorkflow, result: dict[str, object]
+) -> None:
+    try:
+        with transaction.atomic():
+            locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+            locked.state = {
+                **locked.state,
+                AUTO_PULL_RESULT_STATE_KEY: result,
+            }
+            locked.save(update_fields=["state"])
+            workflow.state = locked.state
+    except Exception:
+        logger.exception(
+            "failed to record auto-pull result for workflow %s", workflow.pk
+        )
 
 
 def _handle_system_agent_finished(instance: CodexInstance) -> bool:

@@ -95,6 +95,7 @@
                 data-project-repo-path="{{ project.repo_path }}"
                 data-project-extra-system-prompt="{{ project.extra_system_prompt }}"
                 data-project-auto-pr-mode="{{ project.auto_pr_mode }}"
+                data-project-auto-pull-enabled="{% if project.auto_pull_enabled %}true{% else %}false{% endif %}"
             >{{ project.name }}</option>
             {% endfor %}
         </select>

@@ -1,6 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -8,11 +9,14 @@ from django.test import TestCase
 from hitch.main import repos
 from hitch.main.git_support import hermetic_git_env
 from hitch.main.repos import (
+    AutoPullError,
     commit_hash_for_ref,
     default_branch_checkout_commit_hash,
     default_branch_commit_hash,
     discover_repos,
     git_common_dir,
+    pull_default_branch_from_origin,
+    repo_root,
     same_repo_or_worktree,
 )
 from hitch.main.test.support import _git, _init_repo
@@ -120,8 +124,12 @@ class DiscoverReposTests(TestCase):
             _git(repo, "add", "README.md")
             _git(repo, "commit", "-m", "initial")
             _git(repo, "worktree", "add", "-b", "feature", str(worktree), "HEAD")
+            (repo / "subdir").mkdir()
+            (worktree / "subdir").mkdir()
 
             self.assertEqual(git_common_dir(repo), git_common_dir(worktree))
+            self.assertEqual(repo_root(repo / "subdir"), repo)
+            self.assertEqual(repo_root(worktree / "subdir"), worktree)
             self.assertTrue(same_repo_or_worktree(worktree, repo, str(git_common_dir(repo))))
             self.assertTrue(same_repo_or_worktree(repo, repo, str(git_common_dir(repo))))
 
@@ -267,6 +275,162 @@ class DiscoverReposTests(TestCase):
                 commit_hash_for_ref(repo, "refs/heads/release"), release_sha
             )
             self.assertIsNone(commit_hash_for_ref(repo, "refs/heads/missing"))
+
+    def test_pull_default_branch_from_origin_fast_forwards_default_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            writer = root / "writer"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            _git(source, "clone", str(origin), str(writer))
+            (writer / "README.md").write_text("hello\nremote\n")
+            _git(writer, "commit", "-am", "remote")
+            remote_sha = _git(writer, "rev-parse", "HEAD")
+            _git(writer, "push", "origin", "main")
+            marker = root / "hook-ran"
+            post_merge = repo / ".git" / "hooks" / "post-merge"
+            post_merge.write_text("#!/bin/sh\ntouch ../hook-ran\n")
+            post_merge.chmod(0o755)
+
+            result = pull_default_branch_from_origin(repo)
+
+            self.assertEqual(result.branch, "main")
+            self.assertTrue(result.changed)
+            self.assertEqual(result.after_sha, remote_sha)
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), remote_sha)
+            self.assertEqual((repo / "README.md").read_text(), "hello\nremote\n")
+            self.assertFalse(marker.exists())
+
+    def test_pull_default_branch_from_origin_rejects_non_default_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            _git(repo, "checkout", "-b", "feature")
+
+            with self.assertRaisesRegex(AutoPullError, "not default branch main"):
+                pull_default_branch_from_origin(repo)
+
+    def test_pull_default_branch_from_origin_requires_origin_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "checkout", "-b", "feature")
+            (source / "README.md").write_text("feature\n")
+            _git(source, "commit", "-am", "feature")
+            _git(source, "checkout", "main")
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            _git(repo, "checkout", "-b", "feature", "origin/feature")
+            _git(repo, "branch", "-D", "main")
+            _git(repo, "update-ref", "-d", "refs/remotes/origin/HEAD")
+
+            with self.assertRaisesRegex(
+                AutoPullError, "project default branch is unavailable"
+            ):
+                pull_default_branch_from_origin(repo)
+
+    def test_pull_default_branch_from_origin_scopes_fetch_options(self) -> None:
+        with (
+            patch.object(repos, "_repo_root", return_value=Path("/repo")),
+            patch.object(repos, "_origin_default_branch_name", return_value="main"),
+            patch.object(repos, "_current_branch_name", return_value="main"),
+            patch.object(repos, "_worktree_is_clean", return_value=True),
+            patch.object(
+                repos, "_commit_hash_for_ref", side_effect=["abc123", "def456"]
+            ),
+            patch.object(
+                repos,
+                "_run_git_for_auto_pull",
+                return_value=SimpleNamespace(returncode=0),
+            ) as mock_run,
+        ):
+            pull_default_branch_from_origin("/repo")
+
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[1],
+            [
+                "pull",
+                "--ff-only",
+                "--no-recurse-submodules",
+                "--no-tags",
+                "origin",
+                "main",
+            ],
+        )
+
+    def test_pull_default_branch_from_origin_reports_up_to_date_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            head_sha = _git(repo, "rev-parse", "HEAD")
+
+            result = pull_default_branch_from_origin(repo)
+
+            self.assertEqual(result.branch, "main")
+            self.assertFalse(result.changed)
+            self.assertEqual(result.before_sha, head_sha)
+            self.assertEqual(result.after_sha, head_sha)
+
+    def test_pull_default_branch_from_origin_rejects_dirty_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            (repo / "README.md").write_text("local edit\n")
+
+            with self.assertRaisesRegex(AutoPullError, "uncommitted changes"):
+                pull_default_branch_from_origin(repo)
+
+    def test_pull_default_branch_from_origin_reports_pull_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            origin = root / "origin.git"
+            repo = root / "repo"
+            writer = root / "writer"
+            _init_repo(source, initial_branch="main", configure_user=True)
+            _git(source, "clone", "--bare", str(source), str(origin))
+            _git(source, "clone", str(origin), str(repo))
+            _git(source, "clone", str(origin), str(writer))
+            (writer / "README.md").write_text("remote\n")
+            _git(writer, "commit", "-am", "remote")
+            _git(writer, "push", "origin", "main")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("local\n")
+            _git(repo, "commit", "-am", "local")
+
+            with self.assertRaises(AutoPullError):
+                pull_default_branch_from_origin(repo)
+
+    def test_pull_default_branch_from_origin_rejects_missing_repo(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw_root,
+            self.assertRaisesRegex(AutoPullError, "repository is unavailable"),
+        ):
+            pull_default_branch_from_origin(Path(raw_root) / "missing")
 
     def test_default_branch_checkout_rejects_ambiguous_local_named_branches(
         self,

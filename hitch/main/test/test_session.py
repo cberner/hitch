@@ -28,6 +28,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
+from hitch.main.sessions import session_entry_display
 from hitch.main.sessions.entry_render import tool_call_detail, tool_call_status
 from hitch.main.sessions.session_pr_plan import (
     _pr_snapshot_for_thread,
@@ -48,6 +49,43 @@ _LIVE_PID = os.getpid()
 
 def _worker_is_live_for_test(instance: CodexInstance) -> bool:
     return instance.pid == _LIVE_PID
+
+
+class AutoPullTextTests(TestCase):
+    def test_formats_up_to_date_and_failure_results(self) -> None:
+        self.assertEqual(
+            session_entry_display._auto_pull_text(
+                {"status": "up_to_date", "branch": "main"}
+            ),
+            "Auto-pull: the default repo was already up to date with origin/main.",
+        )
+        self.assertEqual(
+            session_entry_display._auto_pull_text(
+                {"status": "failed", "error": "project repository is dirty"}
+            ),
+            "Auto-pull failed: project repository is dirty",
+        )
+        self.assertEqual(
+            session_entry_display._auto_pull_text({"status": "failed"}),
+            "Auto-pull failed.",
+        )
+        self.assertEqual(
+            session_entry_display._auto_pull_text(
+                {
+                    "status": "skipped",
+                    "reason": "default checkout is the active session checkout",
+                }
+            ),
+            "Auto-pull skipped: default checkout is the active session checkout",
+        )
+        self.assertEqual(
+            session_entry_display._auto_pull_text({"status": "running"}),
+            "Auto-pull started but did not finish.",
+        )
+        self.assertEqual(session_entry_display._auto_pull_text("missing"), "")
+        self.assertEqual(
+            session_entry_display._auto_pull_text({"status": "pulled"}), ""
+        )
 
 
 def _root(item: SimpleNamespace) -> SimpleNamespace:

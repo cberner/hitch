@@ -49,6 +49,89 @@ from hitch.main.workflows import system_agents
 
 
 class SessionDetailFastPathTests(TestCase):
+    def test_pr_closed_workflow_surfaces_auto_pull_result(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="pr-closed-auto-pull",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={
+                "next_user_message_index": 1,
+                system_agents.AUTO_PULL_RESULT_STATE_KEY: {
+                    "status": "failed",
+                    "error": "project repository has uncommitted changes",
+                },
+            },
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="pr-closed-auto-pull",
+            cwd="/repo",
+            prompt="Run QA",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="pr-closed-auto-pull",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"lgtm": True},
+        )
+
+        entries = session_entry_display._apply_qa_approval_messages(
+            [{"kind": "user", "text": "Open a PR"}],
+            "pr-closed-auto-pull",
+        )
+
+        self.assertEqual(entries[0]["display_author"], system_agents.QA_DISPLAY_AUTHOR)
+        self.assertEqual(
+            entries[-1]["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
+        self.assertIn(
+            "Auto-pull failed: project repository has uncommitted changes",
+            entries[-1]["text"],
+        )
+
+    def test_pr_workflow_auto_pull_result_surfaces_without_qa_approval(
+        self,
+    ) -> None:
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="pr-monitor-auto-pull",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={
+                system_agents.AUTO_PULL_RESULT_STATE_KEY: {
+                    "status": "pulled",
+                    "branch": "main",
+                    "before_sha": "a" * 40,
+                    "after_sha": "b" * 40,
+                    "changed": True,
+                },
+            },
+        )
+
+        entries = session_entry_display._apply_qa_approval_messages(
+            [{"kind": "user", "text": "Fix PR"}],
+            "pr-monitor-auto-pull",
+        )
+
+        self.assertEqual(
+            entries[-1]["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
+        self.assertIn(
+            "Auto-pull: pulled origin/main into the default repo.",
+            entries[-1]["text"],
+        )
+
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_renders_indexed_rollout_without_resume(
