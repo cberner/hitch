@@ -193,6 +193,48 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
+    def test_page_renders_goal_body_as_markdown(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        goal_text = "\n".join(
+            [
+                "# Parser audit",
+                "",
+                "- Add fixture coverage",
+                "- Check [docs](https://example.com/parser)",
+                "",
+                "<script>alert(1)</script>",
+            ]
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve parser",
+            goal=goal_text,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        body_start = body.index('<div class="goal-body markdown">')
+        body_end = body.index('<div class="goal-meta">', body_start)
+        goal_body_html = body[body_start:body_end]
+        self.assertIn("<h1>Parser audit</h1>", goal_body_html)
+        self.assertIn("<ul>", goal_body_html)
+        self.assertIn("<li>Add fixture coverage</li>", goal_body_html)
+        self.assertIn(
+            '<a href="https://example.com/parser">docs</a>',
+            goal_body_html,
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", goal_body_html)
+        self.assertNotIn("<script>", goal_body_html)
+        self.assertIn(f'data-goal="{html.escape(goal_text, quote=True)}"', body)
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
     def test_page_shows_tappable_run_status_indicators(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
