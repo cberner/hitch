@@ -38,6 +38,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.repos import AutoPullError, AutoPullResult
 from hitch.main.runtime import codex_events, rate_limit, streaming
 from hitch.main.test.support import _rollout_line
 from hitch.main.workflows import (
@@ -928,6 +929,31 @@ class SessionPrStageRefreshTests(TestCase):
 
         self.assertEqual(refreshed, 0)
         mock_gh_pr_view.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
+    def test_stage_refresh_terminal_completion_does_not_auto_pull(
+        self, mock_gh_pr_view: MagicMock, mock_auto_pull: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = self._due_pr_workflow("stage-refresh-main", cwd)
+            mock_gh_pr_view.return_value = {
+                "url": "https://github.com/cberner/hitch/pull/201",
+                "repository_full_name": "cberner/hitch",
+                "pr_number": 201,
+                "state": "closed",
+                "merged": True,
+                "merged_at": "2026-06-13T20:53:12Z",
+            }
+
+            refreshed = pr_qa.refreshed_pr_handoff_for_stage(workflow, force=True)
+
+        self.assertTrue(refreshed["merged"])
+        mock_auto_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
@@ -3755,6 +3781,502 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             proposal.outcome_metadata["auto_merge_commit_sha"], "abc123"
         )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
+    def test_qa_lgtm_does_not_auto_pull_after_local_branch_merge(
+        self, mock_merge: MagicMock, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+            auto_pr_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+            state={
+                "open_pr_on_lgtm": False,
+                "auto_merge_branch": "main",
+                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
+                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
+            },
+        )
+        mock_merge.return_value = LocalBranchMergeResult(
+            branch="main",
+            commit_sha="abc123",
+            target_worktree="/repo",
+            changed=True,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Looks good", "lgtm": True},
+            ),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
+        self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_when_project_setting_is_off(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=False,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_active_session_checkout(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "skipped",
+                "reason": "default checkout is the active session checkout",
+            },
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_subdirectory_of_active_session_checkout(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo/pkg",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo/pkg",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        with patch(
+            "hitch.main.workflows.system_agents.repo_root",
+            return_value=Path("/repo"),
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "skipped",
+                "reason": "default checkout is the active session checkout",
+            },
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_skips_project_mismatched_with_workflow_checkout(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo-b",
+            git_common_dir="/repo-b/.git",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/repo-a",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/repo-a",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=False,
+        ) as mock_same_repo:
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_same_repo.assert_called_once_with(
+            "/worktrees/repo-a", "/repo-b", "/repo-b/.git"
+        )
+        mock_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "skipped",
+                "reason": "project repository does not match workflow checkout",
+            },
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_records_up_to_date_result(self, mock_pull: MagicMock) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={"existing": "value"},
+        )
+        mock_pull.return_value = AutoPullResult(
+            branch="main",
+            before_sha="abc123",
+            after_sha="abc123",
+            changed=False,
+        )
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=True,
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "up_to_date",
+                "branch": "main",
+                "before_sha": "abc123",
+                "after_sha": "abc123",
+                "changed": False,
+            },
+        )
+        self.assertEqual(workflow.state["existing"], "value")
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_records_running_before_pull(self, mock_pull: MagicMock) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+
+        def observe_running(_repo_path: str) -> AutoPullResult:
+            workflow.refresh_from_db()
+            self.assertEqual(
+                workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+                {"status": "running"},
+            )
+            return AutoPullResult(
+                branch="main",
+                before_sha="abc123",
+                after_sha="abc123",
+                changed=False,
+            )
+
+        mock_pull.side_effect = observe_running
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=True,
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        mock_pull.assert_called_once_with("/repo")
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_result_preserves_workflow_updated_at(
+        self, mock_pull: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+        original_updated_at = datetime(2026, 6, 13, 18, 0, tzinfo=UTC)
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=original_updated_at
+        )
+        mock_pull.return_value = AutoPullResult(
+            branch="main",
+            before_sha="abc123",
+            after_sha="abc123",
+            changed=False,
+        )
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=True,
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.updated_at, original_updated_at)
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY]["status"],
+            "up_to_date",
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_records_expected_failure(self, mock_pull: MagicMock) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+        mock_pull.side_effect = AutoPullError("project repository has uncommitted changes")
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=True,
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "failed",
+                "error": "project repository has uncommitted changes",
+            },
+        )
+
+    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
+    def test_auto_pull_records_unexpected_failure(self, mock_pull: MagicMock) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pull_enabled=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/worktrees/session",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_CLOSED,
+            state={},
+        )
+        mock_pull.side_effect = RuntimeError("boom")
+
+        with patch(
+            "hitch.main.workflows.system_agents.same_repo_or_worktree",
+            return_value=True,
+        ):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_PULL_RESULT_STATE_KEY],
+            {
+                "status": "failed",
+                "error": "boom",
+            },
+        )
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    def test_terminal_merged_pr_completion_auto_pulls(
+        self, mock_auto_pull: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "state": "merged",
+                    "merged": True,
+                }
+            },
+        )
+
+        pr_qa._complete_terminal_pr_workflow(workflow)
+
+        mock_auto_pull.assert_called_once_with(workflow)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    def test_terminal_merged_at_pr_completion_auto_pulls(
+        self, mock_auto_pull: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "state": "closed",
+                    "merged_at": "2026-06-13T18:45:00Z",
+                }
+            },
+        )
+
+        pr_qa._complete_terminal_pr_workflow(workflow)
+
+        mock_auto_pull.assert_called_once_with(workflow)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    def test_terminal_closed_pr_completion_does_not_auto_pull(
+        self, mock_auto_pull: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/worktrees/session",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+
+        pr_qa._complete_terminal_pr_workflow(workflow)
+
+        mock_auto_pull.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")

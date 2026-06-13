@@ -415,6 +415,7 @@ def edit_project(request: HttpRequest) -> HttpResponse:
     name = request.POST.get("name", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     auto_pr_mode = request.POST.get("auto_pr_mode", "").strip()
+    auto_pull = request.POST.get("auto_pull", "").strip()
     if not name:
         return HttpResponseBadRequest("project name is required")
     if len(name) > common._PROJECT_NAME_MAX_LEN:
@@ -423,6 +424,9 @@ def edit_project(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("extra system prompt is too long")
     if auto_pr_mode not in _VALID_PROJECT_AUTO_PR_MODES:
         return HttpResponseBadRequest("invalid project auto-PR setting")
+    if auto_pull not in {"", "true"}:
+        return HttpResponseBadRequest("invalid project auto-pull setting")
+    auto_pull_enabled = auto_pull == "true"
 
     updates: list[str] = []
     if project.name != name:
@@ -434,6 +438,9 @@ def edit_project(request: HttpRequest) -> HttpResponse:
     if project.auto_pr_mode != auto_pr_mode:
         project.auto_pr_mode = auto_pr_mode
         updates.append("auto_pr_mode")
+    if project.auto_pull_enabled != auto_pull_enabled:
+        project.auto_pull_enabled = auto_pull_enabled
+        updates.append("auto_pull_enabled")
     if updates:
         project.save(update_fields=[*updates, "updated_at"])
     return redirect(common._safe_next_url(request) or "index")

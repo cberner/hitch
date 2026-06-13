@@ -7327,6 +7327,7 @@ class ProjectViewTests(TestCase):
                 "name": "Renamed",
                 "extra_system_prompt": "  Prefer project fixtures.  ",
                 "auto_pr_mode": Project.AUTO_PR_ON,
+                "auto_pull": "true",
             },
         )
 
@@ -7335,6 +7336,7 @@ class ProjectViewTests(TestCase):
         self.assertEqual(project.name, "Renamed")
         self.assertEqual(project.extra_system_prompt, "Prefer project fixtures.")
         self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_ON)
+        self.assertTrue(project.auto_pull_enabled)
 
     def test_edit_project_rejects_invalid_posts(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -7373,6 +7375,15 @@ class ProjectViewTests(TestCase):
                     "auto_pr_mode": "maybe",
                 },
                 "invalid project auto-PR setting",
+            ),
+            (
+                {
+                    "project": str(project.pk),
+                    "name": "Renamed",
+                    "auto_pr_mode": Project.AUTO_PR_ON,
+                    "auto_pull": "maybe",
+                },
+                "invalid project auto-pull setting",
             ),
         ):
             with self.subTest(message=message):

@@ -24,6 +24,11 @@
                 {% endfor %}
             </select>
         </label>
+        <label class="checkbox-label">
+            <span>Auto-pull</span>
+            <input type="checkbox" name="auto_pull" value="true" {% if current_project and current_project.auto_pull_enabled %}checked{% endif %} data-project-edit-auto-pull>
+        </label>
+        <p class="field-help">After the PR monitor sees a GitHub PR merge, Hitch fast-forwards this project's default branch from origin in a separate default repository checkout.</p>
         <div class="actions">
             <button type="button" class="button secondary" data-project-edit-cancel>Cancel</button>
             <button type="submit" class="button">Save</button>

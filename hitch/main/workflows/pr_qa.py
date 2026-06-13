@@ -330,6 +330,7 @@ _PR_QA_STATE_KEYS = frozenset(
         "auto_merge_reviewed_target_sha",
         "auto_merge_reviewed_source_tree",
         "auto_merge_session_base_sha",
+        "auto_pull_result",
         "hitch_pr_handoff",
         "last_feedback",
         "last_pr_monitor",
@@ -911,7 +912,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if hitch_handoff_snapshot:
         _mark_hitch_pr_handoff(workflow, snapshot)
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
-        system_agents._complete_workflow(workflow, system_agents.STEP_PR_CLOSED)
+        _complete_terminal_pr_workflow(workflow)
         return
     if not hitch_handoff_snapshot:
         try:
@@ -936,6 +937,24 @@ def _complete_pr_workflow_without_changes(workflow: SystemWorkflow) -> None:
     # is nothing to open a PR for. Treat it as a successful no-op completion.
     system_agents._complete_workflow(workflow, system_agents.STEP_PR_NO_CHANGES)
     _surface_pr_workflow_no_changes(workflow)
+
+def _complete_terminal_pr_workflow(
+    workflow: SystemWorkflow, *, run_auto_pull: bool = True
+) -> None:
+    handoff = _pr_handoff_from_workflow(workflow)
+    system_agents._complete_workflow(workflow, system_agents.STEP_PR_CLOSED)
+    if run_auto_pull and _pr_handoff_is_merged(handoff):
+        system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+
+def _pr_handoff_is_merged(handoff: dict[str, Any]) -> bool:
+    state = handoff.get("state")
+    merged_at = handoff.get("merged_at")
+    return (
+        handoff.get("merged") is True
+        or (isinstance(merged_at, str) and bool(merged_at.strip()))
+    ) or (
+        isinstance(state, str) and state.lower() == "merged"
+    )
 
 def _surface_pr_workflow_no_changes(workflow: SystemWorkflow) -> None:
     try:
@@ -1299,7 +1318,7 @@ def _advance_pr_workflow_from_monitor_result(
     handoff = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(handoff):
         workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
-        system_agents._complete_workflow(workflow, system_agents.STEP_PR_CLOSED)
+        _complete_terminal_pr_workflow(workflow)
         return
 
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
@@ -2071,7 +2090,7 @@ def refreshed_pr_handoff_for_stage(
     _merge_pr_handoff(workflow, observed)
     refreshed = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(refreshed):
-        system_agents._complete_workflow(workflow, system_agents.STEP_PR_CLOSED)
+        _complete_terminal_pr_workflow(workflow, run_auto_pull=False)
     else:
         workflow.save(update_fields=["state", "updated_at"])
     return refreshed
