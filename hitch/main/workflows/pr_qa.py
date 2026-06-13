@@ -912,7 +912,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if hitch_handoff_snapshot:
         _mark_hitch_pr_handoff(workflow, snapshot)
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
-        _complete_terminal_pr_workflow(workflow)
+        _complete_terminal_pr_workflow(workflow, run_auto_pull=False)
         return
     if not hitch_handoff_snapshot:
         try:
