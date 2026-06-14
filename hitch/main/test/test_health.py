@@ -629,3 +629,73 @@ class RunserverSocketProbeTests(TestCase):
 
     def test_missing_net_tcp_returns_zero(self) -> None:
         self.assertEqual(host_probes.runserver_close_wait_count(proc_root=self.proc), 0)
+
+
+class HealthCopyButtonTests(TestCase):
+    """The health copy button uses the shared window.hitch.copyToClipboard.
+
+    Regression guard for the J8 dedup: the button copies via the shared helper
+    and falls back to selecting the text for manual copy only when the helper
+    reports failure.
+    """
+
+    def _render(self) -> str:
+        user = get_user_model().objects.create_user(username="op", password="pw")
+        self.client.force_login(user)
+        response = self.client.get(reverse("health_dashboard"))
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_copy_button_uses_shared_helper(self) -> None:
+        html = self._render()
+        self.assertIn("window.hitch.copyToClipboard", html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                # The real helper guards empty input.
+                self.assertFalse(
+                    page.evaluate("() => window.hitch.copyToClipboard('')")
+                )
+                # The fallback path always resolves a boolean -- never throws or
+                # rejects -- even where execCommand is denied (as in this
+                # sandboxed document).
+                self.assertIn(
+                    page.evaluate("() => window.hitch.copyToClipboard('text')"),
+                    (True, False),
+                )
+                # Success path -> "Copied".
+                page.evaluate(
+                    "() => { window.hitch.copyToClipboard = "
+                    "() => Promise.resolve(true); }"
+                )
+                page.evaluate("() => document.getElementById('copy-button').click()")
+                page.wait_for_function(
+                    "document.getElementById('copy-button').textContent === 'Copied'"
+                )
+                # Failure path -> select the text for manual copy.
+                page.evaluate(
+                    "() => { window.hitch.copyToClipboard = "
+                    "() => Promise.resolve(false); }"
+                )
+                page.evaluate("() => document.getElementById('copy-button').click()")
+                page.wait_for_function(
+                    "document.getElementById('copy-button').textContent "
+                    "=== 'Select + copy'"
+                )
+                self.assertTrue(
+                    page.evaluate("() => (window.getSelection() || '').toString().length > 0")
+                )
+            finally:
+                browser.close()

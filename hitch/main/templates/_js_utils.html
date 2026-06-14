@@ -43,4 +43,51 @@
             credentials: "same-origin",
         });
     };
+
+    // Copy text to the clipboard, resolving to whether it succeeded. Prefers the
+    // async Clipboard API (secure contexts) and falls back to a hidden textarea
+    // + execCommand for older/insecure contexts. Callers can present their own
+    // last-resort UI when this resolves false.
+    window.hitch.copyToClipboard = function (text) {
+        function fallback() {
+            // Never throw: execCommand can be unavailable or denied, and the
+            // helper promises to resolve a boolean so callers can show their own
+            // last-resort UI.
+            try {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.top = "-1000px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                try {
+                    return document.execCommand("copy");
+                } finally {
+                    textarea.remove();
+                }
+            } catch (error) {
+                return false;
+            }
+        }
+        if (!text) {
+            return Promise.resolve(false);
+        }
+        if (
+            window.isSecureContext
+            && navigator.clipboard
+            && typeof navigator.clipboard.writeText === "function"
+        ) {
+            try {
+                return navigator.clipboard.writeText(text).then(
+                    function () { return true; },
+                    function () { return fallback(); }
+                );
+            } catch (error) {
+                // writeText can throw synchronously instead of rejecting.
+                return Promise.resolve(fallback());
+            }
+        }
+        return Promise.resolve(fallback());
+    };
 </script>

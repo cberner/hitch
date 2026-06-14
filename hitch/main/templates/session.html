@@ -2629,33 +2629,7 @@
                 return (body.innerText || body.textContent || "").trimEnd();
             }
 
-            function fallbackCopyText(text) {
-                const textarea = document.createElement("textarea");
-                textarea.value = text;
-                textarea.setAttribute("readonly", "");
-                textarea.style.position = "fixed";
-                textarea.style.top = "-1000px";
-                document.body.appendChild(textarea);
-                textarea.select();
-                try {
-                    return document.execCommand("copy");
-                } finally {
-                    textarea.remove();
-                }
-            }
-
-            async function copyText(text) {
-                if (!text) return false;
-                if (navigator.clipboard && window.isSecureContext) {
-                    try {
-                        await navigator.clipboard.writeText(text);
-                        return true;
-                    } catch {
-                        // Fall back for browsers that expose the API but deny this call.
-                    }
-                }
-                return fallbackCopyText(text);
-            }
+            const copyText = window.hitch.copyToClipboard;
 
             function markCopied(message) {
                 message.classList.add("copied");
