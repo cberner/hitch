@@ -7844,3 +7844,54 @@ class UsageTileAccessibilityTests(TestCase):
         html = self._render(sessions_chart=True, system_chart=True)
         self.assertEqual(html.count('class="lifetime-stat" role="button"'), 2)
         self.assertNotIn('class="lifetime-stat">', html)
+
+
+class SharedCsrfHelperTests(TestCase):
+    """The shared window.hitch.csrfToken helper (_js_utils.html).
+
+    Regression guard for the J5 dedup: the index page wires in the shared
+    helper, which resolves the CSRF token (cookie first, hidden-form-input
+    fallback). In the sandboxed test document `document.cookie` is unreadable,
+    so this exercises the input-fallback branch -- index.html's original
+    behavior, which must be preserved.
+    """
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_csrf_helper_falls_back_to_form_input(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[])
+        html = self.client.get(reverse("index")).content.decode()
+        self.assertIn("window.hitch.csrfToken", html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                result = page.evaluate(
+                    """
+                    () => {
+                        const input = document.querySelector(
+                            "input[name=csrfmiddlewaretoken]");
+                        return {
+                            token: window.hitch.csrfToken(),
+                            input: input ? input.value : null,
+                        };
+                    }
+                    """
+                )
+                self.assertTrue(result["input"])
+                self.assertEqual(result["token"], result["input"])
+            finally:
+                browser.close()

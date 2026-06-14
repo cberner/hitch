@@ -1,0 +1,24 @@
+<script>
+    // Shared client-side helpers, attached to a single window.hitch namespace so
+    // any inline script block (or page) can reuse them. Loaded once per page,
+    // right after _js_class_bootstrap.html, before any block that uses it.
+    window.hitch = window.hitch || {};
+
+    // Django renders the CSRF token both as a `csrftoken` cookie and as a hidden
+    // form input; prefer the cookie and fall back to the input so this works on
+    // pages with or without a rendered form.
+    window.hitch.csrfToken = function () {
+        try {
+            // document.cookie can throw in a sandboxed/opaque-origin document;
+            // fall back to the hidden form input in that case.
+            const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+            if (match) {
+                return decodeURIComponent(match[1]);
+            }
+        } catch (error) {
+            /* fall through to the form input */
+        }
+        const input = document.querySelector("input[name='csrfmiddlewaretoken']");
+        return input ? input.value : "";
+    };
+</script>

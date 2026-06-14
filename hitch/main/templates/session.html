@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
     <title>HITCH — {{ display_title }}</title>
 {% include "_js_class_bootstrap.html" %}
+{% include "_js_utils.html" %}
     <style>
         {% include "_color_tokens.html" %}
         :root {
@@ -3393,10 +3394,7 @@
                 "item/commandExecution/requestApproval": "Run command?",
                 "item/fileChange/requestApproval": "Apply file change?",
             };
-            function csrfToken() {
-                const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
-                return match ? decodeURIComponent(match[1]) : "";
-            }
+            const csrfToken = window.hitch.csrfToken;
 
             function approvalDetail(method, params) {
                 const item = (params && params.item) || params || {};
