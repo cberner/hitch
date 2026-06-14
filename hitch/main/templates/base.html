@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    {% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">{% endblock %}
+    <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
+    <title>{% block title %}HITCH{% endblock %}</title>
+{% include "_js_class_bootstrap.html" %}
+{% include "_js_utils.html" %}
+{% block head %}{% endblock %}
+</head>
+<body{% block body_attrs %}{% endblock %}>
+{% block body %}{% endblock %}
+</body>
+</html>
