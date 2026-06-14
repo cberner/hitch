@@ -15,16 +15,7 @@
             min-height: 100vh;
             padding-bottom: calc(5.5rem + var(--safe-bottom));
         }
-        .topbar {
-            position: sticky;
-            top: 0;
-            z-index: 10;
-            background: color-mix(in srgb, var(--bg) 88%, transparent);
-            backdrop-filter: saturate(180%) blur(14px);
-            -webkit-backdrop-filter: saturate(180%) blur(14px);
-            border-bottom: 1px solid var(--border);
-            padding-top: var(--safe-top);
-        }
+        {% include "_topbar_styles.html" %}
         .topbar-inner {
             max-width: 900px;
             margin: 0 auto;
