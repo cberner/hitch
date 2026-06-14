@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from hitch.main.models import SystemWorkflow
 from hitch.main.runtime import rate_limit
-from hitch.main.runtime.sdk_values import string_from_any
+from hitch.main.runtime.sdk_values import is_nonbool_int, string_from_any
 from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
 _SECONDS_PER_MINUTE = 60
@@ -31,7 +31,7 @@ def _pr_handoff_selector(handoff: dict[str, Any]) -> str:
     if url:
         return url
     number = handoff.get("pr_number")
-    if isinstance(number, int) and not isinstance(number, bool):
+    if is_nonbool_int(number):
         return str(number)
     return ""
 
@@ -49,7 +49,7 @@ def _pr_stage_rate_limit_key(handoff: Mapping[str, Any]) -> str:
         return f"gh:pr-view:{url}"
     repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
-    if isinstance(number, int) and not isinstance(number, bool):
+    if is_nonbool_int(number):
         return f"gh:pr-view:{repo}#{number}" if repo else f"gh:pr-view:#{number}"
     return ""
 
@@ -104,7 +104,7 @@ def _pr_stage_refresh_attempted_at(workflow: SystemWorkflow) -> int:
     if not isinstance(value, dict):
         return 0
     attempted_at = value.get("attempted_at")
-    if isinstance(attempted_at, int) and not isinstance(attempted_at, bool):
+    if is_nonbool_int(attempted_at):
         return attempted_at
     return 0
 

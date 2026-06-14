@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hitch.main.runtime.sdk_values import is_nonbool_int
+
 _PR_GATE_OBSERVATION_FIELDS = frozenset(
     {
         "mergeable",
@@ -214,7 +216,7 @@ def _compact_pr_list(items: list[Any]) -> list[Any]:
             compact_item: dict[str, Any] = {}
             for key in _PR_SAFE_LIST_ITEM_FIELDS:
                 value = item.get(key)
-                if isinstance(value, int) and not isinstance(value, bool):
+                if is_nonbool_int(value):
                     compact_item[key] = value
                 elif isinstance(value, str) and value.strip():
                     compact_item[key] = value.strip()[:500]

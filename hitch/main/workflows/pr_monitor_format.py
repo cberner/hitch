@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hitch.main.runtime.sdk_values import string_from_any, truncate_for_prompt
+from hitch.main.runtime.sdk_values import is_nonbool_int, string_from_any, truncate_for_prompt
 from hitch.main.workflows.agent_io import _string_list
 from hitch.main.workflows.gh_observations import (
     _PR_GATE_BLOCKED,
@@ -42,7 +42,7 @@ def _pr_handoff_field_for_monitor_schema(
     if field in _PR_HANDOFF_BOOLEAN_FIELDS:
         return value if isinstance(value, bool) else None
     if field in _PR_HANDOFF_INTEGER_FIELDS:
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
+        return value if is_nonbool_int(value) else None
     if field == "ci_status":
         return _normalize_ci_status(value) or None
     if field in _PR_HANDOFF_LIST_FIELDS:
@@ -71,7 +71,7 @@ def _pr_list_item_for_monitor_schema(item: Any) -> str | dict[str, Any] | None:
     schema_item: dict[str, Any] = {}
     for key in _PR_SAFE_LIST_ITEM_FIELDS:
         value = item.get(key)
-        if (isinstance(value, int) and not isinstance(value, bool)) or isinstance(
+        if (is_nonbool_int(value)) or isinstance(
             value, str
         ):
             schema_item[key] = value
@@ -185,7 +185,7 @@ def _pr_handoff_agent_summary(handoff: dict[str, Any]) -> str:
     url = string_from_any(handoff.get("url"))
     number = handoff.get("pr_number")
     parts = ["Active PR:"]
-    if isinstance(number, int) and not isinstance(number, bool):
+    if is_nonbool_int(number):
         parts.append(f"#{number}")
     if repo:
         parts.append(f"in {repo}")

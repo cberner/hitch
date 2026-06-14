@@ -31,6 +31,7 @@ from hitch.main.runtime.rollout_state import (
 )
 from hitch.main.runtime.sdk_values import (
     datetime_value,
+    is_nonbool_int,
     string_value,
 )
 from hitch.main.sessions import session_stage
@@ -373,7 +374,7 @@ def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
     if not snapshot:
         return None
     number = snapshot.get("pr_number")
-    if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+    if is_nonbool_int(number) and number > 0:
         return number
     identity = _pr_snapshot_identity(snapshot)
     return identity[1] if identity is not None else None

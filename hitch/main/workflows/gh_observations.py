@@ -13,7 +13,7 @@ from typing import Any
 
 from django.utils import timezone
 
-from hitch.main.runtime.sdk_values import string_from_any, truncate_for_prompt
+from hitch.main.runtime.sdk_values import is_nonbool_int, string_from_any, truncate_for_prompt
 from hitch.main.workflows.pr_handoff import (
     _PR_SAFE_LIST_ITEM_FIELDS,
     _compact_pr_list,
@@ -124,10 +124,10 @@ def _reaction_group_count(group: dict[str, Any]) -> int:
     users = group.get("users")
     if isinstance(users, dict):
         count = users.get("totalCount")
-        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        if is_nonbool_int(count) and count > 0:
             return count
     count = group.get("totalCount") or group.get("count")
-    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+    if is_nonbool_int(count) and count > 0:
         return count
     return 0
 
@@ -147,7 +147,7 @@ def _safe_gh_comment_identifier(comment: Any) -> dict[str, Any]:
         return {}
     item: dict[str, Any] = {}
     comment_id = comment.get("databaseId") or comment.get("id")
-    if isinstance(comment_id, int) and not isinstance(comment_id, bool):
+    if is_nonbool_int(comment_id):
         item["database_id"] = comment_id
     elif isinstance(comment_id, str):
         item["id"] = comment_id
@@ -360,7 +360,7 @@ def _safe_gh_review_thread_identifier(thread: dict[str, Any]) -> dict[str, Any]:
         ("startLine", "start_line"),
     ):
         value = thread.get(source_key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if is_nonbool_int(value):
             item[target_key] = value
         elif isinstance(value, str) and value.strip():
             item[target_key] = value.strip()
@@ -456,7 +456,7 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
         if path:
             parts.append(f"path={path}")
         line = thread.get("line")
-        if isinstance(line, int) and not isinstance(line, bool):
+        if is_nonbool_int(line):
             parts.append(f"line={line}")
         comments = thread.get("comments")
         nodes = comments.get("nodes") if isinstance(comments, dict) else None
@@ -708,7 +708,7 @@ def _safe_pr_feedback_item(item: Any, index: int) -> str:
     safe_parts: list[str] = []
     for key in _PR_SAFE_LIST_ITEM_FIELDS:
         value = item.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if is_nonbool_int(value):
             safe_parts.append(f"{key}={value}")
         elif isinstance(value, str):
             safe_value = _safe_pr_identifier(value)

@@ -18,6 +18,7 @@ from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
 from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_for
 from hitch.main.runtime.sdk_values import (
+    is_nonbool_int,
     plain_sdk_value,
     sdk_model_dump_value,
     string_value,
@@ -185,7 +186,7 @@ def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int]
             return f"{owner}/{repo}", int(number)
     repo = string_value(snapshot.get("repository_full_name"))
     number = snapshot.get("pr_number")
-    if repo and isinstance(number, int) and not isinstance(number, bool):
+    if repo and is_nonbool_int(number):
         return repo, number
     return None
 

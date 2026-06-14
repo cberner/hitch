@@ -40,6 +40,7 @@ from hitch.main.repos import (
 )
 from hitch.main.runtime import codex_pool, rollout
 from hitch.main.runtime.sdk_values import (
+    is_nonbool_int,
     string_from_any,
 )
 from hitch.main.sessions import session_index
@@ -1276,7 +1277,7 @@ def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
         return {}
     retries: dict[str, int] = {}
     for key, value in raw.items():
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if is_nonbool_int(value) and value > 0:
             retries[str(key)] = value
     return retries
 
