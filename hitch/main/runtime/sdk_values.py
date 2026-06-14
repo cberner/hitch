@@ -10,7 +10,19 @@ values and none of them should have to import the others to do so.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeGuard
+
+
+def is_nonbool_int(value: Any) -> TypeGuard[int]:
+    """Return ``True`` only for genuine integers, excluding ``bool``.
+
+    ``bool`` is an ``int`` subclass, so a bare ``isinstance(value, int)`` accepts
+    ``True``/``False`` and lets them stand in for ``1``/``0``. JSON payloads from
+    Codex, GitHub, and rollout files routinely carry both, and treating a boolean
+    flag as a count, line number, or run id is always a bug. The ``TypeGuard``
+    keeps mypy's narrowing, so callers still see ``value`` as ``int``.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def string_value(value: Any) -> str:

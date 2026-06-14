@@ -24,6 +24,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import token_usage
 from hitch.main.sessions.session_settings import (
     _active_project_from_request,
@@ -400,7 +401,7 @@ def _autonomous_goal_recorded_thread_tokens(
     value = token_totals.get(instance.thread_id)
     return (
         value
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        if is_nonbool_int(value) and value > 0
         else 0
     )
 

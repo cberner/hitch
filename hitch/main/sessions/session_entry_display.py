@@ -21,6 +21,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout, streaming
+from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import session_index
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
@@ -359,7 +360,7 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
             )
             insert_index = (
                 prompt_index
-                if isinstance(prompt_index, int) and not isinstance(prompt_index, bool)
+                if is_nonbool_int(prompt_index)
                 else max(next_user_message_index - 1, 0)
             )
         # ``_finalize_agent_entry`` would skip single-finding feedback

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from hitch.main.models import CodexInstance
-from hitch.main.runtime.sdk_values import positive_int, string_from_any
+from hitch.main.runtime.sdk_values import is_nonbool_int, positive_int, string_from_any
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +408,7 @@ def _goal_event_from_event(
 def _goal_tokens_used(goal: dict[str, Any]) -> int | None:
     for key in ("tokensUsed", "tokens_used"):
         value = goal.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if is_nonbool_int(value):
             return max(0, value)
     return None
 
@@ -1050,7 +1050,7 @@ def _pr_update_belongs_to_current_pr(
     # failing run's jobs" follow-up from superseding the PR epoch, without
     # attributing a job check for an unrelated repo/PR's ``run_id`` to it.
     update_run_id = update.values.get("observed_run_id")
-    if isinstance(update_run_id, int) and not isinstance(update_run_id, bool):
+    if is_nonbool_int(update_run_id):
         return update_run_id in _pr_workflow_run_ids(current)
     return False
 
@@ -1064,7 +1064,7 @@ def _pr_workflow_run_ids(snapshot: dict[str, Any] | None) -> set[int]:
     return {
         value
         for value in raw
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        if is_nonbool_int(value) and value > 0
     }
 
 
@@ -1138,7 +1138,7 @@ def _compact_items(items: list[Any]) -> list[dict[str, Any]]:
             value = item.get(key)
             if isinstance(value, str) and value:
                 compact[key] = _compact_text(value)
-            elif isinstance(value, int) and not isinstance(value, bool):
+            elif is_nonbool_int(value):
                 compact[key] = value
         body = string_from_any(item.get("body"))
         if body:
@@ -1181,7 +1181,7 @@ def _event_order(event: dict[str, Any], fallback_order: int) -> tuple[int, int, 
 
 def _int_field(event: dict[str, Any], key: str) -> int | None:
     raw = event.get(key)
-    if isinstance(raw, int) and not isinstance(raw, bool):
+    if is_nonbool_int(raw):
         return raw
     return None
 

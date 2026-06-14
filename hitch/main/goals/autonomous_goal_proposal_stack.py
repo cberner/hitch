@@ -24,6 +24,7 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import rollout
 from hitch.main.runtime.rollout_state import _rollout_file_state_from_value
+from hitch.main.runtime.sdk_values import is_nonbool_int
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
@@ -240,7 +241,7 @@ def _proposal_metadata_non_negative_int(
     metadata: Mapping[str, object], key: str
 ) -> int | None:
     value = metadata.get(key)
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+    if is_nonbool_int(value) and value >= 0:
         return value
     return None
 
@@ -269,7 +270,7 @@ def _autonomous_goal_proposal_stack_continuation_metadata(
 
 
 def _valid_autonomous_goal_stack_metadata_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    return is_nonbool_int(value)
 
 
 def _autonomous_goal_proposal_stack_iteration(proposal: ProposedSession) -> int:
