@@ -1,4 +1,4 @@
-# Inbox and Proposals PRD
+# Inbox and Proposals Spec
 
 Status: Draft
 
@@ -138,7 +138,7 @@ acknowledge notices from Hitch background systems.
 - `INBOX-ag-reference`: User-actionable, published AG-created Proposals and
   Notices appear in the Inbox, but AG-specific proposal, notice, blocking,
   retry, hidden intermediate stack records, and cleanup behavior is owned by
-  [Autonomous Goals PRD](autonomous-goals.md).
+  [Autonomous Goals Spec](autonomous-goals.md).
 
 ### 4.7 UX Requirements
 

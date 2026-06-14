@@ -2,11 +2,11 @@
 
 This file tells coding agents how to work productively in this repository.
 
-## Product requirements
-- Before working on a feature, check `docs/prds/` for a relevant Product Requirements Document.
-- Treat PRDs as authoritative for product behavior, UX, and acceptance criteria.
-- If a user's request contradicts a PRD, flag the contradiction to the user before implementing.
-- If code changes intentionally change product behavior covered by a PRD, update the PRD in the same change or explicitly tell the user it needs a follow-up update.
+## Specs
+- Before working on a feature, check `docs/specs/` for a relevant spec.
+- Treat specs as authoritative for behavior, UX, and acceptance criteria.
+- If a user's request contradicts a spec, flag the contradiction to the user before implementing.
+- If code changes intentionally change behavior covered by a spec, update the spec in the same change or explicitly tell the user it needs a follow-up update.
 
 ## Before completing codebase-changing work
 

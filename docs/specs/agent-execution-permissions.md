@@ -1,4 +1,4 @@
-# Agent Execution Permissions PRD
+# Agent Execution Permissions Spec
 
 Status: Draft
 

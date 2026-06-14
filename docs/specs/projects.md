@@ -1,4 +1,4 @@
-# Projects PRD
+# Projects Spec
 
 Status: Draft
 
