@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
     <title>Health - HITCH</title>
 {% include "_js_class_bootstrap.html" %}
+{% include "_js_utils.html" %}
     <style>
         {% include "_color_tokens.html" %}
         * { box-sizing: border-box; }
@@ -292,16 +293,16 @@
                 }
             }
             button.addEventListener("click", function () {
-                var text = target.innerText;
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(text).then(
-                        function () { flash("Copied"); },
-                        function () { selectTarget(); flash("Select + copy"); }
-                    );
-                } else {
+                window.hitch.copyToClipboard(target.innerText).then(function (copied) {
+                    if (copied) {
+                        flash("Copied");
+                        return;
+                    }
+                    // Programmatic copy denied: select the text so the user can
+                    // copy it manually.
                     selectTarget();
                     flash("Select + copy");
-                }
+                });
             });
         })();
     </script>
