@@ -21,4 +21,26 @@
         const input = document.querySelector("input[name='csrfmiddlewaretoken']");
         return input ? input.value : "";
     };
+
+    // Issue a form-encoded, same-origin POST with the CSRF token attached, and
+    // return the raw fetch promise -- callers handle the response (their
+    // success/error/409 handling legitimately differs). Pass {xhr: true} to add
+    // the X-Requested-With header, which some endpoints use to answer 204
+    // instead of redirecting. `body` may be a string or a URLSearchParams.
+    window.hitch.postForm = function (url, body, options) {
+        options = options || {};
+        const headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-CSRFToken": window.hitch.csrfToken(),
+        };
+        if (options.xhr) {
+            headers["X-Requested-With"] = "XMLHttpRequest";
+        }
+        return fetch(url, {
+            method: "POST",
+            headers: headers,
+            body: body instanceof URLSearchParams ? body.toString() : body,
+            credentials: "same-origin",
+        });
+    };
 </script>

@@ -833,7 +833,6 @@
                 el.title = date.toString();
                 el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
             }
-            const csrfToken = window.hitch.csrfToken();
             const archiveToast = document.querySelector("[data-archive-toast]");
             const archiveUndo = document.querySelector("[data-archive-undo]");
             const archiveToastText = document.querySelector("[data-archive-toast-text]");
@@ -934,17 +933,7 @@
 
             function postArchiveState(row, archived) {
                 const body = new URLSearchParams({ archived: archived ? "true" : "false" });
-                const headers = {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "X-Requested-With": "XMLHttpRequest",
-                };
-                if (csrfToken) headers["X-CSRFToken"] = csrfToken;
-                return fetch(row.dataset.sessionArchiveUrl, {
-                    method: "POST",
-                    headers,
-                    body: body.toString(),
-                    credentials: "same-origin",
-                }).then((response) => {
+                return window.hitch.postForm(row.dataset.sessionArchiveUrl, body, { xhr: true }).then((response) => {
                     if (!response.ok) throw new Error("archive request failed");
                 });
             }
@@ -1155,17 +1144,7 @@
                             return;
                         }
                         const body = new URLSearchParams(new FormData(renameForm));
-                        const headers = {
-                            "Content-Type": "application/x-www-form-urlencoded",
-                            "X-Requested-With": "XMLHttpRequest",
-                        };
-                        if (csrfToken) headers["X-CSRFToken"] = csrfToken;
-                        fetch(renameForm.action, {
-                            method: "POST",
-                            headers,
-                            body: body.toString(),
-                            credentials: "same-origin",
-                        }).then((response) => {
+                        window.hitch.postForm(renameForm.action, body, { xhr: true }).then((response) => {
                             if (!response.ok) throw new Error("rename request failed");
                             if (input) input.value = name;
                             // Mirror session_index.display_title_for: the server
