@@ -1,6 +1,7 @@
 <script>
     (function () {
-        document.documentElement.classList.add("js");
+        // The "js" class is added once by _js_class_bootstrap.html, which every
+        // page including this nav also includes earlier in the document.
         const currentScript = document.currentScript;
         const navMenu = currentScript && currentScript.previousElementSibling;
         if (!navMenu || !navMenu.matches("[data-nav-menu]")) return;

@@ -111,6 +111,9 @@ class IndexViewTests(TestCase):
         initializer_start = body.index("window.closePrimaryNavMenu = closeNavMenu;")
         self.assertGreater(initializer_start, nav_end)
         self.assertLess(initializer_start, body.index("<main>"))
+        # The "js" class is bootstrapped exactly once; the nav initializer no
+        # longer re-adds it (it runs after _js_class_bootstrap.html).
+        self.assertEqual(body.count('classList.add("js")'), 1)
         self.assertContains(response, ".primary-nav.primary-nav-js .primary-nav-panel")
         self.assertNotContains(response, ":is(.js .primary-nav")
 
