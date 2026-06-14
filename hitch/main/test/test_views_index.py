@@ -7895,3 +7895,71 @@ class SharedCsrfHelperTests(TestCase):
                 self.assertEqual(result["token"], result["input"])
             finally:
                 browser.close()
+
+
+class SharedPostFormHelperTests(TestCase):
+    """The shared window.hitch.postForm helper (_js_utils.html).
+
+    Regression guard for the J6 dedup: every form POST goes through one helper
+    that attaches the CSRF token and form-encoded content type, and adds the
+    X-Requested-With header only when opted in (some endpoints answer 204 vs
+    redirect based on it, so it must not be sent unconditionally).
+    """
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_postform_headers_and_xhr_opt_in(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[])
+        html = self.client.get(reverse("index")).content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                result = page.evaluate(
+                    """
+                    async () => {
+                        const calls = [];
+                        window.fetch = (url, opts) => {
+                            calls.push({ url, opts });
+                            return Promise.resolve({ ok: true });
+                        };
+                        await window.hitch.postForm(
+                            "/with-xhr", new URLSearchParams({ a: "1" }), { xhr: true });
+                        await window.hitch.postForm("/no-xhr", "b=2");
+                        return calls.map((c) => ({
+                            url: c.url,
+                            method: c.opts.method,
+                            credentials: c.opts.credentials,
+                            contentType: c.opts.headers["Content-Type"],
+                            hasCsrf: "X-CSRFToken" in c.opts.headers,
+                            xhr: c.opts.headers["X-Requested-With"] || null,
+                        }));
+                    }
+                    """
+                )
+                self.assertEqual(len(result), 2)
+                with_xhr, no_xhr = result
+                for call in result:
+                    self.assertEqual(call["method"], "POST")
+                    self.assertEqual(call["credentials"], "same-origin")
+                    self.assertEqual(
+                        call["contentType"], "application/x-www-form-urlencoded"
+                    )
+                    self.assertTrue(call["hasCsrf"])
+                self.assertEqual(with_xhr["xhr"], "XMLHttpRequest")
+                self.assertIsNone(no_xhr["xhr"])
+            finally:
+                browser.close()

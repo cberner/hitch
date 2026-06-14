@@ -3394,7 +3394,6 @@
                 "item/commandExecution/requestApproval": "Run command?",
                 "item/fileChange/requestApproval": "Apply file change?",
             };
-            const csrfToken = window.hitch.csrfToken;
 
             function approvalDetail(method, params) {
                 const item = (params && params.item) || params || {};
@@ -4234,15 +4233,7 @@
                 // trailing ``/0/`` so a future URL prefix that happens to
                 // contain a ``0`` doesn't accidentally substitute there.
                 const url = entry.url || APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
-                fetch(url, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "X-CSRFToken": csrfToken(),
-                    },
-                    body,
-                    credentials: "same-origin",
-                }).then((response) => {
+                window.hitch.postForm(url, body).then((response) => {
                     // ``fetch`` resolves on HTTP errors (403 CSRF, 409
                     // race-with-another-tab), so a non-2xx response would
                     // otherwise leave the buttons permanently disabled
@@ -4277,15 +4268,7 @@
                 for (const btn of controls) btn.disabled = true;
                 const body = new URLSearchParams({ answers: JSON.stringify(entry.answers || {}) });
                 const url = INPUT_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
-                fetch(url, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "X-CSRFToken": csrfToken(),
-                    },
-                    body,
-                    credentials: "same-origin",
-                }).then((response) => {
+                window.hitch.postForm(url, body).then((response) => {
                     if (!response.ok && response.status !== 409) {
                         for (const btn of controls) btn.disabled = false;
                     }
