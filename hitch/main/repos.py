@@ -149,6 +149,9 @@ def pull_default_branch_from_origin(cwd: str | Path) -> AutoPullResult:
     if result.returncode != 0:
         raise AutoPullError(_git_failure_message(result))
     after_sha = _commit_hash_for_ref(repo, "HEAD") or ""
+    origin_sha = _commit_hash_for_ref(repo, f"refs/remotes/origin/{branch}") or ""
+    if after_sha != origin_sha:
+        raise AutoPullError(f"project repository is ahead of origin/{branch}")
     return AutoPullResult(
         branch=branch,
         before_sha=before_sha,
