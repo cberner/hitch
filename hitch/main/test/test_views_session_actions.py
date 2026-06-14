@@ -107,6 +107,28 @@ class SetSessionNameViewTests(TestCase):
                 self.assertEqual(response.status_code, status)
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.views.session_actions.session_index.update_cached_name")
+    @patch("hitch.main.views.common.Codex")
+    def test_archived_or_unknown_session_returns_400(
+        self, mock_codex: MagicMock, mock_update: MagicMock
+    ) -> None:
+        # thread_set_name raises InvalidRequestError for archived/nonexistent
+        # threads (e.g. a rename from a stale tab or right after archiving).
+        # Answer 400 like the sibling endpoints rather than 500.
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_set_name.side_effect = InvalidRequestError(
+            code=-32600, message="thread is archived"
+        )
+
+        response = self.client.post(
+            reverse("set_session_name", kwargs={"session_id": "abc"}),
+            data={"name": "New title"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # The rename never landed, so the cached name must not be updated.
+        mock_update.assert_not_called()
+
 class SetSessionApprovalModeViewTests(TestCase):
     def test_updates_and_resets_session_approval_mode(self) -> None:
         SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
