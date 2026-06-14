@@ -7755,3 +7755,33 @@ class UnarchiveFailureTests(TestCase):
                 )
             finally:
                 browser.close()
+
+
+class ThreadListSortTests(TestCase):
+    """`_thread_list_page` must sort SDK threads with heterogeneous timestamps.
+
+    Regression guard: threads can carry a datetime, an epoch int/float, or no
+    `updated_at` at all. Sorting that mix directly (or a datetime against the
+    default 0) raises TypeError and 500s the session list, so the sort key is
+    normalized through `updated_at_seconds`.
+    """
+
+    def test_sorts_mixed_and_absent_updated_at_without_crashing(self) -> None:
+        threads = [
+            SimpleNamespace(id="missing"),  # no updated_at attribute at all
+            SimpleNamespace(id="epoch", updated_at=1_700_000_000),
+            SimpleNamespace(id="dt", updated_at=datetime(2025, 1, 2, tzinfo=UTC)),
+        ]
+        codex = SimpleNamespace(
+            thread_list=lambda **kwargs: SimpleNamespace(
+                data=list(threads), next_cursor=""
+            )
+        )
+
+        page = session_list._thread_list_page(
+            cast(Any, codex), archived=False, cursor=""
+        )
+
+        # Newest first: the 2025 datetime, then the 2023 epoch, then the
+        # timestampless thread (treated as oldest).
+        self.assertEqual([thread.id for thread in page.threads], ["dt", "epoch", "missing"])

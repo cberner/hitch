@@ -37,6 +37,7 @@ from hitch.main.runtime.rollout_state import (
 )
 from hitch.main.runtime.sdk_values import (
     string_value,
+    updated_at_seconds,
 )
 from hitch.main.sessions import session_index, system_agent_summary
 from hitch.main.sessions.project_visibility import (
@@ -974,7 +975,11 @@ def _thread_list_page(codex: common.Codex, *, archived: bool, cursor: str) -> Th
     return ThreadListPage(
         threads=sorted(
             list(response.data),
-            key=lambda thread: getattr(thread, "updated_at", 0),
+            # Normalize through updated_at_seconds: SDK threads may carry
+            # datetime, epoch int/float, or no updated_at at all, and sorting a
+            # mix (or a datetime against the default 0) would raise TypeError.
+            key=lambda thread: updated_at_seconds(getattr(thread, "updated_at", None))
+            or 0.0,
             reverse=True,
         ),
         next_cursor=next_cursor if isinstance(next_cursor, str) else "",
