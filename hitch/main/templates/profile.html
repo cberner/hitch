@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
     <title>Profile - HITCH</title>
 {% include "_js_class_bootstrap.html" %}
+{% include "_js_utils.html" %}
     <style>
         {% include "_color_tokens.html" %}
         * { box-sizing: border-box; }
@@ -217,7 +218,7 @@
                 </p>
                 {% endif %}
                 <form class="danger-zone-form" method="post" action="{{ nuke_codex_url }}"
-                      onsubmit="return confirm('Force-kill all Codex app servers Hitch started?');">
+                      data-confirm="Force-kill all Codex app servers Hitch started?">
                     {% csrf_token %}
                     <button class="button danger" type="submit">Nuke Codex instances</button>
                 </form>

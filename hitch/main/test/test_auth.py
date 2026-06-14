@@ -565,3 +565,50 @@ class AuthenticatedSettingsTests(TestCase):
             approval_mode="deny_all",
             enable_memories=True,
         )
+
+
+class ConfirmFormTests(TestCase):
+    """The shared data-confirm wirer replaces inline onsubmit confirms.
+
+    Regression guard for J13: a form[data-confirm] confirms before submitting,
+    and declining cancels the submit.
+    """
+
+    @patch("hitch.main.views.common.Codex")
+    def test_data_confirm_blocks_submit_when_declined(
+        self, mock_codex: MagicMock
+    ) -> None:
+        self.client.force_login(_make_user())
+        _setup_codex(mock_codex)
+        html = self.client.get(reverse("profile")).content.decode()
+        self.assertIn('data-confirm="Force-kill', html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        dispatch = """
+            (accept) => {
+                window.confirm = () => accept;
+                const form = document.querySelector("form[data-confirm]");
+                const event = new Event("submit", { cancelable: true, bubbles: true });
+                form.dispatchEvent(event);
+                return event.defaultPrevented;
+            }
+        """
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                # Declining the confirm cancels the submit.
+                self.assertTrue(page.evaluate(dispatch, False))
+                # Accepting it lets the submit proceed.
+                self.assertFalse(page.evaluate(dispatch, True))
+            finally:
+                browser.close()
