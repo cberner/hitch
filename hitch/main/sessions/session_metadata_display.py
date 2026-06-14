@@ -23,6 +23,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime.sdk_values import latest_updated_at, updated_at_seconds
+from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import session_index
 from hitch.main.sessions.session_cursor import _index_cursor_for_sort_key, _IndexCursor
 from hitch.main.sessions.system_agent_summary import (
@@ -301,9 +302,7 @@ def _session_row_for_metadata(
 def _qa_activity_updated_at_by_metadata_thread_ids(
     main_thread_ids: Iterable[str], hidden_thread_ids: set[str] | None
 ) -> dict[str, Any]:
-    main_thread_ids = [
-        thread_id for thread_id in dict.fromkeys(main_thread_ids) if thread_id
-    ]
+    main_thread_ids = unique_nonempty(main_thread_ids)
     if not main_thread_ids:
         return {}
     runs = list(

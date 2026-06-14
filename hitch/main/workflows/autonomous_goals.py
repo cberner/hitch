@@ -76,6 +76,7 @@ from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
 from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_from_value
 from hitch.main.runtime.sdk_values import truncate_for_prompt
+from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import session_index
 from hitch.main.workflows import engine, system_agents
 from hitch.main.workflows.agent_io import (
@@ -1320,11 +1321,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             workflow, "candidate_session_id"
         )
         resolution_cleanup_cwds = tuple(
-            dict.fromkeys(
-                cwd
-                for cwd in (cleanup_cwd, resolved_proposal_cleanup_cwd)
-                if cwd
-            )
+            unique_nonempty((cleanup_cwd, resolved_proposal_cleanup_cwd))
         )
         return _AutonomousGoalPostCommitAction(
             cleanup_candidate_cwds=resolution_cleanup_cwds
