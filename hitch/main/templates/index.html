@@ -838,7 +838,17 @@
             const archiveToastText = document.querySelector("[data-archive-toast-text]");
             const pendingArchives = new Map();
             const swipableRows = new WeakSet();
-            let undoRow = null;
+            // Rows whose 5s archive grace period is still open, kept ordered by
+            // when the user archived each row (see archiveSequence). A stack (not
+            // a single slot) so rapidly archiving several rows keeps every row
+            // independently undoable until its own timer fires; Undo targets the
+            // most recently archived row.
+            const undoStack = [];
+            // Monotonic counter stamped on each row when its archive begins.
+            // showArchiveToast runs from the archive POST's `.then`, which can
+            // resolve out of order, so the stack is ordered by this sequence
+            // rather than POST-completion order.
+            let archiveSequence = 0;
             const sessionListMenu = document.querySelector("[data-session-list-menu]");
             const sessionListMenuButton = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-open]");
             const sessionListMenuPanel = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-panel]");
@@ -938,13 +948,25 @@
             }
 
             function hideArchiveToast(row) {
-                if (undoRow !== row) return;
-                undoRow = null;
+                const index = undoStack.indexOf(row);
+                if (index !== -1) undoStack.splice(index, 1);
+                // Keep the toast up while any other row's grace period is open.
+                if (undoStack.length > 0) return;
                 if (archiveToast) archiveToast.hidden = true;
             }
 
             function showArchiveToast(row) {
-                undoRow = row;
+                if (!undoStack.includes(row)) {
+                    // Insert ordered by archive sequence so Undo restores the
+                    // most recently archived row first even when archive POSTs
+                    // resolve out of order.
+                    const seq = Number(row.dataset.archiveSeq);
+                    let index = undoStack.length;
+                    while (index > 0 && Number(undoStack[index - 1].dataset.archiveSeq) > seq) {
+                        index -= 1;
+                    }
+                    undoStack.splice(index, 0, row);
+                }
                 if (archiveToastText) archiveToastText.textContent = "Session archived";
                 if (archiveUndo) archiveUndo.disabled = false;
                 if (archiveToast) archiveToast.hidden = false;
@@ -963,6 +985,7 @@
                 closeSessionMenus();
                 resetSwipe(row);
                 row.dataset.pendingArchive = "true";
+                row.dataset.archiveSeq = String(++archiveSequence);
                 row.classList.add("pending-archive");
                 postArchiveState(row, true).then(() => {
                     const timeout = window.setTimeout(() => finalizeArchive(row), 5000);
@@ -975,17 +998,19 @@
             }
 
             function undoArchive() {
-                const row = undoRow;
+                const row = undoStack[undoStack.length - 1];
                 if (!row) return;
                 const timeout = pendingArchives.get(row);
                 if (timeout) window.clearTimeout(timeout);
                 pendingArchives.delete(row);
-                if (archiveUndo) archiveUndo.disabled = true;
+                // Drop this row from the stack now so an immediate second Undo
+                // click targets the next pending row instead of re-running it.
+                hideArchiveToast(row);
+                if (archiveUndo) archiveUndo.disabled = undoStack.length === 0;
                 postArchiveState(row, false).then(() => {
                     row.dataset.pendingArchive = "false";
                     row.classList.remove("pending-archive");
                     setRowArchived(row, false);
-                    hideArchiveToast(row);
                 }).catch(() => {
                     const retryTimeout = window.setTimeout(() => finalizeArchive(row), 5000);
                     pendingArchives.set(row, retryTimeout);
