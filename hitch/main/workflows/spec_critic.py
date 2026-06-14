@@ -222,6 +222,64 @@ def _begin_spec_critic_analysis(workflow: SystemWorkflow) -> None:
             workflow, f"failed to start Spec Critic agents: {exc!r}"
         )
 
+def _spec_critic_spawned_analysis_kinds(workflow: SystemWorkflow) -> set[str]:
+    """Analysis agent kinds a prior spawn already launched.
+
+    Counts a kind as launched if it has either a ``SystemAgentRun`` or a
+    workflow-owned ``CodexInstance`` (the instance is persisted before its run
+    row, so a handler that died in that gap leaves an instance with no run).
+    """
+    kinds = set(
+        workflow.agent_runs.filter(
+            agent_kind__in=_SPEC_CRITIC_ANALYSIS_AGENT_KINDS
+        ).values_list("agent_kind", flat=True)
+    )
+    kinds |= set(
+        CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind__in=_SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
+        ).values_list("agent_kind", flat=True)
+    )
+    return kinds
+
+def _spec_critic_analysis_needs_recovery(workflow: SystemWorkflow) -> bool:
+    """True when an ANALYZING workflow can no longer reach a complete fan-in.
+
+    The fan-in advances only once every analysis kind has a *completed* run, so
+    a stranded ANALYZING step is one that is either missing a kind (the
+    never-spawned orphan or a partial spawn) or has a kind whose run already
+    failed (its finish handler died before blocking). A failed run can never
+    reach COMPLETED and the terminal reconciler skips terminal runs, so without
+    recovery the workflow would hang forever.
+    """
+    if _spec_critic_spawned_analysis_kinds(workflow) != set(
+        _SPEC_CRITIC_ANALYSIS_AGENT_KINDS
+    ):
+        return True
+    return workflow.agent_runs.filter(
+        agent_kind__in=_SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
+        status=SystemAgentRun.STATUS_FAILED,
+    ).exists()
+
+def _recover_spec_critic_analysis(workflow: SystemWorkflow) -> None:
+    """Recover an ANALYZING workflow whose analysis fan-out was stranded.
+
+    Re-spawn the agents only for the never-launched orphan, where nothing
+    exists to duplicate. A partial spawn cannot be safely completed from here:
+    re-launching only the missing kinds races the original spawn loop (which
+    holds no per-kind claim), and a kind whose run already failed can never
+    reach COMPLETED, so the fan-in would never advance. Block instead and
+    surface the failure so the user can retry the critique cleanly.
+    """
+    if not _spec_critic_spawned_analysis_kinds(workflow):
+        _begin_spec_critic_analysis(workflow)
+        return
+    _block_spec_critic_workflow(
+        workflow,
+        "Spec Critic analysis did not start all of its agents. Please retry.",
+    )
+
 def _start_spec_critic_classification(workflow: SystemWorkflow) -> None:
     """Classify the prompt off the request path, then route the workflow."""
     try:
@@ -364,11 +422,12 @@ class _SpecCriticHandler(engine.WorkflowHandler):
                 kind=self.kind,
                 step=system_agents.STEP_SPEC_CRITIC_ANALYZING,
                 stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
-                # Only the "claimed ANALYZING but never spawned the agents"
-                # orphan is recoverable; once any run exists, terminal-instance
-                # reconciliation owns it (re-spawning would duplicate agents).
-                needs_recovery=lambda w: not w.agent_runs.exists(),
-                recover=lambda w: _begin_spec_critic_analysis(w),
+                # Recover ANALYZING when it is missing a run for any analysis
+                # kind: re-spawn the never-launched orphan, but block a partial
+                # spawn (which cannot be safely completed -- see
+                # _recover_spec_critic_analysis).
+                needs_recovery=_spec_critic_analysis_needs_recovery,
+                recover=_recover_spec_critic_analysis,
             ),
             engine.SpawnRecoverySpec(
                 kind=self.kind,

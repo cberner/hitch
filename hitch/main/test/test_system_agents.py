@@ -1536,9 +1536,12 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(mock_spawn.call_count, 3)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_leaves_analysis_with_runs_to_instance_reconciler(
+    def test_reconcile_blocks_partial_analysis_spawn(
         self, mock_spawn: MagicMock
     ) -> None:
+        # A dead spawn left one analysis agent launched and the rest missing.
+        # The missing agents cannot be re-launched safely (that races the
+        # original loop), so recovery blocks instead of completing the fan-out.
         workflow = self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_ANALYZING)
         instance = _instance(
             thread_id="req-thread",
@@ -1557,9 +1560,73 @@ class SpecCriticWorkflowTests(TestCase):
 
         system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
 
-        # An existing run means the analysis agents were spawned; re-spawning
-        # would duplicate them, so the stale recoverer must leave it alone.
         mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_blocks_partial_analysis_with_failed_run(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        # One analysis agent failed and another was never launched. Re-spawning
+        # the missing kinds would still leave the failed kind unable to reach
+        # COMPLETED, so the fan-in could never advance; recovery must block.
+        workflow = self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        instance = _instance(
+            thread_id="req-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_FAILED,
+        )
+
+        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
+
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_blocks_analysis_when_a_launched_run_failed(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        # Every kind was launched but one run failed while the workflow stayed
+        # RUNNING (its finish handler died before blocking). The failed kind can
+        # never reach COMPLETED, so the fan-in is stuck; recovery must block.
+        workflow = self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        statuses = {
+            agent_io.SPEC_REQUIREMENTS_AGENT_KIND: SystemAgentRun.STATUS_FAILED,
+            agent_io.SPEC_RISK_AGENT_KIND: SystemAgentRun.STATUS_COMPLETED,
+            agent_io.SPEC_TEST_AGENT_KIND: SystemAgentRun.STATUS_COMPLETED,
+        }
+        for agent_kind, status in statuses.items():
+            instance = _instance(
+                thread_id=f"{agent_kind}-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                status=CodexInstance.STATUS_COMPLETED,
+                agent_kind=agent_kind,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=agent_kind,
+                thread_id=instance.thread_id,
+                instance=instance,
+                status=status,
+            )
+
+        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
+
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch("hitch.main.workflows.spec_critic._spawn_spec_critic_synthesizer_run")
     def test_reconcile_respawns_synthesizer_when_orphaned_without_run(
