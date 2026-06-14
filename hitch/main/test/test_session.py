@@ -4299,6 +4299,12 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "parseQaCommand")
         self.assertContains(response, '"turn/plan/updated":')
         self.assertContains(response, '"item/plan/delta":')
+        # Stream dispatch must only honour own properties so a wire method
+        # named "constructor"/"__proto__" can't resolve to a prototype member.
+        self.assertContains(
+            response,
+            "Object.prototype.hasOwnProperty.call(STREAM_HANDLERS, parsed.method)",
+        )
         self.assertContains(response, "activateFinalPlanText")
         self.assertContains(response, "input-option-description")
         self.assertContains(response, 'other.placeholder = "Other"')

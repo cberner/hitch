@@ -4362,7 +4362,12 @@
                 }
                 const payload = parsed.payload || {};
                 const order = eventOrder(parsed, streamFallbackOrder);
-                const handler = STREAM_HANDLERS[parsed.method];
+                // Look up by own property only: method strings come straight
+                // off the wire, so an inherited name like "constructor" or
+                // "__proto__" must not resolve to an Object.prototype member.
+                const handler = Object.prototype.hasOwnProperty.call(STREAM_HANDLERS, parsed.method)
+                    ? STREAM_HANDLERS[parsed.method]
+                    : null;
                 if (handler) handler(payload, parsed, order);
             }
 
