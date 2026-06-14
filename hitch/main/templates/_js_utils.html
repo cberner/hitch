@@ -90,4 +90,31 @@
         }
         return Promise.resolve(fallback());
     };
+
+    // Wire every <form data-confirm="..."> to confirm before submitting, so
+    // pages don't need inline onsubmit="return confirm(...)" handlers. Idempotent
+    // and safe to run on any page (a no-op where there are no such forms).
+    window.hitch.wireConfirmForms = function (root) {
+        const scope = root || document;
+        const forms = scope.querySelectorAll("form[data-confirm]");
+        for (const form of forms) {
+            if (form.dataset.confirmWired === "1") {
+                continue;
+            }
+            form.dataset.confirmWired = "1";
+            form.addEventListener("submit", function (event) {
+                if (!window.confirm(form.getAttribute("data-confirm"))) {
+                    event.preventDefault();
+                }
+            });
+        }
+    };
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function () {
+            window.hitch.wireConfirmForms();
+        });
+    } else {
+        window.hitch.wireConfirmForms();
+    }
 </script>
