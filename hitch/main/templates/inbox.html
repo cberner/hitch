@@ -1,12 +1,6 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
-    <title>Inbox - HITCH</title>
-{% include "_js_class_bootstrap.html" %}
+{% extends "base.html" %}
+{% block title %}Inbox - HITCH{% endblock %}
+{% block head %}
     <style>
         {% include "_color_tokens.html" %}
         * { box-sizing: border-box; }
@@ -288,8 +282,8 @@
             .button { width: 100%; }
         }
     </style>
-</head>
-<body>
+{% endblock %}
+{% block body %}
     <header class="topbar">
         <div class="topbar-inner">
             <div class="topbar-leading">
@@ -553,5 +547,4 @@
             {% include "_primary_nav_script.html" %}
         })();
     </script>
-</body>
-</html>
+{% endblock %}

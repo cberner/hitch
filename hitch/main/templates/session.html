@@ -1,13 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-    <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
-    <title>HITCH — {{ display_title }}</title>
-{% include "_js_class_bootstrap.html" %}
-{% include "_js_utils.html" %}
+{% extends "base.html" %}
+{% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">{% endblock %}
+{% block title %}HITCH — {{ display_title }}{% endblock %}
+{% block head %}
     <style>
         {% include "_color_tokens.html" %}
         :root {
@@ -1999,8 +1993,9 @@
     <noscript>
         <style>.edit-title[hidden] { display: block; }</style>
     </noscript>
-</head>
-<body{% if read_only %} class="read-only"{% endif %}>
+{% endblock %}
+{% block body_attrs %}{% if read_only %} class="read-only"{% endif %}{% endblock %}
+{% block body %}
     <header class="topbar">
         <div class="topbar-inner">
             {% include "_primary_nav.html" %}
@@ -4389,5 +4384,4 @@
         })();
     </script>
     {% include "_stage_refresh_script.html" %}
-</body>
-</html>
+{% endblock %}
