@@ -4165,7 +4165,13 @@
                     other.className = "input-other";
                     other.placeholder = "Other";
                     other.setAttribute("aria-label", "Other answer for " + qid);
-                    other.addEventListener("focus", () => setAnswer(other.value, null));
+                    // Focusing the empty Other field must not wipe a selected
+                    // option; only adopt its text once it actually has content
+                    // (re-selecting an already-filled Other, or as the user
+                    // types via the input handler below).
+                    other.addEventListener("focus", () => {
+                        if (inputAnswerPresent(other.value)) setAnswer(other.value, null);
+                    });
                     other.addEventListener("input", () => setAnswer(other.value, null));
                     optionRow.appendChild(other);
                     if (buttons.length && !requiresExplicitChoice) {
