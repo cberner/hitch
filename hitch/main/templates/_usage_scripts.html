@@ -11,6 +11,11 @@
             }
 
             document.querySelectorAll(".lifetime-stat").forEach((tile) => {
+                // Only tiles with a chart are expandable; a chartless tile has
+                // nothing to reveal, so it must not behave (or be announced) as
+                // a button. The template omits role/tabindex/aria-expanded for
+                // those, and this guard keeps the toggle handlers off them too.
+                if (!tile.querySelector(".lifetime-chart")) return;
                 function toggleTile() {
                     const expanded = tile.classList.toggle("is-expanded");
                     tile.setAttribute("aria-expanded", expanded ? "true" : "false");
