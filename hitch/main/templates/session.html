@@ -2615,6 +2615,10 @@
 
             const LONG_PRESS_MS = 650;
             const LONG_PRESS_MOVE_PX = 10;
+            // How long the "copied" flash stays on, and how long the click that
+            // follows a long-press/copy is suppressed; kept in sync with the
+            // .copied CSS transition.
+            const COPY_FEEDBACK_MS = 900;
             let longPress = null;
             let suppressMessageClickUntil = 0;
 
@@ -2633,11 +2637,11 @@
 
             function markCopied(message) {
                 message.classList.add("copied");
-                window.setTimeout(() => message.classList.remove("copied"), 900);
+                window.setTimeout(() => message.classList.remove("copied"), COPY_FEEDBACK_MS);
             }
 
             function copyMessage(message) {
-                suppressMessageClickUntil = Date.now() + 900;
+                suppressMessageClickUntil = Date.now() + COPY_FEEDBACK_MS;
                 copyText(messageCopyText(message)).then((copied) => {
                     if (copied) markCopied(message);
                 }).catch(() => {});
@@ -2749,6 +2753,8 @@
                 const composerHeightProperty = "--composer-height";
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
+                // Re-measure the keyboard offset at a few delays so the composer
+                // settles correctly as the mobile virtual keyboard animates in.
                 const composerKeyboardSettleDelays = [50, 150, 300, 500];
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
                 const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
@@ -4308,7 +4314,7 @@
 
             function renderPrProgress(gates) {
                 if (!prProgress) return;
-                prProgress.innerHTML = "";
+                prProgress.replaceChildren();
                 const validGates = gates.filter((gate) => {
                     return gate
                         && typeof gate.key === "string"
