@@ -1495,6 +1495,110 @@ class SessionViewTests(TestCase):
         self.assertIn("Demo setup file change", body)
 
     @patch("hitch.main.views.common.Codex")
+    def test_input_request_focusing_other_field_keeps_selection(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt="hello",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        self.assertIn('data-read-only="false"', html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.evaluate(
+                    """
+                    () => {
+                        class MockEventSource {
+                            constructor(url) {
+                                this.url = url;
+                                this.listeners = {};
+                                window.__eventSource = this;
+                            }
+                            addEventListener(type, cb) { this.listeners[type] = cb; }
+                            close() {}
+                            emit(type, data) {
+                                this.listeners[type]({ data: JSON.stringify(data) });
+                            }
+                        }
+                        window.EventSource = MockEventSource;
+                    }
+                    """
+                )
+                page.set_content(html, wait_until="load")
+                page.wait_for_function("window.__eventSource !== undefined")
+                page.evaluate(
+                    """
+                    () => window.__eventSource.emit("message", {
+                        method: "input/requested",
+                        eventSeq: 1,
+                        payload: {
+                            id: "req-1",
+                            params: { questions: [{
+                                id: "q1",
+                                question: "Pick one",
+                                options: [{ label: "Alpha" }, { label: "Beta" }],
+                            }] },
+                        },
+                    })
+                    """
+                )
+                page.wait_for_function(
+                    "document.querySelectorAll('.input-options button').length === 2"
+                )
+                # Select the second option explicitly.
+                page.evaluate(
+                    "() => document.querySelectorAll('.input-options button')[1].click()"
+                )
+                pressed = (
+                    "() => document.querySelector("
+                    "\"[data-input-request-id] .input-options button[aria-pressed='true']\")"
+                )
+                page.wait_for_function(
+                    f"{pressed}.querySelector('.input-option-label').textContent === 'Beta'"
+                )
+                # Focusing the empty Other field must not wipe the selection.
+                page.evaluate("() => document.querySelector('.input-other').focus()")
+                self.assertEqual(
+                    page.evaluate(
+                        "() => document.querySelectorAll("
+                        "\".input-options button[aria-pressed='true']\").length"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    page.evaluate(
+                        f"{pressed}.querySelector('.input-option-label').textContent"
+                    ),
+                    "Beta",
+                )
+            finally:
+                browser.close()
+
+    @patch("hitch.main.views.common.Codex")
     def test_registered_demo_status_renders_logs(
         self, mock_codex: MagicMock
     ) -> None:
