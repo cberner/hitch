@@ -1,4 +1,4 @@
-# Autonomous Goals PRD
+# Autonomous Goals Spec
 
 Status: Draft
 
