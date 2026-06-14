@@ -849,6 +849,7 @@
             // resolve out of order, so the stack is ordered by this sequence
             // rather than POST-completion order.
             let archiveSequence = 0;
+            let archiveErrorTimeout = null;
             const sessionListMenu = document.querySelector("[data-session-list-menu]");
             const sessionListMenuButton = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-open]");
             const sessionListMenuPanel = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-panel]");
@@ -968,8 +969,29 @@
                     undoStack.splice(index, 0, row);
                 }
                 if (archiveToastText) archiveToastText.textContent = "Session archived";
-                if (archiveUndo) archiveUndo.disabled = false;
+                if (archiveUndo) {
+                    // Re-reveal Undo in case a prior error notice hid it.
+                    archiveUndo.hidden = false;
+                    archiveUndo.disabled = false;
+                }
+                window.clearTimeout(archiveErrorTimeout);
                 if (archiveToast) archiveToast.hidden = false;
+            }
+
+            function showArchiveError(message) {
+                // Reuse the aria-live toast to report a failed archive action.
+                // A pending grace period and its Undo button take priority, so
+                // don't clobber an active Undo toast; otherwise show an
+                // Undo-less notice that auto-hides (unless a real archive claims
+                // the toast in the meantime).
+                if (undoStack.length > 0) return;
+                if (archiveToastText) archiveToastText.textContent = message;
+                if (archiveUndo) archiveUndo.hidden = true;
+                if (archiveToast) archiveToast.hidden = false;
+                window.clearTimeout(archiveErrorTimeout);
+                archiveErrorTimeout = window.setTimeout(() => {
+                    if (undoStack.length === 0 && archiveToast) archiveToast.hidden = true;
+                }, 5000);
             }
 
             function finalizeArchive(row) {
@@ -1173,6 +1195,10 @@
                         }
                         postArchiveState(row, false).then(() => {
                             setRowArchived(row, false);
+                        }).catch(() => {
+                            // The row stays archived (matching the server);
+                            // surface the failure instead of silently no-opping.
+                            showArchiveError("Couldn't unarchive session");
                         });
                     });
                 }

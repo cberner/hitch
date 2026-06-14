@@ -7682,3 +7682,76 @@ class ArchiveUndoToastTests(TestCase):
                 page.wait_for_function(restored, arg="sess-1")
             finally:
                 browser.close()
+
+
+class UnarchiveFailureTests(TestCase):
+    """Browser-level coverage for a failed unarchive from the row menu.
+
+    Regression guard: a rejected unarchive POST must surface feedback and not
+    leave an unhandled promise rejection or a silently inconsistent row.
+    """
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_failed_unarchive_reports_error_and_keeps_row_archived(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        archived = _session(
+            "arch-1",
+            name="Archived one",
+            path="/tmp/archived_sessions/arch.jsonl",
+        )
+        _setup_codex(mock_codex, threads=[], archived_threads=[archived])
+
+        response = self.client.get(reverse("index"))
+        self.assertEqual(response.status_code, 200)
+        page_html = response.content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(page_html, wait_until="load")
+                # The unarchive POST fails (non-OK response).
+                page.evaluate(
+                    "() => { window.fetch = () => Promise.resolve({ ok: false }); }"
+                )
+                # Submitting an archived row's form takes the unarchive branch.
+                page.evaluate(
+                    "() => document.querySelector("
+                    "\"[data-session-archive-url*='arch-1'] "
+                    "[data-session-archive-form]\").requestSubmit()"
+                )
+                page.wait_for_function(
+                    "() => { const t = document.querySelector("
+                    "'[data-archive-toast]');"
+                    " return t && !t.hidden && document.querySelector("
+                    "'[data-archive-toast-text]').textContent"
+                    ".includes('Couldn'); }"
+                )
+                # No Undo on a failed unarchive, and the row stays archived.
+                self.assertTrue(
+                    page.evaluate(
+                        "() => document.querySelector('[data-archive-undo]').hidden"
+                    )
+                )
+                self.assertEqual(
+                    page.evaluate(
+                        "() => document.querySelector("
+                        "\"[data-session-archive-url*='arch-1']\")"
+                        ".dataset.sessionArchived"
+                    ),
+                    "true",
+                )
+            finally:
+                browser.close()
