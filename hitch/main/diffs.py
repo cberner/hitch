@@ -130,37 +130,74 @@ def _tracked_diff(repo: Path) -> str:
 
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
-    default_base = _merge_base_or_ref(repo, _BRANCH_DIFF_DEFAULT_REF)
-    if default_base is not None:
-        return default_base
-
+    # origin/HEAD is authoritative: if it shares history with HEAD, diff against
+    # that merge-base outright. Otherwise fall back to the closest merge-base
+    # among the well-known remote default branches.
     fallback_ref = None
+    saw_no_common_ancestor = False
     closest_merge_base = None
     closest_distance = None
-    for base_ref in _BRANCH_DIFF_FALLBACK_REFS:
-        output = _git_output(repo, ["rev-parse", "--verify", "--quiet", base_ref])
-        if not output or not output.strip():
+    for index, base_ref in enumerate(
+        (_BRANCH_DIFF_DEFAULT_REF, *_BRANCH_DIFF_FALLBACK_REFS)
+    ):
+        if not _ref_exists(repo, base_ref):
             continue
         if fallback_ref is None:
             fallback_ref = base_ref
-        merge_base = _git_output(repo, ["merge-base", "HEAD", base_ref])
-        if not merge_base or not merge_base.strip():
+        # Allow status 1 (no common ancestor) so it stays distinguishable from
+        # an execution failure (timeout / lock), which returns None.
+        merge_base = _git_output(
+            repo, ["merge-base", "HEAD", base_ref], allow_statuses={0, 1}
+        )
+        if merge_base is None:
             continue
-        distance = _commit_distance_from_head(repo, merge_base.strip())
+        merge_base = merge_base.strip()
+        if not merge_base:
+            saw_no_common_ancestor = True
+            continue
+        if index == 0:
+            return merge_base
+        distance = _commit_distance_from_head(repo, merge_base)
         if distance is None:
             continue
         if closest_distance is None or distance < closest_distance:
-            closest_merge_base = merge_base.strip()
+            closest_merge_base = merge_base
             closest_distance = distance
-    return closest_merge_base or fallback_ref
+    if closest_merge_base is not None:
+        return closest_merge_base
+    # git found no common ancestor between HEAD and a base ref. In a complete
+    # repository that means a genuinely disjoint history (orphan branch / origin
+    # re-pointed at an unrelated repo): diff against the empty tree so the
+    # branch's content shows as additions rather than the unrelated ref's files
+    # as spurious deletions. In a shallow clone the shared ancestor may simply
+    # be unfetched, so keep diffing against the ref directly; likewise fall back
+    # to the ref when merge-base could not be computed at all.
+    if saw_no_common_ancestor and not _is_shallow_repo(repo):
+        empty_tree = _empty_tree_hash(repo)
+        if empty_tree is not None:
+            return empty_tree
+    return fallback_ref
 
 
-def _merge_base_or_ref(repo: Path, base_ref: str) -> str | None:
-    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", base_ref])
-    if not output or not output.strip():
+def _ref_exists(repo: Path, ref: str) -> bool:
+    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", ref])
+    return bool(output and output.strip())
+
+
+def _is_shallow_repo(repo: Path) -> bool:
+    output = _git_output(repo, ["rev-parse", "--is-shallow-repository"])
+    return output is not None and output.strip() == "true"
+
+
+def _empty_tree_hash(repo: Path) -> str | None:
+    # Compute the empty-tree object id for the repo's object format (sha1 vs
+    # sha256) instead of hard-coding the sha1 value, which is not a valid object
+    # name in a sha256 repository.
+    output = _git_output(repo, ["hash-object", "-t", "tree", "/dev/null"])
+    if output is None:
         return None
-    merge_base = _git_output(repo, ["merge-base", "HEAD", base_ref])
-    return merge_base.strip() if merge_base and merge_base.strip() else base_ref
+    value = output.strip()
+    return value or None
 
 
 def _commit_distance_from_head(repo: Path, commit: str) -> int | None:
