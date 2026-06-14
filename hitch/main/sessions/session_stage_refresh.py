@@ -34,6 +34,7 @@ from hitch.main.runtime.sdk_values import (
     is_nonbool_int,
     string_value,
 )
+from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import session_stage
 from hitch.main.sessions.session_pr_plan import (
     _pr_observation_result_for_rollout_path,
@@ -381,7 +382,7 @@ def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
 
 
 def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    ids = unique_nonempty(thread_ids)
     if not ids:
         return set()
     active_statuses = CodexInstance.ACTIVE_STATUSES
@@ -425,7 +426,7 @@ def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
 def _active_instances_by_thread_id(
     thread_ids: Iterable[str],
 ) -> dict[str, CodexInstance]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    ids = unique_nonempty(thread_ids)
     if not ids:
         return {}
     active_instances = (

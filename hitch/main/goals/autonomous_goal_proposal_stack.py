@@ -25,6 +25,7 @@ from hitch.main.models import (
 from hitch.main.runtime import rollout
 from hitch.main.runtime.rollout_state import _rollout_file_state_from_value
 from hitch.main.runtime.sdk_values import is_nonbool_int
+from hitch.main.sequences import unique_nonempty
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
@@ -391,7 +392,7 @@ def _autonomous_goal_accepted_session_blocking_ids(
 
 
 def _accepted_session_live_thread_ids(thread_ids: Iterable[str]) -> set[str]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    ids = unique_nonempty(thread_ids)
     if not ids:
         return set()
     live_thread_ids = set(
@@ -412,7 +413,7 @@ def _accepted_session_live_thread_ids(thread_ids: Iterable[str]) -> set[str]:
 def _accepted_session_done_workflows_by_thread_id(
     thread_ids: Iterable[str],
 ) -> dict[str, SystemWorkflow]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    ids = unique_nonempty(thread_ids)
     if not ids:
         return {}
     done_workflows: dict[str, SystemWorkflow] = {}

@@ -19,13 +19,14 @@ from django.utils import timezone
 
 from hitch.main.models import SessionMetadata, SystemWorkflow
 from hitch.main.runtime.db import run_ignoring_database_locks
+from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import session_stage
 
 
 def _latest_stage_workflows_by_thread_id(
     thread_ids: Iterable[str],
 ) -> dict[str, SystemWorkflow]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    ids = unique_nonempty(thread_ids)
     if not ids:
         return {}
     workflows = (

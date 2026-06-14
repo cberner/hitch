@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .git_support import GitCommandError, run_git
 from .git_support import resolved_path as _resolved_path
+from .sequences import unique_nonempty
 
 _GIT_TIMEOUT_SECONDS = 30
 _AUTO_MERGE_COMMIT_MESSAGE = "Apply QA-approved Hitch session diff"
@@ -490,7 +491,7 @@ def _worktree_index_paths(source_repo: Path, *, hooks_path: Path | None) -> list
         ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         hooks_path=hooks_path,
     )
-    return list(dict.fromkeys(path for path in output.split("\0") if path))
+    return unique_nonempty(output.split("\0"))
 
 
 def _worktree_index_entry(
