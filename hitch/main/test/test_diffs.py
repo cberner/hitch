@@ -189,7 +189,13 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.file_count, 1)
         self.assertEqual(diff.files[0].path, "example.py")
 
-    def test_branch_diff_falls_back_to_origin_master_without_merge_base(self) -> None:
+    def test_disjoint_history_shows_branch_content_without_unrelated_deletions(
+        self,
+    ) -> None:
+        # origin/master exists but shares no history with HEAD (orphan branch /
+        # re-pointed origin). Diffing against it would render its whole tree as
+        # spurious deletions, so the branch content is diffed against the empty
+        # tree: feature.py shows as added and remote.py never appears.
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             subprocess.run(["git", "init", "--initial-branch=feature", str(repo)], check=True, capture_output=True)
@@ -208,7 +214,122 @@ class WorktreeDiffTests(SimpleTestCase):
             diff = build_worktree_diff(str(repo))
 
         self.assertTrue(diff.has_changes)
-        self.assertIn("feature.py", {file.path for file in diff.files})
+        paths = {file.path for file in diff.files}
+        self.assertIn("feature.py", paths)
+        self.assertNotIn("remote.py", paths)
+
+    def test_disjoint_history_uses_repo_object_format_empty_tree(self) -> None:
+        # The empty-tree base must match the repo's object format: the sha1
+        # empty-tree id is not a valid object in a sha256 repo, which would make
+        # the diff silently fall back to HEAD and drop the branch content.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            init = subprocess.run(
+                [
+                    "git", "init", "--object-format=sha256",
+                    "--initial-branch=feature", str(repo),
+                ],
+                capture_output=True,
+            )
+            if init.returncode != 0:
+                self.skipTest("git lacks sha256 object-format support")
+            (repo / "feature.py").write_text("def feature():\n    return 1\n")
+            _git(repo, "add", "feature.py")
+            _git(repo, "commit", "-m", "feature")
+
+            _git(repo, "checkout", "--orphan", "remote-master")
+            _git(repo, "rm", "-rf", ".")
+            (repo / "remote.py").write_text("def remote():\n    return 2\n")
+            _git(repo, "add", "remote.py")
+            _git(repo, "commit", "-m", "remote master")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "checkout", "feature")
+
+            diff = build_worktree_diff(str(repo))
+
+        self.assertTrue(diff.has_changes)
+        paths = {file.path for file in diff.files}
+        self.assertIn("feature.py", paths)
+        self.assertNotIn("remote.py", paths)
+
+    def test_shallow_clone_diffs_against_base_ref_not_empty_tree(self) -> None:
+        # A shallow clone can omit the shared ancestor, so merge-base reports no
+        # common ancestor even though HEAD and origin/main are related. The diff
+        # must use the base ref directly (showing only the real change), not the
+        # empty tree (which would render every file as an addition).
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            origin = root / "origin"
+            subprocess.run(
+                ["git", "init", "--initial-branch=main", str(origin)],
+                check=True, capture_output=True,
+            )
+            (origin / "base.py").write_text("def base():\n    return 1\n")
+            (origin / "shared.py").write_text("def shared():\n    return 0\n")
+            _git(origin, "add", "base.py", "shared.py")
+            _git(origin, "commit", "-m", "ancestor")
+            _git(origin, "checkout", "-b", "feature")
+            (origin / "base.py").write_text("def base():\n    return 2\n")
+            _git(origin, "commit", "-am", "feature change")
+            _git(origin, "checkout", "main")
+            (origin / "base.py").write_text("def base():\n    return 3\n")
+            _git(origin, "commit", "-am", "main change")
+
+            clone = root / "clone"
+            _git(
+                root, "clone", "--depth=1", "--no-single-branch",
+                "--branch", "feature", f"file://{origin}", str(clone),
+            )
+            # The clone is shallow and lacks the ancestor shared with origin/main.
+            self.assertEqual(
+                _git(clone, "rev-parse", "--is-shallow-repository"), "true"
+            )
+
+            diff = build_worktree_diff(str(clone))
+
+        paths = {file.path for file in diff.files}
+        self.assertIn("base.py", paths)
+        self.assertNotIn("shared.py", paths)
+
+    def test_merge_base_execution_error_falls_back_to_ref(self) -> None:
+        # A merge-base failure that is not "no common ancestor" (e.g. a timeout
+        # or lock, surfaced as None) must not be treated as disjoint history.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(
+                ["git", "init", "--initial-branch=master", str(repo)],
+                check=True, capture_output=True,
+            )
+            (repo / "base.py").write_text("def base():\n    return 1\n")
+            (repo / "shared.py").write_text("def shared():\n    return 0\n")
+            _git(repo, "add", "base.py", "shared.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            (repo / "base.py").write_text("def base():\n    return 2\n")
+            _git(repo, "commit", "-am", "local change")
+
+            real_git_output = diffs_module._git_output
+
+            def fake_git_output(
+                repo_arg: Path,
+                args: list[str],
+                *,
+                allow_statuses: set[int] | None = None,
+            ) -> str | None:
+                if args[:1] == ["merge-base"]:
+                    return None  # simulate a timeout / lock, not a clean status 1
+                return real_git_output(repo_arg, args, allow_statuses=allow_statuses)
+
+            with patch.object(
+                diffs_module, "_git_output", side_effect=fake_git_output
+            ):
+                diff = build_worktree_diff(str(repo))
+
+        # Falls back to diffing against origin/master, so only the changed file
+        # shows -- not the whole tree as additions (the empty-tree path).
+        paths = {file.path for file in diff.files}
+        self.assertIn("base.py", paths)
+        self.assertNotIn("shared.py", paths)
 
     def test_origin_master_diff_does_not_require_local_master_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
