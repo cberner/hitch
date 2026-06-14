@@ -2161,12 +2161,14 @@ def _systemd_scope_argv(
         argv.append(f"--property=StandardError=append:{stderr_log_path}")
     else:
         argv.append("--property=StandardError=null")
-    for property_value in systemd_isolation._memory_cgroup_properties(
-        "CODEX_WORKER_MEMORY_HIGH",
-        "CODEX_WORKER_MEMORY_MAX",
-        "CODEX_WORKER_MEMORY_SWAP_MAX",
-    ):
-        argv.append(f"--property={property_value}")
+    argv.extend(
+        f"--property={property_value}"
+        for property_value in systemd_isolation._memory_cgroup_properties(
+            "CODEX_WORKER_MEMORY_HIGH",
+            "CODEX_WORKER_MEMORY_MAX",
+            "CODEX_WORKER_MEMORY_SWAP_MAX",
+        )
+    )
     argv.append("--")
     argv.extend(worker_argv)
     return argv

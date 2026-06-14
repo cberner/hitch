@@ -272,8 +272,8 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
 def _latest_token_usage_from_lines(
     lines: list[dict[str, Any]],
 ) -> dict[str, int] | None:
-    cumulative = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
-    previous = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
+    cumulative = dict.fromkeys(_CUMULATIVE_TOKEN_KEYS, 0)
+    previous = dict.fromkeys(_CUMULATIVE_TOKEN_KEYS, 0)
     latest_context: dict[str, Any] = {}
     latest_context_window: int = 0
     seen = False
@@ -283,7 +283,7 @@ def _latest_token_usage_from_lines(
         if _is_token_usage_reset(current):
             # Discontinuity: drop it and rebase so the next turn's counts add
             # onto the pre-reset total instead of the synthetic window value.
-            previous = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
+            previous = dict.fromkeys(_CUMULATIVE_TOKEN_KEYS, 0)
         else:
             for key in _CUMULATIVE_TOKEN_KEYS:
                 cumulative[key] += max(current[key] - previous[key], 0)
@@ -1611,12 +1611,10 @@ def _user_message_text(payload: dict[str, Any]) -> str:
         parts.append(message)
     images = payload.get("images")
     if isinstance(images, list):
-        for _ in images:
-            parts.append("[image]")
+        parts.extend("[image]" for _ in images)
     local_images = payload.get("local_images")
     if isinstance(local_images, list):
-        for _ in local_images:
-            parts.append("[image]")
+        parts.extend("[image]" for _ in local_images)
     return "\n".join(parts)
 
 

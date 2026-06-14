@@ -590,7 +590,7 @@ class SendMessageViewTests(TestCase):
         def fail_steer_and_delete_owned_copy(*_args: Any, **kwargs: Any) -> None:
             for image_path in kwargs.get("input_image_paths", []):
                 Path(image_path).unlink()
-            return None
+            return
 
         mock_steer.side_effect = fail_steer_and_delete_owned_copy
 

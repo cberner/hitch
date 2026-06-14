@@ -974,7 +974,7 @@ def _thread_list_page(codex: common.Codex, *, archived: bool, cursor: str) -> Th
     next_cursor = getattr(response, "next_cursor", "")
     return ThreadListPage(
         threads=sorted(
-            list(response.data),
+            response.data,
             # Normalize through updated_at_seconds: SDK threads may carry
             # datetime, epoch int/float, or no updated_at at all, and sorting a
             # mix (or a datetime against the default 0) would raise TypeError.

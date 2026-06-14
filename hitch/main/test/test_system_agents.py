@@ -9074,7 +9074,7 @@ class SpecCriticWorkflowTests(TestCase):
                 SystemWorkflow.objects.get(pk=workflow.pk)
             )
             assert claimed
-            return None
+            return
 
         with patch.object(
             pr_qa,
