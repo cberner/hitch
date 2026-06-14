@@ -3926,29 +3926,26 @@
                 ];
             }
 
-            function applyGoalOrder(order) {
-                if (
-                    order[0] < latestGoalOrder[0]
-                    || (order[0] === latestGoalOrder[0] && order[1] < latestGoalOrder[1])
-                ) {
-                    return false;
+            // Compare the leading `levels` of two [recordedAt, eventSeq,
+            // fallbackOrder] tuples; an order ties-or-wins (newer) unless it is
+            // strictly behind on the first differing level. Goal updates compare
+            // 2 levels (no fallback tiebreak); task-plan updates compare 3.
+            function isOrderNewer(order, latest, levels) {
+                for (let i = 0; i < levels; i += 1) {
+                    if (order[i] < latest[i]) return false;
+                    if (order[i] > latest[i]) return true;
                 }
+                return true;
+            }
+
+            function applyGoalOrder(order) {
+                if (!isOrderNewer(order, latestGoalOrder, 2)) return false;
                 latestGoalOrder = order;
                 return true;
             }
 
             function applyTaskPlanOrder(order) {
-                if (
-                    order[0] < latestTaskPlanOrder[0]
-                    || (order[0] === latestTaskPlanOrder[0] && order[1] < latestTaskPlanOrder[1])
-                    || (
-                        order[0] === latestTaskPlanOrder[0]
-                        && order[1] === latestTaskPlanOrder[1]
-                        && order[2] < latestTaskPlanOrder[2]
-                    )
-                ) {
-                    return false;
-                }
+                if (!isOrderNewer(order, latestTaskPlanOrder, 3)) return false;
                 latestTaskPlanOrder = order;
                 return true;
             }

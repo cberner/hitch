@@ -1599,6 +1599,89 @@ class SessionViewTests(TestCase):
                 browser.close()
 
     @patch("hitch.main.views.common.Codex")
+    def test_goal_updates_ignore_stale_ordering(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Exercises the shared event-order comparator: a goal update with an
+        # older recordedAt must not overwrite a newer one.
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt="hello",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            user_message_index=0,
+        )
+
+        html = _get_session(self.client).content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.evaluate(
+                    """
+                    () => {
+                        class MockEventSource {
+                            constructor(url) {
+                                this.url = url;
+                                this.listeners = {};
+                                window.__eventSource = this;
+                            }
+                            addEventListener(type, cb) { this.listeners[type] = cb; }
+                            close() {}
+                            emit(type, data) {
+                                this.listeners[type]({ data: JSON.stringify(data) });
+                            }
+                        }
+                        window.EventSource = MockEventSource;
+                    }
+                    """
+                )
+                page.set_content(html, wait_until="load")
+                page.wait_for_function("window.__eventSource !== undefined")
+
+                def emit_goal(recorded_at: int, objective: str) -> None:
+                    page.evaluate(
+                        """
+                        (args) => window.__eventSource.emit("message", {
+                            method: "thread/goal/updated",
+                            recordedAt: args.recordedAt,
+                            eventSeq: args.recordedAt,
+                            payload: { goal: { objective: args.objective } },
+                        })
+                        """,
+                        {"recordedAt": recorded_at, "objective": objective},
+                    )
+
+                goal_text = (
+                    "() => document.querySelector('[data-live-goal-text]').textContent"
+                )
+                emit_goal(200, "newer goal")
+                page.wait_for_function(f"{goal_text} === 'newer goal'")
+                # A stale (older recordedAt) update is ignored.
+                emit_goal(100, "stale goal")
+                self.assertEqual(page.evaluate(goal_text), "newer goal")
+                # A genuinely newer update applies.
+                emit_goal(300, "latest goal")
+                page.wait_for_function(f"{goal_text} === 'latest goal'")
+            finally:
+                browser.close()
+
+    @patch("hitch.main.views.common.Codex")
     def test_registered_demo_status_renders_logs(
         self, mock_codex: MagicMock
     ) -> None:
@@ -4242,7 +4325,9 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "let streamFallbackOrder = 0")
         self.assertContains(response, "Number(taskPlan.dataset.fallbackOrder)")
         self.assertContains(response, "streamFallbackOrder += 1")
-        self.assertContains(response, "order[2] < latestTaskPlanOrder[2]")
+        # Task-plan ordering compares all three tuple levels (the fallback-order
+        # tiebreak) via the shared comparator.
+        self.assertContains(response, "isOrderNewer(order, latestTaskPlanOrder, 3)")
         self.assertContains(
             response,
             'case "turn/plan/updated": handlePlanUpdated(payload, order); break;',
