@@ -4332,6 +4332,24 @@
                 }
             }
 
+            // Stream message router: maps each SSE method to its handler,
+            // adapting the shared (payload, parsed, order) arguments to each
+            // handler's own signature. An unknown method has no entry and is
+            // ignored, matching the previous switch (which had no default).
+            const STREAM_HANDLERS = {
+                "item/started": (payload, parsed, order) => handleItemStarted(payload, parsed),
+                "item/agentMessage/delta": (payload, parsed, order) => handleAgentDelta(payload),
+                "item/plan/delta": (payload, parsed, order) => handlePlanDelta(payload, parsed),
+                "item/completed": (payload, parsed, order) => handleItemCompleted(payload, parsed),
+                "thread/goal/updated": (payload, parsed, order) => handleGoalUpdated(payload, order),
+                "thread/goal/cleared": (payload, parsed, order) => handleGoalCleared(order),
+                "turn/plan/updated": (payload, parsed, order) => handlePlanUpdated(payload, order),
+                "approval/requested": (payload, parsed, order) => handleApprovalRequested(payload),
+                "approval/resolved": (payload, parsed, order) => handleApprovalResolved(payload),
+                "input/requested": (payload, parsed, order) => handleInputRequested(payload),
+                "input/resolved": (payload, parsed, order) => handleInputResolved(payload),
+            };
+
             function handleMessage(event) {
                 bump();
                 streamFallbackOrder += 1;
@@ -4342,22 +4360,10 @@
                     if (seenEvents.has(key)) return;
                     seenEvents.add(key);
                 }
-                const method = parsed.method;
                 const payload = parsed.payload || {};
                 const order = eventOrder(parsed, streamFallbackOrder);
-                switch (method) {
-                    case "item/started": handleItemStarted(payload, parsed); break;
-                    case "item/agentMessage/delta": handleAgentDelta(payload); break;
-                    case "item/plan/delta": handlePlanDelta(payload, parsed); break;
-                    case "item/completed": handleItemCompleted(payload, parsed); break;
-                    case "thread/goal/updated": handleGoalUpdated(payload, order); break;
-                    case "thread/goal/cleared": handleGoalCleared(order); break;
-                    case "turn/plan/updated": handlePlanUpdated(payload, order); break;
-                    case "approval/requested": handleApprovalRequested(payload); break;
-                    case "approval/resolved": handleApprovalResolved(payload); break;
-                    case "input/requested": handleInputRequested(payload); break;
-                    case "input/resolved": handleInputResolved(payload); break;
-                }
+                const handler = STREAM_HANDLERS[parsed.method];
+                if (handler) handler(payload, parsed, order);
             }
 
             function handleEnd() {
