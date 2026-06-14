@@ -23,7 +23,7 @@
             {% include "_lifetime_token_chart.html" with chart=lifetime_usage.total.chart chart_axis=lifetime_usage.total.chart_axis chart_label="All sessions token usage by date" chart_class="usage-total-chart" chart_id="lifetime-total-chart" only %}
             {% endif %}
             <div class="lifetime-stats" aria-label="All sessions token usage">
-                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
+                <div class="lifetime-stat"{% if lifetime_usage.sessions.chart %} role="button" tabindex="0" aria-expanded="false"{% endif %}>
                     <span class="lifetime-label">Sessions</span>
                     <div class="lifetime-breakdown">
                         <span class="lifetime-metric">
@@ -43,7 +43,7 @@
                     {% include "_lifetime_token_chart.html" with chart=lifetime_usage.sessions.chart chart_axis=lifetime_usage.sessions.chart_axis chart_label="Sessions token usage by date" chart_class="lifetime-chart" only %}
                     {% endif %}
                 </div>
-                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
+                <div class="lifetime-stat"{% if lifetime_usage.system.chart %} role="button" tabindex="0" aria-expanded="false"{% endif %}>
                     <span class="lifetime-label">HITCH system</span>
                     <div class="lifetime-breakdown">
                         <span class="lifetime-metric">

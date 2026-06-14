@@ -7785,3 +7785,59 @@ class ThreadListSortTests(TestCase):
         # Newest first: the 2025 datetime, then the 2023 epoch, then the
         # timestampless thread (treated as oldest).
         self.assertEqual([thread.id for thread in page.threads], ["dt", "epoch", "missing"])
+
+
+class UsageTileAccessibilityTests(TestCase):
+    """Only lifetime-stat tiles that actually have a chart may be interactive.
+
+    Regression guard: a chartless tile must not render as an expandable button
+    (role/tabindex/aria-expanded), since toggling it reveals nothing.
+    """
+
+    def _render(self, *, sessions_chart: bool, system_chart: bool) -> str:
+        from django.template.loader import render_to_string
+
+        chart = [
+            {
+                "date": "2025-01-02",
+                "total": "10",
+                "input": "5",
+                "output": "3",
+                "cached": "2",
+                "input_percent": 50,
+                "output_percent": 30,
+                "cached_percent": 20,
+            }
+        ]
+        lifetime_usage = {
+            "total": {},
+            "sessions": {
+                "input": "5",
+                "output": "3",
+                "cached": "2",
+                "chart": chart if sessions_chart else None,
+                "chart_axis": [],
+            },
+            "system": {
+                "input": "1",
+                "output": "1",
+                "cached": "0",
+                "chart": chart if system_chart else None,
+                "chart_axis": [],
+            },
+        }
+        return render_to_string(
+            "_usage_sections.html", {"lifetime_usage": lifetime_usage}
+        )
+
+    def test_only_charted_tiles_are_interactive(self) -> None:
+        html = self._render(sessions_chart=True, system_chart=False)
+        # The charted Sessions tile is an expandable button; the chartless
+        # system tile is a plain div with no button affordances.
+        self.assertEqual(html.count('class="lifetime-stat" role="button"'), 1)
+        self.assertEqual(html.count('class="lifetime-stat">'), 1)
+
+    def test_both_tiles_interactive_when_both_charted(self) -> None:
+        html = self._render(sessions_chart=True, system_chart=True)
+        self.assertEqual(html.count('class="lifetime-stat" role="button"'), 2)
+        self.assertNotIn('class="lifetime-stat">', html)
