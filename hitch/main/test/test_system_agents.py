@@ -10457,6 +10457,177 @@ class AutonomousGoalWorkflowTests(TestCase):
             (system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,),
         )
 
+    def _autonomous_goal(self) -> AutonomousGoal:
+        project, _ = Project.objects.get_or_create(
+            repo_path="/repo", defaults={"name": "Hitch"}
+        )
+        return AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            ambition=AutonomousGoal.AMBITION_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
+            proposal_budget=25000,
+        )
+
+    def _stranded_autonomous_goal_workflow(
+        self, step: str, goal: AutonomousGoal
+    ) -> SystemWorkflow:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
+            cwd=goal.project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=step,
+            state={"autonomous_goal_id": goal.pk},
+        )
+        # Age the row past the spawn-stale window to mimic a workflow whose
+        # spawn handler was killed before the worker launched.
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(minutes=20)
+        )
+        return workflow
+
+    def test_reconcile_blocks_stranded_candidate_spawn(self) -> None:
+        # The candidate spawn creates a worktree and has step-specific dispatch,
+        # so a stranded candidate is blocked rather than re-driven.
+        goal = self._autonomous_goal()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING, goal
+        )
+        self.assertTrue(
+            autonomous_goals._autonomous_goal_running_workflow_exists(goal)
+        )
+
+        system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id=workflow.main_thread_id
+        )
+
+        workflow.refresh_from_db()
+        # No longer RUNNING, so the goal is unblocked for future proposals and
+        # disk cleanup can reclaim any leaked worktree.
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertFalse(
+            autonomous_goals._autonomous_goal_running_workflow_exists(goal)
+        )
+        # A user-visible failure notice was recorded.
+        self.assertTrue(
+            ProposedSession.objects.filter(
+                source_workflow=workflow,
+                inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            ).exists()
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals."
+        "_block_autonomous_goal_spawn_failure_if_active"
+    )
+    @patch("hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_judge_or_block")
+    @patch(
+        "hitch.main.workflows.autonomous_goals."
+        "_spawn_autonomous_goal_history_summary_or_fallback"
+    )
+    def test_recover_redrives_summary_and_judge_blocks_candidate(
+        self,
+        mock_history: MagicMock,
+        mock_judge: MagicMock,
+        mock_block: MagicMock,
+    ) -> None:
+        def reset() -> None:
+            mock_history.reset_mock()
+            mock_judge.reset_mock()
+            mock_block.reset_mock()
+
+        # HISTORY_SUMMARIZING: re-drive the summarizer (which falls back to the
+        # candidate on its own failure), never block.
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING,
+            self._autonomous_goal(),
+        )
+        autonomous_goals._recover_stranded_autonomous_goal_workflow(workflow)
+        mock_history.assert_called_once()
+        mock_judge.assert_not_called()
+        mock_block.assert_not_called()
+
+        # JUDGE_RUNNING with a persisted candidate: re-drive the read-only judge.
+        reset()
+        candidate = {"title": "t", "summary": "s", "impact": "i"}
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            self._autonomous_goal(),
+        )
+        workflow.state = {**workflow.state, "candidate": candidate}
+        workflow.save(update_fields=["state"])
+        autonomous_goals._recover_stranded_autonomous_goal_workflow(workflow)
+        mock_judge.assert_called_once()
+        self.assertEqual(mock_judge.call_args.args[2], candidate)
+        mock_block.assert_not_called()
+
+        # JUDGE_RUNNING without a persisted candidate cannot be re-driven: block.
+        reset()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            self._autonomous_goal(),
+        )
+        autonomous_goals._recover_stranded_autonomous_goal_workflow(workflow)
+        mock_judge.assert_not_called()
+        mock_block.assert_called_once()
+
+        # CANDIDATE_RUNNING: always block (never re-driven).
+        reset()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            self._autonomous_goal(),
+        )
+        autonomous_goals._recover_stranded_autonomous_goal_workflow(workflow)
+        mock_history.assert_not_called()
+        mock_judge.assert_not_called()
+        mock_block.assert_called_once()
+
+    def test_reconcile_leaves_autonomous_goal_with_live_worker_alone(self) -> None:
+        goal = self._autonomous_goal()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING, goal
+        )
+        _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id=workflow.main_thread_id
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+
+    def test_reconcile_defers_autonomous_goal_with_routing_claim(self) -> None:
+        # A finished worker mid-handoff has a fresh routing claim but no
+        # recreated SystemAgentRun yet; recovery must not block it and discard a
+        # valid completed result.
+        goal = self._autonomous_goal()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING, goal
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            workflow_routing_started_at=datetime.now(UTC)
+        )
+
+        self.assertFalse(
+            autonomous_goals._autonomous_goal_spawn_needs_recovery(workflow)
+        )
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock

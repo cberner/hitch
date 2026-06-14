@@ -1019,6 +1019,73 @@ def _autonomous_goal_stack_proposal_candidate_cwd(
         return ""
     return proposal.candidate_session.cwd or ""
 
+def _autonomous_goal_spawn_needs_recovery(workflow: SystemWorkflow) -> bool:
+    """True when an autonomous-goal workflow lost its worker to a dead spawn.
+
+    The step is still owned -- so recovery must defer -- when any of these hold:
+    a live (starting/running) instance; a terminal instance whose routing claim
+    is still fresh (a finished worker mid-handoff, before its ``SystemAgentRun``
+    row is recovered and the step advanced); or an in-flight ``SystemAgentRun``.
+    Only a workflow with none of these is genuinely stranded by a spawn handler
+    that died before launching the worker.
+    """
+    instances = CodexInstance.objects.filter(workflow_id=workflow.pk)
+    if instances.filter(status__in=CodexInstance.ACTIVE_STATUSES).exists():
+        return False
+    fresh_claim = timezone.now() - system_agents._WORKFLOW_ROUTE_CLAIM_TIMEOUT
+    if instances.filter(workflow_routing_started_at__gte=fresh_claim).exists():
+        return False
+    return not workflow.agent_runs.filter(
+        status=SystemAgentRun.STATUS_RUNNING
+    ).exists()
+
+def _recover_stranded_autonomous_goal_workflow(workflow: SystemWorkflow) -> None:
+    """Recover an autonomous-goal workflow stranded by a dead spawn handler.
+
+    The summarizer and judge spawns are safe to re-drive: the summarizer is
+    optional (its own failure path falls back to running the candidate without a
+    summary), and the judge is a read-only evaluation of the already-persisted
+    candidate. Re-drive those rather than discard recoverable work.
+
+    The candidate spawn instead creates a managed worktree and has step-specific
+    dispatch (initial / retry / stacked-iteration), so re-driving it from here
+    would risk duplicate worktrees or a wrong dispatch. A stranded candidate (or
+    a judge with no persisted candidate, or a deleted goal) is blocked via the
+    existing spawn-failure path, which records an inbox failure notice or
+    finalizes a stacked proposal. Once the workflow is no longer RUNNING the
+    goal's next scheduled proposal starts fresh and disk cleanup reclaims any
+    leaked worktree.
+    """
+    autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+    autonomous_goal = (
+        AutonomousGoal.objects.select_related("project")
+        .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
+        .first()
+    )
+    if autonomous_goal is not None:
+        if workflow.step == system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
+            _spawn_autonomous_goal_history_summary_or_fallback(
+                workflow, autonomous_goal
+            )
+            return
+        candidate = workflow.state.get("candidate")
+        if (
+            workflow.step == system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
+            and isinstance(candidate, dict)
+        ):
+            _spawn_autonomous_goal_judge_or_block(
+                workflow, autonomous_goal, candidate
+            )
+            return
+    _block_autonomous_goal_spawn_failure_if_active(
+        workflow_id=workflow.pk,
+        autonomous_goal_id=autonomous_goal_id,
+        error=(
+            "autonomous goal run never started: its spawn handler died before "
+            "the worker launched"
+        ),
+    )
+
 @engine.register
 class _AutonomousGoalHandler(engine.WorkflowHandler):
     kind = system_agents.AUTONOMOUS_GOAL_AGENT_KIND
@@ -1069,6 +1136,28 @@ class _AutonomousGoalHandler(engine.WorkflowHandler):
             "use_worktrees",
         }
     )
+
+    @override
+    def spawn_recovery_specs(self) -> tuple[engine.SpawnRecoverySpec, ...]:
+        # The candidate/judge/summarizer spawns each commit their RUNNING step
+        # and then launch the worker; a process death in that gap leaves the
+        # workflow RUNNING with no worker, which would otherwise pin the goal
+        # (blocking future auto-proposals) and its worktree forever.
+        spawn_stale = system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+        return tuple(
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=step,
+                stale_timeout=spawn_stale,
+                needs_recovery=_autonomous_goal_spawn_needs_recovery,
+                recover=_recover_stranded_autonomous_goal_workflow,
+            )
+            for step in (
+                system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING,
+                system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+                system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            )
+        )
 
     @override
     def on_agent_finished(
