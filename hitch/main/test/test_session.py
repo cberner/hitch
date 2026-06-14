@@ -4297,8 +4297,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'parsePlanCommand() !== null')
         self.assertContains(response, "parsePrCommand")
         self.assertContains(response, "parseQaCommand")
-        self.assertContains(response, 'case "turn/plan/updated"')
-        self.assertContains(response, 'case "item/plan/delta"')
+        self.assertContains(response, '"turn/plan/updated":')
+        self.assertContains(response, '"item/plan/delta":')
         self.assertContains(response, "activateFinalPlanText")
         self.assertContains(response, "input-option-description")
         self.assertContains(response, 'other.placeholder = "Other"')
@@ -4330,7 +4330,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "isOrderNewer(order, latestTaskPlanOrder, 3)")
         self.assertContains(
             response,
-            'case "turn/plan/updated": handlePlanUpdated(payload, order); break;',
+            '"turn/plan/updated": (payload, parsed, order) => handlePlanUpdated(payload, order)',
         )
         self.assertContains(response, 'status === "in_progress"')
         self.assertContains(response, "taskPlan.dataset.expanded")
