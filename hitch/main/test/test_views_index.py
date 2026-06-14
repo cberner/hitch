@@ -7479,3 +7479,206 @@ class PrStageRefreshSchedulingTests(TestCase):
         self.assertFalse(refreshing)
         self.assertEqual(remaining, 0)
         mock_schedule.assert_not_called()
+
+
+class ArchiveUndoToastTests(TestCase):
+    """Browser-level coverage for the per-row archive grace period and Undo.
+
+    Regression guard: rapidly archiving several rows must keep every row
+    independently undoable until its own 5s timer fires, rather than letting a
+    later archive strand the earlier one with no working Undo.
+    """
+
+    def _seed_two_sessions(self) -> None:
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        for index in (1, 2):
+            SessionMetadata.objects.create(
+                thread_id=f"sess-{index}",
+                cwd="/repo",
+                codex_display_title=f"Session {index}",
+                codex_name=f"Session {index}",
+                codex_created_at=now,
+                codex_updated_at=now - timedelta(minutes=index),
+                codex_last_synced_at=now,
+            )
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_rapid_archive_keeps_every_row_undoable(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        self._seed_two_sessions()
+
+        response = self.client.get(reverse("index"))
+        self.assertEqual(response.status_code, 200)
+        page_html = response.content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(page_html, wait_until="load")
+                # Archive POSTs always succeed in this test; the 5s finalize
+                # timers never fire within the test window.
+                page.evaluate(
+                    "() => { window.fetch = () => Promise.resolve({ ok: true }); }"
+                )
+                self.assertEqual(
+                    page.evaluate(
+                        "() => document.querySelectorAll("
+                        "'[data-session-archive-form]').length"
+                    ),
+                    2,
+                )
+                # Archive both rows in quick succession.
+                page.evaluate(
+                    """
+                    () => {
+                        for (const form of document.querySelectorAll(
+                            "[data-session-archive-form]")) {
+                            form.requestSubmit();
+                        }
+                    }
+                    """
+                )
+                page.wait_for_function(
+                    "document.querySelectorAll("
+                    "'[data-session-row].pending-archive').length === 2"
+                )
+                self.assertFalse(
+                    page.evaluate(
+                        "() => document.querySelector('[data-archive-toast]').hidden"
+                    )
+                )
+
+                undo = "() => document.querySelector('[data-archive-undo]').click()"
+                # First Undo restores the most recently archived row; the toast
+                # stays up because the other row's grace period is still open.
+                page.evaluate(undo)
+                page.wait_for_function(
+                    "document.querySelectorAll("
+                    "'[data-session-row].pending-archive').length === 1"
+                )
+                self.assertFalse(
+                    page.evaluate(
+                        "() => document.querySelector('[data-archive-toast]').hidden"
+                    )
+                )
+                # Second Undo restores the earlier row -- the case the single-slot
+                # implementation dropped on the floor.
+                page.evaluate(undo)
+                page.wait_for_function(
+                    "document.querySelectorAll("
+                    "'[data-session-row].pending-archive').length === 0"
+                )
+                self.assertTrue(
+                    page.evaluate(
+                        "() => document.querySelector('[data-archive-toast]').hidden"
+                    )
+                )
+            finally:
+                browser.close()
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_undo_order_follows_archive_order_despite_post_race(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        self._seed_two_sessions()
+
+        response = self.client.get(reverse("index"))
+        self.assertEqual(response.status_code, 200)
+        page_html = response.content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(page_html, wait_until="load")
+                # Hold every POST open so the test controls completion order:
+                # archive POSTs are keyed by session id, undo POSTs queued FIFO.
+                page.evaluate(
+                    """
+                    () => {
+                        window.__archive = {};
+                        window.__undo = [];
+                        window.fetch = (url, opts) => new Promise((resolve) => {
+                            const ok = () => resolve({ ok: true });
+                            if (opts && opts.body && opts.body.includes("archived=true")) {
+                                const m = String(url).match(/sessions\\/([^/]+)\\/archive/);
+                                window.__archive[m[1]] = ok;
+                            } else {
+                                window.__undo.push(ok);
+                            }
+                        });
+                    }
+                    """
+                )
+                # User archives sess-1 first, then sess-2.
+                for session_id in ("sess-1", "sess-2"):
+                    page.evaluate(
+                        "(id) => document.querySelector("
+                        "`[data-session-archive-url*='${id}'] "
+                        "[data-session-archive-form]`).requestSubmit()",
+                        session_id,
+                    )
+                # The first-archived row's POST resolves LAST -- the race that
+                # ordering by POST completion would get wrong.
+                page.evaluate("() => window.__archive['sess-2']()")
+                page.evaluate("() => window.__archive['sess-1']()")
+                page.wait_for_function(
+                    "document.querySelectorAll("
+                    "'[data-session-row].pending-archive').length === 2"
+                )
+
+                undo = "() => document.querySelector('[data-archive-undo]').click()"
+                resolve_undo = "() => window.__undo.shift()()"
+                pending = (
+                    "(id) => { const el = document.querySelector("
+                    "`[data-session-archive-url*='${id}']`);"
+                    " return !!el && el.classList.contains('pending-archive'); }"
+                )
+                restored = (
+                    "(id) => { const el = document.querySelector("
+                    "`[data-session-archive-url*='${id}']`);"
+                    " return !!el && !el.classList.contains('pending-archive'); }"
+                )
+                # First Undo must restore the most recently archived row (sess-2),
+                # not whichever POST happened to finish last.
+                page.evaluate(undo)
+                page.evaluate(resolve_undo)
+                page.wait_for_function(restored, arg="sess-2")
+                self.assertTrue(page.evaluate(pending, "sess-1"))
+                # Second Undo restores the earlier row (sess-1).
+                page.evaluate(undo)
+                page.evaluate(resolve_undo)
+                page.wait_for_function(restored, arg="sess-1")
+            finally:
+                browser.close()
