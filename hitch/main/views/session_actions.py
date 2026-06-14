@@ -127,10 +127,16 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     if len(name) > common._NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
     settings = _stored_settings(request)
-    with app_server_pool.borrow_codex(
-        common.Codex, enable_memories=settings.enable_memories
-    ) as codex:
-        codex._client.thread_set_name(session_id, name)
+    try:
+        with app_server_pool.borrow_codex(
+            common.Codex, enable_memories=settings.enable_memories
+        ) as codex:
+            codex._client.thread_set_name(session_id, name)
+    except InvalidRequestError:
+        # The app-server raises this for archived/nonexistent threads (e.g. a
+        # rename from a stale tab, or right after archiving). Like the sibling
+        # endpoints, answer 400 instead of 500ing on an expected state.
+        return HttpResponseBadRequest("session is archived or unknown")
     session_index.update_cached_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
