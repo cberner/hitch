@@ -117,4 +117,27 @@
     } else {
         window.hitch.wireConfirmForms();
     }
+
+    // Format a Date relative to now ("just now", "5 minutes ago", "in 2 days").
+    // The formatter and unit table are built once.
+    window.hitch.relativeFromNow = (function () {
+        const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+        const units = [
+            ["year", 31536000],
+            ["month", 2592000],
+            ["week", 604800],
+            ["day", 86400],
+            ["hour", 3600],
+            ["minute", 60],
+        ];
+        return function (date) {
+            const diff = (date.getTime() - Date.now()) / 1000;
+            for (const [unit, secs] of units) {
+                if (Math.abs(diff) >= secs) {
+                    return relative.format(Math.round(diff / secs), unit);
+                }
+            }
+            return "just now";
+        };
+    })();
 </script>

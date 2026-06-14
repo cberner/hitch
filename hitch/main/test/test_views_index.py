@@ -7963,3 +7963,52 @@ class SharedPostFormHelperTests(TestCase):
                 self.assertIsNone(no_xhr["xhr"])
             finally:
                 browser.close()
+
+
+class SharedTimeHelperTests(TestCase):
+    """The shared window.hitch.relativeFromNow helper (_js_utils.html).
+
+    Regression guard for the J4 dedup: index.html and _usage_scripts.html both
+    rely on one relative-time formatter instead of their own copies.
+    """
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_relative_from_now(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[])
+        html = self.client.get(reverse("index")).content.decode()
+        self.assertIn("window.hitch.relativeFromNow", html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                results = page.evaluate(
+                    """
+                    () => ({
+                        past: window.hitch.relativeFromNow(
+                            new Date(Date.now() - 5 * 60 * 1000)),
+                        future: window.hitch.relativeFromNow(
+                            new Date(Date.now() + 2 * 3600 * 1000)),
+                        recent: window.hitch.relativeFromNow(
+                            new Date(Date.now() - 10 * 1000)),
+                    })
+                    """
+                )
+                self.assertIn("minute", results["past"])
+                self.assertIn("hour", results["future"])
+                self.assertEqual(results["recent"], "just now")
+            finally:
+                browser.close()
