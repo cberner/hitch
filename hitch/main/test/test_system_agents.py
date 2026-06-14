@@ -5694,6 +5694,111 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
+    def test_non_json_monitor_falls_back_to_gh_observation(
+        self, _mock_observe: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            max_iterations=3,
+            state={
+                "next_user_message_index": 5,
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            events_path=_agent_message_events_file(self, "totally not json"),
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+            input={"gh_observation": _gh_monitor_observation()},
+        )
+
+        pr_qa._handle_pr_followup_monitor_finished(instance, run, workflow)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        # A non-JSON monitor reply is not authoritative: Hitch falls back to its
+        # own gh observation and keeps the (healthy) PR workflow running instead
+        # of blocking it.
+        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(feedback="Codecov flagged a drop."),
+    )
+    def test_non_json_monitor_blocks_when_gh_has_uninterpreted_text(
+        self, _mock_observe: MagicMock
+    ) -> None:
+        # The gh observation carries review/CI text only the monitor can
+        # interpret; a non-JSON reply must not fall back to the gates (which
+        # could declare the PR ready and drop that feedback) -- it blocks.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            max_iterations=3,
+            state={
+                "next_user_message_index": 5,
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            events_path=_agent_message_events_file(self, "totally not json"),
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+            input={
+                "gh_observation": _gh_monitor_observation(
+                    feedback="Codecov flagged a drop."
+                )
+            },
+        )
+
+        pr_qa._handle_pr_followup_monitor_finished(instance, run, workflow)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_force_pushes_existing_handoff_without_snapshot(

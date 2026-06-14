@@ -1183,26 +1183,46 @@ def _handle_pr_followup_monitor_finished(
 
     raw_output = system_agents._final_agent_text(instance.events_path)
     parsed = _parse_pr_monitor_output(raw_output)
-    if parsed is None:
-        system_agents._fail_run_and_block_workflow(
-            run,
-            "PR follow-up monitor output was not valid JSON",
-            raw_output,
-        )
-        return
-
     monitor_observation = system_agents._run_gh_observation_fallback(run)
-    parsed = _authoritative_pr_monitor_result(
-        parsed,
-        _refresh_pr_monitor_observation(workflow, monitor_observation),
-        monitor_observation=monitor_observation,
-    )
+    gh_observation = _refresh_pr_monitor_observation(workflow, monitor_observation)
+    if parsed is None:
+        if _gh_observation_has_monitor_text(gh_observation):
+            # The PR carries review/CI text that only the monitor can interpret,
+            # and it failed to produce a usable reply. Falling back to the gh
+            # gates could declare the PR ready and silently drop that feedback,
+            # so block for a human rather than risk it.
+            system_agents._fail_run_and_block_workflow(
+                run,
+                "PR follow-up monitor output was not valid JSON",
+                raw_output,
+            )
+            return
+        # No monitor text to interpret -- the merge/review/CI gates are decided
+        # by structured gh signals alone -- so fall back to the gh observation
+        # (exactly as the backoff poll path does) rather than blocking an
+        # otherwise-healthy PR workflow on a transient formatting hiccup.
+        system_agents.logger.warning(
+            "PR follow-up monitor returned non-JSON output; "
+            "falling back to the gh observation for workflow %s",
+            workflow.pk,
+        )
+        result = _carry_current_monitor_feedback(
+            _pr_monitor_result_from_gh_observation(gh_observation),
+            workflow.state.get(system_agents._PR_MONITOR_STATE_KEY),
+            gh_observation,
+        )
+    else:
+        result = _authoritative_pr_monitor_result(
+            parsed,
+            gh_observation,
+            monitor_observation=monitor_observation,
+        )
     run.status = SystemAgentRun.STATUS_COMPLETED
-    run.output = parsed
+    run.output = result
     run.raw_output = raw_output
     run.save(update_fields=["status", "output", "raw_output", "updated_at"])
 
-    _advance_pr_workflow_from_monitor_result(workflow, parsed)
+    _advance_pr_workflow_from_monitor_result(workflow, result)
 
 def _authoritative_pr_monitor_result(
     parsed: dict[str, Any],
