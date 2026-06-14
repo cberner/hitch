@@ -200,14 +200,15 @@ def _active_worker_status_text(active: CodexInstance | None) -> str:
 def _apply_system_authors(
     entries: list[dict[str, Any]], session_id: str
 ) -> list[dict[str, Any]]:
-    system_authors: dict[int, str] = {}
-    for user_message_index, author in CodexInstance.objects.filter(
-        thread_id=session_id,
-        purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        user_message_index__isnull=False,
-    ).values_list("user_message_index", "display_author"):
-        if isinstance(user_message_index, int) and author:
-            system_authors[user_message_index] = author
+    system_authors: dict[int, str] = {
+        user_message_index: author
+        for user_message_index, author in CodexInstance.objects.filter(
+            thread_id=session_id,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            user_message_index__isnull=False,
+        ).values_list("user_message_index", "display_author")
+        if isinstance(user_message_index, int) and author
+    }
     if not system_authors:
         return entries
     user_message_index = 0

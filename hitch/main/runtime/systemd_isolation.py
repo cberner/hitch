@@ -273,13 +273,15 @@ def _memory_cgroup_properties(
     properties: list[str] = []
     if _is_finite_limit(high) or _is_finite_limit(hard):
         properties.append("MemoryAccounting=yes")
-    for prop in (
-        _limit_property("MemoryHigh", high, declarative=declarative),
-        _limit_property("MemoryMax", hard, declarative=declarative),
-        _limit_property("MemorySwapMax", swap_value, declarative=declarative),
-    ):
-        if prop is not None:
-            properties.append(prop)
+    properties.extend(
+        prop
+        for prop in (
+            _limit_property("MemoryHigh", high, declarative=declarative),
+            _limit_property("MemoryMax", hard, declarative=declarative),
+            _limit_property("MemorySwapMax", swap_value, declarative=declarative),
+        )
+        if prop is not None
+    )
     return properties
 
 def _systemd_worker_slice_properties() -> list[str]:

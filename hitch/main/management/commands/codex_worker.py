@@ -1404,8 +1404,7 @@ def _current_approval_mode(
 def _is_user_input_request_method(method: str) -> bool:
     return (
         method in _USER_INPUT_METHODS
-        or method.endswith("/requestUserInput")
-        or method.endswith("/request_user_input")
+        or method.endswith(("/requestUserInput", "/request_user_input"))
     )
 
 

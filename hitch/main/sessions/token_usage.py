@@ -782,7 +782,7 @@ def _write_zero_token_usage_cache(
         thread_id=thread_id,
         defaults={
             **_token_usage_cache_defaults(
-                rollout_path, rollout_mtime_ns, {key: 0 for key in _TOKEN_USAGE_KEYS}
+                rollout_path, rollout_mtime_ns, dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
             ),
             "daily_usage": {},
         },

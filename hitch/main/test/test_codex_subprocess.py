@@ -2784,7 +2784,7 @@ class ReconcileAndLookupTests(TestCase):
                     CodexInstance.objects.filter(pk=instance.pk).update(
                         input_attachment_paths=[str(path_a), str(path_b)],
                     )
-                return None
+                return
 
             with patch.object(Path, "unlink", side_effect=_inject_concurrent_add):
                 codex_pool.cleanup_input_images_for(instance)
@@ -7547,7 +7547,7 @@ class ApprovalHandlerTests(TestCase):
                 self.assertEqual(row.params, {"item": {"command": "rm -rf /"}})
                 # The pk is the link between the SSE event and the
                 # ``POST /approval/<id>/`` URL the browser POSTs to.
-                methods_to_payload = {m: p for m, p in events}
+                methods_to_payload = dict(events)
                 self.assertIn("approval/requested", methods_to_payload)
                 self.assertIn("approval/resolved", methods_to_payload)
                 self.assertEqual(methods_to_payload["approval/requested"]["id"], row.pk)
@@ -7587,7 +7587,7 @@ class ApprovalHandlerTests(TestCase):
             )
 
         self.assertEqual(result, {"decision": payload})
-        methods_to_payload = {method: event_payload for method, event_payload in events}
+        methods_to_payload = dict(events)
         self.assertEqual(
             methods_to_payload["approval/resolved"]["decision"], payload
         )
@@ -7648,7 +7648,7 @@ class ApprovalHandlerTests(TestCase):
                     row = UserInputRequest.objects.get(instance=instance)
                     self.assertEqual(row.method, request_method)
                     self.assertEqual(row.params, params)
-                    methods_to_payload = {m: p for m, p in events}
+                    methods_to_payload = dict(events)
                     self.assertIn("input/requested", methods_to_payload)
                     self.assertIn("input/resolved", methods_to_payload)
                     self.assertEqual(
