@@ -20,7 +20,6 @@ from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_s
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
-    Project,
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
@@ -29,6 +28,7 @@ from hitch.main.models import (
 from hitch.main.runtime import codex_events
 from hitch.main.test.support import (
     _cookie_value,
+    _make_project,
     _seed_cookies,
     _setup_codex,
 )
@@ -61,7 +61,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_discover: MagicMock,
         mock_scheduler: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -83,8 +83,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_lists_goals_and_inbox_count_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         goal = AutonomousGoal.objects.create(
@@ -196,7 +196,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_renders_goal_body_as_markdown(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         goal_text = "\n".join(
@@ -238,7 +238,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_shows_tappable_run_status_indicators(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         blocked_goal = AutonomousGoal.objects.create(
@@ -496,7 +496,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_discover: MagicMock,
         mock_default_branch_commit_hash: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -622,7 +622,7 @@ class AutonomousGoalViewTests(TestCase):
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         self.mock_auto_proposals_paused_by_quota.return_value = True
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -659,7 +659,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_treats_completed_auto_proposal_as_ready_not_done(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         auto_goal = AutonomousGoal.objects.create(
@@ -709,7 +709,7 @@ class AutonomousGoalViewTests(TestCase):
         _mock_discover: MagicMock,
         _mock_default_branch_commit_hash: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -765,7 +765,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_treats_budget_exhausted_stack_proposal_as_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -810,7 +810,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_treats_legacy_stopped_stack_proposal_as_ready(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -866,7 +866,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_shows_manual_goal_with_pending_stack_proposal_as_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -912,7 +912,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_blocks_pending_proposal_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -950,7 +950,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_blocks_stack_continuation_when_extra_pending_proposal_exists(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -997,7 +997,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_keeps_other_goal_ready_when_accepted_automation_is_in_flight(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -1053,7 +1053,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_edit_form_sync_preserves_auto_qa_choice_when_required(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -1083,7 +1083,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_draft_pr_goal_shows_auto_qa_required_on_reopen(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -1110,8 +1110,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_page_lists_proposals_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         goal = AutonomousGoal.objects.create(
@@ -1228,7 +1228,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_page_shows_autonomous_goal_stack_number(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -1281,7 +1281,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_page_omits_stack_label_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         autonomous_goal = AutonomousGoal.objects.create(
@@ -1314,7 +1314,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         stale_claimed_at = (
@@ -1355,7 +1355,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_keeps_active_proposal_start_claim_hidden(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         proposal = ProposedSession.objects.create(
@@ -1389,8 +1389,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_inbox_visible_projects_filter_messages(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _setup_codex(mock_codex)
         ProposedSession.objects.create(
             project=project,
@@ -1441,8 +1441,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_reject_proposed_session_uses_visible_project_filter(
         self, mock_cleanup: MagicMock
     ) -> None:
-        selected_project = Project.objects.create(name="Hitch", repo_path="/repo")
-        visible_project = Project.objects.create(name="Other", repo_path="/other")
+        selected_project = _make_project()
+        visible_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(
             self.client,
             **{
@@ -1474,8 +1474,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_update_outcome_rejects_proposal_hidden_by_visible_project_filter(
         self, mock_cleanup: MagicMock
     ) -> None:
-        visible_project = Project.objects.create(name="Hitch", repo_path="/repo")
-        hidden_project = Project.objects.create(name="Other", repo_path="/other")
+        visible_project = _make_project()
+        hidden_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(
             self.client,
             **{
@@ -1507,7 +1507,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_prefills_proposed_session(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex)
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1537,7 +1537,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex)
         stale_claimed_at = (
             datetime.now(UTC)
@@ -1579,7 +1579,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_prefills_prompt_and_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex)
         prompt = (
             "Debug and fix the user's issue from session UID thread-1.\n\n"
@@ -1599,7 +1599,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_rejects_unavailable_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex)
 
         response = self.client.get(
@@ -1613,7 +1613,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_prefills_bare_repo_cwd_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex)
 
         response = self.client.get(
@@ -1642,7 +1642,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_new_session_page_rejects_proposed_session_for_unavailable_repo(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         proposal = ProposedSession.objects.create(
             project=project,
             title="Add parser coverage",
@@ -1661,7 +1661,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_lists_no_proposal_notice_with_dismiss(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         goal = AutonomousGoal.objects.create(
@@ -1693,7 +1693,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_lists_agent_created_proposal(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         proposal = ProposedSession.objects.create(
@@ -1719,7 +1719,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_shows_create_form_inline_when_no_goals(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
 
@@ -1755,7 +1755,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_moves_create_form_to_header_dialog_when_goals_exist(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -1780,7 +1780,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, '<p class="section-label">Create</p>')
 
     def test_create_autonomous_goal_for_selected_project(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
         response = self.client.post(
@@ -1816,7 +1816,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     def test_create_autonomous_goal_stores_auto_merge_branch(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
         with patch("hitch.main.views.common.local_branch_names", return_value=["main"]):
@@ -1841,7 +1841,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.auto_merge_branch, "main")
 
     def test_edit_autonomous_goal_updates_selected_project_goal(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1888,7 +1888,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     def test_edit_autonomous_goal_clears_proposal_budget_when_blank(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1917,7 +1917,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIsNone(goal.proposal_budget)
 
     def test_edit_autonomous_goal_can_reset_web_search_to_codex_default(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1946,7 +1946,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DEFAULT)
 
     def test_edit_autonomous_goal_updates_auto_merge_branch(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1977,7 +1977,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.auto_merge_branch, "release")
 
     def test_edit_autonomous_goal_clears_auto_merge_when_unchecked(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2008,7 +2008,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.auto_merge_branch, "")
 
     def test_edit_autonomous_goal_preserves_autonomy_when_omitted(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2038,7 +2038,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertTrue(goal.auto_proposal_enabled)
 
     def test_edit_autonomous_goal_clears_auto_proposal_no_proposal_sha(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2068,7 +2068,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.auto_proposal_last_no_proposal_sha, "")
 
     def test_edit_autonomous_goal_preserves_auto_qa_when_omitted(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2096,7 +2096,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertTrue(goal.auto_qa_enabled)
 
     def test_edit_autonomous_goal_disables_auto_qa_when_false_is_explicit(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2125,8 +2125,8 @@ class AutonomousGoalViewTests(TestCase):
         self.assertFalse(goal.auto_qa_enabled)
 
     def test_edit_autonomous_goal_is_scoped_to_selected_project(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=other_project,
@@ -2150,7 +2150,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.goal, "Should not change.")
 
     def test_edit_autonomous_goal_rejects_invalid_posts(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2374,8 +2374,8 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.goal, "Find useful test coverage increments.")
 
     def test_delete_autonomous_goal_soft_deletes_selected_project_goal(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2399,8 +2399,8 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIsNone(other_goal.deleted_at)
 
     def test_delete_autonomous_goal_is_scoped_to_selected_project(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=other_project,
@@ -2415,7 +2415,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIsNone(goal.deleted_at)
 
     def test_delete_autonomous_goal_preserves_accepted_proposal(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2451,7 +2451,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_dismisses_unresolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2484,7 +2484,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_cleans_hidden_stacked_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2522,7 +2522,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2553,7 +2553,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_reconciles_terminal_running_workflow(
         self, mock_interrupt: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2611,7 +2611,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_stops_running_workflow(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2668,7 +2668,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_cleans_worktree_when_interrupt_is_terminal(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2720,7 +2720,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_delete_autonomous_goal_keeps_goal_when_running_workflow_cannot_stop(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2776,8 +2776,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2801,7 +2801,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_run_single_always_uses_worktrees(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(
             self.client,
             hitch_selected_project_id=str(project.pk),
@@ -2822,7 +2822,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_run_single_skips_goal_blocked_by_accepted_session(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2852,8 +2852,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_run_single_is_scoped_to_selected_project(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=other_project,
@@ -2870,8 +2870,8 @@ class AutonomousGoalViewTests(TestCase):
     def test_run_all_starts_each_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         first = AutonomousGoal.objects.create(
             project=project,
@@ -2911,7 +2911,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_reject_proposed_session_requires_reason(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2937,7 +2937,7 @@ class AutonomousGoalViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         codex = _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -2980,7 +2980,7 @@ class AutonomousGoalViewTests(TestCase):
         self, mock_codex: MagicMock, mock_stop_stack: MagicMock
     ) -> None:
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3021,7 +3021,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_resolving_visible_stack_proposal_stops_background_stack_before_cleanup(
         self, mock_stop_stack: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3094,7 +3094,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_reject_visible_stack_proposal_keeps_worktree_when_stop_fails(
         self, mock_stop_stack: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3137,7 +3137,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_not_called()
 
     def test_dismiss_notice_updates_outcome(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3161,7 +3161,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(notice.outcome_status, ProposedSession.OUTCOME_DISMISSED)
 
     def test_notice_rejects_non_dismissed_outcome(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3186,7 +3186,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_dismiss_proposed_session_uses_distinct_outcome(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3219,7 +3219,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_reject_proposed_session_cleans_candidate_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3261,7 +3261,7 @@ class AutonomousGoalViewTests(TestCase):
         # dismiss/reject for the same proposal; re-deciding it must be refused so
         # the recorded outcome is not corrupted and the live session stays
         # visible.
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3315,7 +3315,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_update_outcome_rejects_unset_target_status(self) -> None:
         # OUTCOME_UNSET is the pending inbox state, not a decision; the endpoint
         # must not let a request re-open a proposal by posting it.
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -3344,7 +3344,7 @@ class AutonomousGoalViewTests(TestCase):
         # must leave that decision intact rather than flip it to accepted, which
         # would leave accepted_session pointing at a removed worktree. Exactly
         # one transition wins across both endpoints.
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         proposal = ProposedSession.objects.create(
             project=project,
             title="Add parser coverage",

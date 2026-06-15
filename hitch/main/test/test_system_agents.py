@@ -40,7 +40,7 @@ from hitch.main.models import (
 )
 from hitch.main.repos import AutoPullError, AutoPullResult
 from hitch.main.runtime import codex_events, rate_limit, streaming
-from hitch.main.test.support import _rollout_line
+from hitch.main.test.support import _make_project, _rollout_line
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
@@ -2681,7 +2681,7 @@ class SpecCriticWorkflowTests(TestCase):
             thread_id="qa-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -2993,7 +2993,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_merge_start_block_records_failed_metadata(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         metadata = SessionMetadata.objects.create(
             thread_id="main-thread",
             cwd="/repo",
@@ -3782,7 +3782,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_qa_lgtm_merges_configured_local_branch(
         self, mock_merge: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         implementation = SessionMetadata.objects.create(
             thread_id="main-thread",
             cwd="/repo",
@@ -3854,9 +3854,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_qa_lgtm_does_not_auto_pull_after_local_branch_merge(
         self, mock_merge: MagicMock, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -3913,9 +3911,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_skips_when_project_setting_is_off(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=False,
         )
         SessionMetadata.objects.create(
@@ -3975,9 +3971,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_skips_when_workflow_checkout_missing(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4010,9 +4004,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_skips_active_session_checkout(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4045,9 +4037,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_skips_subdirectory_of_active_session_checkout(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4084,8 +4074,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_skips_project_mismatched_with_workflow_checkout(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
+        project = _make_project(
             repo_path="/repo-b",
             git_common_dir="/repo-b/.git",
             auto_pull_enabled=True,
@@ -4125,9 +4114,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_records_up_to_date_result(self, mock_pull: MagicMock) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4171,9 +4158,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_records_running_before_pull(self, mock_pull: MagicMock) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4217,9 +4202,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pull_result_preserves_workflow_updated_at(
         self, mock_pull: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4282,9 +4265,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_records_expected_failure(self, mock_pull: MagicMock) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4319,9 +4300,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_records_unexpected_failure(self, mock_pull: MagicMock) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pull_enabled=True,
         )
         SessionMetadata.objects.create(
@@ -4483,7 +4462,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_qa_lgtm_blocks_when_local_branch_merge_fails(
         self, mock_merge: MagicMock, mock_surface: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         implementation = SessionMetadata.objects.create(
             thread_id="main-thread",
             cwd="/repo",
@@ -10462,7 +10441,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     def test_recent_proposal_references_cover_empty_and_missing_paths(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -10699,7 +10678,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -10768,7 +10747,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_prompt_includes_summary_and_prior_run_references(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -10869,7 +10848,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_history_summary_invalid_output_falls_back_to_candidate(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -10928,7 +10907,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_history_summary_stops_when_it_exhausts_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11008,7 +10987,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_split: MagicMock,
         mock_write: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11063,7 +11042,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_history_summary_spawn_failure_falls_back_to_candidate(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11117,7 +11096,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_interrupt: MagicMock,
         mock_upsert: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11188,7 +11167,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_interrupt: MagicMock,
         mock_upsert: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11242,7 +11221,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn: MagicMock,
         mock_interrupt: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11321,7 +11300,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn: MagicMock,
         mock_interrupt: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11397,7 +11376,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn: MagicMock,
         mock_interrupt: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11514,7 +11493,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_failed_history_summary_worker_falls_back_to_candidate(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11570,7 +11549,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_summary_step_without_history_skips_to_candidate(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11617,7 +11596,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_history_summary_spawn_noops_when_workflow_inactive(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11664,7 +11643,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["error"], "autonomous goal no longer exists")
 
     def test_history_summary_fallback_noops_when_inactive(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11704,7 +11683,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 1)
     def test_candidate_proposal_history_uses_metadata_and_outcome_notes(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11758,7 +11737,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 10)
     @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 0)
     def test_candidate_proposal_history_truncates_marker_when_no_rows_fit(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11787,7 +11766,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 300)
     def test_candidate_proposal_history_keeps_row_with_long_files(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11839,7 +11818,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_workflow_skips_candidate_spawn_when_goal_deleted_after_record_create(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11887,7 +11866,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_worktree: MagicMock,
         _mock_default_sha: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -11940,7 +11919,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12087,7 +12066,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_accepted_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12176,7 +12155,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_rejected_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12266,7 +12245,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_accepted_stack_proposal_stop_ignores_different_proposal(
         self, mock_interrupt: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12341,7 +12320,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_stack_proposal_stop_cleans_worktree_between_agent_turns(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12422,7 +12401,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_stack_proposal_stop_keeps_accepted_worktree_before_next_candidate(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12491,7 +12470,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_accepted_stack_proposal_stop_leaves_live_uninterrupted_run(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12604,7 +12583,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12746,7 +12725,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_default_sha: MagicMock,
         mock_snapshot: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12834,7 +12813,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -12929,7 +12908,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13032,7 +13011,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13146,7 +13125,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_default_sha: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -13173,7 +13152,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_starts_enabled_goal_without_pending_proposal(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -13217,7 +13196,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13364,7 +13343,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_does_not_continue_exhausted_stack_budget(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13410,7 +13389,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_when_any_extra_pending_proposal_exists(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13453,7 +13432,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_pending_proposal_without_stack_metadata(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13496,7 +13475,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn: MagicMock,
         mock_default_sha: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13536,7 +13515,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(state.continuable_stack_goal_ids, set())
 
     def test_pending_proposal_state_blocks_exhausted_stack_budget(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13581,7 +13560,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(state.continuable_stack_goal_ids, set())
 
     def test_stack_continuation_helpers_reject_invalid_proposal_states(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13709,7 +13688,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_create_workflow_record_rejects_invalid_stack_continuation_metadata(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13755,7 +13734,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha: MagicMock,
         mock_snapshot: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -13822,7 +13801,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_pending_proposal_blocking_ids_loads_pending_proposals_in_bulk(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         continuable_goal = AutonomousGoal.objects.create(
             project=project,
             title="Continuable goal",
@@ -13986,7 +13965,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         _mock_snapshot: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14064,7 +14043,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_ref_sha: MagicMock,
         mock_default_sha: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep release tests current",
@@ -14104,7 +14083,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_rechecks_enablement_after_lock(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -14124,7 +14103,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_ignores_soft_deleted_goal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -14145,7 +14124,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_rechecks_enablement_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -14173,7 +14152,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_rechecks_base_selection_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_ref_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep release tests current",
@@ -14204,7 +14183,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         # The goal ids are a snapshot, so a goal (or its project) deleted between
         # the snapshot and the select_for_update().get() makes the per-goal call
         # raise. One bad row must not abort the rest of the batch.
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         first = AutonomousGoal.objects.create(
             project=project,
             title="First",
@@ -14240,7 +14219,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         self.mock_auto_proposals_paused_by_quota.return_value = True
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -14263,7 +14242,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_skips_pending_proposal_but_not_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         pending_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14308,8 +14287,8 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_does_not_block_on_resolved_proposals(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         accepted_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14358,7 +14337,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_transient_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14391,7 +14370,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_ignores_manual_transient_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14428,7 +14407,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_ignores_stale_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14508,7 +14487,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_serializes_running_workflows_per_project(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         first_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14544,7 +14523,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_own_unfinished_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14584,7 +14563,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_cached_done_accepted_session_with_live_pr_workflow(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14626,7 +14605,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_stale_done_after_resumed_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14749,7 +14728,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_allows_uncached_done_accepted_session_from_workflow(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14808,7 +14787,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_allows_uncached_done_accepted_session_from_rollout(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14909,7 +14888,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_does_not_block_other_goal_for_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -14965,7 +14944,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_user_accepted_auto_review_proposal(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15008,7 +14987,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_user_accepted_running_goal_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15043,7 +15022,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_in_flight_pr_qa_for_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15113,7 +15092,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_blocks_unresolved_failure_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15148,7 +15127,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_does_not_block_resolved_failure_notice(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15182,7 +15161,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_waits_when_base_branch_is_unavailable(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15211,8 +15190,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_reconcile_dead: MagicMock,
         _mock_default_sha: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         eligible_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -15263,8 +15242,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_reconcile_dead: MagicMock,
         _mock_default_sha: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         first_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep tests current",
@@ -15314,7 +15293,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_waits_for_default_branch_change_after_no_proposal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15346,7 +15325,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_no_proposal_records_and_suppresses_until_branch_changes(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15401,7 +15380,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_yolo_workflow_starts_candidate_thread_with_yolo_guidance(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
@@ -15425,7 +15404,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_prompt_includes_prior_memory(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15469,7 +15448,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_prompt_compacts_large_prior_memory(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15512,7 +15491,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 900)
     def test_compacted_memory_context_keeps_recent_actionable_summary(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15543,7 +15522,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     def test_compacted_memory_context_includes_older_summary_section(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15569,7 +15548,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 190)
     def test_fit_memory_context_uses_line_when_full_section_does_not_fit(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15592,7 +15571,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 450)
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
     def test_fit_memory_context_includes_older_compacted_summaries(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15620,7 +15599,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_fit_memory_context_stops_before_older_summary_that_would_overflow(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15646,7 +15625,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 240)
     def test_compacted_memory_context_enforces_budget_with_long_files(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15674,7 +15653,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS", 2)
     def test_memory_context_caps_recent_rows_before_compaction(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
@@ -15701,7 +15680,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_completion_starts_judge_thread(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15798,7 +15777,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_completion_creates_notice_when_no_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15877,7 +15856,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_no_proposal_records_workflow_start_sha_snapshot(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15919,7 +15898,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_spawn_interrupts_worker_when_goal_deleted_mid_spawn(
         self, mock_spawn: MagicMock, mock_interrupt: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -15960,7 +15939,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_dead_autonomous_goal_candidate_worker_is_retried_once(
         self, mock_spawn: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Production issues",
@@ -16059,7 +16038,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_dead_autonomous_goal_candidate_worker_blocks_after_retry_budget(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Production issues",
@@ -16120,7 +16099,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_dead_candidate_worker_retries_within_proposal_budget_after_death_retry(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Production issues",
@@ -16217,7 +16196,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_dead_autonomous_goal_judge_worker_is_retried_once(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16311,7 +16290,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_manual_no_proposal_does_not_record_auto_checkpoint(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16349,7 +16328,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_stale_no_proposal_workflow_does_not_restore_cleared_sha(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16388,7 +16367,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_yolo_candidate_completion_starts_judge_thread_with_yolo_guidance(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16455,7 +16434,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_judge_spawn_interrupts_worker_when_goal_deleted_mid_spawn(
         self, mock_spawn: MagicMock, mock_interrupt: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16540,7 +16519,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     def test_judge_creates_proposal_when_confidence_meets_threshold(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16641,7 +16620,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_draft_patch_autonomy_leaves_proposal_pending_for_candidate_session(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16731,7 +16710,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_draft_pr_autonomy_records_auto_pr_from_judge_completion(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16807,7 +16786,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_merge_worktree_candidate_starts_from_target_branch(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16887,7 +16866,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_draft_patch_does_not_revalidate_until_user_continuation(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -16953,7 +16932,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_draft_patch_auto_qa_setting_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17011,7 +16990,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_draft_pr_autonomy_records_auto_pr_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17071,7 +17050,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_autonomous_goal_auto_merge_config_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17135,7 +17114,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn: MagicMock,
     ) -> None:
         mock_spawn.side_effect = RuntimeError("app-server unavailable")
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17201,7 +17180,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_draft_pr_implementation_completion_records_pr_workflow(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         implementation = SessionMetadata.objects.create(
             thread_id="implementation-thread",
             cwd="/repo",
@@ -17242,7 +17221,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_qa_implementation_completion_records_qa_workflow(
         self, mock_start: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         implementation = SessionMetadata.objects.create(
             thread_id="implementation-thread",
             cwd="/repo",
@@ -17283,7 +17262,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         mock_spawn.side_effect = RuntimeError("app-server unavailable")
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17344,7 +17323,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     def test_completed_autonomous_goal_run_blocks_when_goal_was_deleted(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17438,7 +17417,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
     def test_candidate_failure_creates_visible_notice(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17504,7 +17483,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
     def test_judge_skips_proposal_below_threshold(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17671,7 +17650,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         # rollout file's TokenCount totals are the reliable source and goal
         # events are only a fallback (the larger of the two wins when both
         # exist, since each is a cumulative thread total).
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         SessionMetadata.objects.create(
             thread_id="candidate-thread",
             cwd="/repo",
@@ -17722,7 +17701,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         # budget tracking stayed at zero ("Tokens used: 0" on the inbox tile)
         # and every retry counted against the no-progress cap, ending stacks
         # long before the configured budget was spent.
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17885,7 +17864,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_invalid_candidate_output_retries_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -17982,7 +17961,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_exhausted_candidate_budget_persists_tokens_before_blocking(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18074,7 +18053,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_budget_retries_without_new_token_progress(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18192,7 +18171,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_candidate_budget_no_progress_retry_cap_blocks_loop(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18286,7 +18265,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_no_proposal_retries_candidate_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18367,7 +18346,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_below_threshold_retries_candidate_within_proposal_budget(
         self, mock_spawn: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18486,7 +18465,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(ProposedSession.objects.exists())
 
     def test_candidate_retry_spawn_blocks_when_candidate_session_missing(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18519,7 +18498,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(notice.outcome_metadata["proposal_budget"], 1000)
 
     def test_candidate_retry_spawn_noops_for_inactive_workflow(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18543,7 +18522,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(SystemAgentRun.objects.exists())
 
     def test_publish_unset_stack_proposal_records_budget_metadata(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id="autonomous-goal:1",
@@ -18586,7 +18565,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_current_stack_proposal_falls_back_to_source_workflow_for_legacy_state(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id="autonomous-goal:1",
@@ -18607,7 +18586,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     def test_below_threshold_notice_copy_handles_missing_candidate_title(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18629,7 +18608,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     def test_accepted_proposed_session_unhides_candidate_thread(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -18692,7 +18671,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_proposed_session_accepted_into_new_thread_keeps_candidate_hidden(
         self,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",

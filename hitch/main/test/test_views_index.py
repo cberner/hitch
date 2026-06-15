@@ -52,6 +52,7 @@ from hitch.main.sessions import (
 )
 from hitch.main.test.support import (
     _cookie_value,
+    _make_project,
     _rollout_line,
     _seed_cookies,
     _setup_codex,
@@ -3296,7 +3297,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = []
         now = datetime.now(UTC)
-        project = Project.objects.create(name="Repo", repo_path="/repo")
+        project = _make_project(name="Repo")
         _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
@@ -3523,7 +3524,7 @@ class IndexViewTests(TestCase):
     def test_hides_project_banner_when_project_exists(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Hitch", repo_path="/repo")
+        _make_project()
         _setup_codex(mock_codex)
         mock_discover.return_value = []
 
@@ -4803,8 +4804,8 @@ class IndexViewTests(TestCase):
     def test_selected_project_filters_sessions(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other = _make_project(name="Other", repo_path="/other")
         sessions = [
             _session("matching", name="Matching", cwd="/repo"),
             _session("other", name="Other session", cwd="/other"),
@@ -4829,7 +4830,7 @@ class IndexViewTests(TestCase):
     def test_warm_index_filters_system_sessions_without_hidden_id_scan(
         self, mock_codex: MagicMock, mock_hidden_thread_ids: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         now = timezone.now()
         SessionMetadata.objects.create(
             thread_id="visible",
@@ -4889,8 +4890,8 @@ class IndexViewTests(TestCase):
     def test_visible_projects_filter_sessions(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other = _make_project(name="Other", repo_path="/other")
         sessions = [
             _session("matching", name="Matching", cwd="/repo"),
             _session("other", name="Other session", cwd="/other"),
@@ -4936,7 +4937,7 @@ class IndexViewTests(TestCase):
     def test_visible_projects_rejects_oversized_guest_cookie(
         self, mock_cookie_fits: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
 
         response = self.client.post(
             reverse("update_visible_session_projects"),
@@ -4952,8 +4953,8 @@ class IndexViewTests(TestCase):
         self.assertNotIn(_VISIBLE_SESSION_PROJECTS_COOKIE, response.cookies)
 
     def test_settings_selected_project_stays_visible_with_explicit_filter(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other = _make_project(name="Other", repo_path="/other")
         _seed_cookies(
             self.client,
             **{_VISIBLE_SESSION_PROJECTS_COOKIE: f"[{other.pk}]"},
@@ -5119,7 +5120,7 @@ class IndexViewTests(TestCase):
     def test_no_project_metadata_prevents_cwd_project_inference(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _setup_codex(mock_codex, threads=[_session("cleared", name="Cleared", cwd="/repo")])
         mock_discover.return_value = [Path("/repo")]
         SessionMetadata.objects.create(
@@ -6277,8 +6278,8 @@ class IndexViewTests(TestCase):
     def test_profile_shows_selected_project_token_usage(
         self, mock_codex: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other_project = Project.objects.create(name="Other", repo_path="/other")
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
         session_path = _make_rollout(
             self,
@@ -6960,12 +6961,12 @@ class IndexViewTests(TestCase):
     def test_new_session_page_populates_project_and_bare_repo_selectors(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project_a = Project.objects.create(
+        project_a = _make_project(
             name="Project A",
             repo_path="/home/user/proj-a",
             auto_pr_mode=Project.AUTO_PR_ON,
         )
-        Project.objects.create(name="Project B", repo_path="/home/user/proj-b")
+        _make_project(name="Project B", repo_path="/home/user/proj-b")
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
 
@@ -7013,8 +7014,8 @@ class IndexViewTests(TestCase):
     def test_project_dropdown_selects_saved_repo_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Project A", repo_path="/home/user/proj-a")
-        project_b = Project.objects.create(name="Project B", repo_path="/home/user/proj-b")
+        _make_project(name="Project A", repo_path="/home/user/proj-a")
+        project_b = _make_project(name="Project B", repo_path="/home/user/proj-b")
         _seed_cookies(
             self.client,
             **{_LAST_SELECTED_REPO_COOKIE: "/home/user/proj-b"},
@@ -7032,7 +7033,7 @@ class IndexViewTests(TestCase):
     def test_project_dropdown_keeps_saved_unprojected_repo_on_bare_option(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Project A", repo_path="/home/user/proj-a")
+        _make_project(name="Project A", repo_path="/home/user/proj-a")
         _seed_cookies(
             self.client,
             **{_LAST_SELECTED_REPO_COOKIE: "/home/user/bare"},
@@ -7053,7 +7054,7 @@ class IndexViewTests(TestCase):
     def test_project_dropdown_ignores_stale_saved_repo(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Project A", repo_path="/home/user/proj-a")
+        project = _make_project(name="Project A", repo_path="/home/user/proj-a")
         _seed_cookies(
             self.client,
             **{_LAST_SELECTED_REPO_COOKIE: "/home/user/missing"},
@@ -7175,7 +7176,7 @@ class IndexViewTests(TestCase):
 
 class ProjectViewTests(TestCase):
     def test_projects_default_to_follow_global_auto_pr(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
 
         self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_FOLLOW_GLOBAL)
 
@@ -7194,7 +7195,7 @@ class ProjectViewTests(TestCase):
     def test_new_project_form_hides_repos_that_already_have_projects(
         self, mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Existing", repo_path="/repo")
+        _make_project(name="Existing")
         mock_discover.return_value = [Path("/repo"), Path("/other")]
 
         response = self.client.get(reverse("new_project"))
@@ -7208,9 +7209,8 @@ class ProjectViewTests(TestCase):
     def test_new_project_form_hides_repos_with_existing_git_common_dir(
         self, mock_discover: MagicMock, mock_common_dir: MagicMock
     ) -> None:
-        Project.objects.create(
+        _make_project(
             name="Existing",
-            repo_path="/repo",
             git_common_dir="/repo/.git",
         )
         mock_discover.return_value = [Path("/repo-worktree")]
@@ -7227,7 +7227,7 @@ class ProjectViewTests(TestCase):
     def test_creates_project_selects_it_and_associates_existing_sessions(
         self, mock_discover: MagicMock, mock_codex: MagicMock
     ) -> None:
-        other = Project.objects.create(name="Other", repo_path="/other")
+        other = _make_project(name="Other", repo_path="/other")
         _seed_cookies(
             self.client,
             **{_VISIBLE_SESSION_PROJECTS_COOKIE: f"[{other.pk}]"},
@@ -7267,9 +7267,8 @@ class ProjectViewTests(TestCase):
         mock_common_dir: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        Project.objects.create(
+        _make_project(
             name="Source",
-            repo_path="/repo",
             git_common_dir="/repo/.git",
         )
         mock_discover.return_value = [Path("/repo-worktree")]
@@ -7321,7 +7320,7 @@ class ProjectViewTests(TestCase):
         self.assertEqual(SessionMetadata.objects.get(thread_id="ordinary").project, project)
 
     def test_edit_project_updates_name_and_auto_pr_mode(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
 
         response = self.client.post(
             reverse("edit_project"),
@@ -7342,7 +7341,7 @@ class ProjectViewTests(TestCase):
         self.assertTrue(project.auto_pull_enabled)
 
     def test_edit_project_rejects_invalid_posts(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
 
         for data, message in (
             (
