@@ -1,0 +1,1970 @@
+    <script>
+        (function () {
+            const dateTime = new Intl.DateTimeFormat(undefined, {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+                second: "2-digit",
+                timeZoneName: "short",
+            });
+            function formatTimestampElement(el) {
+                const seconds = Number(el.dataset.ts);
+                if (!Number.isFinite(seconds) || seconds <= 0) return;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                el.textContent = dateTime.format(date);
+            }
+            function formatTimestamps(root) {
+                for (const el of root.querySelectorAll("time[data-ts]")) formatTimestampElement(el);
+            }
+            formatTimestamps(document);
+            function timestampElement(seconds, className) {
+                const el = document.createElement("time");
+                if (className) el.className = className;
+                el.dataset.ts = String(seconds);
+                el.textContent = String(seconds);
+                formatTimestampElement(el);
+                return el;
+            }
+            window.__hitchTimestampElement = timestampElement;
+
+            async function loadIntermediateDetails(details) {
+                if (!details || details.dataset.loaded === "true" || details.dataset.loading === "true") return;
+                const url = details.dataset.bodyUrl;
+                const body = details.querySelector("[data-intermediate-body]");
+                if (!url || !body) return;
+                details.dataset.loading = "true";
+                body.hidden = false;
+                body.setAttribute("aria-busy", "true");
+                try {
+                    const response = await fetch(url, {
+                        headers: { "X-Requested-With": "XMLHttpRequest" },
+                    });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    body.innerHTML = await response.text();
+                    formatTimestamps(body);
+                    details.dataset.loaded = "true";
+                } catch (_error) {
+                    body.textContent = "Unable to load details.";
+                } finally {
+                    delete details.dataset.loading;
+                    body.removeAttribute("aria-busy");
+                }
+            }
+            for (const details of document.querySelectorAll("[data-lazy-intermediate]")) {
+                details.addEventListener("toggle", () => {
+                    if (details.open) loadIntermediateDetails(details);
+                });
+                if (details.open) loadIntermediateDetails(details);
+            }
+
+            function showDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+            }
+            function hideDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
+            }
+
+            {% include "_primary_nav_script.html" %}
+
+            // Session actions menu and inline rename form.
+            const editPanel = document.querySelector("[data-edit-title]");
+            const editButton = document.querySelector("[data-edit-title-open]");
+            const moveProjectButton = document.querySelector("[data-move-project-open]");
+            const moveProjectDialog = document.querySelector("[data-move-project-dialog]");
+            const moveProjectCancel = document.querySelector("[data-move-project-cancel]");
+            const approvalModeButton = document.querySelector("[data-approval-mode-open]");
+            const approvalModeDialog = document.querySelector("[data-approval-mode-dialog]");
+            const approvalModeCancel = document.querySelector("[data-approval-mode-cancel]");
+            const menu = document.querySelector("[data-session-menu]");
+            const menuButton = document.querySelector("[data-session-menu-open]");
+            const menuPanel = document.querySelector("[data-session-menu-panel]");
+            const closeMenu = () => {
+                if (!menuButton || !menuPanel) return;
+                menuPanel.hidden = true;
+                menuButton.setAttribute("aria-expanded", "false");
+            };
+            if (menu && menuButton && menuPanel) {
+                menuButton.addEventListener("click", () => {
+                    const willOpen = menuPanel.hidden;
+                    menuPanel.hidden = !willOpen;
+                    menuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+                document.addEventListener("click", (event) => {
+                    if (!menu.contains(event.target)) closeMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape") return;
+                    if (menuPanel.hidden) return;
+                    closeMenu();
+                    menuButton.focus();
+                });
+            }
+            if (editPanel && editButton) {
+                editButton.addEventListener("click", () => {
+                    closeMenu();
+                    editPanel.hidden = false;
+                    const input = editPanel.querySelector("input[name='name']");
+                    if (input) {
+                        input.focus();
+                        input.select();
+                    }
+                    editPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+                });
+            }
+            if (moveProjectButton && moveProjectDialog) {
+                moveProjectButton.addEventListener("click", () => {
+                    closeMenu();
+                    showDialog(moveProjectDialog);
+                    const select = moveProjectDialog.querySelector("select[name='project']");
+                    if (select) select.focus();
+                });
+            }
+            if (moveProjectCancel && moveProjectDialog) {
+                moveProjectCancel.addEventListener("click", () => hideDialog(moveProjectDialog));
+            }
+            if (approvalModeButton && approvalModeDialog) {
+                approvalModeButton.addEventListener("click", () => {
+                    closeMenu();
+                    showDialog(approvalModeDialog);
+                    const select = approvalModeDialog.querySelector("select[name='approval_mode']");
+                    if (select) select.focus();
+                });
+            }
+            if (approvalModeCancel && approvalModeDialog) {
+                approvalModeCancel.addEventListener("click", () => hideDialog(approvalModeDialog));
+            }
+
+            const diffModal = document.querySelector("[data-diff-modal]");
+            const diffOpeners = document.querySelectorAll("[data-diff-open]");
+            const diffClose = document.querySelector("[data-diff-close]");
+            const openDiff = () => {
+                if (!diffModal) return;
+                if (diffModal.open) return;
+                closeMenu();
+                if (typeof diffModal.showModal === "function") {
+                    diffModal.showModal();
+                } else {
+                    diffModal.setAttribute("open", "");
+                }
+            };
+            const closeDiff = () => {
+                if (!diffModal) return;
+                if (typeof diffModal.close === "function") {
+                    diffModal.close();
+                } else {
+                    diffModal.removeAttribute("open");
+                }
+            };
+            for (const opener of diffOpeners) {
+                opener.addEventListener("click", () => {
+                    if (opener.disabled) return;
+                    openDiff();
+                });
+            }
+            if (diffClose) diffClose.addEventListener("click", closeDiff);
+            if (diffModal) {
+                diffModal.addEventListener("click", (event) => {
+                    if (event.target === diffModal) closeDiff();
+                });
+            }
+
+            const LONG_PRESS_MS = 650;
+            const LONG_PRESS_MOVE_PX = 10;
+            // How long the "copied" flash stays on, and how long the click that
+            // follows a long-press/copy is suppressed; kept in sync with the
+            // .copied CSS transition.
+            const COPY_FEEDBACK_MS = 900;
+            let longPress = null;
+            let suppressMessageClickUntil = 0;
+
+            function copyableMessageFrom(target) {
+                if (!(target instanceof Element)) return null;
+                return target.closest("[data-copyable-message]");
+            }
+
+            function messageCopyText(message) {
+                const body = message.querySelector(".body");
+                if (!body) return "";
+                return (body.innerText || body.textContent || "").trimEnd();
+            }
+
+            const copyText = window.hitch.copyToClipboard;
+
+            function markCopied(message) {
+                message.classList.add("copied");
+                window.setTimeout(() => message.classList.remove("copied"), COPY_FEEDBACK_MS);
+            }
+
+            function copyMessage(message) {
+                suppressMessageClickUntil = Date.now() + COPY_FEEDBACK_MS;
+                copyText(messageCopyText(message)).then((copied) => {
+                    if (copied) markCopied(message);
+                }).catch(() => {});
+            }
+
+            function clearLongPress() {
+                if (!longPress) return;
+                window.clearTimeout(longPress.timer);
+                longPress = null;
+            }
+
+            document.addEventListener("pointerdown", (event) => {
+                if (event.button && event.button !== 0) return;
+                const message = copyableMessageFrom(event.target);
+                if (!message) return;
+                clearLongPress();
+                longPress = {
+                    pointerId: event.pointerId,
+                    message,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    timer: window.setTimeout(() => {
+                        const pendingMessage = longPress ? longPress.message : message;
+                        longPress = null;
+                        copyMessage(pendingMessage);
+                    }, LONG_PRESS_MS),
+                };
+            });
+            document.addEventListener("pointermove", (event) => {
+                if (!longPress || event.pointerId !== longPress.pointerId) return;
+                const dx = Math.abs(event.clientX - longPress.startX);
+                const dy = Math.abs(event.clientY - longPress.startY);
+                if (dx > LONG_PRESS_MOVE_PX || dy > LONG_PRESS_MOVE_PX) clearLongPress();
+            }, { passive: true });
+            document.addEventListener("pointerup", clearLongPress);
+            document.addEventListener("pointercancel", clearLongPress);
+            document.addEventListener("contextmenu", (event) => {
+                const message = copyableMessageFrom(event.target);
+                if (!message) return;
+                if (!longPress && Date.now() > suppressMessageClickUntil) return;
+                event.preventDefault();
+                if (!longPress) return;
+                const pendingMessage = longPress.message;
+                clearLongPress();
+                copyMessage(pendingMessage);
+            });
+            document.addEventListener("click", (event) => {
+                if (Date.now() > suppressMessageClickUntil) return;
+                if (!copyableMessageFrom(event.target)) return;
+                event.preventDefault();
+                event.stopPropagation();
+            }, true);
+
+            function isSuperEnter(event) {
+                const hasSuper = event.metaKey
+                    || (event.getModifierState && event.getModifierState("Meta"))
+                    || (event.getModifierState && event.getModifierState("OS"));
+                return event.key === "Enter" && hasSuper;
+            }
+            function requestSubmit(form, submitter) {
+                if (!form || !submitter || submitter.disabled) return;
+                if (typeof form.requestSubmit === "function") {
+                    form.requestSubmit(submitter);
+                } else {
+                    submitter.click();
+                }
+            }
+            const stopForm = document.querySelector("[data-stop-form]");
+            let stopSubmitting = false;
+            if (stopForm) {
+                stopForm.addEventListener("submit", (event) => {
+                    if (stopSubmitting) {
+                        event.preventDefault();
+                        return;
+                    }
+                    stopSubmitting = true;
+                    for (const button of document.querySelectorAll("[data-composer-stop]")) {
+                        button.disabled = true;
+                    }
+                });
+            }
+
+            // Composer: auto-grow the textarea up to its CSS max-height and
+            // disable submit when empty. Enter inserts a newline; Super+Enter
+            // submits the send button.
+            const composer = document.querySelector("[data-composer]");
+            if (composer) {
+                const input = composer.querySelector("[data-composer-input]");
+                const submit = composer.querySelector("[data-composer-submit]");
+                const stop = composer.querySelector("[data-composer-stop]");
+                const planModeInput = composer.querySelector("[data-plan-mode-input]");
+                const planModeExplicitInput = composer.querySelector("[data-plan-mode-explicit-input]");
+                const slashCommand = composer.querySelector("[data-slash-command]");
+                const slashTrigger = composer.querySelector("[data-slash-trigger]");
+                const slashMenu = composer.querySelector("[data-slash-menu]");
+                const slashPlan = composer.querySelector("[data-slash-plan]");
+                const slashPr = composer.querySelector("[data-slash-pr]");
+                const slashFixPr = composer.querySelector("[data-slash-fix-pr]");
+                const slashQa = composer.querySelector("[data-slash-qa]");
+                const imageButton = composer.querySelector("[data-image-button]");
+                const imageInput = composer.querySelector("[data-image-input]");
+                const imageSummary = composer.querySelector("[data-image-summary]");
+                const imageClear = composer.querySelector("[data-image-clear]");
+                const liveWork = document.querySelector("[data-live-work]");
+                const nextMessageConfig = document.querySelector("[data-next-message-config]");
+                const nextMessageItems = nextMessageConfig
+                    ? nextMessageConfig.querySelectorAll("[data-next-message-item]")
+                    : [];
+                const composerHeightProperty = "--composer-height";
+                const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
+                const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
+                // Re-measure the keyboard offset at a few delays so the composer
+                // settles correctly as the mobile virtual keyboard animates in.
+                const composerKeyboardSettleDelays = [50, 150, 300, 500];
+                const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
+                const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
+                const workflowLocked = composer.dataset.workflowLocked === "true";
+                let composerKeyboardFrame = 0;
+                let composerKeyboardSettleTimers = [];
+                const hasImages = () => imageInput && (imageInput.files || []).length > 0;
+                const syncComposerHeight = () => {
+                    const height = Math.ceil(composer.getBoundingClientRect().height);
+                    if (height > 0) {
+                        document.documentElement.style.setProperty(composerHeightProperty, `${height}px`);
+                    }
+                };
+                const sync = () => {
+                    input.style.height = "auto";
+                    input.style.height = input.scrollHeight + "px";
+                    syncComposerHeight();
+                    submit.disabled = workflowLocked || (
+                        input.value.trim().length === 0 && !hasImages()
+                    );
+                };
+                const syncImageSummary = () => {
+                    if (!imageInput) return;
+                    const files = Array.from(imageInput.files || []);
+                    if (!files.length) {
+                        if (imageButton) {
+                            delete imageButton.dataset.hasImages;
+                            delete imageButton.dataset.count;
+                        }
+                        if (imageSummary) {
+                            imageSummary.hidden = true;
+                            imageSummary.textContent = "";
+                        }
+                        if (imageClear) imageClear.hidden = true;
+                        return;
+                    }
+                    if (imageButton) {
+                        imageButton.dataset.hasImages = "true";
+                        imageButton.dataset.count = String(files.length);
+                    }
+                    if (imageSummary) {
+                        imageSummary.hidden = false;
+                        imageSummary.textContent = files.length === 1
+                            ? files[0].name
+                            : `${files.length} images`;
+                    }
+                    if (imageClear) imageClear.hidden = false;
+                };
+                const clearImages = () => {
+                    if (!imageInput) return;
+                    imageInput.value = "";
+                    syncImageSummary();
+                    sync();
+                };
+                const clearComposerKeyboardOffset = () => {
+                    document.documentElement.style.removeProperty(composerKeyboardOffsetProperty);
+                };
+                const clearComposerKeyboardSettleTimers = () => {
+                    for (const timer of composerKeyboardSettleTimers) {
+                        window.clearTimeout(timer);
+                    }
+                    composerKeyboardSettleTimers = [];
+                };
+                const updateComposerKeyboardOffset = () => {
+                    composerKeyboardFrame = 0;
+                    const viewport = window.visualViewport;
+                    if (
+                        !viewport
+                        || !mobileComposerQuery.matches
+                        || Math.abs((viewport.scale || 1) - 1) > 0.01
+                        || !composer.contains(document.activeElement)
+                    ) {
+                        clearComposerKeyboardOffset();
+                        return;
+                    }
+                    const layoutHeight = Math.max(
+                        document.documentElement.clientHeight || 0,
+                        window.innerHeight || 0,
+                    );
+                    const offset = Math.max(
+                        0,
+                        Math.ceil(layoutHeight - viewport.height - viewport.offsetTop),
+                    );
+                    if (offset > 0) {
+                        document.documentElement.style.setProperty(
+                            composerKeyboardOffsetProperty,
+                            `${offset}px`,
+                        );
+                    } else {
+                        clearComposerKeyboardOffset();
+                    }
+                };
+                const scheduleComposerKeyboardOffset = () => {
+                    if (composerKeyboardFrame) return;
+                    composerKeyboardFrame = window.requestAnimationFrame(updateComposerKeyboardOffset);
+                };
+                const scheduleSettledComposerKeyboardOffset = () => {
+                    scheduleComposerKeyboardOffset();
+                    clearComposerKeyboardSettleTimers();
+                    if (!composer.contains(document.activeElement)) return;
+                    composerKeyboardSettleTimers = composerKeyboardSettleDelays.map(
+                        (delay) => window.setTimeout(scheduleComposerKeyboardOffset, delay),
+                    );
+                };
+                const parsePlanCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== "/plan") return null;
+                    return text.slice(parts[0].length).trim();
+                };
+                const parsePrCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== "/pr") return null;
+                    return prPrompt;
+                };
+                const parseFixPrCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== fixPrPrompt) return null;
+                    return fixPrPrompt;
+                };
+                const parseQaCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== "/qa") return null;
+                    return qaPrompt;
+                };
+                const syncNextMessageConfig = () => {
+                    const workflowCommand = parsePrCommand() !== null
+                        || parseFixPrCommand() !== null
+                        || parseQaCommand() !== null;
+                    const planMode = !workflowCommand && (
+                        composer.dataset.planMode === "true"
+                        || parsePlanCommand() !== null
+                    );
+                    if (nextMessageConfig) {
+                        nextMessageConfig.dataset.planMode = planMode ? "true" : "false";
+                    }
+                    for (const item of nextMessageItems) {
+                        const value = item.querySelector("[data-next-message-value]");
+                        if (!value) continue;
+                        value.textContent = planMode
+                            ? item.dataset.planValue || item.dataset.normalValue || ""
+                            : item.dataset.normalValue || "";
+                    }
+                };
+                const setPlanMode = (enabled, explicit = false) => {
+                    composer.dataset.planMode = enabled ? "true" : "false";
+                    if (planModeInput) planModeInput.value = enabled ? "true" : "";
+                    if (planModeExplicitInput) {
+                        planModeExplicitInput.value = explicit ? "true" : "";
+                    }
+                    if (slashTrigger) slashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
+                    if (slashPlan) slashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+                    syncNextMessageConfig();
+                };
+                const syncSlashMenuStatusOffset = () => {
+                    if (!liveWork || !slashMenu) return;
+                    if (slashMenu.hidden) {
+                        delete liveWork.dataset.slashMenuOpen;
+                    } else {
+                        liveWork.dataset.slashMenuOpen = "true";
+                    }
+                };
+                const closeSlashMenu = () => {
+                    if (!slashMenu || !slashTrigger) return;
+                    slashMenu.hidden = true;
+                    slashTrigger.setAttribute("aria-expanded", "false");
+                    syncSlashMenuStatusOffset();
+                };
+                const openSlashMenu = () => {
+                    if (!slashMenu || !slashTrigger) return;
+                    slashMenu.hidden = false;
+                    slashTrigger.setAttribute("aria-expanded", "true");
+                    syncSlashMenuStatusOffset();
+                };
+                setPlanMode(composer.dataset.initialPlanMode === "true");
+                sync();
+                syncImageSummary();
+                const composerResizeObserver = "ResizeObserver" in window
+                    ? new ResizeObserver(syncComposerHeight)
+                    : null;
+                if (composerResizeObserver) composerResizeObserver.observe(composer);
+                if (imageInput) {
+                    imageInput.addEventListener("change", () => {
+                        syncImageSummary();
+                        sync();
+                    });
+                }
+                if (imageClear) imageClear.addEventListener("click", clearImages);
+                if (slashTrigger && slashMenu) {
+                    slashTrigger.addEventListener("click", () => {
+                        if (slashMenu.hidden) {
+                            openSlashMenu();
+                        } else {
+                            closeSlashMenu();
+                        }
+                    });
+                }
+                if (slashPlan) {
+                    slashPlan.addEventListener("click", () => {
+                        const enabled = composer.dataset.planMode !== "true";
+                        setPlanMode(enabled, true);
+                        if (enabled && input.value.trim() === "/") {
+                            input.value = "";
+                            sync();
+                        }
+                        closeSlashMenu();
+                        input.focus();
+                    });
+                }
+                if (slashPr) {
+                    slashPr.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        clearImages();
+                        input.value = prPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
+                if (slashFixPr) {
+                    slashFixPr.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        clearImages();
+                        input.value = fixPrPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
+                if (slashQa) {
+                    slashQa.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        clearImages();
+                        input.value = qaPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
+                document.addEventListener("click", (event) => {
+                    if (!slashCommand || !slashMenu || slashMenu.hidden) return;
+                    if (!slashCommand.contains(event.target)) closeSlashMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape") return;
+                    if (!slashMenu || slashMenu.hidden) return;
+                    closeSlashMenu();
+                    if (slashTrigger) slashTrigger.focus();
+                });
+                input.addEventListener("input", () => {
+                    sync();
+                    if (input.value.trim() === "/") {
+                        openSlashMenu();
+                    } else {
+                        closeSlashMenu();
+                    }
+                    syncNextMessageConfig();
+                });
+                input.addEventListener("keydown", (event) => {
+                    if (!isSuperEnter(event)) return;
+                    event.preventDefault();
+                    requestSubmit(composer, submit);
+                });
+                composer.addEventListener("focusin", scheduleSettledComposerKeyboardOffset);
+                composer.addEventListener("focusout", () => {
+                    clearComposerKeyboardSettleTimers();
+                    window.setTimeout(scheduleComposerKeyboardOffset, 0);
+                });
+                if (window.visualViewport) {
+                    window.visualViewport.addEventListener("resize", scheduleSettledComposerKeyboardOffset);
+                    window.visualViewport.addEventListener("scroll", scheduleSettledComposerKeyboardOffset);
+                }
+                window.addEventListener("resize", () => {
+                    syncComposerHeight();
+                    scheduleSettledComposerKeyboardOffset();
+                });
+                composer.addEventListener("submit", (event) => {
+                    const submitter = event.submitter || document.activeElement;
+                    if (workflowLocked && submitter !== stop) {
+                        event.preventDefault();
+                        return;
+                    }
+                    const isStopSubmit = submitter === stop;
+                    if (isStopSubmit) {
+                        clearImages();
+                    } else {
+                        const prCommandPrompt = parsePrCommand();
+                        const fixPrCommandPrompt = prCommandPrompt === null ? parseFixPrCommand() : null;
+                        const qaCommandPrompt = (
+                            prCommandPrompt === null && fixPrCommandPrompt === null
+                        ) ? parseQaCommand() : null;
+                        const workflowCommandPrompt = prCommandPrompt || fixPrCommandPrompt || qaCommandPrompt;
+                        const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
+                        if (workflowCommandPrompt !== null) {
+                            setPlanMode(false, true);
+                            clearImages();
+                            input.value = workflowCommandPrompt;
+                            sync();
+                        } else if (commandPrompt !== null) {
+                            setPlanMode(true, true);
+                            input.value = commandPrompt;
+                            if (!commandPrompt && !hasImages()) {
+                                event.preventDefault();
+                                sync();
+                                input.focus();
+                                return;
+                            }
+                            sync();
+                        }
+                    }
+                    // Defer the disable until after the form's entry
+                    // list has been serialized: the Stop button carries
+                    // the active worker's id as its name/value, and
+                    // disabling the submitter inside the submit handler
+                    // can strip that pair from the POST in browsers
+                    // that apply the disabled-state before serialization
+                    // — which would silently drop the instance id and
+                    // let `stop_session` fall back to "latest active",
+                    // potentially aborting the wrong overlapping worker.
+                    setTimeout(() => {
+                        submit.disabled = true;
+                        if (stop) stop.disabled = true;
+                    }, 0);
+                });
+            }
+        })();
+    </script>
+
+    <script>
+        // Subscribe to the session SSE feed.
+        //
+        // The live work strip (fixed above the composer) shows the live
+        // stream's state: pulsing green "Codex is working…" while a turn is
+        // in progress, hidden when connected and idle, amber "Reconnecting…"
+        // for recoverable transport loss, and red "Connection lost" only
+        // after a longer fatal timeout. Goal notifications update the adjacent
+        // chip with Codex's current high-level objective. The server emits
+        // a named ``heartbeat`` event every few seconds carrying
+        // ``{working: bool}`` so the pill can stay accurate without
+        // inferring state from item events alone.
+        //
+        // When a live worker is rendering we also progressively project
+        // its item events into the DOM (agent deltas, tool-call status);
+        // when the stream ends we reload so the canonical rollout-based
+        // render replaces the scratch UI in one step.
+        (function () {
+            const streamSource = document.querySelector("[data-stream-url]");
+            const indicator = document.querySelector("[data-live-status]");
+            const liveWork = document.querySelector("[data-live-work]");
+            const liveGoal = document.querySelector("[data-live-goal]");
+            const liveGoalText = document.querySelector("[data-live-goal-text]");
+            const prProgress = document.querySelector("[data-pr-progress]");
+            const streamUrl = streamSource && streamSource.dataset.streamUrl;
+            if (!streamUrl || !indicator) return;
+
+            function timestampElement(seconds, className) {
+                if (typeof window.__hitchTimestampElement === "function") {
+                    return window.__hitchTimestampElement(seconds, className);
+                }
+                const el = document.createElement("time");
+                if (className) el.className = className;
+                el.dataset.ts = String(seconds);
+                el.textContent = String(seconds);
+                const date = new Date(seconds * 1000);
+                if (Number.isFinite(date.getTime())) {
+                    el.dateTime = date.toISOString();
+                    el.title = date.toString();
+                    el.textContent = date.toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        timeZoneName: "short",
+                    });
+                }
+                return el;
+            }
+
+            function timestampSecondsForEvent(event) {
+                const recordedAt = Number(event && event.recordedAt);
+                if (Number.isFinite(recordedAt) && recordedAt > 0) {
+                    return recordedAt / 1000000;
+                }
+                return Date.now() / 1000;
+            }
+
+            const STATE_TEXT = {
+                disconnected: "Connection lost",
+                idle: "Connected",
+                reconnecting: "Reconnecting…",
+                working: "Codex is working…",
+            };
+            let workingText = indicator.dataset.workingText || STATE_TEXT.working;
+            // Liveness budget: heartbeats arrive ~3s apart, so two missed
+            // intervals plus a margin move the pill into reconnecting.
+            // Only show "Connection lost" after a substantially longer
+            // period with no successful frame.
+            const STALE_MS = 8000;
+            const RECONNECT_FATAL_MS = 30000;
+            const RETRY_MS = 2000;
+            // Initial state matches what the server rendered so the pill
+            // doesn't flash through "disconnected" before the first
+            // heartbeat arrives.
+            let connState = indicator.dataset.state || "disconnected";
+            let lastFrame = Date.now();
+            let problemStartedAt = 0;
+            let retryTimer = 0;
+            let source = null;
+            let streamEnded = false;
+            function statusTextFor(state) {
+                return state === "working" ? workingText : STATE_TEXT[state];
+            }
+            function setState(state) {
+                const retryable = state === "reconnecting" || state === "disconnected";
+                indicator.setAttribute("role", retryable ? "button" : "status");
+                if (retryable) {
+                    indicator.tabIndex = 0;
+                } else {
+                    indicator.removeAttribute("tabindex");
+                }
+                const nextText = statusTextFor(state);
+                if (state !== connState) {
+                    connState = state;
+                    indicator.dataset.state = state;
+                    if (liveWork) liveWork.dataset.state = state;
+                }
+                if (indicator.textContent !== nextText) indicator.textContent = nextText;
+            }
+            function clearRetryTimer() {
+                if (!retryTimer) return;
+                clearTimeout(retryTimer);
+                retryTimer = 0;
+            }
+            function bump() {
+                lastFrame = Date.now();
+                problemStartedAt = 0;
+                clearRetryTimer();
+                // A frame arrived, so the transport is healthy. Heartbeats set
+                // the precise working/idle state; for plain data frames during a
+                // recovery, clear the stale "reconnecting"/"disconnected" pill
+                // optimistically rather than leave it lying until the next
+                // heartbeat lands.
+                if (connState === "reconnecting" || connState === "disconnected") {
+                    setState("working");
+                }
+            }
+            function retryNow() {
+                if (streamEnded) return;
+                clearRetryTimer();
+                problemStartedAt = Date.now();
+                lastFrame = Date.now();
+                setState("reconnecting");
+                connect();
+            }
+            function scheduleRetry() {
+                if (streamEnded || retryTimer) return;
+                retryTimer = window.setTimeout(() => {
+                    retryTimer = 0;
+                    connect();
+                }, RETRY_MS);
+            }
+            function markConnectionProblem() {
+                if (!problemStartedAt) problemStartedAt = Date.now();
+                const failedFor = Date.now() - problemStartedAt;
+                setState(failedFor >= RECONNECT_FATAL_MS ? "disconnected" : "reconnecting");
+                scheduleRetry();
+            }
+            indicator.addEventListener("click", () => {
+                if (connState === "reconnecting" || connState === "disconnected") retryNow();
+            });
+            indicator.addEventListener("keydown", (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                if (connState !== "reconnecting" && connState !== "disconnected") return;
+                event.preventDefault();
+                retryNow();
+            });
+            // Periodically re-check liveness so a silent connection (no
+            // heartbeats arriving despite the EventSource still believing
+            // it's open) starts a manual reconnect. A fatal label appears
+            // only after repeated reconnect attempts fail to produce frames.
+            setInterval(() => {
+                if (!streamEnded && Date.now() - lastFrame > STALE_MS) markConnectionProblem();
+            }, 1000);
+
+            const sessionMain = document.querySelector("[data-session-main]");
+            const liveRoot = document.querySelector("[data-live-root]");
+            const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
+            const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
+            const HIDE_LIVE_USER_MESSAGE = liveRoot && liveRoot.dataset.hideUserMessage === "true";
+            const SANITIZE_LIVE_DETAILS = liveRoot && liveRoot.dataset.sanitizeLiveDetails === "true";
+            // The Django ``resolve_approval`` URL is templated with a
+            // placeholder pk of ``0`` server-side; the JS swaps in the
+            // real ApprovalRequest id when a decision is posted.
+            const APPROVAL_URL_TEMPLATE = liveRoot
+                ? liveRoot.dataset.approvalUrlTemplate || ""
+                : "";
+            const INPUT_URL_TEMPLATE = liveRoot
+                ? liveRoot.dataset.inputUrlTemplate || ""
+                : "";
+            const empty = document.querySelector(".empty-thread");
+            const jumpLatest = document.querySelector("[data-jump-latest]");
+            const scrollRoot = document.scrollingElement || document.documentElement;
+            const FOLLOW_MARGIN = 96;
+            let followLatest = !!liveRoot;
+            let lastScrollY = window.scrollY;
+            let followFrame = 0;
+
+            function distanceFromBottom() {
+                return scrollRoot.scrollHeight - window.innerHeight - window.scrollY;
+            }
+
+            function nearBottom() {
+                return distanceFromBottom() <= FOLLOW_MARGIN;
+            }
+
+            function syncJumpButton() {
+                if (!jumpLatest) return;
+                jumpLatest.hidden = followLatest;
+            }
+
+            function scrollToLatest(smooth) {
+                window.scrollTo({
+                    top: scrollRoot.scrollHeight,
+                    behavior: smooth ? "smooth" : "auto",
+                });
+                syncJumpButton();
+            }
+
+            function followRenderedContent() {
+                if (!followLatest || !liveRoot) {
+                    syncJumpButton();
+                    return;
+                }
+                if (followFrame) cancelAnimationFrame(followFrame);
+                followFrame = requestAnimationFrame(() => {
+                    followFrame = 0;
+                    if (followLatest) {
+                        scrollToLatest(false);
+                    } else {
+                        syncJumpButton();
+                    }
+                });
+            }
+
+            if (liveRoot) {
+                requestAnimationFrame(() => scrollToLatest(false));
+            }
+            window.addEventListener("scroll", () => {
+                const currentY = window.scrollY;
+                if (currentY < lastScrollY - 4) {
+                    followLatest = false;
+                } else if (nearBottom()) {
+                    followLatest = true;
+                }
+                lastScrollY = currentY;
+                syncJumpButton();
+            }, { passive: true });
+            if (jumpLatest) {
+                jumpLatest.addEventListener("click", () => {
+                    followLatest = true;
+                    scrollToLatest(true);
+                });
+            }
+
+            // Per-item DOM trackers. Items are keyed by the server-assigned
+            // item id; for agent messages we keep a reference to the body
+            // node so deltas append directly.
+            const items = new Map();
+            const planViews = new Map();
+            const taskPlan = document.querySelector("[data-task-plan]");
+            const taskPlanToggle = taskPlan && taskPlan.querySelector("[data-task-plan-toggle]");
+            const taskPlanCurrent = taskPlan && taskPlan.querySelector("[data-task-plan-current]");
+            const taskPlanExplanation = taskPlan && taskPlan.querySelector("[data-task-plan-explanation]");
+            const taskPlanList = taskPlan && taskPlan.querySelector("[data-task-plan-list]");
+            // The pending-user bubble is replaced once the server-side
+            // user message arrives via the stream, so it doesn't end up
+            // double-rendered with the canonical reload.
+            const pendingUser = document.querySelector("[data-pending-user]");
+
+            const TOOL_LABELS = {
+                commandExecution: "Command",
+                mcpToolCall: "MCP tool call",
+                dynamicToolCall: "Tool call",
+                fileChange: "File change",
+                webSearch: "Web search",
+                collabAgentToolCall: "Collab agent call",
+                imageView: "Image view",
+                imageGeneration: "Image generation",
+                reasoning: "Reasoning",
+                plan: "Plan",
+                hookPrompt: "Hook prompt",
+                enteredReviewMode: "Entered review mode",
+                exitedReviewMode: "Exited review mode",
+                contextCompaction: "Context compaction",
+            };
+
+            // Pending approval prompts. Keyed by ApprovalRequest pk so an
+            // ``approval/resolved`` event can find and finalize the matching
+            // node without re-rendering the whole turn.
+            const approvals = new Map();
+            const inputRequests = new Map();
+            let latestGoalOrder = [0, 0];
+            let streamFallbackOrder = 0;
+            let latestTaskPlanOrder = [
+                taskPlan ? Number(taskPlan.dataset.recordedAt) || 0 : 0,
+                taskPlan ? Number(taskPlan.dataset.eventSeq) || 0 : 0,
+                taskPlan ? Number(taskPlan.dataset.fallbackOrder) || 0 : 0,
+            ];
+
+            const APPROVAL_LABELS = {
+                "item/commandExecution/requestApproval": "Run command?",
+                "item/fileChange/requestApproval": "Apply file change?",
+            };
+
+            function approvalDetail(method, params) {
+                const item = (params && params.item) || params || {};
+                if (method === "item/commandExecution/requestApproval") {
+                    return item.command || JSON.stringify(item, null, 2);
+                }
+                if (method === "item/fileChange/requestApproval") {
+                    const paths = (item.changes || []).map((c) => c.path).filter(Boolean);
+                    if (paths.length) return paths.join("\n");
+                }
+                return JSON.stringify(item, null, 2);
+            }
+
+            function demoCommandDetail(command) {
+                return String(command || "").trim() ? "Command details hidden in demo panel." : "";
+            }
+
+            function demoFileChangeDetail(changes) {
+                const count = (changes || []).filter((c) => c.path).length;
+                if (!count) return "";
+                return count === 1 ? "1 file" : count + " files";
+            }
+
+            function sanitizedApprovalDetail(method, params) {
+                const item = (params && params.item) || params || {};
+                if (method === "item/commandExecution/requestApproval") {
+                    const detail = demoCommandDetail(item.command || "");
+                    if (detail) return "Demo setup command approval requested. " + detail;
+                    return "Demo setup command approval requested.";
+                }
+                if (method === "item/fileChange/requestApproval") {
+                    const detail = demoFileChangeDetail(item.changes || []);
+                    if (detail) return "Demo setup file change approval requested. " + detail;
+                    return "Demo setup file change approval requested.";
+                }
+                return "Demo setup approval requested.";
+            }
+
+            function execpolicyAmendmentDecision(params) {
+                const decisions = params && Array.isArray(params.availableDecisions)
+                    ? params.availableDecisions
+                    : [];
+                return decisions.find((decision) => {
+                    return decision
+                        && typeof decision === "object"
+                        && decision.acceptWithExecpolicyAmendment
+                        && Array.isArray(decision.acceptWithExecpolicyAmendment.execpolicy_amendment);
+                }) || null;
+            }
+
+            function approvalDecisionText(decision) {
+                if (typeof decision === "string") return decision || "decline";
+                if (decision && typeof decision === "object" && decision.acceptWithExecpolicyAmendment) {
+                    return "accept and remember";
+                }
+                return "decline";
+            }
+
+            function sanitizedToolDetail(item) {
+                if (item.type === "commandExecution") {
+                    return demoCommandDetail(item.command || "") || "Demo setup command details hidden.";
+                }
+                if (item.type === "fileChange") {
+                    return demoFileChangeDetail(item.changes || []) || "Demo setup file change";
+                }
+                return "";
+            }
+
+            function ensureNoEmpty() {
+                if (empty && empty.parentNode) empty.remove();
+            }
+
+            function insertBeforeLive(node) {
+                if (!liveRoot || !liveRoot.parentNode) return;
+                liveRoot.parentNode.insertBefore(node, liveRoot);
+            }
+
+            function renderUserItem(item, timestampSeconds) {
+                if (pendingUser && pendingUser.parentNode) pendingUser.remove();
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = liveRoot && liveRoot.dataset.activeAuthor
+                    ? liveRoot.dataset.activeAuthor
+                    : "User";
+                header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
+                const msg = document.createElement("div");
+                msg.className = "message user";
+                msg.dataset.copyableMessage = "";
+                const body = document.createElement("div");
+                body.className = "body";
+                body.textContent = userMessageText(item);
+                msg.appendChild(body);
+                wrap.appendChild(header);
+                wrap.appendChild(msg);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "user", node: wrap });
+                followRenderedContent();
+            }
+
+            function userMessageText(item) {
+                const parts = [];
+                for (const wrapped of item.content || []) {
+                    const inner = wrapped || {};
+                    switch (inner.type) {
+                        case "text":
+                            if (inner.text) parts.push(inner.text);
+                            break;
+                        case "mention": parts.push("@" + (inner.name || "")); break;
+                        case "skill": parts.push("/" + (inner.name || "")); break;
+                        case "image": parts.push("[image]"); break;
+                        case "localImage": parts.push("[image]"); break;
+                    }
+                }
+                return parts.join("\n");
+            }
+
+            function memoryEntries(citation) {
+                return Array.isArray(citation && citation.entries) ? citation.entries : [];
+            }
+
+            function memoryThreadIds(citation) {
+                if (Array.isArray(citation && citation.threadIds)) return citation.threadIds;
+                if (Array.isArray(citation && citation.thread_ids)) return citation.thread_ids;
+                return [];
+            }
+
+            function memoryCitationCount(citation) {
+                const entries = memoryEntries(citation);
+                const threadIds = memoryThreadIds(citation);
+                return entries.length + threadIds.length;
+            }
+
+            function memoryLine(entry) {
+                const start = entry.lineStart ?? entry.line_start;
+                const end = entry.lineEnd ?? entry.line_end;
+                if (entry.path && start && end) return entry.path + ":" + start + "-" + end;
+                return entry.path || "";
+            }
+
+            function appendMemoryRows(popover, rows) {
+                if (!rows.length) return;
+                const list = document.createElement("ul");
+                list.className = "memory-list";
+                for (const row of rows) {
+                    const item = document.createElement("li");
+                    const path = document.createElement("span");
+                    path.className = "memory-path";
+                    path.textContent = row.path || "";
+                    item.appendChild(path);
+                    if (row.note) {
+                        const note = document.createElement("span");
+                        note.className = "memory-note";
+                        note.textContent = row.note;
+                        item.appendChild(note);
+                    }
+                    list.appendChild(item);
+                }
+                popover.appendChild(list);
+            }
+
+            function renderMemoryCitation(citation) {
+                const count = memoryCitationCount(citation);
+                if (!count) return null;
+                const details = document.createElement("details");
+                details.className = "memory-citation";
+                const summary = document.createElement("summary");
+                summary.textContent = "Memories used: " + count;
+                details.appendChild(summary);
+
+                const popover = document.createElement("div");
+                popover.className = "memory-popover";
+                appendMemoryRows(
+                    popover,
+                    memoryEntries(citation).map((entry) => ({
+                        path: memoryLine(entry),
+                        note: entry.note || "",
+                    }))
+                );
+
+                const threadIds = memoryThreadIds(citation).filter(Boolean);
+                if (threadIds.length) {
+                    const label = document.createElement("div");
+                    label.className = "memory-section-label";
+                    label.textContent = "Prior sessions";
+                    popover.appendChild(label);
+                    appendMemoryRows(
+                        popover,
+                        threadIds.map((threadId) => ({ path: threadId, note: "" }))
+                    );
+                }
+
+                details.appendChild(popover);
+                return details;
+            }
+
+            function setMemoryCitation(message, citation) {
+                const existing = message.querySelector(".memory-citation");
+                if (existing) existing.remove();
+                const node = renderMemoryCitation(citation);
+                if (node) message.appendChild(node);
+            }
+
+            function renderAgentItem(item, timestampSeconds) {
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = "Agent";
+                header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
+                const msg = document.createElement("div");
+                msg.className = "message agent streaming";
+                msg.dataset.copyableMessage = "";
+                const body = document.createElement("div");
+                body.className = "body";
+                body.textContent = item.text || "";
+                msg.appendChild(body);
+                setMemoryCitation(msg, item.memoryCitation || item.memory_citation);
+                wrap.appendChild(header);
+                wrap.appendChild(msg);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "agent", node: wrap, body, message: msg });
+                followRenderedContent();
+            }
+
+            function renderToolCallItem(item, timestampSeconds) {
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = TOOL_LABELS[item.type] || item.type;
+                header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
+                const row = document.createElement("div");
+                row.className = "tool-call";
+                const detail = document.createElement("span");
+                detail.className = "detail";
+                detail.textContent = toolDetail(item);
+                row.appendChild(detail);
+                const status = document.createElement("span");
+                status.className = "status inProgress";
+                status.textContent = "inProgress";
+                row.appendChild(status);
+                wrap.appendChild(header);
+                wrap.appendChild(row);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "tool", node: wrap, rowNode: row, statusNode: status, detail });
+                followRenderedContent();
+            }
+
+            function ensurePlanView(turnId, itemId) {
+                const key = turnId || itemId || "active";
+                let view = planViews.get(key);
+                if (!view && itemId) view = planViews.get(itemId);
+                if (!view && turnId) view = planViews.get(turnId);
+                if (!view) {
+                    const wrap = document.createElement("div");
+                    wrap.className = "entry";
+                    if (itemId) wrap.dataset.itemId = itemId;
+                    const card = document.createElement("div");
+                    card.className = "plan-card";
+                    const header = document.createElement("div");
+                    header.className = "plan-header";
+                    header.textContent = "Plan";
+                    const explanation = document.createElement("div");
+                    explanation.className = "plan-explanation";
+                    explanation.hidden = true;
+                    const list = document.createElement("ol");
+                    list.className = "plan-checklist";
+                    list.hidden = true;
+                    const text = document.createElement("div");
+                    text.className = "plan-text";
+                    text.hidden = true;
+                    card.appendChild(header);
+                    card.appendChild(explanation);
+                    card.appendChild(list);
+                    card.appendChild(text);
+                    wrap.appendChild(card);
+                    insertBeforeLive(wrap);
+                    view = { node: wrap, explanation, list, text, textRaw: "" };
+                    planViews.set(key, view);
+                    followRenderedContent();
+                }
+                if (turnId) planViews.set(turnId, view);
+                if (itemId) planViews.set(itemId, view);
+                if (itemId) {
+                    view.node.dataset.itemId = itemId;
+                    items.set(itemId, { kind: "plan", node: view.node, view });
+                }
+                return view;
+            }
+
+            function renderPlanItem(item, turnId, timestampSeconds) {
+                const view = ensurePlanView(turnId, item.id);
+                ensurePlanTimestamp(view, timestampSeconds);
+                if (item.text) activateFinalPlanText(view);
+                view.textRaw = item.text || view.textRaw || "";
+                renderPlanText(view);
+                followRenderedContent();
+            }
+
+            function ensurePlanTimestamp(view, timestampSeconds) {
+                const header = view.node.querySelector(".plan-header");
+                if (header && !header.querySelector("time[data-ts]")) {
+                    header.appendChild(timestampElement(timestampSeconds, ""));
+                }
+            }
+
+            function activateFinalPlanText(view) {
+                view.explanation.textContent = "";
+                view.explanation.hidden = true;
+                view.list.replaceChildren();
+                view.list.hidden = true;
+            }
+
+            function renderPlanText(view) {
+                const text = view.textRaw.trim();
+                view.text.textContent = text;
+                view.text.hidden = !text || !view.list.hidden;
+            }
+
+            function renderPlanSteps(view, steps) {
+                view.list.replaceChildren();
+                for (const step of steps) {
+                    const text = planStepText(step);
+                    if (!text) continue;
+                    const li = document.createElement("li");
+                    const status = normalizePlanStatus(step && step.status);
+                    li.className = "plan-step " + status;
+                    li.textContent = text;
+                    view.list.appendChild(li);
+                }
+                view.list.hidden = view.list.children.length === 0;
+                renderPlanText(view);
+            }
+
+            function normalizePlanStatus(status) {
+                if (status === "completed") return "completed";
+                if (status === "inProgress" || status === "in_progress") return "inProgress";
+                return "pending";
+            }
+
+            function planStepText(step) {
+                return step && typeof step.step === "string" ? step.step.trim() : "";
+            }
+
+            function currentTaskText(steps) {
+                const clean = steps
+                    .map((step) => ({
+                        text: planStepText(step),
+                        status: normalizePlanStatus(step && step.status),
+                    }))
+                    .filter((step) => step.text);
+                if (!clean.length) return "";
+                const active = clean.find((step) => step.status === "inProgress")
+                    || clean.find((step) => step.status === "pending")
+                    || clean[clean.length - 1];
+                return active ? active.text : "";
+            }
+
+            function updateTaskPlan(payload) {
+                if (!taskPlan || !taskPlanCurrent || !taskPlanExplanation || !taskPlanList) return;
+                const steps = Array.isArray(payload && payload.plan) ? payload.plan : [];
+                const explanation = typeof payload.explanation === "string"
+                    ? payload.explanation.trim()
+                    : "";
+                taskPlanExplanation.textContent = explanation;
+                taskPlanExplanation.hidden = !explanation;
+                taskPlanList.replaceChildren();
+                for (const step of steps) {
+                    const text = planStepText(step);
+                    if (!text) continue;
+                    const li = document.createElement("li");
+                    li.className = "plan-step " + normalizePlanStatus(step && step.status);
+                    li.textContent = text;
+                    taskPlanList.appendChild(li);
+                }
+                taskPlanList.hidden = taskPlanList.children.length === 0;
+                const current = currentTaskText(steps) || explanation;
+                taskPlanCurrent.textContent = current;
+                setTaskPlanVisible(!!current || !!taskPlanList.children.length);
+            }
+
+            if (taskPlan && taskPlanToggle) {
+                taskPlanToggle.addEventListener("click", () => {
+                    const expanded = taskPlan.dataset.expanded !== "true";
+                    taskPlan.dataset.expanded = expanded ? "true" : "false";
+                    taskPlanToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                });
+            }
+
+            function setTaskPlanVisible(visible) {
+                if (!taskPlan) return;
+                taskPlan.hidden = !visible;
+                if (sessionMain) sessionMain.classList.toggle("has-task-plan", visible);
+            }
+
+            function toolDetail(item) {
+                if (SANITIZE_LIVE_DETAILS) {
+                    const sanitized = sanitizedToolDetail(item);
+                    if (sanitized) return sanitized;
+                }
+                switch (item.type) {
+                    case "commandExecution": return item.command || "";
+                    case "mcpToolCall": return (item.server || "") + " / " + (item.tool || "");
+                    case "fileChange":
+                        const paths = (item.changes || []).map((c) => c.path).filter(Boolean);
+                        if (!paths.length) return "";
+                        return paths.length === 1 ? paths[0] : paths[0] + " (+" + (paths.length - 1) + " more)";
+                    case "webSearch": return item.query || "";
+                    case "plan": return (item.text || "").split("\n", 1)[0];
+                    case "imageView": return item.path || "";
+                    case "imageGeneration": return item.revisedPrompt || item.savedPath || "";
+                    default: return "";
+                }
+            }
+
+            function handleItemStarted(payload, event) {
+                ensureNoEmpty();
+                const item = payload.item || {};
+                if (!item.id) return;
+                if (HIDE_LIVE_TRANSCRIPT) return;
+                if (items.has(item.id)) {
+                    if (item.type === "plan") {
+                        const entry = items.get(item.id);
+                        if (entry && entry.kind === "plan") {
+                            ensurePlanTimestamp(entry.view, timestampSecondsForEvent(event));
+                        }
+                    }
+                    return;
+                }
+                const timestampSeconds = timestampSecondsForEvent(event);
+                switch (item.type) {
+                    case "userMessage":
+                        if (!HIDE_LIVE_USER_MESSAGE) renderUserItem(item, timestampSeconds);
+                        break;
+                    case "agentMessage": renderAgentItem(item, timestampSeconds); break;
+                    case "plan": renderPlanItem(item, payload.turnId, timestampSeconds); break;
+                    default: renderToolCallItem(item, timestampSeconds); break;
+                }
+            }
+
+            function handleAgentDelta(payload) {
+                const entry = items.get(payload.itemId);
+                if (!entry || entry.kind !== "agent") return;
+                entry.body.textContent += payload.delta || "";
+                followRenderedContent();
+            }
+
+            function handlePlanDelta(payload, event) {
+                if (HIDE_LIVE_TRANSCRIPT) return;
+                const itemId = payload.itemId;
+                if (!itemId) return;
+                const entry = items.get(itemId);
+                const view = entry && entry.kind === "plan"
+                    ? entry.view
+                    : ensurePlanView(payload.turnId, itemId);
+                ensurePlanTimestamp(view, timestampSecondsForEvent(event));
+                activateFinalPlanText(view);
+                view.textRaw += payload.delta || "";
+                renderPlanText(view);
+                followRenderedContent();
+            }
+
+            function handleItemCompleted(payload, event) {
+                const item = payload.item || {};
+                if (HIDE_LIVE_TRANSCRIPT) return;
+                if (HIDE_LIVE_USER_MESSAGE && item.type === "userMessage") return;
+                const entry = items.get(item.id);
+                if (!entry) {
+                    // Item that completed without a prior started event —
+                    // render now so the user still sees it. A frame with no
+                    // usable id can't be registered by handleItemStarted, so
+                    // guard against recursing forever on it.
+                    if (!item.id) return;
+                    handleItemStarted(payload, event);
+                    if (!items.has(item.id)) return;
+                    return handleItemCompleted(payload, event);
+                }
+                if (entry.kind === "agent" && item.type === "agentMessage") {
+                    entry.body.textContent = item.text || entry.body.textContent;
+                    setMemoryCitation(entry.message, item.memoryCitation || item.memory_citation);
+                    entry.message.classList.remove("streaming");
+                    if (item.phase === "commentary") {
+                        entry.message.classList.remove("agent");
+                        entry.message.classList.add("thinking");
+                        const role = entry.node.querySelector(".role");
+                        if (role) role.textContent = "Agent (thinking)";
+                    }
+                    followRenderedContent();
+                    return;
+                }
+                if (entry.kind === "plan" && item.type === "plan") {
+                    ensurePlanTimestamp(entry.view, timestampSecondsForEvent(event));
+                    activateFinalPlanText(entry.view);
+                    entry.view.textRaw = item.text || entry.view.textRaw;
+                    renderPlanText(entry.view);
+                    followRenderedContent();
+                    return;
+                }
+                if (entry.kind === "tool" && entry.statusNode) {
+                    const status = readStatus(item);
+                    entry.statusNode.classList.remove("inProgress");
+                    if (status && status !== "completed") {
+                        entry.statusNode.classList.add(status);
+                        entry.statusNode.textContent = status;
+                    } else {
+                        entry.statusNode.remove();
+                        entry.statusNode = null;
+                    }
+                    const detail = toolDetail(item);
+                    if (detail && entry.detail) entry.detail.textContent = detail;
+                    if (
+                        entry.rowNode
+                        && !entry.statusNode
+                        && entry.detail
+                        && !entry.detail.textContent.trim()
+                    ) {
+                        entry.rowNode.remove();
+                        entry.rowNode = null;
+                    }
+                }
+                followRenderedContent();
+            }
+
+            function readStatus(item) {
+                if (typeof item.status === "string") return item.status;
+                if (item.status && typeof item.status === "object" && item.status.value) return item.status.value;
+                return null;
+            }
+
+            function setGoal(objective) {
+                if (!liveGoal || !liveGoalText) return;
+                const text = typeof objective === "string" ? objective.trim() : "";
+                liveGoalText.textContent = text;
+                liveGoal.hidden = !text;
+            }
+
+            function eventOrder(event, fallbackOrder) {
+                return [
+                    Number.isSafeInteger(event.recordedAt) ? event.recordedAt : 0,
+                    Number.isSafeInteger(event.eventSeq) ? event.eventSeq : 0,
+                    fallbackOrder,
+                ];
+            }
+
+            // Compare the leading `levels` of two [recordedAt, eventSeq,
+            // fallbackOrder] tuples; an order ties-or-wins (newer) unless it is
+            // strictly behind on the first differing level. Goal updates compare
+            // 2 levels (no fallback tiebreak); task-plan updates compare 3.
+            function isOrderNewer(order, latest, levels) {
+                for (let i = 0; i < levels; i += 1) {
+                    if (order[i] < latest[i]) return false;
+                    if (order[i] > latest[i]) return true;
+                }
+                return true;
+            }
+
+            function applyGoalOrder(order) {
+                if (!isOrderNewer(order, latestGoalOrder, 2)) return false;
+                latestGoalOrder = order;
+                return true;
+            }
+
+            function applyTaskPlanOrder(order) {
+                if (!isOrderNewer(order, latestTaskPlanOrder, 3)) return false;
+                latestTaskPlanOrder = order;
+                return true;
+            }
+
+            function handleGoalUpdated(payload, order) {
+                if (!applyGoalOrder(order)) return;
+                const goal = (payload && payload.goal) || {};
+                setGoal(goal.objective || "");
+            }
+
+            function handleGoalCleared(order) {
+                if (!applyGoalOrder(order)) return;
+                setGoal("");
+            }
+
+            function handlePlanUpdated(payload, order) {
+                if (!applyTaskPlanOrder(order)) return;
+                updateTaskPlan(payload);
+                followRenderedContent();
+            }
+
+            function handleApprovalRequested(payload) {
+                ensureNoEmpty();
+                const id = payload.id;
+                if (id == null || approvals.has(id)) return;
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.approvalId = String(id);
+                const box = document.createElement("div");
+                box.className = "approval";
+                const header = document.createElement("div");
+                header.className = "approval-header";
+                header.textContent = APPROVAL_LABELS[payload.method] || "Approval requested";
+                box.appendChild(header);
+                const detail = document.createElement("div");
+                detail.className = "approval-detail";
+                detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS
+                    ? sanitizedApprovalDetail(payload.method, payload.params)
+                    : approvalDetail(payload.method, payload.params);
+                box.appendChild(detail);
+                if (READ_ONLY) {
+                    wrap.appendChild(box);
+                    insertBeforeLive(wrap);
+                    approvals.set(id, { node: wrap, box, actions: null, resolved: false });
+                    followRenderedContent();
+                    return;
+                }
+                const actions = document.createElement("div");
+                actions.className = "approval-actions";
+                const buttons = [
+                    { decision: "accept", label: "Run" },
+                    { decision: "cancel", label: "Cancel" },
+                ];
+                const amendmentDecision = execpolicyAmendmentDecision(payload.params);
+                if (amendmentDecision) {
+                    buttons.splice(1, 0, {
+                        decision: "accept",
+                        label: "Run and remember",
+                        decisionPayload: amendmentDecision,
+                    });
+                }
+                buttons.splice(buttons.length - 1, 0, { decision: "decline", label: "Skip" });
+                for (const { decision, label, decisionPayload } of buttons) {
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.dataset.decision = decision;
+                    btn.textContent = label;
+                    btn.addEventListener("click", () => submitApproval(id, decision, decisionPayload));
+                    actions.appendChild(btn);
+                }
+                box.appendChild(actions);
+                wrap.appendChild(box);
+                insertBeforeLive(wrap);
+                approvals.set(id, { node: wrap, box, actions, resolved: false, reloadOnResolve: false });
+                followRenderedContent();
+            }
+
+            function inputAnswerPresent(value) {
+                if (typeof value === "string") return value.trim().length > 0;
+                if (Array.isArray(value)) return value.length > 0;
+                if (value && typeof value === "object") return Object.keys(value).length > 0;
+                return value != null;
+            }
+
+            function handleInputRequested(payload) {
+                ensureNoEmpty();
+                const id = payload.id;
+                if (id == null || inputRequests.has(id)) return;
+                const params = payload.params || {};
+                const questions = Array.isArray(params.questions) ? params.questions : [];
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.inputRequestId = String(id);
+                const box = document.createElement("div");
+                box.className = "input-request";
+                const header = document.createElement("div");
+                header.className = "input-request-header";
+                header.textContent = "Input requested";
+                box.appendChild(header);
+                if (READ_ONLY) {
+                    for (const question of questions) {
+                        const qid = typeof question.id === "string" ? question.id : "";
+                        if (!qid) continue;
+                        const qbox = document.createElement("div");
+                        qbox.className = "input-question";
+                        const qheader = document.createElement("div");
+                        qheader.className = "input-question-header";
+                        qheader.textContent = typeof question.header === "string" ? question.header : "";
+                        if (qheader.textContent) qbox.appendChild(qheader);
+                        const title = document.createElement("div");
+                        title.className = "input-question-title";
+                        title.textContent = typeof question.question === "string" ? question.question : qid;
+                        qbox.appendChild(title);
+                        box.appendChild(qbox);
+                    }
+                    wrap.appendChild(box);
+                    insertBeforeLive(wrap);
+                    inputRequests.set(id, {
+                        node: wrap,
+                        box,
+                        actions: null,
+                        answers: {},
+                        resolved: false,
+                    });
+                    followRenderedContent();
+                    return;
+                }
+                const answers = {};
+                const requiredQuestionIds = [];
+                let refreshSubmitState = () => {};
+                for (const question of questions) {
+                    const qid = typeof question.id === "string" ? question.id : "";
+                    if (!qid) continue;
+                    const requiresExplicitChoice = question.requires_explicit_choice === true;
+                    if (requiresExplicitChoice) requiredQuestionIds.push(qid);
+                    const qbox = document.createElement("div");
+                    qbox.className = "input-question";
+                    const qheader = document.createElement("div");
+                    qheader.className = "input-question-header";
+                    qheader.textContent = typeof question.header === "string" ? question.header : "";
+                    if (qheader.textContent) qbox.appendChild(qheader);
+                    const title = document.createElement("div");
+                    title.className = "input-question-title";
+                    title.textContent = typeof question.question === "string" ? question.question : qid;
+                    qbox.appendChild(title);
+                    const options = Array.isArray(question.options) ? question.options : [];
+                    const optionRow = document.createElement("div");
+                    optionRow.className = "input-options";
+                    const buttons = [];
+                    const setAnswer = (value, selected) => {
+                        if (inputAnswerPresent(value)) {
+                            answers[qid] = value;
+                        } else {
+                            delete answers[qid];
+                        }
+                        for (const btn of buttons) btn.setAttribute("aria-pressed", "false");
+                        if (selected) selected.setAttribute("aria-pressed", "true");
+                        refreshSubmitState();
+                    };
+                    for (const option of options) {
+                        const label = typeof option.label === "string" ? option.label : "";
+                        if (!label) continue;
+                        const btn = document.createElement("button");
+                        btn.type = "button";
+                        btn.setAttribute("aria-pressed", "false");
+                        const labelNode = document.createElement("span");
+                        labelNode.className = "input-option-label";
+                        labelNode.textContent = label;
+                        btn.appendChild(labelNode);
+                        const description = typeof option.description === "string"
+                            ? option.description.trim()
+                            : "";
+                        if (description) {
+                            const descriptionNode = document.createElement("span");
+                            descriptionNode.className = "input-option-description";
+                            descriptionNode.textContent = description;
+                            btn.appendChild(descriptionNode);
+                        }
+                        btn.addEventListener("click", () => setAnswer(label, btn));
+                        optionRow.appendChild(btn);
+                        buttons.push(btn);
+                    }
+                    const other = document.createElement("input");
+                    other.type = "text";
+                    other.className = "input-other";
+                    other.placeholder = "Other";
+                    other.setAttribute("aria-label", "Other answer for " + qid);
+                    // Focusing the empty Other field must not wipe a selected
+                    // option; only adopt its text once it actually has content
+                    // (re-selecting an already-filled Other, or as the user
+                    // types via the input handler below).
+                    other.addEventListener("focus", () => {
+                        if (inputAnswerPresent(other.value)) setAnswer(other.value, null);
+                    });
+                    other.addEventListener("input", () => setAnswer(other.value, null));
+                    optionRow.appendChild(other);
+                    if (buttons.length && !requiresExplicitChoice) {
+                        const firstLabel = buttons[0].querySelector(".input-option-label");
+                        setAnswer(firstLabel ? firstLabel.textContent || "" : "", buttons[0]);
+                    }
+                    qbox.appendChild(optionRow);
+                    box.appendChild(qbox);
+                }
+                const actions = document.createElement("div");
+                actions.className = "input-request-actions";
+                const submit = document.createElement("button");
+                submit.type = "button";
+                submit.dataset.submitInput = "true";
+                submit.textContent = "Submit";
+                submit.addEventListener("click", () => submitInputRequest(id));
+                actions.appendChild(submit);
+                refreshSubmitState = () => {
+                    submit.disabled = requiredQuestionIds.some((qid) => {
+                        return !inputAnswerPresent(answers[qid]);
+                    });
+                };
+                refreshSubmitState();
+                if (!requiredQuestionIds.length) {
+                    const skip = document.createElement("button");
+                    skip.type = "button";
+                    skip.textContent = "Skip";
+                    skip.addEventListener("click", () => {
+                        const entry = inputRequests.get(id);
+                        if (entry) {
+                            for (const key of Object.keys(entry.answers)) {
+                                delete entry.answers[key];
+                            }
+                        }
+                        submitInputRequest(id);
+                    });
+                    actions.appendChild(skip);
+                }
+                box.appendChild(actions);
+                wrap.appendChild(box);
+                insertBeforeLive(wrap);
+                inputRequests.set(id, { node: wrap, box, actions, answers, requiredQuestionIds, resolved: false });
+                followRenderedContent();
+            }
+
+            function submitApproval(id, decision, decisionPayload) {
+                const entry = approvals.get(id);
+                if (!entry || !entry.actions) return;
+                const reenable = () => {
+                    for (const btn of entry.actions.querySelectorAll("button")) {
+                        btn.disabled = false;
+                    }
+                };
+                for (const btn of entry.actions.querySelectorAll("button")) {
+                    btn.disabled = true;
+                }
+                const body = new URLSearchParams({ decision });
+                if (decisionPayload) body.set("decision_payload", JSON.stringify(decisionPayload));
+                // Swap the placeholder pk Django emits via
+                // ``reverse('resolve_approval', kwargs={'approval_id': 0})``
+                // for the real ApprovalRequest id. The regex anchors on the
+                // trailing ``/0/`` so a future URL prefix that happens to
+                // contain a ``0`` doesn't accidentally substitute there.
+                const url = entry.url || APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
+                window.hitch.postForm(url, body).then((response) => {
+                    // ``fetch`` resolves on HTTP errors (403 CSRF, 409
+                    // race-with-another-tab), so a non-2xx response would
+                    // otherwise leave the buttons permanently disabled
+                    // with no retry path. The 409 case is intentional —
+                    // the row is already decided, and the matching
+                    // ``approval/resolved`` SSE frame will fold the UI;
+                    // for everything else, re-enable so the user can try
+                    // again.
+                    if (response.ok && entry.reloadOnResolve) {
+                        window.location.reload();
+                        return;
+                    }
+                    if (!response.ok && response.status !== 409) reenable();
+                }).catch(() => {
+                    // Network failure (no response). The approval/resolved
+                    // event from the worker is the canonical signal that a
+                    // decision took effect, so re-enabling here is safe.
+                    reenable();
+                });
+            }
+
+            function submitInputRequest(id) {
+                const entry = inputRequests.get(id);
+                if (!entry || entry.resolved) return;
+                if (Array.isArray(entry.requiredQuestionIds)) {
+                    const missingRequired = entry.requiredQuestionIds.some((qid) => {
+                        return !inputAnswerPresent((entry.answers || {})[qid]);
+                    });
+                    if (missingRequired) return;
+                }
+                const controls = entry.box.querySelectorAll("button, input");
+                for (const btn of controls) btn.disabled = true;
+                const body = new URLSearchParams({ answers: JSON.stringify(entry.answers || {}) });
+                const url = INPUT_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
+                window.hitch.postForm(url, body).then((response) => {
+                    if (!response.ok && response.status !== 409) {
+                        for (const btn of controls) btn.disabled = false;
+                    }
+                }).catch(() => {
+                    for (const btn of controls) btn.disabled = false;
+                });
+            }
+
+            function handleApprovalResolved(payload) {
+                const id = payload.id;
+                const entry = approvals.get(id);
+                if (!entry) return;
+                if (entry.resolved) return;
+                entry.resolved = true;
+                entry.box.classList.add("resolved");
+                if (entry.actions && entry.actions.parentNode) entry.actions.remove();
+                const note = document.createElement("div");
+                note.className = "approval-resolution";
+                note.textContent = "Decision: " + approvalDecisionText(payload.decision);
+                entry.box.appendChild(note);
+                followRenderedContent();
+            }
+
+            function handleInputResolved(payload) {
+                const id = payload.id;
+                const entry = inputRequests.get(id);
+                if (!entry || entry.resolved) return;
+                entry.resolved = true;
+                entry.box.classList.add("resolved");
+                for (const control of entry.box.querySelectorAll("button, input")) {
+                    control.disabled = true;
+                }
+                if (entry.actions && entry.actions.parentNode) entry.actions.remove();
+                const note = document.createElement("div");
+                note.className = "approval-resolution";
+                note.textContent = "Answers submitted";
+                entry.box.appendChild(note);
+                followRenderedContent();
+            }
+
+            const seenEvents = new Set();
+
+            function eventKey(event) {
+                const recordedAt = Number.isSafeInteger(event.recordedAt) ? event.recordedAt : null;
+                const eventSeq = Number.isSafeInteger(event.eventSeq) ? event.eventSeq : null;
+                if (recordedAt === null && eventSeq === null) return "";
+                return [
+                    recordedAt === null ? "" : recordedAt,
+                    eventSeq === null ? "" : eventSeq,
+                    event.method || "",
+                ].join(":");
+            }
+
+            function handleHeartbeat(event) {
+                bump();
+                let payload;
+                try { payload = JSON.parse(event.data); } catch { payload = {}; }
+                if (payload && typeof payload.statusText === "string" && payload.statusText.trim()) {
+                    workingText = payload.statusText.trim();
+                }
+                if (payload && Array.isArray(payload.prWorkflowProgress)) {
+                    renderPrProgress(payload.prWorkflowProgress);
+                }
+                setState(payload && payload.working ? "working" : "idle");
+            }
+
+            function renderPrProgress(gates) {
+                if (!prProgress) return;
+                prProgress.replaceChildren();
+                const validGates = gates.filter((gate) => {
+                    return gate
+                        && typeof gate.key === "string"
+                        && typeof gate.label === "string"
+                        && typeof gate.status === "string";
+                });
+                prProgress.hidden = validGates.length === 0;
+                for (const gate of validGates) {
+                    const item = document.createElement("span");
+                    item.className = "pr-gate";
+                    item.dataset.prGate = gate.key;
+                    item.dataset.status = gate.status;
+                    if (typeof gate.summary === "string") item.title = gate.summary;
+                    const statusLabel = typeof gate.statusLabel === "string"
+                        ? gate.statusLabel
+                        : gate.status;
+                    item.setAttribute("aria-label", `${gate.label}: ${statusLabel}`);
+                    item.textContent = `${gate.label}: ${statusLabel}`;
+                    prProgress.appendChild(item);
+                }
+            }
+
+            // Stream message router: maps each SSE method to its handler,
+            // adapting the shared (payload, parsed, order) arguments to each
+            // handler's own signature. An unknown method has no entry and is
+            // ignored, matching the previous switch (which had no default).
+            const STREAM_HANDLERS = {
+                "item/started": (payload, parsed, order) => handleItemStarted(payload, parsed),
+                "item/agentMessage/delta": (payload, parsed, order) => handleAgentDelta(payload),
+                "item/plan/delta": (payload, parsed, order) => handlePlanDelta(payload, parsed),
+                "item/completed": (payload, parsed, order) => handleItemCompleted(payload, parsed),
+                "thread/goal/updated": (payload, parsed, order) => handleGoalUpdated(payload, order),
+                "thread/goal/cleared": (payload, parsed, order) => handleGoalCleared(order),
+                "turn/plan/updated": (payload, parsed, order) => handlePlanUpdated(payload, order),
+                "approval/requested": (payload, parsed, order) => handleApprovalRequested(payload),
+                "approval/resolved": (payload, parsed, order) => handleApprovalResolved(payload),
+                "input/requested": (payload, parsed, order) => handleInputRequested(payload),
+                "input/resolved": (payload, parsed, order) => handleInputResolved(payload),
+            };
+
+            function handleMessage(event) {
+                bump();
+                streamFallbackOrder += 1;
+                let parsed;
+                try { parsed = JSON.parse(event.data); } catch { return; }
+                const key = eventKey(parsed);
+                if (key) {
+                    if (seenEvents.has(key)) return;
+                    seenEvents.add(key);
+                }
+                const payload = parsed.payload || {};
+                const order = eventOrder(parsed, streamFallbackOrder);
+                // Look up by own property only: method strings come straight
+                // off the wire, so an inherited name like "constructor" or
+                // "__proto__" must not resolve to an Object.prototype member.
+                const handler = Object.prototype.hasOwnProperty.call(STREAM_HANDLERS, parsed.method)
+                    ? STREAM_HANDLERS[parsed.method]
+                    : null;
+                if (handler) handler(payload, parsed, order);
+            }
+
+            function handleEnd() {
+                streamEnded = true;
+                clearRetryTimer();
+                if (source) source.close();
+                // Reload so the rollout-based render replaces the live DOM
+                // (markdown rendering, intermediate collapsing, etc.) and the
+                // page picks up any newly-spawned worker.
+                window.location.reload();
+            }
+
+            function connect() {
+                if (streamEnded) return;
+                if (source) source.close();
+                source = new EventSource(streamUrl);
+                source.addEventListener("heartbeat", handleHeartbeat);
+                source.addEventListener("message", handleMessage);
+                source.addEventListener("end", handleEnd);
+                source.addEventListener("error", markConnectionProblem);
+            }
+
+            connect();
+        })();
+    </script>
