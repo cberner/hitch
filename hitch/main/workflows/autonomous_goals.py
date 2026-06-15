@@ -672,7 +672,7 @@ def _seed_stack_continuation_proposal_budget_state(
 ) -> None:
     if _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY not in state:
         return
-    metadata = _proposal_outcome_metadata(proposal, {})
+    metadata = _proposal_outcome_metadata(proposal)
     for key in (
         _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
         _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
@@ -2025,7 +2025,7 @@ def _dismiss_replaced_autonomous_goal_proposal(
     ):
         return ()
     outcome_metadata = {
-        **_proposal_outcome_metadata(previous, {}),
+        **_proposal_outcome_metadata(previous),
         "stacked_diff_hidden_until_complete": False,
         "stacked_diff_replaced_by": replacement.pk,
     }
@@ -2096,7 +2096,7 @@ def _publish_current_stack_proposal(
                 outcome_status=ProposedSession.OUTCOME_UNSET,
             ).exists()
         outcome_metadata = {
-            **_proposal_outcome_metadata(proposal, {}),
+            **_proposal_outcome_metadata(proposal),
             **budget_metadata,
             **stop_metadata,
         }
@@ -2112,7 +2112,7 @@ def _publish_current_stack_proposal(
     if not _autonomous_goal_proposal_hidden_until_complete(proposal):
         return False
     outcome_metadata = {
-        **_proposal_outcome_metadata(proposal, {}),
+        **_proposal_outcome_metadata(proposal),
         "stacked_diff_hidden_until_complete": False,
         **budget_metadata,
         **stop_metadata,
@@ -2166,7 +2166,7 @@ def _autonomous_goal_proposal_hidden_until_complete(
 ) -> bool:
     return (
         proposal.outcome_status == ProposedSession.OUTCOME_DISMISSED
-        and _proposal_outcome_metadata(proposal, {}).get(
+        and _proposal_outcome_metadata(proposal).get(
             "stacked_diff_hidden_until_complete"
         )
         is True

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import glob
 import logging
-import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ from hitch.main.models import (
     SessionMetadata,
     SystemWorkflow,
 )
-from hitch.main.runtime import app_server_pool, rollout
+from hitch.main.runtime import app_server_pool, codex_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _ARCHIVED_SESSIONS_DIR,
     _rollout_path_from_value,
@@ -157,7 +156,7 @@ def _session_detail_metadata(session_id: str) -> SessionMetadata | None:
 def _stored_rollout_path_for_thread(session_id: str) -> Path | None:
     if not session_id:
         return None
-    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    codex_home = codex_pool.codex_home_dir()
     pattern = f"rollout-*-{glob.escape(session_id)}.jsonl"
     for base_name in ("sessions", _ARCHIVED_SESSIONS_DIR):
         base = codex_home / base_name

@@ -60,14 +60,14 @@ class _AcceptedSessionRolloutEvidence:
 
 
 def _proposal_outcome_metadata(
-    proposal: ProposedSession, updates: dict[str, object]
+    proposal: ProposedSession, updates: dict[str, object] | None = None
 ) -> dict[str, object]:
     metadata = (
         dict(proposal.outcome_metadata)
         if isinstance(proposal.outcome_metadata, dict)
         else {}
     )
-    for key, value in updates.items():
+    for key, value in (updates or {}).items():
         if value is None:
             metadata.pop(key, None)
         else:
@@ -175,7 +175,7 @@ def _claim_autonomous_goal_stack_continuation_proposal(
     proposal: ProposedSession,
 ) -> ProposedSession | None:
     outcome_metadata = {
-        **_proposal_outcome_metadata(proposal, {}),
+        **_proposal_outcome_metadata(proposal),
         "stacked_diff_hidden_until_complete": False,
     }
     applied = ProposedSession.objects.filter(
@@ -206,7 +206,7 @@ def _autonomous_goal_proposal_allows_stack_continuation(
     candidate_cwd = proposal.candidate_session.cwd.strip()
     if not candidate_cwd or candidate_cwd == autonomous_goal.project.repo_path:
         return False
-    metadata = _proposal_outcome_metadata(proposal, {})
+    metadata = _proposal_outcome_metadata(proposal)
     if metadata.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY):
         return False
     if not _autonomous_goal_proposal_budget_allows_stack_continuation(
@@ -231,7 +231,7 @@ def _autonomous_goal_proposal_budget_allows_stack_continuation(
     if budget <= 0:
         return True
     if metadata is None:
-        metadata = _proposal_outcome_metadata(proposal, {})
+        metadata = _proposal_outcome_metadata(proposal)
     tokens_used = _proposal_metadata_non_negative_int(
         metadata, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY
     )
@@ -250,7 +250,7 @@ def _proposal_metadata_non_negative_int(
 def _autonomous_goal_proposal_stack_continuation_metadata(
     proposal: ProposedSession, autonomous_goal: AutonomousGoal
 ) -> _AutonomousGoalProposalStackMetadata | None:
-    metadata = _proposal_outcome_metadata(proposal, {})
+    metadata = _proposal_outcome_metadata(proposal)
     depth_value = metadata.get("stacked_diff_depth")
     iteration_value = metadata.get("stacked_diff_iteration")
     if not _valid_autonomous_goal_stack_metadata_int(

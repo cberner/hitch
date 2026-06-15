@@ -134,12 +134,7 @@ def _pr_handoff_identity_changed(
         return False
     current_number = current.get("pr_number")
     update_number = update.get("pr_number")
-    if (
-        isinstance(current_number, int)
-        and not isinstance(current_number, bool)
-        and isinstance(update_number, int)
-        and not isinstance(update_number, bool)
-    ):
+    if is_nonbool_int(current_number) and is_nonbool_int(update_number):
         return current_number != update_number
     current_url = current.get("url")
     update_url = update.get("url")
@@ -183,13 +178,8 @@ def _compact_pr_handoff(value: Any) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key in _PR_HANDOFF_FIELDS:
         raw = value.get(key)
-        if (
-            (key in _PR_HANDOFF_BOOLEAN_FIELDS and isinstance(raw, bool))
-            or (
-                key in _PR_HANDOFF_INTEGER_FIELDS
-                and isinstance(raw, int)
-                and not isinstance(raw, bool)
-            )
+        if (key in _PR_HANDOFF_BOOLEAN_FIELDS and isinstance(raw, bool)) or (
+            key in _PR_HANDOFF_INTEGER_FIELDS and is_nonbool_int(raw)
         ):
             compact[key] = raw
         elif isinstance(raw, str):
