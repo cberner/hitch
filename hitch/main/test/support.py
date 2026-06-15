@@ -18,6 +18,8 @@ from django.core import signing
 from django.test import Client
 from openai_codex.errors import MethodNotFoundError
 
+from hitch.main.models import Project
+
 
 def _sign(name: str, value: str) -> str:
     return signing.get_cookie_signer(salt=name).sign(value)
@@ -80,6 +82,11 @@ def _make_model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
             for v in ("low", "medium", "high")
         ],
     )
+
+
+def _make_project(name: str = "Hitch", repo_path: str = "/repo", **kwargs: Any) -> Project:
+    """Create a Project with the defaults the test suite overwhelmingly uses."""
+    return Project.objects.create(name=name, repo_path=repo_path, **kwargs)
 
 
 def _rollout_line(
