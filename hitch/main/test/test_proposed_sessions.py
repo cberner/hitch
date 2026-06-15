@@ -14,17 +14,18 @@ from hitch.main.goals.proposed_sessions import (
     ProposedSessionInput,
     create_proposed_session,
 )
-from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
+from hitch.main.models import AutonomousGoal, ProposedSession, SessionMetadata
 from hitch.main.runtime.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
+from hitch.main.test.support import _make_project
 
 
 class ProposedSessionServiceTests(TestCase):
     def test_create_proposed_session_resolves_project_and_source_session(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         source = SessionMetadata.objects.create(
             thread_id="thread-1",
             cwd="/repo",
@@ -63,7 +64,7 @@ class ProposedSessionServiceTests(TestCase):
             )
 
     def test_create_proposed_session_rejects_invalid_values(self) -> None:
-        Project.objects.create(name="Hitch", repo_path="/repo")
+        _make_project()
         cases = [
             ("", "summary", "prompt", "/repo", "medium", "title is required"),
             ("x" * 201, "summary", "prompt", "/repo", "medium", "title is too long"),
@@ -91,7 +92,7 @@ class ProposedSessionServiceTests(TestCase):
 
 class ProposeSessionCommandTests(TestCase):
     def test_command_creates_json_response(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         out = StringIO()
 
         call_command(
@@ -140,7 +141,7 @@ class CodexToolTests(TestCase):
         self.assertIn("inputSchema", specs[0])
 
     def test_dynamic_tool_call_creates_proposal(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         source = SessionMetadata.objects.create(
             thread_id="thread-1",
             cwd="/repo",
@@ -178,7 +179,7 @@ class CodexToolTests(TestCase):
         self.assertIn("unknown Hitch tool", response["contentItems"][0]["text"])
 
     def test_dynamic_tool_call_accepts_namespace_less_payload(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
 
         response = handle_dynamic_tool_call(
             {
@@ -200,7 +201,7 @@ class CodexToolTests(TestCase):
     def test_dynamic_tool_call_closes_thread_connection(
         self, mock_close: MagicMock
     ) -> None:
-        Project.objects.create(name="Hitch", repo_path="/repo")
+        _make_project()
 
         response = handle_dynamic_tool_call(
             {

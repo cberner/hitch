@@ -25,7 +25,6 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
-    Project,
     SessionMetadata,
     SystemWorkflow,
     UserInputRequest,
@@ -34,6 +33,7 @@ from hitch.main.runtime import codex_pool
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
     _make_model,
+    _make_project,
     _rollout_line,
     _seed_cookies,
 )
@@ -722,9 +722,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             extra_system_prompt="Use project fixtures.",
         )
         SessionMetadata.objects.create(thread_id="abc", cwd="/repo", project=project)
@@ -2652,7 +2650,7 @@ class SendMessageViewTests(TestCase):
         # configured local merge silently disappears every time they trigger
         # QA from the composer.
         mock_discover.return_value = [Path("/repo")]
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         SessionMetadata.objects.create(
             thread_id="abc",
             cwd="/repo",

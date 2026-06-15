@@ -18,6 +18,7 @@ from hitch.main.sessions import settings_cookies
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
+    _make_project,
     _seed_cookies,
 )
 from hitch.main.workflows import pr_stage
@@ -836,9 +837,7 @@ class SettingsPageRenderTests(TestCase):
     def test_project_auto_pr_setting_renders_in_edit_dialog(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path="/repo",
+        project = _make_project(
             auto_pr_mode=Project.AUTO_PR_OFF,
             auto_pull_enabled=True,
         )
@@ -1532,7 +1531,7 @@ class UpdateSettingsViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         cases: list[tuple[str, dict[str, str], dict[str, str], str, str]] = [
             (
                 "sandbox policy",
@@ -1990,7 +1989,7 @@ class SelectedProjectCookieImportTests(TestCase):
     def test_login_empty_selected_project_cookie_clears_account_project(self) -> None:
         user_model = get_user_model()
         user = user_model.objects.create_user("dev@example.com", password="StrongPass123!")
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         UserSettings.objects.create(user=user, selected_project=project)
         _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: ""})
 
@@ -2007,8 +2006,8 @@ class SelectedProjectCookieImportTests(TestCase):
     def test_login_stale_selected_project_cookie_clears_account_project(self) -> None:
         user_model = get_user_model()
         user = user_model.objects.create_user("dev@example.com", password="StrongPass123!")
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        stale = Project.objects.create(name="Old", repo_path="/old")
+        project = _make_project()
+        stale = _make_project(name="Old", repo_path="/old")
         stale_id = stale.pk
         stale.delete()
         UserSettings.objects.create(user=user, selected_project=project)

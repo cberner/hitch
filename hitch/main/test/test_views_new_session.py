@@ -39,6 +39,7 @@ from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
     _make_model,
+    _make_project,
     _rollout_line,
     _seed_cookies,
     _setup_codex,
@@ -768,7 +769,7 @@ class NewSessionViewTests(TestCase):
         mock_stop_stack: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -836,7 +837,7 @@ class NewSessionViewTests(TestCase):
         mock_save_images: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -893,7 +894,7 @@ class NewSessionViewTests(TestCase):
         mock_stop_stack: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -926,7 +927,7 @@ class NewSessionViewTests(TestCase):
         mock_stop_stack.assert_not_called()
 
     def test_new_session_finish_ignores_replaced_start_claim(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
         old_claim = "2026-06-05T14:00:00+00:00"
         new_claim = "2026-06-05T14:45:00+00:00"
@@ -961,7 +962,7 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.outcome_metadata[claim_key], new_claim)
 
     def test_new_session_reset_ignores_replaced_start_claim(self) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
         old_claim = "2026-06-05T14:00:00+00:00"
         new_claim = "2026-06-05T14:45:00+00:00"
@@ -1000,7 +1001,7 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1075,7 +1076,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         proposal = ProposedSession.objects.create(
             project=project,
             title="Add parser coverage",
@@ -1125,7 +1126,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1231,7 +1232,7 @@ class NewSessionViewTests(TestCase):
         codex._client.thread_resume.side_effect = AssertionError(
             "thread_resume should not be needed"
         )
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1308,7 +1309,7 @@ class NewSessionViewTests(TestCase):
             thread=_session("candidate-thread", path=str(rollout_path))
         )
         mock_run_borrowed.side_effect = _run_borrowed_with(codex)
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1385,7 +1386,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1449,7 +1450,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1529,7 +1530,7 @@ class NewSessionViewTests(TestCase):
 
         for index, (prompt, expected) in enumerate(cases):
             with self.subTest(prompt=prompt):
-                project = Project.objects.create(
+                project = _make_project(
                     name=f"Hitch {index}", repo_path=f"{self.REPO}-{index}"
                 )
                 goal = AutonomousGoal.objects.create(
@@ -1616,7 +1617,7 @@ class NewSessionViewTests(TestCase):
             thread=SimpleNamespace(turns=[])
         )
         mock_start_workflow.side_effect = RuntimeError("workflow failed")
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1676,7 +1677,7 @@ class NewSessionViewTests(TestCase):
         codex._client.thread_resume.return_value = SimpleNamespace(
             thread=SimpleNamespace(turns=[])
         )
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1763,7 +1764,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1825,8 +1826,8 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
+        project = _make_project(repo_path=self.REPO)
+        other_project = _make_project(name="Other", repo_path="/home/user/other")
         goal = AutonomousGoal.objects.create(
             project=other_project,
             title="Improve docs",
@@ -2008,7 +2009,7 @@ class NewSessionViewTests(TestCase):
                 if project_auto_pr_mode is None:
                     data["cwd"] = repo
                 else:
-                    project = Project.objects.create(
+                    project = _make_project(
                         name=f"Hitch {index}",
                         repo_path=repo,
                         auto_pr_mode=project_auto_pr_mode,
@@ -2144,12 +2145,12 @@ class NewSessionViewTests(TestCase):
                     if selector == "selected"
                     else f"{self.REPO}/selected-{index}"
                 )
-                selected_project = Project.objects.create(
+                selected_project = _make_project(
                     name=f"Selected {index}", repo_path=selected_repo
                 )
                 posted_project = None
                 if selector in {"cwd", "project", "bare"}:
-                    posted_project = Project.objects.create(
+                    posted_project = _make_project(
                         name=f"Posted {index}", repo_path=repo
                     )
                 data = {"prompt": "do thing"}
@@ -2273,7 +2274,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        project = Project.objects.create(
+        project = _make_project(
             name="Hitch",
             repo_path=self.REPO,
             extra_system_prompt="Use project fixtures.",
@@ -2312,7 +2313,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        project = Project.objects.create(
+        project = _make_project(
             name="Hitch",
             repo_path=self.REPO,
             extra_system_prompt="Use project fixtures.",
@@ -2769,7 +2770,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
         mock_create_thread.return_value = "coding-proposal-thread"
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         proposal = ProposedSession.objects.create(
             project=project,
             title="Tidy up logging",
@@ -2810,7 +2811,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         proposal = ProposedSession.objects.create(
             project=project,
             title="Tidy up logging",
@@ -2849,7 +2850,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO)
         proposal = ProposedSession.objects.create(
             project=project,
             title="Tidy up logging",
@@ -2887,8 +2888,8 @@ class NewSessionViewTests(TestCase):
         mock_start_workflow: MagicMock,
     ) -> None:
         repo_b = "/home/user/other"
-        project_a = Project.objects.create(name="Project A", repo_path=self.REPO)
-        project_b = Project.objects.create(name="Project B", repo_path=repo_b)
+        project_a = _make_project(name="Project A", repo_path=self.REPO)
+        project_b = _make_project(name="Project B", repo_path=repo_b)
         _setup_codex(mock_codex, models=[])
         cases = [
             (

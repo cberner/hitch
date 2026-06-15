@@ -21,7 +21,6 @@ from hitch.main import demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
-    Project,
     SessionDemo,
     SessionMetadata,
     SystemAgentRun,
@@ -36,6 +35,7 @@ from hitch.main.sessions.session_pr_plan import (
 )
 from hitch.main.test.support import (
     _cookie_value,
+    _make_project,
     _rollout_line,
     _seed_cookies,
 )
@@ -537,7 +537,7 @@ class SessionViewTests(TestCase):
     def test_selected_project_session_nav_includes_project_links(
         self, mock_codex: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         thread = _thread([_turn([_user_message("hi")])], cwd="/repo")
         _patch_thread(self, mock_codex, thread)
@@ -615,7 +615,7 @@ class SessionViewTests(TestCase):
     def test_action_menu_includes_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        project = _make_project(repo_path="/tmp/demo")
         SessionMetadata.objects.create(
             thread_id="thread-1", cwd="/tmp/demo", project=project
         )
@@ -657,8 +657,8 @@ class SessionViewTests(TestCase):
     def test_action_menu_prefers_hitch_project_for_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        session_project = Project.objects.create(name="Other", repo_path="/tmp/other")
-        hitch_project = Project.objects.create(name="Hitch", repo_path="/tmp/hitch")
+        session_project = _make_project(name="Other", repo_path="/tmp/other")
+        hitch_project = _make_project(repo_path="/tmp/hitch")
         SessionMetadata.objects.create(
             thread_id="thread-1", cwd="/tmp/other", project=session_project
         )
@@ -678,8 +678,8 @@ class SessionViewTests(TestCase):
     def test_action_menu_ignores_undiscovered_hitch_project_for_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        session_project = Project.objects.create(name="Other", repo_path="/tmp/other")
-        hitch_project = Project.objects.create(
+        session_project = _make_project(name="Other", repo_path="/tmp/other")
+        hitch_project = _make_project(
             name="Hitch", repo_path="/tmp/missing-hitch"
         )
         SessionMetadata.objects.create(
@@ -701,7 +701,7 @@ class SessionViewTests(TestCase):
     def test_action_menu_includes_cwd_for_bare_repo_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Other", repo_path="/tmp/demo")
+        _make_project(name="Other", repo_path="/tmp/demo")
         SessionMetadata.objects.create(
             thread_id="thread-1", cwd="/tmp/demo", project_cleared=True
         )
@@ -718,7 +718,7 @@ class SessionViewTests(TestCase):
 
     @patch("hitch.main.views.common.Codex")
     def test_renders_move_to_project_menu_and_dialog(self, mock_codex: MagicMock) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        project = _make_project(repo_path="/tmp/demo")
         SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/demo", project=project)
         thread = _thread([_turn([_user_message("hi")])])
         _patch_thread(self, mock_codex, thread)
@@ -738,7 +738,7 @@ class SessionViewTests(TestCase):
     def test_set_session_project_moves_and_clears_project(
         self, mock_codex: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        project = _make_project(repo_path="/tmp/demo")
         thread = _thread([_turn([_user_message("hi")])])
         _patch_thread(self, mock_codex, thread)
 
@@ -767,7 +767,7 @@ class SessionViewTests(TestCase):
     def test_set_session_project_uses_metadata_cwd_without_resume(
         self, mock_codex: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        project = _make_project(repo_path="/tmp/demo")
         SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/demo")
 
         response = self.client.post(
@@ -786,7 +786,7 @@ class SessionViewTests(TestCase):
     def test_set_session_project_falls_back_without_metadata_cwd(
         self, mock_run_borrowed: MagicMock
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        project = _make_project(repo_path="/tmp/demo")
         SessionMetadata.objects.create(thread_id="thread-1")
         client = SimpleNamespace(
             _client=SimpleNamespace(
