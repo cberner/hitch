@@ -37,11 +37,14 @@ from hitch.main.runtime.sdk_values import (
 from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import session_stage
 from hitch.main.sessions.session_pr_plan import (
+    _claude_pr_observation_for_session,
     _pr_observation_result_for_rollout_path,
     _pr_snapshot_identity,
     _workflow_after_main_lifecycle,
 )
-from hitch.main.workflows import pr_qa, pr_stage
+from hitch.main.sessions.session_resume import _session_is_claude
+from hitch.main.sessions.token_usage import _claude_thread_ids
+from hitch.main.workflows import pr_qa, pr_stage, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -106,11 +109,22 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     cheap no-op when the same PR was refreshed elsewhere recently.
     """
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    # A Claude session has no Codex rollout to scan; its PR identity is recovered
+    # from the thread's own GitHub MCP calls in the events file instead. The
+    # workflow-handoff path below is backend-agnostic, so a Claude PR opened via
+    # ``/pr``/``/fix-pr`` already refreshes through its monitor workflow; this
+    # closes the no-workflow path (a PR the agent opened directly via gh) whose
+    # snapshot refresh would otherwise be skipped for Claude.
+    is_claude = _session_is_claude(session_id)
     rollout_state = _rollout_file_state_from_value(
         metadata.codex_path if metadata is not None else None
     )
     rollout_path = rollout_state.path if rollout_state is not None else None
-    pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
+    pr_observation = (
+        _claude_pr_observation_for_session(session_id)
+        if is_claude
+        else _pr_observation_result_for_rollout_path(rollout_path)
+    )
     main_updated_at = metadata.codex_updated_at if metadata is not None else None
     stage_pr_workflow = _workflow_after_main_lifecycle(
         pr_stage._latest_pr_workflow_for_thread(session_id),
@@ -126,23 +140,28 @@ def _refresh_session_pr_stage(session_id: str) -> None:
         )
         return
     if stage_pr_workflow is not None:
-        pr_qa.refreshed_pr_handoff_for_stage(stage_pr_workflow)
+        system_agents.refreshed_pr_handoff_for_stage(stage_pr_workflow)
         return
     snapshot = pr_observation.snapshot
-    if metadata is None or snapshot is None or rollout_state is None:
+    # Codex keys the stage cache on the rollout mtime; Claude has no rollout, so
+    # key it on 0 -- matching the detail render, which uses ``stage_cache_mtime_ns
+    # == 0`` for a session with no ``codex_path`` and therefore prefers this
+    # cached terminal stage on reload.
+    if metadata is None or snapshot is None or (rollout_state is None and not is_claude):
         return
-    if not pr_qa.pr_snapshot_stage_refresh_due(
+    if not system_agents.pr_snapshot_stage_refresh_due(
         cwd=metadata.cwd,
         snapshot=snapshot,
         attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
     ):
         return
     pr_stage._mark_cached_pr_stage_refresh_attempt(session_id)
-    refreshed = pr_qa.refreshed_pr_snapshot_for_stage(
+    refreshed = system_agents.refreshed_pr_snapshot_for_stage(
         cwd=metadata.cwd, snapshot=snapshot
     )
     stage = session_stage.derive_stage(pr_snapshot=refreshed)
-    pr_stage._update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
+    source_mtime_ns = rollout_state.mtime_ns if rollout_state is not None else 0
+    pr_stage._update_cached_stage_best_effort(session_id, stage, source_mtime_ns)
 
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
@@ -152,6 +171,11 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     workflows_by_thread_id = pr_stage._latest_stage_workflows_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
     waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
+    # One bulk query: Claude rows have no rollout to key the stage cache on, so the
+    # async refresh keys their terminal PR stage at mtime 0. Identifying them by
+    # backend (not an empty codex_path, which a fresh Codex row also has) lets the
+    # list serve that cache so the index matches the detail page.
+    claude_thread_ids = _claude_thread_ids(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
     for session in sessions:
         session_id = session.get("id")
@@ -162,6 +186,22 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         active_instance = active_instances_by_thread_id.get(session_id)
         awaiting_user_input = session_id in waiting_thread_ids
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
+        if (
+            session_id in claude_thread_ids
+            and active_instance is None
+            and workflow is None
+            and not awaiting_user_input
+        ):
+            # Claude row (no rollout) with a refresh-written terminal PR stage:
+            # serve it directly so the index matches the detail page. The list has
+            # no rollout to scan or schedule a refresh from -- the detail page owns
+            # the gh-backed refresh that populated this cache.
+            claude_cached = _claude_cached_stage_for_row(session)
+            if claude_cached is not None:
+                session["stage"] = _session_list_stage_context(
+                    claude_cached, pr_snapshot=None, refreshing=False
+                )
+                continue
         if (
             active_instance is None
             and workflow is None
@@ -183,7 +223,18 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             )
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
-        entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
+        if session_id in claude_thread_ids:
+            # A Claude row has no rollout to scan, so the rollout-based parse
+            # returns no PR observation. A Claude session that opened a PR
+            # directly (not through a /pr workflow) would then show only
+            # activity/idle and never schedule the gh refresh, unlike the detail
+            # page, which already recovers the PR from the thread's own GitHub
+            # MCP calls. Recover it here too so the first list render shows the
+            # PR stage and schedules the refresh that populates the mtime-0 cache.
+            entries: list[dict[str, Any]] = []
+            pr_observation = _claude_pr_observation_for_session(session_id)
+        else:
+            entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
         if not entries and session.get("has_activity"):
             entries = [{"kind": "user"}]
         stage_workflow = _workflow_after_main_lifecycle(
@@ -456,6 +507,20 @@ def _cached_stage_for_session_row(
         if session.get("stage_cache_mtime_ns") == rollout_state.mtime_ns
         else None
     )
+
+
+def _claude_cached_stage_for_row(
+    session: Mapping[str, Any],
+) -> session_stage.SessionStage | None:
+    """Cached terminal PR stage for a Claude row (no rollout).
+
+    The async PR refresh persists a Claude session's stage keyed at mtime 0 (it
+    has no rollout mtime). Callers gate this on a *reliable* Claude-backend check
+    -- not an empty ``codex_path``, which a freshly-created Codex row also has.
+    """
+    if session.get("stage_cache_mtime_ns") != 0:
+        return None
+    return session_stage.stage_for_key(string_value(session.get("stage_cache_key")))
 
 
 def _session_stage_data_for_rollout_path(

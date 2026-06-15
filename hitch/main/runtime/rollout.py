@@ -96,11 +96,8 @@ _PR_PROMPT_ALIASES = frozenset(
         ),
     }
 )
-_PR_WORKFLOW_PROMPT_PREFIXES = (
-    "Hitch QA agent could not complete the PR workflow.",
-    "Hitch PR workflow could not complete.",
-    "Hitch PR monitor found follow-up work on the active PR.",
-)
+# PR-workflow feedback prompts live in ``codex_events`` (shared with the Claude
+# PR replay); ``_is_pr_workflow_prompt`` delegates there.
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _COLLABORATION_MODE_PLAN = "plan"
 _COLLABORATION_MODE_DEFAULT = "default"
@@ -733,8 +730,7 @@ def _is_pr_creation_prompt(text: str) -> bool:
 
 
 def _is_pr_workflow_prompt(text: str) -> bool:
-    text = text.strip()
-    return any(text.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES)
+    return codex_events.is_pr_workflow_notice_prompt(text)
 
 
 def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

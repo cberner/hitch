@@ -5,9 +5,12 @@
             // model can't use stops the user from saving a combination that
             // would bounce. An empty advertised set means "no constraint", so
             // every effort stays available.
-            const settingsModelSelect = document.querySelector("[data-settings-model-select]");
-            const settingsEffortSelect = document.querySelector("[data-settings-effort-select]");
             function applySupportedEffortFilter() {
+                // Re-query each call: the model field can be rebuilt from a
+                // free-text fallback into a <select> when the provider changes,
+                // so a reference captured at load would go stale.
+                const settingsModelSelect = document.querySelector("[data-settings-model-select]");
+                const settingsEffortSelect = document.querySelector("[data-settings-effort-select]");
                 if (!settingsModelSelect || !settingsEffortSelect) return;
                 const option = settingsModelSelect.selectedOptions && settingsModelSelect.selectedOptions[0];
                 const raw = option ? (option.dataset.supportedEfforts || "") : "";
@@ -25,5 +28,15 @@
                 // selected effort is no longer offered by the new model.
                 if (selectedHidden) settingsEffortSelect.value = "";
             }
-            if (settingsModelSelect) settingsModelSelect.addEventListener("change", applySupportedEffortFilter);
+            // Delegated listener so a model <select> created after initial render
+            // (e.g. switching the provider away from the free-text fallback field)
+            // still triggers the filter -- not only the select present on load.
+            // ``repopulateModels`` dispatches a bubbling ``change`` on the new
+            // select so this catches it.
+            document.addEventListener("change", function (event) {
+                const target = event.target;
+                if (target && target.matches && target.matches("[data-settings-model-select]")) {
+                    applySupportedEffortFilter();
+                }
+            });
             applySupportedEffortFilter();

@@ -12,7 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches, claude_options, coding_agents
 from hitch.main import repos as repos_module
 from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
 from hitch.main.goals.autonomous_goal_run_display import (
@@ -31,7 +31,7 @@ from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
 )
-from hitch.main.sessions import session_index
+from hitch.main.sessions import session_index, session_pr_plan
 from hitch.main.sessions.message_intent import (
     _is_fix_pr_activation,
     _is_pr_activation,
@@ -48,6 +48,7 @@ from hitch.main.sessions.session_pr_plan import (
     _PR_SLASH_PROMPT,
     _count_user_entries,
 )
+from hitch.main.sessions.session_resume import _session_is_claude
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
     _QA_SLASH_PROMPT,
@@ -55,7 +56,9 @@ from hitch.main.sessions.session_settings import (
     _cached_models_and_settings,
     _effective_approval_mode_for_session,
     _effective_auto_pr_enabled,
+    _effective_provider,
     _effective_sandbox_policy_for_cwd,
+    _model_for_thread_backend,
     _new_session_form_context,
     _project_for_proposed_session,
     _resolved_settings,
@@ -398,6 +401,12 @@ def _posted_new_session_coding_agent(raw: str | None) -> tuple[str, str | None]:
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
+    # Claude candidate threads are local-only, so count their user turns from the
+    # worker events instead of a Codex ``thread_resume`` that would fail. Reached
+    # through the defining module so tests can intercept it there (the view
+    # function ``new_session`` shadows this submodule in the package namespace).
+    if _session_is_claude(thread_id):
+        return session_pr_plan._claude_user_message_index(thread_id)
     resumed = app_server_pool.run_borrowed_op_with_retry(
         common.Codex,
         lambda codex: codex._client.thread_resume(thread_id),
@@ -497,7 +506,40 @@ def _start_candidate_proposal_session(
             "candidate session cwd is not an allowed repository"
         )
     prompt = _candidate_proposal_continuation_prompt(prompt)
-    base_instructions = common._base_instructions_for_settings(spawn_settings)
+    # The candidate thread's backend is fixed by its history. Normalize the
+    # per-turn model to that backend so selecting Claude (or Codex) in settings
+    # can't queue a worker with a model id the CLI will reject. A Codex thread
+    # keeps its own prior model as the fallback so a plan turn (which requires a
+    # concrete model) is not left without one. Auto-QA/PR and the Spec Critic run
+    # on the resolved backend (their sub-agents spawn as Claude workers, and the
+    # PR is opened by hitch via ``gh``).
+    prior_candidate_instance = codex_pool.latest_for_thread(
+        candidate_session.thread_id
+    )
+    candidate_backend = (
+        CodexInstance.BACKEND_CLAUDE
+        if prior_candidate_instance is not None
+        and prior_candidate_instance.backend == CodexInstance.BACKEND_CLAUDE
+        else CodexInstance.BACKEND_CODEX
+    )
+    candidate_model = _model_for_thread_backend(
+        backend=candidate_backend,
+        model=settings.model or None,
+        codex_fallback_model=(
+            prior_candidate_instance.model if prior_candidate_instance else None
+        ),
+    )
+    # The candidate's backend is fixed by its history, which can differ from the
+    # current global provider in ``spawn_settings`` (the user may have switched
+    # back to Codex). Key the base instructions off that backend, not the
+    # provider: Claude ships its own system prompt, so a Claude candidate must
+    # never inherit Hitch's Codex-specific base instructions even when the
+    # provider is now Codex.
+    base_instructions = (
+        None
+        if candidate_backend == CodexInstance.BACKEND_CLAUDE
+        else common._base_instructions_for_settings(spawn_settings)
+    )
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = common._developer_instructions_for_project(settings, project)
     auto_merge_to_local_branch, auto_merge_branch = (
@@ -518,7 +560,7 @@ def _start_candidate_proposal_session(
             "cwd": candidate_cwd,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": approval_mode,
-            "model": settings.model or None,
+            "model": candidate_model,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
@@ -571,7 +613,7 @@ def _start_candidate_proposal_session(
         "cwd": candidate_cwd,
         "prompt": prompt,
         "developer_instructions": developer_instructions or None,
-        "model": settings.model or None,
+        "model": candidate_model,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
@@ -591,7 +633,7 @@ def _start_candidate_proposal_session(
     if auto_qa_enabled:
         spawn_kwargs["auto_qa_enabled"] = True
     if auto_pr_enabled or auto_qa_enabled:
-        spawn_kwargs["stored_model"] = settings.model or None
+        spawn_kwargs["stored_model"] = candidate_model
         spawn_kwargs["stored_reasoning_effort"] = settings.reasoning_effort or None
         spawn_kwargs["user_message_index"] = _next_user_message_index_for_candidate_thread(
             candidate_session.thread_id, settings
@@ -599,7 +641,6 @@ def _start_candidate_proposal_session(
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
-
     input_images_owned = False
     claim_response = _claim_candidate_proposal_start(
         proposed_session=proposed_session,
@@ -869,13 +910,36 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # render would have snapped away from; without this, a stale value
     # would ride straight into ``thread_start(model=...)`` and 500 the
     # new-session click.
-    resolved_settings = _new_session_post_settings(request)
+    claude_start = (
+        _effective_provider(_stored_settings(request)) == coding_agents.PROVIDER_CLAUDE
+    )
+    if claude_start:
+        # The Claude spawn path needs no Codex model catalog, and the
+        # provider-aware resolver ignores ``models_data`` for Claude, so skip the
+        # app-server lookup entirely (it may be unavailable).
+        resolved_settings = _resolved_settings(request, [])
+    else:
+        resolved_settings = _new_session_post_settings(request)
     settings = resolved_settings.values
     spawn_settings = (
         settings._replace(coding_agent=coding_agent_override)
         if coding_agent_override
         else settings
     )
+    # A Claude session needs a valid Claude model before the plan-mode guard
+    # below. A fresh Claude user has no saved model, so default it here rather
+    # than 400 -- the spawn path would otherwise only apply the default later.
+    if (
+        coding_agents.backend_for_provider(_effective_provider(spawn_settings))
+        == coding_agents.BACKEND_CLAUDE
+        and settings.model not in claude_options.VALID_CLAUDE_MODELS
+    ):
+        settings = settings._replace(model=claude_options.DEFAULT_CLAUDE_MODEL)
+        spawn_settings = (
+            spawn_settings._replace(model=claude_options.DEFAULT_CLAUDE_MODEL)
+            if coding_agent_override
+            else settings
+        )
     use_worktrees, use_worktrees_error = _posted_bool_override(
         request.POST.get("use_worktrees"),
         default=settings.use_worktrees,
@@ -963,17 +1027,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         else:
             thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
         base_instructions = common._base_instructions_for_settings(spawn_settings)
-        create_thread_kwargs: dict[str, Any] = {
-            "cwd": session_cwd,
-            "name": thread_name,
-            "developer_instructions": source_developer_instructions or None,
-            "model": settings.model or None,
-            "enable_memories": settings.enable_memories,
-        }
-        if web_search_mode:
-            create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            create_thread_kwargs["base_instructions"] = base_instructions
         proposal_claimed = False
         if proposed_session is not None:
             claim_response = _claim_new_session_proposal_start(
@@ -984,7 +1037,30 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 return claim_response
             proposal_claimed = True
         try:
-            thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
+            if claude_start:
+                # Claude has no app-server thread; mint a local shell (the workflow
+                # then spawns its Claude sub-agents and PR-prompt turn on it). The
+                # model was already normalized to a Claude id above.
+                thread_id = codex_pool.create_claude_session_thread(
+                    cwd=session_cwd,
+                    name=thread_name,
+                    model=settings.model or None,
+                    project=None if target.project_cleared else source_project,
+                    developer_instructions=source_developer_instructions or None,
+                )
+            else:
+                create_thread_kwargs: dict[str, Any] = {
+                    "cwd": session_cwd,
+                    "name": thread_name,
+                    "developer_instructions": source_developer_instructions or None,
+                    "model": settings.model or None,
+                    "enable_memories": settings.enable_memories,
+                }
+                if web_search_mode:
+                    create_thread_kwargs["web_search_mode"] = web_search_mode
+                if base_instructions:
+                    create_thread_kwargs["base_instructions"] = base_instructions
+                thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
         except Exception:
             if proposal_claimed:
                 assert proposed_session is not None
@@ -1086,6 +1162,21 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    session_backend = coding_agents.backend_for_provider(
+        _effective_provider(spawn_settings)
+    )
+    # Only forward a non-default backend so the Codex spawn path (and its many
+    # tests) keep their exact call signature.
+    if session_backend == coding_agents.BACKEND_CLAUDE:
+        spawn_kwargs["backend"] = session_backend
+        # The model cookie may hold a Codex model id; fall back to a valid
+        # Claude model so the CLI does not reject the turn.
+        if spawn_kwargs.get("model") not in claude_options.VALID_CLAUDE_MODELS:
+            spawn_kwargs["model"] = claude_options.DEFAULT_CLAUDE_MODEL
+        # Auto-QA and Auto-PR both run on the local worker backend now: the QA
+        # workflow records the session's backend and spawns its sub-agents as
+        # Claude workers, and the PR is opened by hitch via ``gh`` rather than the
+        # agent, so neither needs the Codex app-server.
     if input_image_paths:
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
@@ -1116,23 +1207,47 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         and not input_image_paths
         and not plan_mode
     ):
-        spec_create_thread_kwargs: dict[str, Any] = {
-            "cwd": session_cwd,
-            "name": (
-                proposed_session.title
-                if proposed_session is not None
-                else prompt.split("\n", 1)[0]
-            ),
-            "developer_instructions": developer_instructions or None,
-            "model": settings.model or None,
-            "enable_memories": settings.enable_memories,
-        }
-        if web_search_mode:
-            spec_create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            spec_create_thread_kwargs["base_instructions"] = base_instructions
+        spec_thread_name = (
+            proposed_session.title
+            if proposed_session is not None
+            else prompt.split("\n", 1)[0]
+        )
+        # The Spec Critic records the main thread's backend and runs its
+        # sub-agents (and the deferred implementation turn) on it. Claude has no
+        # app-server thread, so mint a local shell; normalize the model so the
+        # Claude workers are never handed a Codex model id.
+        spec_model = settings.model or None
+        if (
+            session_backend == coding_agents.BACKEND_CLAUDE
+            and spec_model not in claude_options.VALID_CLAUDE_MODELS
+        ):
+            spec_model = claude_options.DEFAULT_CLAUDE_MODEL
         try:
-            thread_id = codex_pool.create_session_thread(**spec_create_thread_kwargs)
+            if session_backend == coding_agents.BACKEND_CLAUDE:
+                thread_id = codex_pool.create_claude_session_thread(
+                    cwd=session_cwd,
+                    name=spec_thread_name,
+                    model=spec_model,
+                    project=None if target.project_cleared else session_project,
+                    developer_instructions=developer_instructions or None,
+                    auto_pr_enabled=auto_pr_enabled,
+                    auto_qa_enabled=auto_qa_enabled,
+                )
+            else:
+                spec_create_thread_kwargs: dict[str, Any] = {
+                    "cwd": session_cwd,
+                    "name": spec_thread_name,
+                    "developer_instructions": developer_instructions or None,
+                    "model": spec_model,
+                    "enable_memories": settings.enable_memories,
+                }
+                if web_search_mode:
+                    spec_create_thread_kwargs["web_search_mode"] = web_search_mode
+                if base_instructions:
+                    spec_create_thread_kwargs["base_instructions"] = base_instructions
+                thread_id = codex_pool.create_session_thread(
+                    **spec_create_thread_kwargs
+                )
         except Exception:
             _cleanup_worktree_quietly(managed_worktree)
             raise
@@ -1142,7 +1257,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "prompt": prompt,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
-            "model": settings.model or None,
+            "model": spec_model,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
@@ -1162,11 +1277,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             # into the cwd allowlist) on every failed-then-retried new session.
             _cleanup_worktree_quietly(managed_worktree)
             raise
-        spec_thread_name = (
-            proposed_session.title
-            if proposed_session is not None
-            else prompt.split("\n", 1)[0]
-        )
         session_metadata = session_index.upsert_local_session(
             thread_id=thread_id,
             cwd=session_cwd,

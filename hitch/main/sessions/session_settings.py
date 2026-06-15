@@ -10,19 +10,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
 from django.urls import reverse
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches, claude_options, coding_agents
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.models import (
+    CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
     UserSettings,
 )
-from hitch.main.runtime import disk_cleanup
+from hitch.main.runtime import codex_pool, disk_cleanup
 from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
 from hitch.main.sessions.session_pr_plan import _PR_SLASH_PROMPT
 from hitch.main.sessions.settings_cookies import (
@@ -43,6 +44,9 @@ from hitch.main.sessions.settings_cookies import (
     _read_cookie,
     _settings_cookie_updates,
     _web_search_mode_label,
+)
+from hitch.main.sessions.settings_cookies import (
+    _effective_provider as _effective_provider,
 )
 from hitch.main.workflows import system_agents
 
@@ -324,6 +328,18 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
         approval_mode=saved_approval,
         web_search_mode=saved_web_search,
     )
+    # Claude models are not in the Codex catalog, so reconciling them against
+    # ``models_data`` would always snap a valid Claude id to a Codex default
+    # (and persist that for authenticated users). Validate against the static
+    # Claude set instead and skip the Codex model/effort reconciliation.
+    if _effective_provider(saved) == coding_agents.PROVIDER_CLAUDE:
+        if saved.model and saved.model not in claude_options.VALID_CLAUDE_MODELS:
+            return _resolved_settings_result(
+                request,
+                saved._replace(model=claude_options.DEFAULT_CLAUDE_MODEL),
+                {_MODEL_COOKIE: claude_options.DEFAULT_CLAUDE_MODEL},
+            )
+        return _resolved_settings_result(request, saved, {})
     if not models_data:
         return _resolved_settings_result(request, saved, {})
 
@@ -446,3 +462,88 @@ def _allowed_session_cwds() -> set[str]:
             *worktrees_module.discover_managed_worktrees(),
         ]
     }
+
+
+def _claude_workflow_common(
+    session_id: str, settings: SettingsValues
+) -> tuple[str, str, str] | HttpResponse:
+    """Resolve ``(cwd, model, developer_instructions)`` for a Claude follow-up
+    workflow, or an error response.
+
+    Claude threads have no Codex rollout, so these come from local rows: the
+    session cwd (validated against the allowlist) and the thread's prior Claude
+    model (preferred when the settings cookie holds a Codex id).
+    """
+    # Local imports break the cycle: views/common imports this module, and these
+    # helpers live there. ``_is_allowed_session_cwd`` is resolved through the
+    # ``views`` package so ``patch.object(views, "_is_allowed_session_cwd")`` --
+    # the way the former monolith's tests gate the cwd allowlist -- still applies.
+    from hitch.main import views
+    from hitch.main.sessions.session_resume import _local_session_cwd
+    from hitch.main.views.common import (
+        _developer_instructions_for_project,
+        _project_for_cwd,
+    )
+
+    cwd = _local_session_cwd(session_id)
+    if not cwd:
+        return HttpResponseBadRequest("session has no cwd")
+    if not views._is_allowed_session_cwd(cwd):
+        return HttpResponseBadRequest("session cwd is not an allowed repository")
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    model = settings.model
+    if model not in claude_options.VALID_CLAUDE_MODELS:
+        prior_model = previous_instance.model if previous_instance is not None else ""
+        model = (
+            prior_model
+            if prior_model in claude_options.VALID_CLAUDE_MODELS
+            else claude_options.DEFAULT_CLAUDE_MODEL
+        )
+    developer_instructions = (
+        previous_instance.developer_instructions
+        if previous_instance is not None
+        else _developer_instructions_for_project(
+            settings, _project_for_cwd(cwd, list(Project.objects.all()))
+        )
+    ) or ""
+    return cwd, model, developer_instructions
+
+
+def _candidate_thread_backend(thread_id: str) -> str:
+    """Return the backend a candidate thread's turns must run on.
+
+    The backend is fixed by the thread's history (``spawn_turn`` recovers it),
+    so the provider chosen in settings can't change it. Callers use this to
+    normalize the per-turn model and to gate Codex-only auto-review workflows.
+    """
+    prior = codex_pool.latest_for_thread(thread_id)
+    if prior is not None and prior.backend == CodexInstance.BACKEND_CLAUDE:
+        return CodexInstance.BACKEND_CLAUDE
+    return CodexInstance.BACKEND_CODEX
+
+
+def _model_for_thread_backend(
+    *, backend: str, model: str | None, codex_fallback_model: str | None = None
+) -> str | None:
+    """Snap a settings model id onto one valid for ``backend``.
+
+    A Claude thread handed a Codex model id (or vice versa) would have the CLI
+    reject the turn, so a mismatched id is replaced with the backend's default.
+    For a Codex thread handed a Claude model, ``codex_fallback_model`` (the
+    thread's own prior Codex model) is used when available so plan turns -- which
+    require a concrete model -- keep one instead of being dropped to ``None``.
+    """
+    if backend == CodexInstance.BACKEND_CLAUDE:
+        if model not in claude_options.VALID_CLAUDE_MODELS:
+            return claude_options.DEFAULT_CLAUDE_MODEL
+        return model
+    # A Codex thread must not be handed a Claude model id; fall back to the
+    # thread's prior Codex model (so plan mode still has one), else drop it and
+    # let Codex apply its own default for the turn.
+    if model in claude_options.VALID_CLAUDE_MODELS:
+        if codex_fallback_model and codex_fallback_model not in (
+            claude_options.VALID_CLAUDE_MODELS
+        ):
+            return codex_fallback_model
+        return None
+    return model

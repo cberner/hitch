@@ -1390,7 +1390,9 @@ class SpecCriticWorkflowTests(TestCase):
 
         spec_critic._run_spec_critic_classification(workflow.pk)
 
-        mock_should_run.assert_called_once_with("Improve onboarding", cwd="/repo")
+        mock_should_run.assert_called_once_with(
+            "Improve onboarding", cwd="/repo", backend="codex"
+        )
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
@@ -10819,6 +10821,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(
             mock_spawn.call_args.kwargs["agent_kind"],
             system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
+        )
+        # The history-summary spawn must carry the workflow backend (like the
+        # candidate/judge spawns) so a Claude goal does not fall back to Codex.
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["backend"],
+            CodexInstance.BACKEND_CODEX,
         )
 
         system_agents.on_codex_instance_finished(summary)

@@ -37,6 +37,7 @@ class SettingsValues(NamedTuple):
     visible_session_project_ids: tuple[int, ...] | None
     show_no_project_sessions: bool
     enable_memories: bool
+    provider: str = coding_agents.PROVIDER_CODEX
 
 
 class SessionProjectVisibility(NamedTuple):
@@ -102,6 +103,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_PROVIDER_COOKIE = "hitch_provider"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
@@ -151,6 +153,12 @@ def _effective_coding_agent(settings: SettingsValues) -> str:
     if settings.coding_agent in coding_agents.VALID_CODING_AGENTS:
         return settings.coding_agent
     return coding_agents.DEFAULT_CODING_AGENT
+
+
+def _effective_provider(settings: SettingsValues) -> str:
+    if settings.provider in coding_agents.VALID_PROVIDERS:
+        return settings.provider
+    return coding_agents.DEFAULT_PROVIDER
 
 
 def _option_label(
@@ -366,6 +374,21 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
         from_cookie=str,
         import_value=lambda raw: (
             raw if raw in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+        ),
+    ),
+    _SettingSpec(
+        "provider",
+        _PROVIDER_COOKIE,
+        to_cookie=lambda value: (
+            value
+            if value in coding_agents.VALID_PROVIDERS
+            else coding_agents.DEFAULT_PROVIDER
+        ),
+        from_cookie=str,
+        import_value=lambda raw: (
+            raw
+            if raw in coding_agents.VALID_PROVIDERS
+            else coding_agents.DEFAULT_PROVIDER
         ),
     ),
     _SettingSpec(

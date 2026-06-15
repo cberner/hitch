@@ -1,6 +1,79 @@
 """The web layer, split by domain. Endpoints are re-exported here for urls.py;
 helpers are re-exported for compatibility with existing attribute access."""
 
+# --- Backward-compatibility re-exports for the former monolith ``views`` module.
+# Tests and older callers reach these helpers (and a few module/class objects)
+# through ``hitch.main.views.<name>`` attribute access or ``patch.object(views,
+# ...)``; bind them here from their relocated split modules.
+from hitch.main.sessions import (
+    session_index as session_index,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _auto_merge_to_local_branch_for_session as _auto_merge_to_local_branch_for_session,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _auto_pr_enabled_for_session as _auto_pr_enabled_for_session,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _auto_qa_enabled_for_session as _auto_qa_enabled_for_session,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _claude_fix_pr_url as _claude_fix_pr_url,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _claude_pr_observation_for_session as _claude_pr_observation_for_session,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _claude_user_message_index as _claude_user_message_index,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _thread_plan_mode_state as _thread_plan_mode_state,
+)
+from hitch.main.sessions.session_pr_plan import (
+    _workflow_after_main_lifecycle as _workflow_after_main_lifecycle,
+)
+from hitch.main.sessions.session_resume import (
+    _session_is_claude as _session_is_claude,
+)
+from hitch.main.sessions.session_settings import (
+    _allowed_session_cwds as _allowed_session_cwds,
+)
+from hitch.main.sessions.session_settings import (
+    _candidate_thread_backend as _candidate_thread_backend,
+)
+from hitch.main.sessions.session_settings import (
+    _claude_workflow_common as _claude_workflow_common,
+)
+from hitch.main.sessions.session_settings import (
+    _model_for_thread_backend as _model_for_thread_backend,
+)
+from hitch.main.sessions.session_settings import (
+    _stored_settings as _stored_settings,
+)
+from hitch.main.sessions.session_stage_refresh import (
+    _refresh_session_pr_stage as _refresh_session_pr_stage,
+)
+from hitch.main.sessions.settings_cookies import (
+    SettingsValues as SettingsValues,
+)
+from hitch.main.sessions.token_usage import (
+    _claude_thread_ids as _claude_thread_ids,
+)
+from hitch.main.sessions.token_usage import (
+    _claude_token_usage_for as _claude_token_usage_for,
+)
+from hitch.main.sessions.token_usage import (
+    _usage_token_cache_state as _usage_token_cache_state,
+)
+from hitch.main.sessions.token_usage import (
+    _usage_token_refresh_needed as _usage_token_refresh_needed,
+)
+from hitch.main.sessions.token_usage import (
+    _usage_token_refresh_work_batches as _usage_token_refresh_work_batches,
+)
+from hitch.main.sessions.token_usage import (
+    _UsageTokenRefreshCandidate as _UsageTokenRefreshCandidate,
+)
 from hitch.main.views.account import (
     _import_cookie_settings_to_user as _import_cookie_settings_to_user,
 )
@@ -75,6 +148,9 @@ from hitch.main.views.common import (
 )
 from hitch.main.views.common import (
     _USAGE_SESSION_INDEX_REFRESH_LOCK as _USAGE_SESSION_INDEX_REFRESH_LOCK,
+)
+from hitch.main.views.common import (
+    Codex as Codex,
 )
 from hitch.main.views.common import (
     UsageContext as UsageContext,
@@ -296,10 +372,25 @@ from hitch.main.views.messages import (
     _VALID_PLAN_ACTIONS as _VALID_PLAN_ACTIONS,
 )
 from hitch.main.views.messages import (
+    _codex_followup_model as _codex_followup_model,
+)
+from hitch.main.views.messages import (
     _duplicate_saved_input_images as _duplicate_saved_input_images,
 )
 from hitch.main.views.messages import (
     _metadata_cwd_is_disallowed as _metadata_cwd_is_disallowed,
+)
+from hitch.main.views.messages import (
+    _send_claude_follow_up as _send_claude_follow_up,
+)
+from hitch.main.views.messages import (
+    _start_claude_fix_pr_workflow as _start_claude_fix_pr_workflow,
+)
+from hitch.main.views.messages import (
+    _start_claude_qa_workflow as _start_claude_qa_workflow,
+)
+from hitch.main.views.messages import (
+    _start_claude_spec_critic_follow_up as _start_claude_spec_critic_follow_up,
 )
 from hitch.main.views.messages import (
     _stored_model_and_effort as _stored_model_and_effort,
@@ -606,4 +697,10 @@ from hitch.main.views.settings import (
 )
 from hitch.main.views.settings import (
     update_visible_session_projects as update_visible_session_projects,
+)
+from hitch.main.workflows import (
+    system_agents as system_agents,
+)
+from hitch.main.workflows.pr_stage import (
+    _latest_pr_workflow_for_thread as _latest_pr_workflow_for_thread,
 )

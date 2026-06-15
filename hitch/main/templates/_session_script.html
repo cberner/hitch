@@ -1062,6 +1062,13 @@
                         case "localImage": parts.push("[image]"); break;
                     }
                 }
+                // Claude userMessage items carry plain ``text`` rather than Codex's
+                // typed ``content`` blocks, so fall back to it -- otherwise a live
+                // Claude prompt renders as an empty bubble until a reload rebuilds
+                // it from the events file.
+                if (parts.length === 0 && typeof item.text === "string") {
+                    return item.text;
+                }
                 return parts.join("\n");
             }
 

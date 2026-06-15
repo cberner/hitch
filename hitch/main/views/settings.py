@@ -15,7 +15,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches, claude_options, coding_agents
 from hitch.main import repos as repos_module
 from hitch.main.models import (
     CodexInstance,
@@ -170,6 +170,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
+    provider = request.POST.get("provider", "").strip()
     coding_agent = request.POST.get("coding_agent", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
@@ -204,7 +205,13 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     # too big for the cookie still saves correctly; don't block them on it.
     if user is None and not _extra_system_prompt_cookie_fits(extra_system_prompt):
         return HttpResponseBadRequest("extra system prompt is too long")
-    valid_efforts = {e.value for e in ReasoningEffort}
+    # Accept any effort some provider offers; the provider-specific checks below
+    # (Claude's set, or the Codex model catalog) do the precise rejection. Codex's
+    # enum omits Claude's ``max``, so a Claude POST of ``max`` must not 400 here
+    # before the Claude validation at ``provider == PROVIDER_CLAUDE`` runs.
+    valid_efforts = {
+        e.value for e in ReasoningEffort
+    } | claude_options.CLAUDE_REASONING_EFFORTS
     if effort and effort not in valid_efforts:
         return HttpResponseBadRequest("invalid reasoning effort")
     if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:
@@ -220,6 +227,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid coding agent")
     if not coding_agent:
         coding_agent = coding_agents.DEFAULT_CODING_AGENT
+    if provider and provider not in coding_agents.VALID_PROVIDERS:
+        return HttpResponseBadRequest("invalid provider")
+    if not provider:
+        provider = coding_agents.DEFAULT_PROVIDER
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
@@ -254,7 +265,16 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if enable_memories not in {"", "true"}:
         return HttpResponseBadRequest("invalid memories setting")
     enable_memories = "true" if enable_memories == "true" else "false"
-    if model or effort:
+    if provider == coding_agents.PROVIDER_CLAUDE:
+        # Claude has no app-server model listing; validate against the static
+        # Claude model set instead of cross-checking the Codex catalog.
+        if model and model not in claude_options.VALID_CLAUDE_MODELS:
+            return HttpResponseBadRequest("invalid model")
+        # Reject an effort Claude doesn't accept (e.g. Codex's "minimal") rather
+        # than storing one the worker would silently drop at turn time.
+        if effort and effort not in claude_options.CLAUDE_REASONING_EFFORTS:
+            return HttpResponseBadRequest("invalid reasoning effort")
+    elif model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
         # the chosen model doesn't support) gets a clean 400 instead of
@@ -278,6 +298,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         reasoning_effort=effort,
         sandbox_policy=sandbox,
         approval_mode=approval,
+        provider=provider,
         coding_agent=coding_agent,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",

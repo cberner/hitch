@@ -49,14 +49,14 @@ def _iter_running_worker_pids(
     proc_root: Path = Path("/proc"),
     manage_py: str | None = None,
 ) -> Iterable[tuple[int, int]]:
-    """Yield ``(pid, instance_id)`` for this deployment's live ``codex_worker``
-    processes.
+    """Yield ``(pid, instance_id)`` for this deployment's live worker processes.
 
-    Matches the same ``codex_worker --instance-id <pk>`` marker
-    ``_pid_is_our_worker`` uses, and *additionally* requires this deployment's
+    Matches the same ``--instance-id <pk>`` marker ``_pid_is_our_worker`` uses on
+    either backend's worker command (Codex rows run ``codex_worker``, Claude rows
+    run ``claude_worker``), and *additionally* requires this deployment's
     ``manage.py`` path on the command line. Without that, a second Hitch checkout
     running under the same Unix user -- whose worker command lines carry the same
-    generic ``codex_worker`` marker but whose instance ids belong to a different
+    generic worker marker but whose instance ids belong to a different
     database -- would be scanned here and could be reaped as "not in our expected
     set". Linux-only (the deployment target); on a host without ``/proc`` it
     yields nothing, so the orphan reap is simply a no-op there rather than
@@ -73,7 +73,8 @@ def _iter_running_worker_pids(
         except OSError:
             continue
         parts = cmdline.split(b"\0")
-        if b"codex_worker" not in parts or marker not in parts:
+        is_worker = b"codex_worker" in parts or b"claude_worker" in parts
+        if not is_worker or marker not in parts:
             continue
         try:
             idx = parts.index(b"--instance-id")

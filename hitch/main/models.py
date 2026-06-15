@@ -23,6 +23,8 @@ from django.conf import settings
 from django.db import models
 from django.utils.dateparse import parse_datetime
 
+from hitch.main import coding_agents
+
 
 class Project(models.Model):
     """A git repository grouping for visible Codex sessions."""
@@ -147,6 +149,13 @@ class AutonomousGoal(models.Model):
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Coding-agent provider whose backend runs this goal's candidate/judge
+    # sub-agents. Validated in the view against ``coding_agents.VALID_PROVIDERS``.
+    provider = models.CharField(
+        max_length=16,
+        choices=coding_agents.PROVIDER_OPTIONS,
+        default=coding_agents.DEFAULT_PROVIDER,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -558,7 +567,26 @@ class CodexInstance(models.Model):
         {APPROVAL_MODE_PROMPT_USER, APPROVAL_MODE_APPROVE_ALL}
     )
 
+    # Which coding-agent backend drives this worker. ``codex`` rows run the
+    # openai-codex app-server via ``codex_worker``; ``claude`` rows run the
+    # local Claude CLI via ``claude_worker`` and translate its message stream
+    # into the same on-disk event schema. Defaulting to ``codex`` keeps every
+    # existing row and migration backfill on the original path.
+    BACKEND_CODEX = "codex"
+    BACKEND_CLAUDE = "claude"
+    BACKEND_CHOICES = (
+        (BACKEND_CODEX, "Codex"),
+        (BACKEND_CLAUDE, "Claude Code"),
+    )
+
     pid = models.IntegerField()
+    backend = models.CharField(
+        max_length=16, choices=BACKEND_CHOICES, default=BACKEND_CODEX
+    )
+    # Real Claude CLI session id for ``claude`` rows, used to resume the
+    # transcript on follow-up turns. Empty for ``codex`` rows (which resume by
+    # ``thread_id`` against the app-server instead).
+    claude_session_id = models.CharField(max_length=128, blank=True, default="")
     systemd_scope_unit = models.CharField(max_length=128, blank=True, default="")
     thread_id = models.CharField(max_length=128, db_index=True)
     cwd = models.CharField(max_length=4096)
@@ -850,8 +878,21 @@ class UserInputRequest(models.Model):
         )
 
 
+# Bump whenever the meaning of the cached token counts changes. A cached
+# ``ArchivedSessionTokenUsage`` row stamped below this is treated as stale and
+# recomputed (Codex re-parses the immutable rollout; Claude rewrites the row on
+# its next turn), so counting-logic fixes reach already-cached sessions.
+# v1: sum positive per-event deltas and skip context-window reset events
+# (commit 20ea557), correcting Codex sessions that hit their context window.
+TOKEN_USAGE_LOGIC_VERSION = 1
+
+
 class ArchivedSessionTokenUsage(models.Model):
-    """Cached token usage for archived Codex sessions."""
+    """Cached token usage for archived Codex sessions.
+
+    Also reused for Claude sessions, which have no rollout file: the worker
+    writes the row directly (``rollout_path=""``) at turn completion.
+    """
 
     thread_id = models.CharField(max_length=128, unique=True)
     rollout_path = models.CharField(max_length=4096, blank=True, default="")
@@ -889,6 +930,7 @@ class UserSettings(models.Model):
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
+    provider = models.CharField(max_length=16, blank=True, default="codex")
     coding_agent = models.CharField(max_length=32, blank=True, default="")
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)

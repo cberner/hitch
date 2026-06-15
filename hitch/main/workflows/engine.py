@@ -84,6 +84,9 @@ SHARED_STATE_KEYS = frozenset(
         "base_instructions",
         "developer_instructions",
         "enable_memories",
+        # Worker backend (codex/claude) the workflow's sub-agents run on; written
+        # at start by every kind that records it and read by ``_workflow_backend``.
+        "backend",
         "next_user_message_index",
         "archived_from_blocked",
         "error",

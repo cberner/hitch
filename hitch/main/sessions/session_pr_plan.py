@@ -25,7 +25,9 @@ from hitch.main.runtime.sdk_values import (
     updated_at_seconds,
     value_for,
 )
+from hitch.main.sessions import claude_session_entries
 from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
+from hitch.main.sessions.session_resume import _session_is_claude
 from hitch.main.workflows import pr_qa, pr_stage, pr_stage_refresh_state, system_agents
 
 logger = logging.getLogger(__name__)
@@ -208,9 +210,15 @@ def _thread_plan_mode_state(
         if latest_collaboration_mode is _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED
         else latest_collaboration_mode
     )
+    # Claude sessions have no rollout collaboration mode, so ``latest_mode`` is
+    # always None for them. The flag-only fallback would then treat any completed
+    # plan-mode turn as still in plan mode forever -- even after the agent exited
+    # plan and gave a final answer -- so ordinary follow-ups would keep defaulting
+    # to plan mode. For Claude rely on ``awaiting_approval`` (which correctly
+    # clears once a final reply follows the plan) and the active-turn flag instead.
     stored_plan_mode = (
         _latest_user_instance_ended_in_plan_mode(session_id)
-        if latest_mode is None
+        if latest_mode is None and not _session_is_claude(session_id)
         else False
     )
     active = (
@@ -305,6 +313,65 @@ def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
         pr_observation=pr_observation,
         stage_pr_workflow=stage_pr_workflow,
         latest_pr_url=None,
+    )
+
+
+def _claude_pr_observation_for_session(
+    session_id: str,
+) -> codex_events.PrObservationResult:
+    """Recover a Claude thread's PR state from its worker event files.
+
+    Claude has no Codex rollout to scan, so a PR opened through a GitHub MCP tool
+    -- even by a normal turn outside the ``/pr`` workflow -- is detected from the
+    ``mcpToolCall`` results recorded across the thread's instances' events. This
+    lets the PR badge and ``/fix-pr`` find a PR the same way the Codex rollout
+    scan does, including clearing a stale PR once a later completed normal turn
+    supersedes it (each Claude instance is one turn).
+    """
+    turns = [
+        (events_path, status == CodexInstance.STATUS_COMPLETED)
+        for events_path, status in (
+            CodexInstance.objects.filter(
+                thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+            )
+            .order_by("started_at", "pk")
+            .values_list("events_path", "status")
+        )
+        if events_path
+    ]
+    return codex_events.pr_observation_result_from_claude_event_paths(
+        turns, thread_id=session_id
+    )
+
+
+def _claude_fix_pr_url(session_id: str) -> str | None:
+    """Resolve the open PR URL for a Claude ``/fix-pr``.
+
+    Claude threads have no Codex rollout to scan, so the URL comes from the
+    thread's own GitHub MCP calls (recovered from its event files) and, failing
+    that, the latest PR/QA workflow's recorded handoff.
+    """
+    pr_observation = _claude_pr_observation_for_session(session_id)
+    # Pass the session's recency so a completed later turn (which superseded the
+    # PR in ``pr_observation``) can also strip a stale PR/QA workflow handoff --
+    # otherwise ``/fix-pr`` keeps targeting the obsolete PR. The detail/stage
+    # paths key on ``codex_updated_at`` the same way.
+    main_updated_at = (
+        SessionMetadata.objects.filter(thread_id=session_id)
+        .values_list("codex_updated_at", flat=True)
+        .first()
+    )
+    stage_pr_workflow = _workflow_after_main_lifecycle(
+        pr_stage._latest_pr_workflow_for_thread(session_id),
+        pr_observation,
+        main_updated_at=main_updated_at,
+    )
+    return _current_pr_url_for_thread(
+        None,
+        pr_observation=pr_observation,
+        stage_pr_workflow=stage_pr_workflow,
+        latest_pr_url=None,
+        latest_pr_url_loaded=True,
     )
 
 
@@ -466,6 +533,30 @@ def _clear_plan_actions(entries: list[dict[str, Any]]) -> None:
             entry["show_plan_actions"] = False
         elif entry.get("kind") == "intermediate":
             _clear_plan_actions(entry.get("items", []))
+
+
+def _claude_user_message_index(session_id: str) -> int:
+    """Count user messages across a Claude thread's events files.
+
+    Claude threads have no app-server rollout to resume, so the auto-review
+    ``user_message_index`` is derived from the per-worker events JSONL the
+    Claude backend writes instead.
+    """
+    count = 0
+    paths = (
+        CodexInstance.objects.filter(
+            thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+        )
+        .order_by("started_at", "pk")
+        .values_list("events_path", flat=True)
+    )
+    for path in paths:
+        if not path:
+            continue
+        for entry in claude_session_entries.session_entries(path):
+            if entry.get("kind") == "user":
+                count += 1
+    return count
 
 
 def _count_user_entries(entries: list[dict[str, Any]]) -> int:

@@ -38,7 +38,13 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
-from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main import claude_options
+from hitch.main.models import (
+    ApprovalRequest,
+    CodexInstance,
+    Project,
+    UserInputRequest,
+)
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
 
 logger = logging.getLogger(__name__)
@@ -123,6 +129,7 @@ def spawn_new_session(
     auto_qa_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
+    backend: str = CodexInstance.BACKEND_CODEX,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -133,6 +140,31 @@ def spawn_new_session(
     has an id to redirect to immediately); the prompt itself is run by the
     detached worker.
     """
+    if backend == CodexInstance.BACKEND_CLAUDE:
+        return _spawn_claude_session(
+            cwd=cwd,
+            prompt=prompt,
+            thread_name=thread_name,
+            input_image_paths=input_image_paths,
+            base_instructions=base_instructions,
+            developer_instructions=developer_instructions,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+            web_search_mode=web_search_mode,
+            plan_mode=plan_mode,
+            purpose=purpose,
+            workflow_id=workflow_id,
+            agent_kind=agent_kind,
+            display_author=display_author,
+            output_schema=output_schema,
+            user_message_index=user_message_index,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            auto_merge_to_local_branch=auto_merge_to_local_branch,
+            auto_merge_branch=auto_merge_branch,
+        )
     config = app_server_config(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
@@ -210,6 +242,160 @@ def spawn_new_session(
     if thread_path:
         setattr(instance, _CODEX_THREAD_PATH_ATTR, thread_path)
     return instance
+
+
+def _spawn_claude_session(
+    *,
+    cwd: str,
+    prompt: str,
+    thread_name: str | None,
+    input_image_paths: list[str] | None,
+    base_instructions: str | None,
+    developer_instructions: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+    sandbox_policy: str | None,
+    approval_mode: str | None,
+    web_search_mode: str | None,
+    plan_mode: bool,
+    purpose: str,
+    workflow_id: int | None,
+    agent_kind: str,
+    display_author: str,
+    output_schema: dict[str, Any] | None,
+    user_message_index: int | None,
+    auto_pr_enabled: bool,
+    auto_qa_enabled: bool,
+    auto_merge_to_local_branch: bool,
+    auto_merge_branch: str,
+) -> CodexInstance:
+    """Detach a Claude Code worker for a brand-new local session.
+
+    Unlike Codex, Claude has no app-server that pre-creates a resumable thread,
+    so we mint the thread id locally and let the worker fix the CLI session id to
+    match it (``ClaudeAgentOptions.session_id``). A ``SessionMetadata`` row is
+    registered up front so the new session shows up in the index immediately,
+    matching the visible-thread behaviour ``thread/set-name`` gives Codex.
+    """
+    from hitch.main import demo
+    from hitch.main.sessions import session_index
+
+    thread_id = uuid.uuid4().hex
+    name_source = thread_name if thread_name and thread_name.strip() else prompt
+    # Mirror the Codex indexer: resolve the project from ``cwd`` and flag hidden
+    # QA/spec/autonomous system-agent runs. This upsert stamps ``codex_updated_at``,
+    # which ``_ensure_indexed_system_threads`` treats as "already indexed" -- so if
+    # we leave ``project``/``is_hidden_system_session`` unset here the backfill is
+    # skipped and Claude system sessions both leak into normal views and vanish from
+    # project-filtered System Sessions views.
+    is_hidden_system = (
+        purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+        and agent_kind != demo.DEMO_AGENT_KIND
+    )
+    if is_hidden_system and not (sandbox_policy or "").strip():
+        # A hidden Claude reviewer (QA/Spec/Autonomous/monitor) started from the
+        # empty "Codex default" sandbox has no app-server to resolve that choice
+        # the way Codex does server-side, and the worker only auto-runs Bash/file
+        # under a write sandbox -- so a default-settings reviewer otherwise can't
+        # run tests. Resolve the empty choice to workspace-write here. The worker
+        # still denies a truly-unsandboxed (None) hidden run as defense in depth,
+        # and visible user/feedback turns are left untouched (the worker defaults
+        # those, keeping the persisted CodexInstance.sandbox_policy unchanged).
+        sandbox_policy = claude_options.SANDBOX_WORKSPACE_WRITE
+    session_index.upsert_local_session(
+        thread_id=thread_id,
+        cwd=cwd,
+        projects=list(Project.objects.all()),
+        name=_initial_thread_name(name_source),
+        preview=prompt,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
+        is_hidden_system_session=is_hidden_system,
+    )
+    return _spawn_worker(
+        thread_id=thread_id,
+        cwd=cwd,
+        prompt=prompt,
+        input_image_paths=input_image_paths,
+        base_instructions=base_instructions,
+        developer_instructions=developer_instructions,
+        model=model if plan_mode else None,
+        stored_model=model,
+        reasoning_effort=reasoning_effort,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+        web_search_mode=web_search_mode,
+        plan_mode=plan_mode,
+        purpose=purpose,
+        workflow_id=workflow_id,
+        agent_kind=agent_kind,
+        display_author=display_author,
+        output_schema=output_schema,
+        user_message_index=user_message_index,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
+        backend=CodexInstance.BACKEND_CLAUDE,
+    )
+
+
+def create_claude_session_thread(
+    *,
+    cwd: str,
+    name: str,
+    model: str | None = None,
+    project: Project | None = None,
+    developer_instructions: str | None = None,
+    auto_pr_enabled: bool = False,
+    auto_qa_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
+) -> str:
+    """Create a Claude session-thread shell without starting a turn.
+
+    The Claude analog of :func:`create_session_thread`. Claude has no app-server
+    thread to pre-create, so we mint a local thread id, register its metadata,
+    and add a completed placeholder ``CodexInstance`` carrying the Claude backend.
+    That placeholder makes the backend recoverable from history -- so the Spec
+    Critic preflight (which needs the thread before the visible implementation
+    turn) records the right backend and ``spawn_turn`` later resumes as Claude --
+    and lets the session page render an empty transcript while the preflight runs.
+
+    ``developer_instructions`` is stored on the placeholder so a later follow-up
+    turn -- which inherits them from the latest instance on the thread when none
+    is passed -- keeps the project/extra developer prompt. Without this a fresh
+    ``/qa`` shell (whose workflow may finish without spawning a visible turn)
+    would hand every subsequent turn an empty developer prompt.
+    """
+    from hitch.main.sessions import session_index
+
+    thread_id = uuid.uuid4().hex
+    session_index.upsert_local_session(
+        thread_id=thread_id,
+        cwd=cwd,
+        project=project,
+        name=_initial_thread_name(name),
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
+    )
+    CodexInstance.objects.create(
+        thread_id=thread_id,
+        cwd=cwd,
+        prompt="",
+        events_path="",
+        pid=0,
+        status=CodexInstance.STATUS_COMPLETED,
+        backend=CodexInstance.BACKEND_CLAUDE,
+        purpose=CodexInstance.PURPOSE_USER,
+        model=model or "",
+        developer_instructions=developer_instructions or "",
+    )
+    return thread_id
 
 
 def create_session_thread(
@@ -324,6 +510,12 @@ def spawn_turn(
         developer_instructions = (
             previous.developer_instructions if previous is not None else None
         )
+    # The backend is a property of the session, recovered from its history so
+    # callers resume a Claude thread without having to re-specify it. The stored
+    # Claude session id is what lets the worker resume the CLI transcript.
+    prior = latest_for_thread(thread_id)
+    backend = prior.backend if prior is not None else CodexInstance.BACKEND_CODEX
+    claude_session_id = prior.claude_session_id if prior is not None else ""
     return _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
@@ -351,6 +543,8 @@ def spawn_turn(
         auto_qa_enabled=auto_qa_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
+        backend=backend,
+        claude_session_id=claude_session_id,
     )
 
 
@@ -1018,7 +1212,9 @@ def _pid_is_our_worker(
     except OSError:
         return False
     parts = cmdline.split(b"\0")
-    if b"codex_worker" not in parts:
+    # Either backend's worker command is a valid identity: Codex rows run
+    # ``codex_worker``, Claude rows run ``claude_worker``.
+    if b"codex_worker" not in parts and b"claude_worker" not in parts:
         return False
     # Require this deployment's manage.py too: a recycled pid could belong to a
     # second Hitch checkout's codex_worker carrying the same generic marker and
@@ -1626,6 +1822,8 @@ def _spawn_worker(
     auto_qa_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
+    backend: str = CodexInstance.BACKEND_CODEX,
+    claude_session_id: str = "",
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1678,6 +1876,8 @@ def _spawn_worker(
             display_author=display_author,
             output_schema=output_schema,
             user_message_index=user_message_index,
+            backend=backend,
+            claude_session_id=claude_session_id,
         )
         instance.events_path = str(target_dir / f"{instance.pk}.jsonl")
         instance.save(update_fields=["events_path"])
@@ -1689,6 +1889,10 @@ def _spawn_worker(
             "sandbox_policy": sandbox_policy,
             "approval_mode": approval_mode,
         }
+        # Only forward a non-default backend so the Codex launch path (and its
+        # tests) keep their exact kwargs.
+        if backend != CodexInstance.BACKEND_CODEX:
+            launch_kwargs["backend"] = backend
         if web_search_mode:
             launch_kwargs["web_search_mode"] = web_search_mode
         if enable_memories:
@@ -1748,6 +1952,7 @@ def _launch_worker_process(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    backend: str = CodexInstance.BACKEND_CODEX,
 ) -> WorkerLaunch:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     env = os.environ.copy()
@@ -1766,6 +1971,7 @@ def _launch_worker_process(
         enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
+        backend=backend,
     )
 
     requested_isolation = _worker_isolation()
@@ -2059,12 +2265,16 @@ def _worker_argv(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    backend: str = CodexInstance.BACKEND_CODEX,
 ) -> list[str]:
     manage_py = _our_manage_py()
+    command = (
+        "claude_worker" if backend == CodexInstance.BACKEND_CLAUDE else "codex_worker"
+    )
     argv = [
         sys.executable,
         manage_py,
-        "codex_worker",
+        command,
         "--instance-id",
         str(instance_id),
     ]
@@ -2081,12 +2291,15 @@ def _worker_argv(
         argv.extend(["--approval-mode", approval_mode])
     if web_search_mode:
         argv.extend(["--web-search-mode", web_search_mode])
-    if enable_memories:
-        argv.append("--enable-memories")
-    if collaboration_mode:
-        argv.extend(["--collaboration-mode", collaboration_mode])
     if plan_mode:
         argv.append("--plan-mode")
+    # ``--enable-memories`` and ``--collaboration-mode`` are Codex-only knobs;
+    # the Claude worker does not accept them.
+    if backend != CodexInstance.BACKEND_CLAUDE:
+        if enable_memories:
+            argv.append("--enable-memories")
+        if collaboration_mode:
+            argv.extend(["--collaboration-mode", collaboration_mode])
     return argv
 
 

@@ -145,6 +145,7 @@ def start_pr_qa_workflow(
                     else system_agents.QA_WORKFLOW_MAX_ITERATIONS
                 ),
                 state={
+                    "backend": system_agents._backend_for_thread(main_thread_id),
                     "pr_prompt": system_agents.PR_SLASH_PROMPT,
                     "sandbox_policy": sandbox_policy or "",
                     "approval_mode": approval_mode or "",
@@ -205,6 +206,7 @@ def start_pr_monitor_workflow(
                 step=system_agents.STEP_PR_MONITORING,
                 max_iterations=system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS,
                 state={
+                    "backend": system_agents._backend_for_thread(main_thread_id),
                     "pr_prompt": system_agents.PR_SLASH_PROMPT,
                     "sandbox_policy": sandbox_policy or "",
                     "approval_mode": approval_mode or "",
@@ -1732,6 +1734,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
         web_search_mode=system_agents._workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        backend=system_agents._workflow_backend(workflow),
         workflow_id=workflow.pk,
         agent_kind=system_agents.PR_QA_AGENT_KIND,
         display_author=system_agents.QA_DISPLAY_AUTHOR,
@@ -1765,10 +1768,23 @@ def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
         prompt=prompt,
+        base_instructions=_state_string(workflow, "base_instructions") or None,
+        developer_instructions=(
+            _state_string(workflow, "developer_instructions") or None
+        ),
+        model=_state_string(workflow, "model") or None,
+        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
         approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+        # Forward the workflow's sandbox (and model/instructions) like the QA/spec
+        # spawns do, so a user who chose read-only for ``/fix-pr`` keeps it. Without
+        # this the empty sandbox would be promoted to workspace-write by the Claude
+        # spawn layer, letting the monitor auto-run Bash/file with write access.
+        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
         web_search_mode=system_agents._workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        backend=system_agents._workflow_backend(workflow),
         workflow_id=workflow.pk,
         agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         display_author=system_agents.PR_MONITOR_DISPLAY_AUTHOR,

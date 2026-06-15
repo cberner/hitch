@@ -522,6 +522,7 @@
                                     data-proposal-budget="{{ goal.proposal_budget_form_value }}"
                                     data-confidence-threshold="{{ goal.confidence_threshold }}"
                                     data-web-search-mode="{{ goal.web_search_mode }}"
+                                    data-provider="{{ goal.provider }}"
                                     data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
                                     data-auto-merge-branch="{{ goal.auto_merge_branch }}"
                                 >Edit</button>
@@ -551,6 +552,7 @@
                         <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ goal.get_confidence_threshold_display }}</span>
                         <span class="meta">Web search: {{ goal.get_web_search_mode_display }}</span>
+                        <span class="meta">Coding agent: {{ goal.get_provider_display }}</span>
                         {% if goal.auto_merge_to_local_branch %}
                         <span class="meta">Auto merge: {{ goal.auto_merge_branch }}</span>
                         {% endif %}
@@ -675,6 +677,14 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>
+                Coding agent
+                <select name="provider" data-edit-autonomous-goal-provider>
+                    {% for value, label in provider_choices %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             <label class="checkbox-label">
                 <span>Auto merge to local branch</span>
                 <input type="hidden" name="auto_merge_to_local_branch" value="false">
@@ -710,6 +720,7 @@
             const editGoalProposalBudget = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-proposal-budget]");
             const editGoalConfidence = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-confidence-threshold]");
             const editGoalWebSearch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-web-search-mode]");
+            const editGoalProvider = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-provider]");
             const editGoalAutoMerge = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge]");
             const editGoalAutoMergeBranch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge-branch]");
             const editGoalCancel = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-cancel]");
@@ -843,6 +854,7 @@
                     if (editGoalProposalBudget) editGoalProposalBudget.value = button.dataset.proposalBudget || "";
                     if (editGoalConfidence) editGoalConfidence.value = button.dataset.confidenceThreshold || "";
                     if (editGoalWebSearch) editGoalWebSearch.value = button.dataset.webSearchMode || "";
+                    if (editGoalProvider) editGoalProvider.value = button.dataset.provider || "";
                     if (editGoalAutoMerge) editGoalAutoMerge.checked = button.dataset.autoMergeToLocalBranch === "true";
                     if (editGoalAutoMergeBranch) editGoalAutoMergeBranch.value = button.dataset.autoMergeBranch || "";
                     syncStackedDiffDepth(editGoalForm);

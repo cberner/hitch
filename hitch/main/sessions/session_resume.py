@@ -32,7 +32,7 @@ from hitch.main.runtime.rollout_state import (
     _rollout_path_is_archived,
 )
 from hitch.main.runtime.sdk_values import updated_at_seconds
-from hitch.main.sessions import session_index
+from hitch.main.sessions import claude_session_entries, session_index
 from hitch.main.sessions.entry_render import collapse_flat_entries
 from hitch.main.sessions.settings_cookies import SettingsValues
 
@@ -178,6 +178,65 @@ def _rollout_filename_matches_thread_id(path: Path, session_id: str) -> bool:
     return match is not None and match.group("thread_id") == session_id
 
 
+def _claude_resume_for_session(
+    session_id: str,
+    metadata: SessionMetadata | None,
+    *,
+    active_instance: CodexInstance | None,
+    require_system_agent_thread: bool,
+) -> _MetadataResume | None:
+    """Build a session resume for a Claude-backed thread from worker events.
+
+    Claude sessions have no Codex rollout/thread, so the normal
+    ``thread_resume`` path would fail on the synthetic UUID. We reconstruct a
+    synthetic thread from local metadata and derive the transcript from the
+    latest worker's events file. While a turn is active the transcript is left
+    empty here so the SSE replay (which streams the events file from the start)
+    is the single source on the live page; completed sessions render their full
+    transcript statically.
+    """
+    if require_system_agent_thread:
+        return None
+    latest = _latest_instance_for_next_message(session_id)
+    if latest is None or latest.backend != CodexInstance.BACKEND_CLAUDE:
+        return None
+    if metadata is not None:
+        thread = _metadata_thread(metadata)
+    else:
+        thread = _MetadataThread(
+            id=session_id,
+            cwd=latest.cwd,
+            path="",
+            name="",
+            preview=latest.prompt,
+            created_at=None,
+            updated_at=None,
+            archived=False,
+            thread_source="",
+        )
+    # Each Claude turn is a separate CodexInstance with its own events file, so
+    # a multi-turn transcript spans all of them in order. While a turn is
+    # active its file is omitted here and streamed live by the SSE EventSource
+    # instead (avoids duplicating the in-flight turn); earlier completed turns
+    # still render so they don't vanish until the page reloads.
+    instances = CodexInstance.objects.filter(
+        thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+    ).order_by("started_at", "pk")
+    if active_instance is not None:
+        instances = instances.exclude(pk=active_instance.pk)
+    collected: list[dict[str, Any]] = []
+    for path in instances.values_list("events_path", flat=True):
+        if path:
+            collected.extend(claude_session_entries.session_entries(path))
+    entries = tuple(collected)
+    return _MetadataResume(
+        thread=thread,
+        entries=entries,
+        model=latest.model,
+        reasoning_effort=latest.reasoning_effort,
+    )
+
+
 def _metadata_resume_for_inactive_session(
     session_id: str,
     metadata: SessionMetadata | None,
@@ -256,3 +315,26 @@ def _latest_instance_for_next_message(session_id: str) -> CodexInstance | None:
         .order_by("-started_at", "-pk")
         .first()
     )
+
+
+def _session_is_claude(session_id: str) -> bool:
+    backend = (
+        CodexInstance.objects.filter(thread_id=session_id)
+        .order_by("-started_at", "-pk")
+        .values_list("backend", flat=True)
+        .first()
+    )
+    return backend == CodexInstance.BACKEND_CLAUDE
+
+
+def _local_session_cwd(session_id: str) -> str:
+    """Resolve a session's cwd from local rows, for backends with no Codex thread.
+
+    Claude threads are not known to the Codex app-server, so the cwd is read
+    from the latest worker row (or the metadata row) instead of ``thread_resume``.
+    """
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    if previous_instance is not None and previous_instance.cwd:
+        return previous_instance.cwd
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    return metadata.cwd if metadata is not None else ""

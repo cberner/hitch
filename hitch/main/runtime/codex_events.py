@@ -33,6 +33,28 @@ _PR_INFO_TOOLS = frozenset(
         "merge_pull_request",
     }
 )
+# PR-*creation* tools only. A turn that merely *looks up* a PR (``get_pr_info``/
+# ``fetch_pr``/``merge_pull_request``) must not start a new PR epoch for a Claude
+# session -- otherwise inspecting an unrelated PR would hijack the badge/`/fix-pr`.
+# Lookups still refresh the *current* PR via the belongs-to-current check.
+_PR_CREATION_TOOLS = frozenset({"create_pull_request", "create_pr"})
+# Prompts Hitch's own PR/QA/monitor workflow posts as feedback turns. Such a turn
+# is part of maintaining the active PR, not unrelated lifecycle work, so it must
+# not clear the PR observation even when it makes no PR-related MCP call. Shared
+# with ``rollout`` (which detects these from rollout lines) so both backends agree.
+_PR_WORKFLOW_PROMPT_PREFIXES = (
+    "Hitch QA agent could not complete the PR workflow.",
+    "Hitch PR workflow could not complete.",
+    "Hitch PR monitor found follow-up work on the active PR.",
+)
+
+
+def is_pr_workflow_notice_prompt(text: str) -> bool:
+    """Whether ``text`` is one of Hitch's PR-workflow feedback prompts."""
+    stripped = text.strip()
+    return any(stripped.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES)
+
+
 _PR_COMMENT_TOOLS = frozenset({"fetch_pr_comments"})
 _PR_THREAD_TOOLS = frozenset({"list_pull_request_review_threads"})
 _PR_REVIEW_TOOLS = frozenset({"list_pull_request_reviews"})
@@ -241,6 +263,105 @@ def latest_pr_snapshot_from_event_paths(
         return None
 
     return _pr_snapshot_from_updates(sorted(updates, key=lambda item: item.order))
+
+
+def pr_observation_result_from_claude_event_paths(
+    turns: Iterable[tuple[str | Path, bool]],
+    *,
+    thread_id: str,
+) -> PrObservationResult:
+    """Claude analog of the rollout PR-observation replay.
+
+    Each Claude worker instance is one turn, so -- like ``rollout`` does for the
+    Codex transcript -- a completed *normal* turn that does real work but makes no
+    PR-related GitHub MCP call clears a stale PR epoch. Without this boundary a
+    Claude session that opens a PR and then runs an unrelated turn would report the
+    old PR forever (stale badge / ``/fix-pr`` target). ``turns`` is
+    ``(events_path, is_completed)`` per instance in chronological order;
+    ``is_completed`` comes from the instance's terminal status, since a
+    still-running turn must not clear the epoch.
+    """
+    observation_turns: list[PrObservationTurn] = []
+    for path, is_completed in turns:
+        if not path:
+            continue
+        items, has_activity, user_text = _claude_turn_pr_items(
+            path, thread_id=thread_id
+        )
+        is_pr_prompt = _claude_turn_opens_pr(items)
+        # A PR-workflow feedback/monitor turn (its prompt starts with a known
+        # prefix) maintains the active PR, so -- like the Codex replay -- it must
+        # not count as lifecycle activity that clears the PR observation.
+        is_pr_workflow_notice = is_pr_workflow_notice_prompt(user_text)
+        observation_turns.append(
+            PrObservationTurn(
+                is_pr_prompt=is_pr_prompt,
+                is_completed=is_completed,
+                items=tuple(items),
+                has_lifecycle_activity=(
+                    not is_pr_prompt
+                    and not is_pr_workflow_notice
+                    and is_completed
+                    and has_activity
+                ),
+            )
+        )
+    return pr_observation_result_from_turns(observation_turns)
+
+
+def _claude_turn_opens_pr(items: list[dict[str, Any]]) -> bool:
+    """Whether a turn *creates* a PR (vs. merely looking one up).
+
+    Only a successful ``create_pull_request`` establishes the session's PR epoch;
+    a turn that just inspects a PR must not become the session PR.
+    """
+    creation_items = [
+        item
+        for item in items
+        if _normalized_github_tool(item) in _PR_CREATION_TOOLS
+    ]
+    return pr_snapshot_from_completed_mcp_items(creation_items) is not None
+
+
+def _claude_turn_pr_items(
+    path: str | Path, *, thread_id: str
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Return ``(completed mcpToolCall items, has user/agent activity, user text)``
+    for one Claude worker events file -- the per-turn inputs for the lifecycle
+    replay. ``user text`` is the turn's first user-message text (used to detect a
+    PR-workflow feedback prompt)."""
+    items: list[dict[str, Any]] = []
+    has_activity = False
+    user_text = ""
+    try:
+        with Path(path).open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                event = _event_from_line(raw)
+                if event is None or event.get("method") != ITEM_COMPLETED_METHOD:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                payload_thread_id = _payload_thread_id(payload)
+                if payload_thread_id is not None and payload_thread_id != thread_id:
+                    continue
+                item = payload.get("item")
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "mcpToolCall":
+                    items.append(item)
+                elif item_type in ("userMessage", "agentMessage"):
+                    has_activity = True
+                    if item_type == "userMessage" and not user_text:
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            user_text = text
+    except FileNotFoundError:
+        return items, has_activity, user_text
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read Claude events %s: %s", path, exc)
+    return items, has_activity, user_text
 
 
 def _parsed_events_from_paths(

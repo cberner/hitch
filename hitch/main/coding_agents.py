@@ -7,11 +7,34 @@ CODING_AGENT_CODEX = "codex"
 CODING_AGENT_HITCH = "hitch"
 DEFAULT_CODING_AGENT = CODING_AGENT_CODEX
 
+# Coding-agent variants only distinguish base-instruction sets and apply to the
+# Codex provider; the provider (below) is what selects the worker backend.
 CODING_AGENT_OPTIONS: tuple[tuple[str, str], ...] = (
     (CODING_AGENT_CODEX, "Codex"),
     (CODING_AGENT_HITCH, "HITCH"),
 )
 VALID_CODING_AGENTS = {value for value, _label in CODING_AGENT_OPTIONS}
+
+# Provider selects the worker backend. ``codex`` runs the openai-codex
+# app-server (``codex_worker``); ``claude`` runs the local Claude CLI
+# (``claude_worker``). Backend identifiers mirror ``CodexInstance.BACKEND_*``.
+BACKEND_CODEX = "codex"
+BACKEND_CLAUDE = "claude"
+PROVIDER_CODEX = "codex"
+PROVIDER_CLAUDE = "claude"
+DEFAULT_PROVIDER = PROVIDER_CODEX
+PROVIDER_OPTIONS: tuple[tuple[str, str], ...] = (
+    (PROVIDER_CODEX, "Codex"),
+    (PROVIDER_CLAUDE, "Claude Code"),
+)
+VALID_PROVIDERS = {value for value, _label in PROVIDER_OPTIONS}
+
+
+def backend_for_provider(provider: str) -> str:
+    """Return the worker backend for ``provider`` (Codex for unknown values)."""
+    if provider == PROVIDER_CLAUDE:
+        return BACKEND_CLAUDE
+    return BACKEND_CODEX
 
 HITCH_BASE_INSTRUCTIONS = """You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.
 

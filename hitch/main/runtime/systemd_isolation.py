@@ -47,15 +47,16 @@ def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
     return result.stdout.decode("utf-8", errors="replace").strip() in {"", "not-found"}
 
 def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) -> bool:
-    """Whether any live ``codex_worker`` process currently runs in ``scope_unit``.
+    """Whether any live worker process currently runs in ``scope_unit``.
 
-    Worker unit names are not deployment-unique, so once our dead worker's unit
-    is collected another Hitch checkout under the same user can create a unit
-    with the same name. We only reap a unit whose own worker is already gone, so
-    a *live* ``codex_worker`` in it means the name was reused by a different
-    launch -- signaling it would kill that launch's worker and grandchildren.
-    Linux-only; without ``/proc`` it reports ``False`` (the reap is then
-    best-effort, as before).
+    Scope unit names (``hitch-codex-worker-<id>.scope``) are not
+    deployment-unique, so once our dead worker's scope is collected another Hitch
+    checkout under the same user can create a scope with the same name. We only
+    reap a scope whose own worker is already gone, so a *live* worker in it
+    (``codex_worker`` or ``claude_worker`` -- both run under these scopes) means
+    the name was reused by a different launch -- signaling it would kill that
+    launch's worker and grandchildren. Linux-only; without ``/proc`` it reports
+    ``False`` (the reap is then best-effort, as before).
     """
     if not proc_root.exists():
         return False
@@ -67,7 +68,8 @@ def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) 
             cmdline = (entry / "cmdline").read_bytes()
         except OSError:
             continue
-        if b"codex_worker" not in cmdline.split(b"\0"):
+        parts = cmdline.split(b"\0")
+        if b"codex_worker" not in parts and b"claude_worker" not in parts:
             continue
         try:
             cgroup = (entry / "cgroup").read_bytes()

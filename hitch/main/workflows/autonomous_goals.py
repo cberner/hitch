@@ -25,6 +25,7 @@ from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
+from hitch.main import coding_agents
 from hitch.main.goals.autonomous_goal_prompts import (
     _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
     _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
@@ -269,8 +270,13 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
     )
     if project is not None:
         goals = goals.filter(project=project)
-    if goals.exists() and _auto_proposals_paused_by_usage_quota_throttled():
-        return 0
+    # The usage-quota pause reads the Codex account rate limits, so it only
+    # applies to Codex-provider goals. Claude goals run on the local backend, so
+    # drop only the Codex goals when the account is below quota rather than
+    # short-circuiting the whole batch.
+    codex_goals = goals.exclude(provider=coding_agents.PROVIDER_CLAUDE)
+    if codex_goals.exists() and _auto_proposals_paused_by_usage_quota_throttled():
+        goals = goals.filter(provider=coding_agents.PROVIDER_CLAUDE)
 
     started = 0
     for autonomous_goal_id in goals.order_by("created_at", "id").values_list(
@@ -598,6 +604,10 @@ def _create_autonomous_goal_workflow_record(
         _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY: 1,
         "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
         "web_search_mode": autonomous_goal.web_search_mode,
+        # The goal carries no resumable thread, so record the backend up front
+        # (``_workflow_backend`` would otherwise default to Codex) so the
+        # candidate/judge sub-agents spawn on the goal's chosen provider.
+        "backend": coding_agents.backend_for_provider(autonomous_goal.provider),
     }
     if autonomous_goal.proposal_budget is not None:
         state[_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY] = (
@@ -2344,6 +2354,7 @@ def _spawn_autonomous_goal_history_summary_run(
         workflow.save(update_fields=["state", "updated_at"])
     instance: CodexInstance | None = None
     run: SystemAgentRun | None = None
+    workflow_backend = system_agents._workflow_backend(workflow)
     try:
         instance = codex_pool.spawn_new_session(
             cwd=session_cwd,
@@ -2353,11 +2364,20 @@ def _spawn_autonomous_goal_history_summary_run(
             web_search_mode=system_agents._workflow_web_search_mode(workflow),
             thread_source=ThreadSource.subagent,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            backend=workflow_backend,
             workflow_id=workflow.pk,
             agent_kind=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,
             display_author=system_agents.AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR,
             output_schema=_AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA,
-            model=_autonomous_goal_history_summary_model(),
+            # The history-summary model override is a Codex model id (e.g.
+            # ``gpt-small``); a Claude spawn stores it verbatim and the CLI would
+            # reject it, so drop it for Claude (the candidate/judge spawns pass no
+            # model either, falling back to the session's Claude default).
+            model=(
+                _autonomous_goal_history_summary_model()
+                if workflow_backend == CodexInstance.BACKEND_CODEX
+                else None
+            ),
             reasoning_effort="low",
         )
         run = _get_or_create_autonomous_goal_history_summary_run(
@@ -2553,19 +2573,22 @@ def _spawn_autonomous_goal_candidate_run(
             cwd=session_cwd,
             prompt=prompt,
             approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+            # A no-code (proposal-only) candidate runs in the real repo cwd with no
+            # worktree, so it must not write: pin it read-only explicitly rather
+            # than passing an empty sandbox. An empty sandbox is no longer
+            # equivalent to "no writes" for a Claude reviewer -- the spawn layer now
+            # promotes an empty hidden-agent sandbox to workspace-write so reviewers
+            # can run tests -- which would otherwise let a proposal-only candidate
+            # mutate the user's real repo.
             sandbox_policy=(
                 system_agents.AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
                 if _autonomous_goal_candidate_allows_code_changes(workflow)
-                # A no-code (proposal-only) candidate runs in the user's real repo
-                # cwd with no worktree, so it must not write. An empty sandbox
-                # defaults to workspace-write at the app-server, which would let a
-                # misbehaving or prompt-injected run mutate the real repo despite
-                # the "do not make code changes" prompt -- pin it read-only.
                 else "readOnly"
             ),
             web_search_mode=system_agents._workflow_web_search_mode(workflow),
             thread_source=ThreadSource.subagent,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            backend=system_agents._workflow_backend(workflow),
             workflow_id=workflow.pk,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
@@ -2695,13 +2718,14 @@ def _spawn_autonomous_goal_judge_run(
         approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
         # The judge only evaluates the candidate, so it never writes -- pin it
         # read-only. This matters for no-code goals where ``session_cwd`` is the
-        # user's real repo: an empty sandbox defaults to workspace-write at the
-        # app-server, which would let the evaluation step mutate the repo the
-        # no-code candidate was deliberately kept out of.
+        # user's real repo: an empty sandbox would be promoted to workspace-write
+        # by the Claude spawn layer, letting the judge mutate the repo the no-code
+        # candidate was deliberately kept out of.
         sandbox_policy="readOnly",
         web_search_mode=system_agents._workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        backend=system_agents._workflow_backend(workflow),
         workflow_id=workflow.pk,
         agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         display_author=system_agents.AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR,

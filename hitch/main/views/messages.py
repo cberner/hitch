@@ -12,10 +12,11 @@ from django.http import (
     HttpResponseBadRequest,
 )
 from django.shortcuts import redirect
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from openai_codex.errors import InvalidRequestError
 
-from hitch.main import caches
+from hitch.main import caches, claude_options
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -29,6 +30,7 @@ from hitch.main.runtime.input_images import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
+from hitch.main.sessions import session_index
 from hitch.main.sessions.message_intent import (
     _is_fix_pr_activation,
     _is_pr_activation,
@@ -59,13 +61,15 @@ from hitch.main.sessions.session_resume import (
     _record_session_unarchived,
     _restore_archived_session_for_rejected_turn,
     _session_detail_metadata,
+    _session_is_claude,
     _thread_resume_archived_error,
     _unarchive_session_for_turn,
 )
 from hitch.main.sessions.session_settings import (
     _effective_approval_mode_for_session,
+    _effective_sandbox_policy,
     _effective_sandbox_policy_for_cwd,
-    _stored_settings,
+    _model_for_thread_backend,
 )
 from hitch.main.sessions.settings_cookies import (
     SettingsValues,
@@ -75,6 +79,21 @@ from hitch.main.views import common
 from hitch.main.workflows import pr_qa, spec_critic, system_agents
 
 logger = logging.getLogger(__name__)
+
+
+def _views() -> Any:
+    """Return the ``hitch.main.views`` package object.
+
+    The Claude follow-up/workflow helpers below resolve a handful of their
+    collaborators through this package so that ``patch.object(views, "...")`` --
+    the way the former monolith's tests intercept these dependencies -- keeps
+    working now that the helpers live in this split module. Imported lazily to
+    avoid the import cycle (``views/__init__`` imports this module).
+    """
+    from hitch.main import views
+
+    return views
+
 
 _PLAN_ACTION_APPROVE = "approve"
 
@@ -103,14 +122,303 @@ class _TurnRejectedError(Exception):
         super().__init__()
         self.response = response
 
+def _codex_followup_model(resumed: Any, settings: SettingsValues) -> str | None:
+    """Resumed Codex thread's model, falling back to the settings model.
+
+    The settings (cookie) model can hold a ``claude-*`` id when the user
+    switches the global provider to Claude while a Codex session stays open.
+    This path only runs for Codex-backed sessions, so the Codex normalization in
+    ``_model_for_thread_backend`` drops a Claude id rather than queue a Codex
+    worker/workflow with a model the app-server would reject. The thread's own
+    model keeps priority over the cookie.
+    """
+    resumed_model = string_value(getattr(resumed, "model", None))
+    return _model_for_thread_backend(
+        backend=CodexInstance.BACKEND_CODEX,
+        model=resumed_model or settings.model,
+        codex_fallback_model=resumed_model or None,
+    )
+
+
 def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[str, str]:
-    """Thread's recorded model/effort, falling back to the request settings."""
-    model = string_value(getattr(resumed, "model", None)) or settings.model
+    """Thread's recorded model/effort, falling back to the request settings.
+
+    The model is normalized to the Codex backend so a ``claude-*`` cookie id
+    (provider switched to Claude with a Codex session open) is dropped rather
+    than queued onto a Codex worker the app-server would reject.
+    """
+    model = _codex_followup_model(resumed, settings) or ""
     effort = (
         string_value(getattr(resumed, "reasoning_effort", None))
         or settings.reasoning_effort
     )
     return model, effort
+
+def _start_claude_qa_workflow(
+    *,
+    session_id: str,
+    qa_activation: bool,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Start a PR/QA workflow on an existing Claude session (manual /qa or /pr).
+
+    The Claude analog of the Codex follow-up activation: the workflow records the
+    thread's (Claude) backend and spawns its sub-agents and the PR-prompt turn as
+    Claude workers; the PR itself is opened by hitch via ``gh``. cwd and per-turn
+    settings come from local rows since the thread has no Codex rollout to resume.
+    """
+    # ``/qa`` and ``/pr`` carry no image attachments (rejected earlier), so the
+    # saved temp copies are not needed.
+    common._cleanup_saved_input_images(input_image_paths)
+    common_result = _views()._claude_workflow_common(session_id, settings)
+    if isinstance(common_result, HttpResponse):
+        return common_result
+    cwd, model, developer_instructions = common_result
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _views()._auto_merge_to_local_branch_for_session(session_id)
+    )
+    workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _views()._claude_user_message_index(session_id),
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        workflow_kwargs["web_search_mode"] = web_search_mode
+    # No base instructions: this is a Claude workflow (the thread's backend, not
+    # the current global provider, decides). Claude ships its own system prompt,
+    # so Hitch's Codex/HITCH base-instruction variants must never reach a Claude
+    # QA/PR agent -- even when the global provider was switched back to Codex.
+    if qa_activation:
+        workflow_kwargs["open_pr_on_lgtm"] = False
+    if auto_merge_to_local_branch and auto_merge_branch:
+        workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+    system_agents.start_pr_qa_workflow(**workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
+def _start_claude_fix_pr_workflow(
+    *,
+    session_id: str,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Start PR-follow-up monitoring for an existing Claude session (``/fix-pr``).
+
+    The Claude analog of the Codex ``fix_pr`` route: it targets the session's
+    already-open PR via ``start_pr_monitor_workflow`` (which skips the QA step
+    and never opens a second PR) rather than the generic PR/QA activation.
+    """
+    # ``/fix-pr`` carries no image attachments (rejected earlier), so drop the
+    # saved temp copies.
+    common._cleanup_saved_input_images(input_image_paths)
+    pr_url = _views()._claude_fix_pr_url(session_id)
+    if not pr_url:
+        return HttpResponseBadRequest("fix-pr requires an opened PR for this session")
+    common_result = _views()._claude_workflow_common(session_id, settings)
+    if isinstance(common_result, HttpResponse):
+        return common_result
+    cwd, model, developer_instructions = common_result
+    workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "pr_url": pr_url,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _views()._claude_user_message_index(session_id),
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        workflow_kwargs["web_search_mode"] = web_search_mode
+    # No base instructions: a Claude workflow ships its own system prompt, so
+    # Hitch's Codex base-instruction variants must not reach the Claude monitor
+    # agent even if the global provider was switched back to Codex.
+    system_agents.start_pr_monitor_workflow(**workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
+def _start_claude_spec_critic_follow_up(
+    *,
+    session_id: str,
+    prompt: str,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Run the Spec Critic preflight on an existing Claude session follow-up.
+
+    Mirrors the Codex follow-up preflight on the local Claude thread: the hidden
+    analysis/synthesizer agents run as Claude workers, then the implementation
+    turn spawns on the same thread carrying the session's Auto-PR/Auto-QA config.
+    """
+    common_result = _views()._claude_workflow_common(session_id, settings)
+    if isinstance(common_result, HttpResponse):
+        common._cleanup_saved_input_images(input_image_paths)
+        return common_result
+    cwd, model, developer_instructions = common_result
+    auto_pr_enabled = _views()._auto_pr_enabled_for_session(session_id)
+    auto_qa_enabled = (
+        False if auto_pr_enabled else _views()._auto_qa_enabled_for_session(session_id)
+    )
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _views()._auto_merge_to_local_branch_for_session(session_id)
+        if auto_qa_enabled
+        else (False, "")
+    )
+    spec_workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "prompt": prompt,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _views()._claude_user_message_index(session_id),
+        "auto_pr_enabled": auto_pr_enabled,
+        "auto_qa_enabled": auto_qa_enabled,
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        spec_workflow_kwargs["web_search_mode"] = web_search_mode
+    # No base instructions: a Claude workflow ships its own system prompt, so
+    # Hitch's Codex base-instruction variants must not reach the Claude Spec
+    # Critic agents even if the global provider was switched back to Codex.
+    if auto_merge_to_local_branch and auto_merge_branch:
+        spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+        spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+    common._cleanup_saved_input_images(input_image_paths)
+    system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
+def _send_claude_follow_up(
+    *,
+    session_id: str,
+    prompt: str,
+    plan_mode: bool,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Run a follow-up turn on a Claude session without a Codex resume.
+
+    Claude threads are not known to the Codex app-server, so the normal
+    follow-up path's ``thread_resume`` would fail. cwd and per-turn settings are
+    taken from local rows instead; ``spawn_turn`` inherits the backend and the
+    stored Claude session id from the thread's history.
+    """
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    cwd = previous_instance.cwd if previous_instance is not None else ""
+    if not cwd:
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+        cwd = metadata.cwd if metadata is not None else ""
+    if not cwd:
+        common._cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest("session has no cwd")
+    if cwd not in _views()._allowed_session_cwds():
+        common._cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest("session cwd is not an allowed repository")
+    model = settings.model
+    if model not in claude_options.VALID_CLAUDE_MODELS:
+        # The settings cookie may hold a Codex model id (provider switched back).
+        # Prefer the session's own prior Claude model so a follow-up keeps the
+        # same model instead of silently jumping to the default.
+        prior_model = previous_instance.model if previous_instance is not None else ""
+        model = (
+            prior_model
+            if prior_model in claude_options.VALID_CLAUDE_MODELS
+            else claude_options.DEFAULT_CLAUDE_MODEL
+        )
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    developer_instructions = (
+        previous_instance.developer_instructions
+        if previous_instance is not None
+        else common._developer_instructions_for_project(
+            settings, common._project_for_cwd(cwd, list(Project.objects.all()))
+        )
+    )
+    spawn_kwargs: dict[str, Any] = {
+        "thread_id": session_id,
+        "cwd": cwd,
+        "prompt": prompt,
+        "model": model,
+        "stored_model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        # Honor a per-session approval override (set from the session header), as
+        # the Codex follow-up path does -- otherwise a Claude thread pinned to
+        # deny_all/approve_all in the session UI would spawn follow-ups under the
+        # global default instead.
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
+        "plan_mode": plan_mode,
+    }
+    if input_image_paths:
+        spawn_kwargs["input_image_paths"] = input_image_paths
+    if web_search_mode:
+        spawn_kwargs["web_search_mode"] = web_search_mode
+    if developer_instructions:
+        # Set on every turn, not just the first: developer guidance now rides in
+        # the per-turn system prompt (not the user prompt), so each follow-up
+        # worker must carry it. It is read back from the previous instance above,
+        # so it propagates forward across the session.
+        spawn_kwargs["developer_instructions"] = developer_instructions
+    # Carry the session's Auto-PR/Auto-QA configuration onto every follow-up
+    # turn. ``on_codex_instance_finished`` fires off the completed instance's
+    # ``auto_pr_enabled``/``auto_qa_enabled`` flags, so without this a Claude
+    # session would only auto-review/open-a-PR after its initial turn and skip it
+    # on every follow-up. Auto-PR supersedes Auto-QA, and plan turns never
+    # auto-review.
+    auto_pr_enabled = not plan_mode and _views()._auto_pr_enabled_for_session(session_id)
+    auto_qa_enabled = (
+        not plan_mode
+        and not auto_pr_enabled
+        and _views()._auto_qa_enabled_for_session(session_id)
+    )
+    if auto_pr_enabled or auto_qa_enabled:
+        spawn_kwargs["user_message_index"] = _views()._claude_user_message_index(
+            session_id
+        )
+    if auto_pr_enabled:
+        spawn_kwargs["auto_pr_enabled"] = True
+    elif auto_qa_enabled:
+        spawn_kwargs["auto_qa_enabled"] = True
+        auto_merge_to_local_branch, auto_merge_branch = (
+            _views()._auto_merge_to_local_branch_for_session(session_id)
+        )
+        if auto_merge_to_local_branch:
+            spawn_kwargs["auto_merge_to_local_branch"] = True
+            spawn_kwargs["auto_merge_branch"] = auto_merge_branch
+    try:
+        codex_pool.spawn_turn(**spawn_kwargs)
+    except Exception:
+        common._cleanup_saved_input_images(input_image_paths)
+        raise
+    # Claude sessions have no app-server sync to refresh the index timestamp, so
+    # bump it here or a multi-turn session stays sorted at its creation time.
+    # Best-effort: the worker records turn activity again on completion, so a
+    # transient SQLite lock must not 500 an already-launched turn -- that would
+    # re-run the cleanup that deletes the worker's input images and invite a
+    # duplicate retry.
+    now = timezone.now()
+    run_ignoring_database_locks(
+        lambda: SessionMetadata.objects.filter(thread_id=session_id).update(
+            codex_updated_at=now, codex_last_synced_at=now
+        ),
+        description="claude follow-up recency bump",
+    )
+    return redirect("session", session_id=session_id)
+
 
 @_limit_input_image_uploads
 @require_http_methods(["POST"])
@@ -154,7 +462,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest(
             "image attachments are not supported for PR workflow requests"
         )
-    settings = _stored_settings(request)
+    settings = _views()._stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     active_instance = None
     instance_id: int | None = None
@@ -259,6 +567,69 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             raise _TurnRejectedError(
                 HttpResponseBadRequest("PR workflow is running for this session")
             )
+        # Claude threads have no Codex rollout to resume, so route their
+        # follow-up turns around the app-server entirely.
+        if _session_is_claude(session_id):
+            # An archived Claude session has no app-server thread to unarchive, so
+            # clear the local archived state directly before routing -- otherwise
+            # the accepted turn/workflow stays hidden from the session list (the
+            # Claude helpers only bump recency, never the archive bit). Mirrors the
+            # Codex unarchive below, but keeps the authoritative Claude usage row
+            # (``update_cached_archived`` does not drop ``ArchivedSessionTokenUsage``).
+            claude_metadata = _session_detail_metadata(session_id)
+            if _metadata_indicates_archived(claude_metadata):
+                if _metadata_cwd_is_disallowed(claude_metadata):
+                    raise _TurnRejectedError(
+                        HttpResponseBadRequest(
+                            "thread cwd is not an allowed repository"
+                        )
+                    )
+                session_index.update_cached_archived(session_id, archived=False)
+            # ``/fix-pr`` targets the session's already-open PR, so route it to the
+            # PR-monitor workflow (no second PR on LGTM) instead of the generic
+            # QA/PR activation below -- mirroring the Codex follow-up path.
+            if fix_pr_activation:
+                fix_pr_response: HttpResponse = _views()._start_claude_fix_pr_workflow(
+                    session_id=session_id,
+                    settings=settings,
+                    input_image_paths=input_image_paths,
+                )
+                return fix_pr_response
+            if qa_workflow_activation:
+                qa_response: HttpResponse = _views()._start_claude_qa_workflow(
+                    session_id=session_id,
+                    qa_activation=qa_activation,
+                    settings=settings,
+                    input_image_paths=input_image_paths,
+                )
+                return qa_response
+            # ``start_spec_critic_workflow`` runs the should-run classifier on a
+            # background thread, so do not pre-classify on the request path here:
+            # that would stream a synchronous classifier turn (and classify the
+            # prompt twice). Route in whenever Spec Critic is eligible, exactly
+            # like the new-session path.
+            if (
+                settings.spec_critic_enabled
+                and not plan_mode
+                and not input_image_paths
+            ):
+                spec_response: HttpResponse = (
+                    _views()._start_claude_spec_critic_follow_up(
+                        session_id=session_id,
+                        prompt=prompt,
+                        settings=settings,
+                        input_image_paths=input_image_paths,
+                    )
+                )
+                return spec_response
+            follow_up_response: HttpResponse = _views()._send_claude_follow_up(
+                session_id=session_id,
+                prompt=prompt,
+                plan_mode=plan_mode,
+                settings=settings,
+                input_image_paths=input_image_paths,
+            )
+            return follow_up_response
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
         # ``raw_active`` posts still do not retarget a different active worker.

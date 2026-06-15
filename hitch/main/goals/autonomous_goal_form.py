@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from django.http import HttpRequest
 
+from hitch.main import coding_agents
 from hitch.main.formatting import render_markdown
 from hitch.main.models import AutonomousGoal
 from hitch.main.runtime.codex_pool import _VALID_WEB_SEARCH_MODES
@@ -38,6 +39,7 @@ class AutonomousGoalValues(NamedTuple):
     web_search_mode: str
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
+    provider: str
 
 
 def _validated_autonomous_goal_title(raw_title: str) -> tuple[str, str | None]:
@@ -58,6 +60,7 @@ def _validated_autonomous_goal_values(
     auto_proposal_default: bool = False,
     stacked_diff_depth_default: int = AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
     proposal_budget_default: int | None = None,
+    provider_default: str = coding_agents.DEFAULT_PROVIDER,
     local_branches: list[str] | None = None,
 ) -> tuple[AutonomousGoalValues | None, str | None]:
     title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
@@ -125,6 +128,11 @@ def _validated_autonomous_goal_values(
     if auto_merge not in {"", "false", "true"}:
         return None, "auto merge setting is invalid"
     auto_merge_to_local_branch = auto_merge == "true"
+    provider = (
+        request.POST.get("provider", provider_default).strip() or provider_default
+    )
+    if provider not in coding_agents.VALID_PROVIDERS:
+        return None, "provider is invalid"
     auto_merge_branch = request.POST.get("auto_merge_branch", "").strip()
     valid_local_branches = set(local_branches or [])
     if auto_merge_to_local_branch:
@@ -149,6 +157,7 @@ def _validated_autonomous_goal_values(
         web_search_mode=web_search_mode,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
+        provider=provider,
     ), None
 
 

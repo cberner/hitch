@@ -58,6 +58,14 @@
         {% endfor %}
     </select>
 </label>
+<label>
+    Coding agent
+    <select name="provider">
+        {% for value, label in provider_choices %}
+        <option value="{{ value }}"{% if value == default_provider %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
 <label class="checkbox-label">
     <span>Auto merge to local branch</span>
     <input type="hidden" name="auto_merge_to_local_branch" value="false">

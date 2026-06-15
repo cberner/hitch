@@ -35,7 +35,7 @@ from openai_codex.generated.v2_all import (
     ThreadSortKey,
 )
 
-from hitch.main import caches, coding_agents, demo
+from hitch.main import caches, claude_options, coding_agents, demo
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import build_worktree_diff
@@ -101,6 +101,7 @@ from hitch.main.sessions.session_entry_display import (
 from hitch.main.sessions.session_pr_plan import (
     _PR_SLASH_PROMPT,
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
+    _claude_pr_observation_for_session,
     _current_pr_url_for_thread,
     _mark_pending_plan_actions,
     _pr_observation_result_for_thread,
@@ -108,8 +109,10 @@ from hitch.main.sessions.session_pr_plan import (
     _workflow_after_main_lifecycle,
 )
 from hitch.main.sessions.session_resume import (
+    _claude_resume_for_session,
     _metadata_resume_for_inactive_session,
     _session_detail_metadata,
+    _session_is_claude,
 )
 from hitch.main.sessions.session_settings import (
     _QA_SLASH_PROMPT,
@@ -117,6 +120,7 @@ from hitch.main.sessions.session_settings import (
     _current_disk_usage_max_percent,
     _effective_approval_mode,
     _effective_approval_mode_for_session,
+    _effective_provider,
     _effective_sandbox_policy_for_cwd,
     _format_disk_usage_max_percent,
     _resolved_settings,
@@ -230,27 +234,69 @@ def _settings_context(
     # advertise any constraint, so every effort is allowed (matching
     # ``_validate_settings_against_models``).
     supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
-    current_supported = supported_by_model.get(current_settings.model, set())
+    codex_model_options = [
+        {
+            "id": m.id,
+            "display_name": m.display_name,
+            "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
+        }
+        for m in models_data
+    ]
+    # Claude has no app-server effort listing; it accepts a fixed set (no
+    # ``minimal``), so advertise that so the dropdown filters it out rather than
+    # storing a value the Claude worker silently drops.
+    claude_supported_efforts = claude_options.CLAUDE_REASONING_EFFORTS
+    claude_model_options = [
+        {
+            "id": value,
+            "display_name": label,
+            "supported_efforts": " ".join(sorted(claude_supported_efforts)),
+        }
+        for value, label in claude_options.CLAUDE_MODELS
+    ]
+    current_provider = _effective_provider(current_settings)
+    current_supported = (
+        set(claude_supported_efforts)
+        if current_provider == coding_agents.PROVIDER_CLAUDE
+        else supported_by_model.get(current_settings.model, set())
+    )
+    # Render the model dropdown for the saved provider so opening the dialog
+    # with Claude selected does not show (and post) a Codex model id that
+    # ``update_settings`` would reject. The JS swaps lists on provider change.
+    initial_model_options = (
+        claude_model_options
+        if current_provider == coding_agents.PROVIDER_CLAUDE
+        else codex_model_options
+    )
+    # The effort dropdown must contain an option for every effort *any* provider
+    # accepts -- the per-option ``supported`` flag (and the JS effort filter) hide
+    # the ones the current model rejects. Codex's ``ReasoningEffort`` enum omits
+    # Claude's ``max``, so append the Claude-only efforts after it; otherwise
+    # ``max`` is advertised in a Claude model's ``data-supported-efforts`` but has
+    # no selectable option to render.
+    codex_effort_values = [effort.value for effort in ReasoningEffort]
+    effort_values = codex_effort_values + [
+        value
+        for value in sorted(claude_supported_efforts)
+        if value not in codex_effort_values
+    ]
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
         "edit_project_url": reverse("edit_project"),
-        "model_options": [
-            {
-                "id": m.id,
-                "display_name": m.display_name,
-                # Space-separated so the template can drop it into a single
-                # data attribute the effort-filter script splits on whitespace.
-                "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
-            }
-            for m in models_data
-        ],
+        # Space-separated efforts so the template can drop it into a single
+        # data attribute the effort-filter script splits on whitespace.
+        "model_options": initial_model_options,
+        "model_options_by_provider": {
+            coding_agents.PROVIDER_CODEX: codex_model_options,
+            coding_agents.PROVIDER_CLAUDE: claude_model_options,
+        },
         "effort_options": [
             {
-                "value": effort.value,
-                "supported": not current_supported or effort.value in current_supported,
+                "value": value,
+                "supported": not current_supported or value in current_supported,
             }
-            for effort in ReasoningEffort
+            for value in effort_values
         ],
         "sandbox_options": [
             {"id": value, "display_name": label}
@@ -264,6 +310,11 @@ def _settings_context(
             {"id": value, "display_name": label}
             for value, label in coding_agents.CODING_AGENT_OPTIONS
         ],
+        "provider_options": [
+            {"id": value, "display_name": label}
+            for value, label in coding_agents.PROVIDER_OPTIONS
+        ],
+        "current_provider": _effective_provider(current_settings),
         "web_search_options": [
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS
@@ -434,7 +485,12 @@ def _render_session_detail(
         if metadata is not None
         else 0
     )
-    metadata_resume = _metadata_resume_for_inactive_session(
+    metadata_resume = _claude_resume_for_session(
+        session_id,
+        metadata,
+        active_instance=active_instance,
+        require_system_agent_thread=require_system_agent_thread,
+    ) or _metadata_resume_for_inactive_session(
         session_id,
         metadata,
         active_instance=active_instance,
@@ -517,11 +573,15 @@ def _render_session_detail(
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     latest_pr_url = rollout_data.latest_pr_url if rollout_data is not None else None
-    pr_observation = (
-        rollout_data.pr_observation
-        if rollout_data is not None
-        else _pr_observation_result_for_thread(thread)
-    )
+    if rollout_data is not None:
+        pr_observation = rollout_data.pr_observation
+    elif _session_is_claude(session_id):
+        # Claude threads have no rollout; recover the PR from the thread's GitHub
+        # MCP calls so a PR opened outside the /pr workflow still surfaces on the
+        # badge (the synthetic thread's empty ``turns`` would otherwise find none).
+        pr_observation = _claude_pr_observation_for_session(session_id)
+    else:
+        pr_observation = _pr_observation_result_for_thread(thread)
     latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
@@ -659,6 +719,10 @@ def _render_session_detail(
             if rollout_data.latest_token_usage is not None
             else None
         )
+    elif _session_is_claude(session_id):
+        # Claude has no rollout file; the worker writes the counts straight to
+        # the ArchivedSessionTokenUsage cache (rollout_path="") each turn.
+        session_token_usage = token_usage._claude_token_usage_for(session_id)
     else:
         session_token_usage = token_usage._token_usage_for(thread)
     _attach_lazy_intermediate_context(
@@ -1247,6 +1311,10 @@ def _session_approval_mode_context(
 def _base_instructions_for_settings(
     settings: SettingsValues, *, explicit_default: bool = False
 ) -> str | None:
+    # Claude ships its own system prompt; Hitch's Codex base-instruction
+    # variants do not apply to the Claude backend.
+    if _effective_provider(settings) == coding_agents.PROVIDER_CLAUDE:
+        return None
     agent = _effective_coding_agent(settings)
     if agent == coding_agents.CODING_AGENT_CODEX:
         if explicit_default and settings.coding_agent == coding_agents.CODING_AGENT_CODEX:
@@ -1423,6 +1491,16 @@ def _rename_codex_thread_from_proposal(
     title = _proposed_session_thread_title(proposed_session)
     if not title:
         return False
+    # Claude candidate threads are local-only -- there is no Codex app-server
+    # thread to ``thread_set_name``, and the visible title lives in the
+    # session-index cache. Apply it directly; routing through the Codex rename
+    # would raise and leave the accepted session showing its hidden candidate
+    # title instead of the proposal title.
+    if _session_is_claude(session_metadata.thread_id):
+        _apply_proposed_session_title_to_session_metadata(
+            proposed_session, session_metadata
+        )
+        return True
     try:
         with app_server_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories

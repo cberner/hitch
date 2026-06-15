@@ -15,6 +15,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from hitch.main import coding_agents
 from hitch.main.goals.autonomous_goal_form import (
     _attach_autonomous_goal_display_state,
     _validated_autonomous_goal_values,
@@ -116,6 +117,8 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
             "default_web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
+            "provider_choices": coding_agents.PROVIDER_OPTIONS,
+            "default_provider": coding_agents.DEFAULT_PROVIDER,
             "local_branch_choices": local_branch_choices,
             "title_max_len": _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
             **settings_context,
@@ -150,6 +153,7 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
         web_search_mode=values.web_search_mode,
         auto_merge_to_local_branch=values.auto_merge_to_local_branch,
         auto_merge_branch=values.auto_merge_branch,
+        provider=values.provider,
     )
     return redirect("autonomous_goals")
 
@@ -173,6 +177,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         auto_proposal_default=autonomous_goal.auto_proposal_enabled,
         stacked_diff_depth_default=autonomous_goal.stacked_diff_depth,
         proposal_budget_default=autonomous_goal.proposal_budget,
+        provider_default=autonomous_goal.provider,
         local_branches=common.local_branch_names(project.repo_path),
     )
     if error is not None:
@@ -193,6 +198,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         "web_search_mode",
         "auto_merge_to_local_branch",
         "auto_merge_branch",
+        "provider",
     ):
         value = getattr(values, field)
         if getattr(autonomous_goal, field) != value:

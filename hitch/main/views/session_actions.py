@@ -27,6 +27,10 @@ from hitch.main.sessions import session_index
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
+from hitch.main.sessions.session_resume import (
+    _local_session_cwd,
+    _session_is_claude,
+)
 from hitch.main.sessions.session_settings import (
     _allowed_session_cwds,
     _effective_approval_mode,
@@ -126,17 +130,19 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("name is required")
     if len(name) > common._NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
-    settings = _stored_settings(request)
-    try:
-        with app_server_pool.borrow_codex(
-            common.Codex, enable_memories=settings.enable_memories
-        ) as codex:
-            codex._client.thread_set_name(session_id, name)
-    except InvalidRequestError:
-        # The app-server raises this for archived/nonexistent threads (e.g. a
-        # rename from a stale tab, or right after archiving). Like the sibling
-        # endpoints, answer 400 instead of 500ing on an expected state.
-        return HttpResponseBadRequest("session is archived or unknown")
+    # Claude threads have no app-server thread; update the local cache directly.
+    if not _session_is_claude(session_id):
+        settings = _stored_settings(request)
+        try:
+            with app_server_pool.borrow_codex(
+                common.Codex, enable_memories=settings.enable_memories
+            ) as codex:
+                codex._client.thread_set_name(session_id, name)
+        except InvalidRequestError:
+            # The app-server raises this for archived/nonexistent threads (e.g. a
+            # rename from a stale tab, or right after archiving). Like the sibling
+            # endpoints, answer 400 instead of 500ing on an expected state.
+            return HttpResponseBadRequest("session is archived or unknown")
     session_index.update_cached_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
@@ -149,14 +155,17 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
-    settings = _stored_settings(request)
-    with app_server_pool.borrow_codex(
-        common.Codex, enable_memories=settings.enable_memories
-    ) as codex:
-        if archived == "true":
-            codex.thread_archive(session_id)
-        else:
-            codex.thread_unarchive(session_id)
+    # Claude threads have no app-server thread; update the local cache directly.
+    is_claude = _session_is_claude(session_id)
+    if not is_claude:
+        settings = _stored_settings(request)
+        with app_server_pool.borrow_codex(
+            common.Codex, enable_memories=settings.enable_memories
+        ) as codex:
+            if archived == "true":
+                codex.thread_archive(session_id)
+            else:
+                codex.thread_unarchive(session_id)
     if archived == "true":
         demo.cleanup_demo_for_session(session_id)
     session_index.update_cached_archived(session_id, archived=archived == "true")
@@ -164,8 +173,12 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     # the archive bit flips, which invalidates *this* thread's cached usage
     # row. Other threads' caches still match their rollouts, so leave them
     # alone — a blanket wipe forces /profile and /usage to re-parse every
-    # archived rollout file the next time they render.
-    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+    # archived rollout file the next time they render. Claude has no rollout to
+    # re-parse: its cache row (``rollout_path == ""``) is the *authoritative*
+    # accumulated usage, so dropping it would permanently lose the thread's
+    # totals — keep it.
+    if not is_claude:
+        ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":
@@ -200,16 +213,24 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     ).exists():
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
-    try:
-        resumed = app_server_pool.run_borrowed_op_with_retry(
-            common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
-            enable_memories=settings.enable_memories,
-        )
-    except InvalidRequestError:
-        return HttpResponseBadRequest("session is archived or unknown")
-    thread = resumed.thread
-    cwd = common._thread_cwd(thread)
+    # ``spawn_turn`` below inherits the session backend from its history, so the
+    # demo turn runs as a Claude worker for Claude sessions. Only the cwd lookup
+    # differs: a Claude thread has no Codex app-server thread to ``thread_resume``,
+    # so read its cwd from the local rows instead.
+    cwd: str | None
+    if _session_is_claude(session_id):
+        cwd = _local_session_cwd(session_id)
+    else:
+        try:
+            resumed = app_server_pool.run_borrowed_op_with_retry(
+                common.Codex,
+                lambda codex: codex._client.thread_resume(session_id),
+                enable_memories=settings.enable_memories,
+            )
+        except InvalidRequestError:
+            return HttpResponseBadRequest("session is archived or unknown")
+        thread = resumed.thread
+        cwd = common._thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
     if cwd not in _allowed_session_cwds():

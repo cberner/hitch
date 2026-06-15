@@ -645,7 +645,15 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
         agent_kinds = _expected_system_agent_kinds_for_step(workflow)
         if not agent_kinds:
             continue
-        filters |= models.Q(workflow_id=workflow.pk, agent_kind__in=agent_kinds)
+        # The backend constraint must ride inside each per-workflow term: a
+        # workflow only ever spawns its own backend's sub-agents, and applying a
+        # single backend to the whole OR'd queryset would drop terminal rows for
+        # every workflow whose backend differs from the last loop iteration.
+        filters |= models.Q(
+            workflow_id=workflow.pk,
+            agent_kind__in=agent_kinds,
+            backend=_workflow_backend(workflow),
+        )
         has_instance_filter = True
     if not has_instance_filter:
         return 0
@@ -1794,6 +1802,31 @@ def _workflow_web_search_mode(workflow: SystemWorkflow) -> str | None:
     return _state_string(workflow, "web_search_mode") or None
 
 
+def _workflow_backend(workflow: SystemWorkflow) -> str:
+    """Return the worker backend for a workflow's sub-agent spawns.
+
+    Stored in workflow state at creation from the originating session so every
+    sub-agent runs the same backend -- a Claude session's workflows never fall
+    back to the Codex app-server. Defaults to Codex for older rows.
+    """
+    if _state_string(workflow, "backend") == CodexInstance.BACKEND_CLAUDE:
+        return CodexInstance.BACKEND_CLAUDE
+    return CodexInstance.BACKEND_CODEX
+
+
+def _backend_for_thread(thread_id: str) -> str:
+    """Resolve the backend of an existing thread from its latest worker row.
+
+    Used at workflow creation to record which backend the workflow's sub-agents
+    should run. Threads with no prior worker (e.g. a freshly minted system
+    thread) default to Codex.
+    """
+    prior = codex_pool.latest_for_thread(thread_id)
+    if prior is not None and prior.backend == CodexInstance.BACKEND_CLAUDE:
+        return CodexInstance.BACKEND_CLAUDE
+    return CodexInstance.BACKEND_CODEX
+
+
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:
     if instance.workflow_id is None:
         return None
@@ -1846,3 +1879,18 @@ def _recovered_system_agent_run_input(
 # engine and reach back into this module for the shared spawn/transition
 # helpers, so they need its namespace to be fully initialized.
 from hitch.main.workflows import autonomous_goals, pr_qa, spec_critic  # noqa: E402
+
+# Re-export the workflow entry points so callers (and tests) can reach them
+# through ``system_agents`` -- the single facade for starting a system workflow
+# -- without importing each kind module directly.
+start_pr_qa_workflow = pr_qa.start_pr_qa_workflow
+start_pr_monitor_workflow = pr_qa.start_pr_monitor_workflow
+start_spec_critic_workflow = spec_critic.start_spec_critic_workflow
+spec_critic_should_run = spec_critic.spec_critic_should_run
+
+# Re-export the PR snapshot/handoff stage-refresh helpers so the stage-refresh
+# path (and tests) can reach them through the ``system_agents`` facade, matching
+# the former monolith's references.
+pr_snapshot_stage_refresh_due = pr_qa.pr_snapshot_stage_refresh_due
+refreshed_pr_snapshot_for_stage = pr_qa.refreshed_pr_snapshot_for_stage
+refreshed_pr_handoff_for_stage = pr_qa.refreshed_pr_handoff_for_stage

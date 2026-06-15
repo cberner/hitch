@@ -213,6 +213,17 @@ def _worker_log_exception(exc: BaseException) -> None:
         )
 
 
+def request_cancel() -> None:
+    """Set the shared graceful-cancel flag that ``_wait_for_decision`` polls.
+
+    Exposed so the Claude worker, which reuses ``_wait_for_decision`` for its
+    approval waits, can unblock a pending approval on Stop without owning a
+    second cancel flag.
+    """
+    global _cancel_requested
+    _cancel_requested = True
+
+
 def _on_sigterm(_signum: int, _frame: Any) -> None:
     """Mark the active turn for graceful cancellation.
 
@@ -223,8 +234,7 @@ def _on_sigterm(_signum: int, _frame: Any) -> None:
     SIGTERM here; a follow-up click escalates to SIGKILL, which has
     no Python-level handler and tears the worker down immediately.
     """
-    global _cancel_requested
-    _cancel_requested = True
+    request_cancel()
 
 
 def _on_sigusr1(_signum: int, _frame: Any) -> None:
