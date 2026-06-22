@@ -2242,6 +2242,11 @@ class NewSessionViewTests(TestCase):
                 {_CODING_AGENT_COOKIE: "hitch"},
                 {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
             ),
+            (
+                "hitch spec writer coding agent",
+                {_CODING_AGENT_COOKIE: "hitch_spec_writer"},
+                {"base_instructions": coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS},
+            ),
         ]
 
         for index, (label, cookies, expected) in enumerate(cases):
@@ -2378,6 +2383,12 @@ class NewSessionViewTests(TestCase):
                 {_CODING_AGENT_COOKIE: "codex"},
                 {"coding_agent": "hitch"},
                 {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
+            ),
+            (
+                "hitch spec writer override from codex setting",
+                {_CODING_AGENT_COOKIE: "codex"},
+                {"coding_agent": "hitch_spec_writer"},
+                {"base_instructions": coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS},
             ),
             (
                 "codex override from hitch setting",

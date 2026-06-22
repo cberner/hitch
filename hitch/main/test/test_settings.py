@@ -96,6 +96,34 @@ class CodingAgentsTests(SimpleTestCase):
     def test_codex_agent_uses_default_base_instructions(self) -> None:
         self.assertIsNone(coding_agents.base_instructions_for("codex"))
 
+    def test_hitch_spec_writer_agent_uses_spec_prompt(self) -> None:
+        self.assertIn(
+            (
+                coding_agents.CODING_AGENT_HITCH_SPEC_WRITER,
+                "HITCH Spec Writer",
+            ),
+            coding_agents.CODING_AGENT_OPTIONS,
+        )
+
+        base_instructions = coding_agents.base_instructions_for(
+            coding_agents.CODING_AGENT_HITCH_SPEC_WRITER
+        )
+
+        self.assertIsNotNone(base_instructions)
+        assert base_instructions is not None
+        self.assertIn("specification-writing agent", base_instructions)
+        self.assertIn("Check `docs/specs/`", base_instructions)
+        self.assertIn("The clarification loop is mandatory", base_instructions)
+        self.assertIn("HITCH's session UI", base_instructions)
+        self.assertIn("Use Markdown by default", base_instructions)
+        self.assertIn("HITCH's diff viewer", base_instructions)
+        self.assertIn("Do not paste full specs or large spec sections", base_instructions)
+        self.assertNotIn("through a terminal", base_instructions)
+        self.assertIn(
+            "expert software architect, product manager, and technical writer",
+            base_instructions,
+        )
+
     def test_default_codex_base_instructions_strip_hitch_additions(self) -> None:
         base_instructions = coding_agents.default_codex_base_instructions()
 
@@ -472,6 +500,8 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'name="coding_agent"')
         self.assertContains(response, 'value="codex" selected')
         self.assertContains(response, 'value="hitch"')
+        self.assertContains(response, 'value="hitch_spec_writer"')
+        self.assertContains(response, "HITCH Spec Writer")
         self.assertContains(response, "Coding agent")
         self.assertContains(response, "Extra developer prompt")
         self.assertContains(response, 'name="extra_system_prompt"')
@@ -1432,11 +1462,17 @@ class UpdateSettingsViewTests(TestCase):
     def test_saves_coding_agent_to_signed_cookie(self) -> None:
         response = self.client.post(
             reverse("update_settings"),
-            data={"model": "", "reasoning_effort": "", "coding_agent": "hitch"},
+            data={
+                "model": "",
+                "reasoning_effort": "",
+                "coding_agent": "hitch_spec_writer",
+            },
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
+        self.assertEqual(
+            _cookie_value(response, _CODING_AGENT_COOKIE), "hitch_spec_writer"
+        )
 
     def test_rejects_invalid_coding_agent(self) -> None:
         response = self.client.post(
