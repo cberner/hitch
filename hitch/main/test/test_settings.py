@@ -118,6 +118,9 @@ class CodingAgentsTests(SimpleTestCase):
         self.assertIn("Use Markdown by default", base_instructions)
         self.assertIn("HITCH's diff viewer", base_instructions)
         self.assertIn("Do not paste full specs or large spec sections", base_instructions)
+        self.assertIn("conversation-visible question ledger", base_instructions)
+        self.assertIn("partial or missing answers", base_instructions)
+        self.assertIn("Do not rely on hidden scratch files", base_instructions)
         self.assertNotIn("through a terminal", base_instructions)
         self.assertIn(
             "expert software architect, product manager, and technical writer",

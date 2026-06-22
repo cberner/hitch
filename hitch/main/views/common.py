@@ -1254,6 +1254,15 @@ def _base_instructions_for_settings(
         return None
     return coding_agents.base_instructions_for(agent)
 
+
+def _base_instructions_for_follow_up(
+    settings: SettingsValues, previous_instance: CodexInstance | None
+) -> str | None:
+    if previous_instance is not None:
+        return previous_instance.base_instructions or None
+    return _base_instructions_for_settings(settings, explicit_default=True)
+
+
 def _project_for_thread(
     thread: Any,
     metadata_by_thread: dict[str, SessionMetadata],

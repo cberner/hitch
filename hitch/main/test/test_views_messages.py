@@ -1846,7 +1846,7 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_codex_coding_agent_clears_previous_hitch_base_instructions(
+    def test_follow_up_keeps_previous_hitch_base_instructions(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
@@ -1871,11 +1871,80 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        base_instructions = mock_spawn.call_args.kwargs["base_instructions"]
         self.assertEqual(
-            base_instructions, coding_agents.default_codex_base_instructions()
+            mock_spawn.call_args.kwargs["base_instructions"],
+            coding_agents.HITCH_BASE_INSTRUCTIONS,
         )
-        self.assertNotIn("You are running inside HITCH", base_instructions)
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_codex_coding_agent_keeps_previous_spec_writer_base_instructions(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "codex"})
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            base_instructions=coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "1. answered, 2. still unsure"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["base_instructions"],
+            coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS,
+        )
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_follow_up_keeps_previous_legacy_spec_writer_base_instructions(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "codex"})
+        legacy_spec_writer_base_instructions = (
+            "You are Codex, a specification-writing agent based on GPT-5.\n"
+            "Legacy prompt text without the latest clarification guidance."
+        )
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            base_instructions=legacy_spec_writer_base_instructions,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "1. answered, 2. still unsure"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["base_instructions"],
+            legacy_spec_writer_base_instructions,
+        )
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -1900,6 +1969,35 @@ class SendMessageViewTests(TestCase):
             mock_spawn.call_args.kwargs["base_instructions"],
             coding_agents.default_codex_base_instructions(),
         )
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_follow_up_keeps_default_codex_session_when_global_agent_changes(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn("base_instructions", mock_spawn.call_args.kwargs)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -2753,7 +2851,7 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
+    def test_qa_slash_command_keeps_previous_hitch_base_instructions(
         self,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
@@ -2778,11 +2876,10 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
         self.assertEqual(
-            base_instructions, coding_agents.default_codex_base_instructions()
+            mock_start_workflow.call_args.kwargs["base_instructions"],
+            coding_agents.HITCH_BASE_INSTRUCTIONS,
         )
-        self.assertNotIn("You are running inside HITCH", base_instructions)
 
     @patch("hitch.main.workflows.pr_qa.start_user_steering_turn")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
