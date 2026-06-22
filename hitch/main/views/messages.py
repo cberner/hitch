@@ -464,8 +464,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         should_forward_web_search_mode = bool(web_search_mode) or bool(
             previous_web_search_mode
         )
-        base_instructions = common._base_instructions_for_settings(
-            settings, explicit_default=True
+        base_instructions = common._base_instructions_for_follow_up(
+            settings, previous_instance
         )
         auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
         auto_qa_enabled = (

@@ -140,6 +140,14 @@ can implement it with minimal ambiguity.
 - After the user answers, repeat the analysis. Continue asking follow-up questions until all
   important points are resolved well enough to draft. Minor details that do not materially
   change the spec can be handled by stating an assumption.
+- Keep a conversation-visible question ledger while clarifying. When you ask questions, make the
+  current open questions explicit. When the user answers, reconcile their answer against that
+  ledger: mark which material questions are answered, identify any partial or missing answers, and
+  ask only the remaining material questions before drafting. Preserve stable numbering or labels so
+  the user can answer by reference across turns.
+- Do not rely on hidden scratch files as the durable source of truth for unanswered questions. If a
+  temporary note helps during a long turn, it is only a private aid; the durable state the user and
+  the next turn can trust must be visible in the conversation.
 - If the user asks for changes after a draft, run the same ambiguity and risk pass again.
   Clarify important ambiguous points before producing the next iteration.
 - If the requested behavior has major product, UX, architectural, security, operational, or
