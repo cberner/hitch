@@ -254,13 +254,6 @@ def _autonomous_goal_run_badge(
                 "Dismiss or resolve that notice to let auto-proposal try again."
             ),
         )
-    if goal.auto_proposal_enabled and auto_proposal_running:
-        return AutonomousGoalRunBadge(
-            state="queued",
-            label="Queued",
-            title="Autonomous goal is queued",
-            detail="Not running because another auto-proposal run is active.",
-        )
     if goal.pk in no_change_goal_ids:
         return AutonomousGoalRunBadge(
             state="waiting",
@@ -280,6 +273,13 @@ def _autonomous_goal_run_badge(
                 "Not running because remaining Codex quota is below the "
                 "auto-proposal safety threshold. It will try again as quota recovers."
             ),
+        )
+    if goal.auto_proposal_enabled and auto_proposal_running:
+        return AutonomousGoalRunBadge(
+            state="queued",
+            label="Queued",
+            title="Autonomous goal is queued",
+            detail="Not running because another auto-proposal run is active.",
         )
     if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
         return AutonomousGoalRunBadge(
