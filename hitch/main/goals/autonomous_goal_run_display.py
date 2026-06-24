@@ -19,7 +19,6 @@ from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_s
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
-    Project,
     ProposedSession,
     SystemAgentRun,
     SystemWorkflow,
@@ -64,9 +63,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     )
     pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
     unresolved_failure_notice_goal_ids = _autonomous_goal_failure_notice_ids(goal_ids)
-    project_running_auto_proposal_ids = _autonomous_goal_running_auto_proposal_project_ids(
-        goals
-    )
+    auto_proposal_running = _autonomous_goal_running_auto_proposal_exists()
     accepted_session_blocking_goal_ids = (
         autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
             goals
@@ -133,7 +130,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
             accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
-            project_running_auto_proposal_ids=project_running_auto_proposal_ids,
+            auto_proposal_running=auto_proposal_running,
             no_change_goal_ids=no_change_goal_ids,
             auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
         )
@@ -156,25 +153,12 @@ def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
     }
 
 
-def _autonomous_goal_running_auto_proposal_project_ids(
-    goals: list[AutonomousGoal],
-) -> set[int]:
-    project_ids = {goal.project_id for goal in goals}
-    repo_path_by_project_id = dict(
-        Project.objects.filter(pk__in=project_ids).values_list("pk", "repo_path")
-    )
-    running_auto_proposal_cwds = set(
-        SystemWorkflow.objects.filter(
-            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            status=SystemWorkflow.STATUS_RUNNING,
-            state__auto_proposal=True,
-        ).values_list("cwd", flat=True)
-    )
-    return {
-        project_id
-        for project_id, repo_path in repo_path_by_project_id.items()
-        if repo_path in running_auto_proposal_cwds
-    }
+def _autonomous_goal_running_auto_proposal_exists() -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status=SystemWorkflow.STATUS_RUNNING,
+        state__auto_proposal=True,
+    ).exists()
 
 
 def _autonomous_goal_no_change_ids(
@@ -203,7 +187,7 @@ def _autonomous_goal_run_badge(
     continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
     accepted_session_blocking_goal_ids: set[int],
-    project_running_auto_proposal_ids: set[int],
+    auto_proposal_running: bool,
     no_change_goal_ids: set[int],
     auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
@@ -270,15 +254,12 @@ def _autonomous_goal_run_badge(
                 "Dismiss or resolve that notice to let auto-proposal try again."
             ),
         )
-    if (
-        goal.auto_proposal_enabled
-        and goal.project_id in project_running_auto_proposal_ids
-    ):
+    if goal.auto_proposal_enabled and auto_proposal_running:
         return AutonomousGoalRunBadge(
             state="queued",
             label="Queued",
             title="Autonomous goal is queued",
-            detail="Not running because another auto-proposal run is active for this project.",
+            detail="Not running because another auto-proposal run is active.",
         )
     if goal.pk in no_change_goal_ids:
         return AutonomousGoalRunBadge(
