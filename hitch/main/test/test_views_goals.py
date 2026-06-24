@@ -52,6 +52,25 @@ class AutonomousGoalViewTests(TestCase):
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
 
+    def _create_running_auto_proposal(self, *, repo_path: str = "/other") -> None:
+        other_project = _make_project(name="Other", repo_path=repo_path)
+        running_goal = AutonomousGoal.objects.create(
+            project=other_project,
+            title="Running goal",
+            goal="This hidden run owns the global queue.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": True},
+        )
+
     @patch("hitch.main.workflows.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -1057,7 +1076,6 @@ class AutonomousGoalViewTests(TestCase):
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         project = _make_project()
-        other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
         AutonomousGoal.objects.create(
@@ -1066,22 +1084,7 @@ class AutonomousGoalViewTests(TestCase):
             goal="Wait while global automation is active.",
             auto_proposal_enabled=True,
         )
-        running_goal = AutonomousGoal.objects.create(
-            project=other_project,
-            title="Running goal",
-            goal="This hidden run owns the global queue.",
-            auto_proposal_enabled=True,
-        )
-        SystemWorkflow.objects.create(
-            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_goal.pk
-            ),
-            cwd="/other",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": True},
-        )
+        self._create_running_auto_proposal()
 
         response = self.client.get(reverse("autonomous_goals"))
 
@@ -1092,6 +1095,72 @@ class AutonomousGoalViewTests(TestCase):
             response,
             "Not running because another auto-proposal run is active.",
         )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch(
+        "hitch.main.repos.discover_repos",
+        return_value=[Path("/repo"), Path("/other")],
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_page_keeps_no_change_reason_when_auto_proposal_runs_elsewhere(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_default_branch_commit_hash: MagicMock,
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="No change goal",
+            goal="Wait for new commits.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+        )
+        self._create_running_auto_proposal()
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="waiting"')
+        self.assertContains(response, ">No change</button>", html=False)
+        self.assertContains(
+            response,
+            "It will try again after that branch changes.",
+        )
+        self.assertNotContains(response, ">Queued</button>", html=False)
+
+    @patch(
+        "hitch.main.repos.discover_repos",
+        return_value=[Path("/repo"), Path("/other")],
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_page_keeps_quota_reason_when_auto_proposal_runs_elsewhere(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        self.mock_auto_proposals_paused_by_quota.return_value = True
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Quota goal",
+            goal="Wait for quota recovery.",
+            auto_proposal_enabled=True,
+        )
+        self._create_running_auto_proposal()
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="quota"')
+        self.assertContains(response, ">Quota</button>", html=False)
+        self.assertContains(response, "remaining Codex quota is below")
+        self.assertNotContains(response, ">Queued</button>", html=False)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
