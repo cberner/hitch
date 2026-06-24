@@ -9,7 +9,13 @@ from typing import Any, NamedTuple, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
-from django.db import IntegrityError, connection, connections, transaction
+from django.db import (
+    IntegrityError,
+    OperationalError,
+    connection,
+    connections,
+    transaction,
+)
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from openai_codex.generated.v2_all import (
@@ -14199,6 +14205,37 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch(
+        "hitch.main.workflows.autonomous_goals._lock_auto_proposal_queue",
+        side_effect=OperationalError("schema changed"),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_reraises_non_lock_operational_error(
+        self,
+        mock_spawn: MagicMock,
+        mock_lock_queue: MagicMock,
+        mock_default_sha: MagicMock,
+    ) -> None:
+        project = _make_project()
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+
+        with self.assertRaisesRegex(OperationalError, "schema changed"):
+            autonomous_goals._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_called_once_with("/repo")
+        mock_lock_queue.assert_called_once_with()
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
