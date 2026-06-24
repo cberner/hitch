@@ -1048,6 +1048,51 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertNotContains(response, ">Queued</button>", html=False)
 
+    @patch(
+        "hitch.main.repos.discover_repos",
+        return_value=[Path("/repo"), Path("/other")],
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_page_queues_auto_goal_when_auto_proposal_runs_in_other_project(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = _make_project()
+        other_project = _make_project(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Wait while global automation is active.",
+            auto_proposal_enabled=True,
+        )
+        running_goal = AutonomousGoal.objects.create(
+            project=other_project,
+            title="Running goal",
+            goal="This hidden run owns the global queue.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd="/other",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": True},
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="queued"')
+        self.assertContains(response, ">Queued</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because another auto-proposal run is active.",
+        )
+
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
     def test_edit_form_sync_preserves_auto_qa_choice_when_required(

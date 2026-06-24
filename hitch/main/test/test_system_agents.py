@@ -1,5 +1,7 @@
 import json
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,8 +9,8 @@ from typing import Any, NamedTuple, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
-from django.db import IntegrityError, connection, transaction
-from django.test import TestCase, override_settings
+from django.db import IntegrityError, connection, connections, transaction
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -10276,6 +10278,107 @@ class AutoProposalQuotaPauseTests(TestCase):
         self.assertEqual(mock_quota.call_count, 2)
 
 
+class AutonomousGoalAutoProposalConcurrencyTests(TransactionTestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        autonomous_goals._reset_auto_proposal_quota_cache()
+        self.quota_patcher = patch(
+            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota",
+            return_value=False,
+        )
+        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.addCleanup(self.quota_patcher.stop)
+        self.worktree_patcher = patch(
+            "hitch.main.workflows.autonomous_goals.create_worktree_for_session",
+            return_value=MagicMock(path=Path("/repo-worktree")),
+        )
+        self.mock_create_worktree = self.worktree_patcher.start()
+        self.addCleanup(self.worktree_patcher.stop)
+
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_concurrent_auto_proposal_starts_share_global_queue_lock(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        first_project = _make_project()
+        second_project = _make_project(name="Other", repo_path="/other")
+        first_goal = AutonomousGoal.objects.create(
+            project=first_project,
+            title="Keep tests current",
+            goal="Find small test improvements.",
+            auto_proposal_enabled=True,
+        )
+        second_goal = AutonomousGoal.objects.create(
+            project=second_project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+        branch_lookup_barrier = threading.Barrier(2)
+        spawn_lock = threading.Lock()
+        spawned_threads: list[str] = []
+        db_connection_lock = threading.Lock()
+        worker_db_connections: list[Any] = []
+
+        def branch_sha(_repo_path: str) -> str:
+            branch_lookup_barrier.wait(timeout=10)
+            return "a" * 40
+
+        def spawn_instance(**_kwargs: object) -> CodexInstance:
+            with spawn_lock:
+                thread_id = f"candidate-thread-{len(spawned_threads) + 1}"
+                spawned_threads.append(thread_id)
+            return _instance(
+                thread_id=thread_id,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            )
+
+        def close_thread_db_connection(db_connection: Any) -> None:
+            raw_connection = db_connection.connection
+            db_connection.close()
+            if raw_connection is not None:
+                raw_connection.close()
+                db_connection.connection = None
+
+        def start(goal_id: int) -> bool:
+            db_connection = connections["default"]
+            db_connection.inc_thread_sharing()
+            with db_connection_lock:
+                worker_db_connections.append(db_connection)
+            try:
+                return autonomous_goals._maybe_start_auto_proposal_workflow(goal_id)
+            finally:
+                close_thread_db_connection(db_connection)
+
+        mock_default_sha.side_effect = branch_sha
+        mock_spawn.side_effect = spawn_instance
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(start, first_goal.pk),
+                executor.submit(start, second_goal.pk),
+            ]
+            results = [future.result(timeout=10) for future in futures]
+
+        for db_connection in worker_db_connections:
+            close_thread_db_connection(db_connection)
+            db_connection.dec_thread_sharing()
+
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 1)
+        self.assertEqual(mock_spawn.call_count, 1)
+        self.assertEqual(
+            SystemWorkflow.objects.filter(
+                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+                status=SystemWorkflow.STATUS_RUNNING,
+                state__auto_proposal=True,
+            ).count(),
+            1,
+        )
+
+
 class AutonomousGoalWorkflowTests(TestCase):
     @override
     def setUp(self) -> None:
@@ -14284,7 +14387,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_does_not_block_on_resolved_proposals(
+    def test_auto_proposal_resolved_proposals_do_not_bypass_global_queue(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = _make_project()
@@ -14326,8 +14429,13 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows()
 
-        self.assertEqual(started, 2)
-        self.assertEqual(SystemWorkflow.objects.count(), 2)
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(accepted_goal.pk),
+        )
+        self.assertEqual(mock_spawn.call_count, 1)
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
@@ -15236,7 +15344,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value=0,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_run_auto_proposals_command_without_project_starts_across_projects(
+    def test_run_auto_proposals_command_without_project_starts_one_global_workflow(
         self,
         mock_spawn: MagicMock,
         mock_reconcile_dead: MagicMock,
@@ -15250,7 +15358,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             goal="Find small test improvements.",
             auto_proposal_enabled=True,
         )
-        second_goal = AutonomousGoal.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
@@ -15277,16 +15385,14 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         output = call_command("run_auto_proposals")
 
-        self.assertEqual(output, "Started 2 auto-proposal workflow(s).")
+        self.assertEqual(output, "Started 1 auto-proposal workflow(s).")
+        workflow = SystemWorkflow.objects.get()
         self.assertEqual(
-            set(SystemWorkflow.objects.values_list("main_thread_id", flat=True)),
-            {
-                autonomous_goals._autonomous_goal_main_thread_id(first_goal.pk),
-                autonomous_goals._autonomous_goal_main_thread_id(second_goal.pk),
-            },
+            workflow.main_thread_id,
+            autonomous_goals._autonomous_goal_main_thread_id(first_goal.pk),
         )
         mock_reconcile_dead.assert_called_once_with()
-        self.assertEqual(mock_spawn.call_count, 2)
+        self.assertEqual(mock_spawn.call_count, 1)
 
     @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")

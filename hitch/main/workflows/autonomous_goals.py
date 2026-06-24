@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast, override
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
@@ -68,12 +68,13 @@ from hitch.main.models import (
     CodexInstance,
     Project,
     ProposedSession,
+    RefreshThrottle,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
 )
 from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
-from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool, db, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_from_value
 from hitch.main.runtime.sdk_values import truncate_for_prompt
 from hitch.main.sequences import unique_nonempty
@@ -175,6 +176,8 @@ _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION = "retry_candidate_continua
 _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 
 _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
+
+_AUTO_PROPOSAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
 
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -385,41 +388,51 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
     if default_branch_sha is None:
         return False
 
-    with transaction.atomic():
-        autonomous_goal = (
-            AutonomousGoal.objects.select_related("project")
-            .select_for_update()
-            .get(pk=autonomous_goal_id, deleted_at__isnull=True)
-        )
-        Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
-        if not autonomous_goal.auto_proposal_enabled:
-            return False
-        if not _autonomous_goal_auto_proposal_snapshot_matches(
-            autonomous_goal, start_snapshot
-        ):
-            return False
-        if not _autonomous_goal_auto_proposal_db_allows_start(
-            autonomous_goal, default_branch_sha
-        ):
-            return False
-        stack_continuation_proposal = (
-            _autonomous_goal_stack_continuation_proposal(autonomous_goal)
-        )
-        if stack_continuation_proposal is not None:
-            stack_continuation_proposal = (
-                _claim_autonomous_goal_stack_continuation_proposal(
-                    stack_continuation_proposal
-                )
+    try:
+        with transaction.atomic():
+            _lock_auto_proposal_queue()
+            autonomous_goal = (
+                AutonomousGoal.objects.select_related("project")
+                .select_for_update()
+                .get(pk=autonomous_goal_id, deleted_at__isnull=True)
             )
-            if stack_continuation_proposal is None:
+            Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
+            if not autonomous_goal.auto_proposal_enabled:
                 return False
-        workflow, created = _create_autonomous_goal_workflow_record(
-            autonomous_goal=autonomous_goal,
-            auto_proposal=True,
-            default_branch_sha=default_branch_sha,
-            use_worktrees=True,
-            stack_continuation_proposal=stack_continuation_proposal,
+            if not _autonomous_goal_auto_proposal_snapshot_matches(
+                autonomous_goal, start_snapshot
+            ):
+                return False
+            if not _autonomous_goal_auto_proposal_db_allows_start(
+                autonomous_goal, default_branch_sha
+            ):
+                return False
+            stack_continuation_proposal = (
+                _autonomous_goal_stack_continuation_proposal(autonomous_goal)
+            )
+            if stack_continuation_proposal is not None:
+                stack_continuation_proposal = (
+                    _claim_autonomous_goal_stack_continuation_proposal(
+                        stack_continuation_proposal
+                    )
+                )
+                if stack_continuation_proposal is None:
+                    return False
+            workflow, created = _create_autonomous_goal_workflow_record(
+                autonomous_goal=autonomous_goal,
+                auto_proposal=True,
+                default_branch_sha=default_branch_sha,
+                use_worktrees=True,
+                stack_continuation_proposal=stack_continuation_proposal,
+            )
+    except OperationalError as exc:
+        if not db.is_database_locked_error(exc):
+            raise
+        logger.warning(
+            "skipping auto-proposal workflow start for goal %s because database is locked",
+            autonomous_goal_id,
         )
+        return False
     if created:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
     return workflow.is_active
@@ -436,7 +449,7 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return False
-    if _project_running_auto_proposal_workflow_exists(autonomous_goal):
+    if _running_auto_proposal_workflow_exists():
         return False
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return False
@@ -498,7 +511,7 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return None
-    if _project_running_auto_proposal_workflow_exists(autonomous_goal):
+    if _running_auto_proposal_workflow_exists():
         return None
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
@@ -537,15 +550,24 @@ def _autonomous_goal_auto_merge_base_ref(
     )
     return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
-def _project_running_auto_proposal_workflow_exists(
-    autonomous_goal: AutonomousGoal,
-) -> bool:
+def _lock_auto_proposal_queue() -> None:
+    """Serialize the global auto-proposal check/create critical section."""
+    RefreshThrottle.objects.get_or_create(
+        key=_AUTO_PROPOSAL_QUEUE_LOCK_KEY,
+        defaults={"attempted_at": timezone.now()},
+    )
+    RefreshThrottle.objects.select_for_update().get(
+        key=_AUTO_PROPOSAL_QUEUE_LOCK_KEY
+    )
+
+
+def _running_auto_proposal_workflow_exists() -> bool:
     return SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        cwd=autonomous_goal.project.repo_path,
         status=SystemWorkflow.STATUS_RUNNING,
         state__auto_proposal=True,
     ).exists()
+
 
 def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) -> bool:
     return SystemWorkflow.objects.filter(
@@ -553,6 +575,7 @@ def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) ->
         main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal.pk),
         status=SystemWorkflow.STATUS_RUNNING,
     ).exists()
+
 
 def start_autonomous_goal_workflow(
     *,
