@@ -3089,6 +3089,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_start.assert_called_once_with(
             autonomous_goals=[first, second],
             use_worktrees=True,
+            project=project,
         )
 
     @patch("hitch.main.workflows.autonomous_goals.autonomous_goal_queue_busy")

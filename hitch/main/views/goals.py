@@ -318,6 +318,7 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     result = goal_workflows.start_autonomous_goal_workflows_or_queue(
         autonomous_goals=runnable_goals,
         use_worktrees=True,
+        project=project,
     )
     if (
         result.started_workflow is None

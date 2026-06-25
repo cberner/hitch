@@ -670,6 +670,7 @@ def start_autonomous_goal_workflows_or_queue(
     *,
     autonomous_goals: list[AutonomousGoal],
     use_worktrees: bool = False,
+    project: Project | None = None,
 ) -> AutonomousGoalBatchStartResult:
     goal_ids = [goal.pk for goal in autonomous_goals]
     if not goal_ids:
@@ -718,10 +719,12 @@ def start_autonomous_goal_workflows_or_queue(
 
     if started_workflow is not None and started_goal is not None:
         _spawn_autonomous_goal_workflow_and_continue_queue(
-            started_workflow, started_goal
+            started_workflow, started_goal, project=project
         )
     elif should_drain_existing_queue:
-        started_workflow = _start_next_queued_autonomous_goal_workflow()
+        started_workflow = _start_next_queued_autonomous_goal_workflow(
+            project=project
+        )
     return AutonomousGoalBatchStartResult(
         started_workflow=started_workflow,
         queued_count=queued_count,
@@ -791,6 +794,12 @@ def _spawn_autonomous_goal_workflow_and_continue_queue(
     workflow.refresh_from_db(fields=["status", "updated_at"])
     if not workflow.is_active:
         _start_next_queued_autonomous_goal_workflow(project=project)
+
+
+def _continue_queue_if_workflow_stopped(workflow: SystemWorkflow) -> None:
+    workflow.refresh_from_db(fields=["status", "updated_at"])
+    if not workflow.is_active:
+        _start_next_queued_autonomous_goal_workflow()
 
 
 def _create_autonomous_goal_workflow_record(
@@ -1136,6 +1145,7 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
     system_agents._block_workflow(workflow, error, surface_to_thread=False)
     if runs and terminal_instance_returned:
         _cleanup_autonomous_goal_workflow_worktree(workflow)
+    _start_next_queued_autonomous_goal_workflow()
     return True
 
 def stop_running_autonomous_goal_stack_after_proposal_resolution(
@@ -1494,12 +1504,15 @@ def _handle_autonomous_goal_agent_finished(
             _spawn_autonomous_goal_judge_or_block(
                 workflow, autonomous_goal, post_commit_action.candidate
             )
+            _continue_queue_if_workflow_stopped(workflow)
         return
     if post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
+        _continue_queue_if_workflow_stopped(workflow)
         return
     if post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION:
         _spawn_autonomous_goal_candidate_retry_or_block(workflow, autonomous_goal)
+        _continue_queue_if_workflow_stopped(workflow)
         return
     if (
         post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
@@ -1508,9 +1521,11 @@ def _handle_autonomous_goal_agent_finished(
         _spawn_autonomous_goal_judge_or_block(
             workflow, autonomous_goal, post_commit_action.candidate
         )
+        _continue_queue_if_workflow_stopped(workflow)
         return
     if post_commit_action.kind == _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
+        _continue_queue_if_workflow_stopped(workflow)
         return
     _start_next_queued_autonomous_goal_workflow()
 
