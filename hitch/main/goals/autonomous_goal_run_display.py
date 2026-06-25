@@ -63,7 +63,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     )
     pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
     unresolved_failure_notice_goal_ids = _autonomous_goal_failure_notice_ids(goal_ids)
-    auto_proposal_running = _autonomous_goal_running_auto_proposal_exists()
+    autonomous_goal_running = _autonomous_goal_running_exists()
     accepted_session_blocking_goal_ids = (
         autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
             goals
@@ -130,7 +130,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
             accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
-            auto_proposal_running=auto_proposal_running,
+            autonomous_goal_running=autonomous_goal_running,
             no_change_goal_ids=no_change_goal_ids,
             auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
         )
@@ -153,11 +153,10 @@ def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
     }
 
 
-def _autonomous_goal_running_auto_proposal_exists() -> bool:
+def _autonomous_goal_running_exists() -> bool:
     return SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status=SystemWorkflow.STATUS_RUNNING,
-        state__auto_proposal=True,
     ).exists()
 
 
@@ -187,7 +186,7 @@ def _autonomous_goal_run_badge(
     continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
     accepted_session_blocking_goal_ids: set[int],
-    auto_proposal_running: bool,
+    autonomous_goal_running: bool,
     no_change_goal_ids: set[int],
     auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
@@ -264,6 +263,10 @@ def _autonomous_goal_run_badge(
                 "for the tracked branch. It will try again after that branch changes."
             ),
         )
+    if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
+        completed_badge = _completed_autonomous_goal_run_badge(workflow)
+        if completed_badge is not None:
+            return completed_badge
     if goal.auto_proposal_enabled and auto_proposals_paused_by_quota:
         return AutonomousGoalRunBadge(
             state="quota",
@@ -274,12 +277,12 @@ def _autonomous_goal_run_badge(
                 "auto-proposal safety threshold. It will try again as quota recovers."
             ),
         )
-    if goal.auto_proposal_enabled and auto_proposal_running:
+    if goal.auto_proposal_enabled and autonomous_goal_running:
         return AutonomousGoalRunBadge(
             state="queued",
             label="Queued",
             title="Autonomous goal is queued",
-            detail="Not running because another auto-proposal run is active.",
+            detail="Not running because another autonomous goal run is active.",
         )
     if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
         return AutonomousGoalRunBadge(
@@ -288,10 +291,6 @@ def _autonomous_goal_run_badge(
             title="Autonomous goal is ready",
             detail="Auto-proposal is enabled. This goal will start when the scheduler runs and quota allows.",
         )
-    if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
-        completed_badge = _completed_autonomous_goal_run_badge(workflow)
-        if completed_badge is not None:
-            return completed_badge
     if not goal.auto_proposal_enabled:
         detail = "Auto-proposal is off. Use Run to start this goal manually."
         latest_detail = _autonomous_goal_latest_run_detail(workflow)

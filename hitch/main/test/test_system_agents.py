@@ -13288,6 +13288,79 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_waits_when_manual_goal_is_running(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = _make_project()
+        manual_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Manual goal",
+            goal="User-started work is already running.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                manual_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": manual_goal.pk, "auto_proposal": False},
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Auto goal",
+            goal="This should wait for the global background queue.",
+            auto_proposal_enabled=True,
+        )
+
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_manual_start_waits_when_any_autonomous_goal_is_running(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Running goal",
+            goal="This goal owns the global queue.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": False},
+        )
+        waiting_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="This manual start should wait.",
+        )
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=waiting_goal,
+            use_worktrees=True,
+        )
+
+        self.assertIsNone(workflow)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
         "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
@@ -14212,7 +14285,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch(
-        "hitch.main.workflows.autonomous_goals._lock_auto_proposal_queue",
+        "hitch.main.workflows.autonomous_goals._lock_autonomous_goal_queue",
         side_effect=OperationalError("schema changed"),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")

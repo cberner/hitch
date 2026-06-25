@@ -95,6 +95,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "autonomous_goals": goals,
             "autonomous_goal_create_url": reverse("create_autonomous_goal"),
             "autonomous_goal_run_all_url": reverse("run_autonomous_goals"),
+            "autonomous_goal_run_busy": request.GET.get("ag_run_busy") == "1",
             "ambition_choices": AutonomousGoal.AMBITION_CHOICES,
             "default_ambition": AutonomousGoal.AMBITION_INCREMENTAL,
             "autonomy_choices": AutonomousGoal.AUTONOMY_CHOICES,
@@ -293,10 +294,12 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
         raise Http404("autonomous goal not found")
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return redirect("autonomous_goals")
-    goal_workflows.start_autonomous_goal_workflow(
+    workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
         autonomous_goal=autonomous_goal,
         use_worktrees=True,
     )
+    if workflow is None:
+        return _redirect_autonomous_goals_run_busy()
     return redirect("autonomous_goals")
 
 @require_http_methods(["POST"])
@@ -310,11 +313,21 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     ):
         if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
             continue
-        goal_workflows.start_autonomous_goal_workflow(
+        workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
+        if workflow is not None:
+            break
+    else:
+        if goal_workflows.autonomous_goal_queue_busy():
+            return _redirect_autonomous_goals_run_busy()
     return redirect("autonomous_goals")
+
+
+def _redirect_autonomous_goals_run_busy() -> HttpResponse:
+    return redirect(f"{reverse('autonomous_goals')}?ag_run_busy=1")
+
 
 @require_http_methods(["GET"])
 def autonomous_goal_run_log(request: HttpRequest, workflow_id: int) -> HttpResponse:

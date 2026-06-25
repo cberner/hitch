@@ -182,6 +182,15 @@
             border-radius: var(--radius);
             background: var(--surface);
         }
+        .page-notice {
+            margin: 0 0 1rem;
+            padding: 0.75rem 0.9rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+            color: var(--text);
+            font-size: 0.9rem;
+        }
         .form {
             display: grid;
             gap: 0.9rem;
@@ -491,6 +500,11 @@
         </section>
 
         {% if current_project %}
+        {% if autonomous_goal_run_busy %}
+        <div class="page-notice" role="status">
+            Another autonomous goal run is active. Try Run again after it finishes.
+        </div>
+        {% endif %}
         <section class="section" aria-labelledby="autonomous-goal-list-title">
             <p class="section-label">Goals</p>
             <h2 id="autonomous-goal-list-title" hidden>Goals</h2>

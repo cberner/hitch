@@ -624,11 +624,10 @@ class AutonomousGoalViewTests(TestCase):
             response,
             "It will try again after that branch changes.",
         )
-        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertContains(response, ">Queued</button>", html=False)
         self.assertContains(
             response,
-            "Auto-proposal is enabled. This goal will start when the scheduler runs "
-            "and quota allows.",
+            "Not running because another autonomous goal run is active.",
         )
         self.assertContains(response, 'data-state="skipped"')
         self.assertContains(response, ">Skipped</button>", html=False)
@@ -1093,7 +1092,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, ">Queued</button>", html=False)
         self.assertContains(
             response,
-            "Not running because another auto-proposal run is active.",
+            "Not running because another autonomous goal run is active.",
         )
 
     @patch(
@@ -2886,7 +2885,9 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNone(goal.deleted_at)
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
@@ -2911,7 +2912,9 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_always_uses_worktrees(
         self, mock_start: MagicMock
     ) -> None:
@@ -2932,7 +2935,38 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle",
+        return_value=None,
+    )
+    def test_run_single_redirects_with_busy_notice_when_queue_active(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+
+        response = self.client.post(reverse("run_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"], f"{reverse('autonomous_goals')}?ag_run_busy=1"
+        )
+        mock_start.assert_called_once()
+
+        notice_response = self.client.get(response["Location"])
+        self.assertContains(
+            notice_response,
+            "Another autonomous goal run is active. Try Run again after it finishes.",
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_skips_goal_blocked_by_accepted_session(
         self, mock_start: MagicMock
     ) -> None:
@@ -2962,7 +2996,9 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_is_scoped_to_selected_project(
         self, mock_start: MagicMock
     ) -> None:
@@ -2980,8 +3016,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
-    def test_run_all_starts_each_selected_project_goal(
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
+    def test_run_all_starts_first_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
         project = _make_project()
@@ -2992,7 +3030,7 @@ class AutonomousGoalViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        second = AutonomousGoal.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful docs increments.",
@@ -3014,12 +3052,38 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
             [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
-            [first, second],
+            [first],
         )
         self.assertEqual(
             [call.kwargs["use_worktrees"] for call in mock_start.call_args_list],
-            [True, True],
+            [True],
         )
+
+    @patch("hitch.main.workflows.autonomous_goals.autonomous_goal_queue_busy")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle",
+        return_value=None,
+    )
+    def test_run_all_redirects_with_busy_notice_when_queue_active(
+        self, mock_start: MagicMock, mock_queue_busy: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        mock_queue_busy.return_value = True
+
+        response = self.client.post(reverse("run_autonomous_goals"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"], f"{reverse('autonomous_goals')}?ag_run_busy=1"
+        )
+        mock_start.assert_called_once()
+        mock_queue_busy.assert_called_once()
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_reject_proposed_session_requires_reason(

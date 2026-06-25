@@ -177,7 +177,7 @@ _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 
 _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
 
-_AUTO_PROPOSAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
+_AUTONOMOUS_GOAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
 
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -390,7 +390,7 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
 
     try:
         with transaction.atomic():
-            _lock_auto_proposal_queue()
+            _lock_autonomous_goal_queue()
             autonomous_goal = (
                 AutonomousGoal.objects.select_related("project")
                 .select_for_update()
@@ -449,7 +449,7 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return False
-    if _running_auto_proposal_workflow_exists():
+    if _running_autonomous_goal_workflow_exists():
         return False
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return False
@@ -511,7 +511,7 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return None
-    if _running_auto_proposal_workflow_exists():
+    if _running_autonomous_goal_workflow_exists():
         return None
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
@@ -550,23 +550,26 @@ def _autonomous_goal_auto_merge_base_ref(
     )
     return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
-def _lock_auto_proposal_queue() -> None:
-    """Serialize the global auto-proposal check/create critical section."""
+def _lock_autonomous_goal_queue() -> None:
+    """Serialize the global autonomous-goal check/create critical section."""
     RefreshThrottle.objects.get_or_create(
-        key=_AUTO_PROPOSAL_QUEUE_LOCK_KEY,
+        key=_AUTONOMOUS_GOAL_QUEUE_LOCK_KEY,
         defaults={"attempted_at": timezone.now()},
     )
     RefreshThrottle.objects.select_for_update().get(
-        key=_AUTO_PROPOSAL_QUEUE_LOCK_KEY
+        key=_AUTONOMOUS_GOAL_QUEUE_LOCK_KEY
     )
 
 
-def _running_auto_proposal_workflow_exists() -> bool:
+def _running_autonomous_goal_workflow_exists() -> bool:
     return SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status=SystemWorkflow.STATUS_RUNNING,
-        state__auto_proposal=True,
     ).exists()
+
+
+def autonomous_goal_queue_busy() -> bool:
+    return _running_autonomous_goal_workflow_exists()
 
 
 def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) -> bool:
@@ -601,6 +604,34 @@ def start_autonomous_goal_workflow(
     if created:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
     return workflow
+
+
+def start_autonomous_goal_workflow_if_queue_idle(
+    *,
+    autonomous_goal: AutonomousGoal,
+    use_worktrees: bool = False,
+) -> SystemWorkflow | None:
+    with transaction.atomic():
+        _lock_autonomous_goal_queue()
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
+            .get()
+        )
+        if _running_autonomous_goal_workflow_exists():
+            return None
+        workflow, created = _create_autonomous_goal_workflow_record(
+            autonomous_goal=autonomous_goal,
+            auto_proposal=False,
+            default_branch_sha=None,
+            use_worktrees=use_worktrees,
+            stack_continuation_proposal=None,
+        )
+    if created:
+        _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
+    return workflow
+
 
 def _create_autonomous_goal_workflow_record(
     *,
