@@ -268,7 +268,7 @@ class _AutonomousGoalHistorySummaryUnpreservedError(RuntimeError):
 
 
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
-    if _start_next_queued_autonomous_goal_workflow() is not None:
+    if _start_next_queued_autonomous_goal_workflow(project=project) is not None:
         return 1
 
     goals = AutonomousGoal.objects.select_related("project").filter(
@@ -717,7 +717,7 @@ def start_autonomous_goal_workflows_or_queue(
         )
 
     if started_workflow is not None and started_goal is not None:
-        _spawn_autonomous_goal_history_summary_or_candidate(
+        _spawn_autonomous_goal_workflow_and_continue_queue(
             started_workflow, started_goal
         )
     elif should_drain_existing_queue:
@@ -728,50 +728,69 @@ def start_autonomous_goal_workflows_or_queue(
     )
 
 
-def _start_next_queued_autonomous_goal_workflow() -> SystemWorkflow | None:
-    workflow: SystemWorkflow | None = None
-    autonomous_goal: AutonomousGoal | None = None
-    with transaction.atomic():
-        _lock_autonomous_goal_queue()
-        if _running_autonomous_goal_workflow_exists():
-            return None
-        workflow = (
-            SystemWorkflow.objects.select_for_update()
-            .filter(
+def _start_next_queued_autonomous_goal_workflow(
+    *, project: Project | None = None
+) -> SystemWorkflow | None:
+    skipped_workflow_ids: set[int] = set()
+    while True:
+        workflow: SystemWorkflow | None = None
+        autonomous_goal: AutonomousGoal | None = None
+        with transaction.atomic():
+            _lock_autonomous_goal_queue()
+            if _running_autonomous_goal_workflow_exists():
+                return None
+            workflows = SystemWorkflow.objects.select_for_update().filter(
                 kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
                 status=SystemWorkflow.STATUS_QUEUED,
             )
-            .order_by("created_at", "id")
-            .first()
-        )
-        if workflow is None:
-            return None
-        autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
-        autonomous_goal = (
-            AutonomousGoal.objects.select_related("project")
-            .select_for_update()
-            .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
-            .first()
-        )
-        if autonomous_goal is None:
-            system_agents._block_workflow(
-                workflow,
-                "autonomous goal no longer exists",
-                surface_to_thread=False,
+            if skipped_workflow_ids:
+                workflows = workflows.exclude(pk__in=skipped_workflow_ids)
+            workflow = workflows.order_by("created_at", "id").first()
+            if workflow is None:
+                return None
+            autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+            autonomous_goal = (
+                AutonomousGoal.objects.select_related("project")
+                .select_for_update()
+                .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
+                .first()
             )
-            return None
-        if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
-            system_agents._block_workflow(
-                workflow,
-                "autonomous goal has an accepted session waiting",
-                surface_to_thread=False,
-            )
-            return None
-        workflow.status = SystemWorkflow.STATUS_RUNNING
-        workflow.save(update_fields=["status", "updated_at"])
+            if autonomous_goal is None:
+                system_agents._block_workflow(
+                    workflow,
+                    "autonomous goal no longer exists",
+                    surface_to_thread=False,
+                )
+                continue
+            if project is not None and autonomous_goal.project_id != project.pk:
+                skipped_workflow_ids.add(workflow.pk)
+                continue
+            if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+                system_agents._block_workflow(
+                    workflow,
+                    "autonomous goal has an accepted session waiting",
+                    surface_to_thread=False,
+                )
+                continue
+            workflow.status = SystemWorkflow.STATUS_RUNNING
+            workflow.save(update_fields=["status", "updated_at"])
 
+        _spawn_autonomous_goal_workflow_and_continue_queue(
+            workflow, autonomous_goal, project=project
+        )
+        return workflow
+
+
+def _spawn_autonomous_goal_workflow_and_continue_queue(
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    *,
+    project: Project | None = None,
+) -> None:
     _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
-    return workflow
+    workflow.refresh_from_db(fields=["status", "updated_at"])
+    if not workflow.is_active:
+        _start_next_queued_autonomous_goal_workflow(project=project)
 
 
 def _create_autonomous_goal_workflow_record(
@@ -1464,6 +1483,7 @@ def _handle_autonomous_goal_agent_finished(
             token_delta,
         )
     if post_commit_action is None:
+        _start_next_queued_autonomous_goal_workflow()
         return
     for cwd in post_commit_action.cleanup_candidate_cwds:
         _cleanup_autonomous_goal_candidate_cwd(cwd)
