@@ -1132,6 +1132,55 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch(
+        "hitch.main.repos.discover_repos",
+        return_value=[Path("/repo"), Path("/other")],
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_page_queues_auto_goal_when_stopped_ag_worker_is_active(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        stopped_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Stopped goal",
+            goal="Its judge worker is still exiting.",
+        )
+        stopped_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                stopped_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"autonomous_goal_id": stopped_goal.pk, "auto_proposal": False},
+        )
+        CodexInstance.objects.create(
+            pid=123,
+            thread_id="stopped-judge-thread",
+            cwd=project.repo_path,
+            prompt="judge autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=stopped_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Wait while the stopped worker exits.",
+            auto_proposal_enabled=True,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="queued"')
+
+    @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
@@ -2947,6 +2996,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(mock_start.call_count, 1)
         self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
+        self.assertEqual(mock_start.call_args.kwargs["project"], project)
 
     @patch(
         "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"

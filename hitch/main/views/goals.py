@@ -297,6 +297,7 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
     workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
         autonomous_goal=autonomous_goal,
         use_worktrees=True,
+        project=project,
     )
     if workflow is None:
         return _redirect_autonomous_goals_run_busy()

@@ -582,16 +582,25 @@ def _running_autonomous_goal_workflow_exists() -> bool:
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         ).values("pk"),
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists()
 
 
-def _queued_autonomous_goal_workflow_exists() -> bool:
-    return SystemWorkflow.objects.filter(
+def _queued_autonomous_goal_workflow_exists(*, project: Project | None = None) -> bool:
+    workflows = SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status=SystemWorkflow.STATUS_QUEUED,
-    ).exists()
+    )
+    if project is None:
+        return workflows.exists()
+
+    project_goal_ids = set(
+        AutonomousGoal.objects.filter(project=project).values_list("pk", flat=True)
+    )
+    return any(
+        _state_int(workflow, "autonomous_goal_id") in project_goal_ids
+        for workflow in workflows.only("state")
+    )
 
 
 def autonomous_goal_queue_busy() -> bool:
@@ -644,40 +653,43 @@ def start_autonomous_goal_workflow_if_queue_idle(
     *,
     autonomous_goal: AutonomousGoal,
     use_worktrees: bool = False,
+    project: Project | None = None,
 ) -> SystemWorkflow | None:
-    workflow: SystemWorkflow | None = None
-    autonomous_goal_to_spawn: AutonomousGoal | None = None
-    created = False
-    should_drain_existing_queue = False
-    with transaction.atomic():
-        _lock_autonomous_goal_queue()
-        autonomous_goal = (
-            AutonomousGoal.objects.select_related("project")
-            .select_for_update()
-            .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
-            .get()
-        )
-        if _running_autonomous_goal_workflow_exists():
-            return None
-        if _queued_autonomous_goal_workflow_exists():
-            should_drain_existing_queue = True
-        else:
-            workflow, created = _create_autonomous_goal_workflow_record(
-                autonomous_goal=autonomous_goal,
-                auto_proposal=False,
-                default_branch_sha=None,
-                use_worktrees=use_worktrees,
-                stack_continuation_proposal=None,
-                status=SystemWorkflow.STATUS_RUNNING,
+    while True:
+        workflow: SystemWorkflow | None = None
+        autonomous_goal_to_spawn: AutonomousGoal | None = None
+        created = False
+        should_drain_existing_queue = False
+        with transaction.atomic():
+            _lock_autonomous_goal_queue()
+            autonomous_goal = (
+                AutonomousGoal.objects.select_related("project")
+                .select_for_update()
+                .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
+                .get()
             )
-            autonomous_goal_to_spawn = autonomous_goal
-    if should_drain_existing_queue:
-        _start_next_queued_autonomous_goal_workflow()
-    elif created and workflow is not None and autonomous_goal_to_spawn is not None:
-        _spawn_autonomous_goal_history_summary_or_candidate(
-            workflow, autonomous_goal_to_spawn
-        )
-    return workflow
+            if _running_autonomous_goal_workflow_exists():
+                return None
+            if _queued_autonomous_goal_workflow_exists(project=project):
+                should_drain_existing_queue = True
+            else:
+                workflow, created = _create_autonomous_goal_workflow_record(
+                    autonomous_goal=autonomous_goal,
+                    auto_proposal=False,
+                    default_branch_sha=None,
+                    use_worktrees=use_worktrees,
+                    stack_continuation_proposal=None,
+                    status=SystemWorkflow.STATUS_RUNNING,
+                )
+                autonomous_goal_to_spawn = autonomous_goal
+        if should_drain_existing_queue:
+            if _start_next_queued_autonomous_goal_workflow(project=project) is None:
+                continue
+        elif created and workflow is not None and autonomous_goal_to_spawn is not None:
+            _spawn_autonomous_goal_history_summary_or_candidate(
+                workflow, autonomous_goal_to_spawn
+            )
+        return workflow
 
 
 @dataclass(frozen=True)
@@ -709,7 +721,7 @@ def start_autonomous_goal_workflows_or_queue(
             .order_by("created_at", "id")
         )
         running = _running_autonomous_goal_workflow_exists()
-        queue_has_waiting = _queued_autonomous_goal_workflow_exists()
+        queue_has_waiting = _queued_autonomous_goal_workflow_exists(project=project)
         queue_occupied = running or queue_has_waiting
         for autonomous_goal in locked_goals:
             if _autonomous_goal_pending_workflow_exists(autonomous_goal):

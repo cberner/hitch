@@ -154,10 +154,7 @@ def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
 
 
 def _autonomous_goal_running_exists() -> bool:
-    return SystemWorkflow.objects.filter(
-        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        status=SystemWorkflow.STATUS_RUNNING,
-    ).exists()
+    return autonomous_goals.autonomous_goal_queue_busy()
 
 
 def _autonomous_goal_no_change_ids(
