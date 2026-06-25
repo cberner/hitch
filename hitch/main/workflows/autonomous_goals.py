@@ -1182,6 +1182,8 @@ def _interrupt_spawned_autonomous_goal_run_if_inactive(
     system_agents._mark_system_agent_runs_failed(interrupted_runs, error)
     if terminal_instance_returned:
         _cleanup_autonomous_goal_workflow_worktree(workflow)
+        if workflow.state.get(_AUTONOMOUS_GOAL_STOP_WAITING_FOR_SPAWN_STATE_KEY):
+            _start_next_queued_autonomous_goal_workflow_on_commit()
     return workflow
 
 def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -> bool:
