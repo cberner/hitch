@@ -12614,6 +12614,62 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_not_called()
 
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_stop_fresh_no_run_spawn_gap_keeps_queue_waiting(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        active_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Active goal",
+            goal="Its spawn is still in flight.",
+        )
+        queued_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Should wait for the in-flight spawn gap.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                active_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": active_goal.pk, "auto_proposal": False},
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                queued_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": queued_goal.pk,
+                "auto_proposal": False,
+                "manual_run_all_queue": True,
+            },
+        )
+
+        stopped = autonomous_goals.stop_running_autonomous_goal_workflow(
+            active_goal.pk, system_agents.AUTONOMOUS_GOAL_DELETED_ERROR
+        )
+
+        self.assertTrue(stopped)
+        workflow.refresh_from_db()
+        queued_workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertTrue(autonomous_goals.autonomous_goal_queue_busy())
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_QUEUED)
+        queued_workflow.delete()
+        self.assertTrue(autonomous_goals.autonomous_goal_queue_busy())
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_leaves_live_uninterrupted_run(
@@ -13991,6 +14047,11 @@ class AutonomousGoalWorkflowTests(TestCase):
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={"autonomous_goal_id": running_goal.pk, "auto_proposal": False},
         )
+        SystemWorkflow.objects.filter(pk=running_workflow.pk).update(
+            updated_at=timezone.now()
+            - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+            - timedelta(seconds=1)
+        )
         queued_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
@@ -14154,6 +14215,73 @@ class AutonomousGoalWorkflowTests(TestCase):
             instance=instance,
             status=SystemAgentRun.STATUS_FAILED,
             error=system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            reconciled = system_agents.reconcile_terminal_workflow_instances(
+                main_thread_id=workflow.main_thread_id
+            )
+
+        queued_workflow.refresh_from_db()
+        self.assertEqual(reconciled, 1)
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_RUNNING)
+        mock_spawn.assert_called_once_with(queued_workflow, queued_goal)
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_reconcile_completed_resolution_ag_run_drains_manual_queue(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        stopped_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Resolved goal",
+            goal="Its terminal callback was missed.",
+        )
+        queued_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Start after reconciliation.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                stopped_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={"autonomous_goal_id": stopped_goal.pk, "auto_proposal": False},
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                queued_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": queued_goal.pk,
+                "auto_proposal": False,
+                "manual_run_all_queue": True,
+            },
+        )
+        instance = _instance(
+            thread_id="stopped-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_FAILED,
+            error=system_agents.AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR,
         )
 
         with self.captureOnCommitCallbacks(execute=True):
@@ -15563,6 +15691,34 @@ class AutonomousGoalWorkflowTests(TestCase):
             [invocation.args[0] for invocation in mock_start.call_args_list],
             [first.pk, second.pk],
         )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._start_next_queued_autonomous_goal_workflow",
+        side_effect=OperationalError("database is locked"),
+    )
+    def test_auto_proposal_batch_survives_locked_pre_drain(
+        self, mock_drain: MagicMock
+    ) -> None:
+        project = _make_project()
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+
+        with patch.object(
+            autonomous_goals,
+            "_maybe_start_auto_proposal_workflow",
+            return_value=True,
+        ) as mock_start:
+            started = autonomous_goals.maybe_start_auto_proposal_workflows(
+                project=project
+            )
+
+        self.assertEqual(started, 1)
+        mock_drain.assert_called_once_with(project=project)
+        mock_start.assert_called_once_with(goal.pk)
 
     @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")

@@ -180,6 +180,7 @@ _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
 _AUTONOMOUS_GOAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
 
 _AUTONOMOUS_GOAL_MANUAL_QUEUE_STATE_KEY = "manual_run_all_queue"
+_AUTONOMOUS_GOAL_STOP_WAITING_FOR_SPAWN_STATE_KEY = "stop_waiting_for_spawn"
 
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -268,7 +269,7 @@ class _AutonomousGoalHistorySummaryUnpreservedError(RuntimeError):
 
 
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
-    if _start_next_queued_autonomous_goal_workflow(project=project) is not None:
+    if _try_start_next_queued_autonomous_goal_workflow(project=project) is not None:
         return 1
 
     goals = AutonomousGoal.objects.select_related("project").filter(
@@ -577,13 +578,35 @@ def _running_autonomous_goal_workflow_exists() -> bool:
     ).values("pk")
     if running_workflow_ids.exists():
         return True
-    return CodexInstance.objects.filter(
+    if CodexInstance.objects.filter(
         workflow_id__in=SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         ).values("pk"),
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         status__in=CodexInstance.ACTIVE_STATUSES,
-    ).exists()
+    ).exists():
+        return True
+    return _fresh_autonomous_goal_spawn_workflow_exists()
+
+
+def _fresh_autonomous_goal_spawn_workflow_exists() -> bool:
+    fresh_spawn = timezone.now() - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+    workflows = SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status__in=(SystemWorkflow.STATUS_RUNNING, SystemWorkflow.STATUS_BLOCKED),
+        step__in=(
+            system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING,
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            system_agents.STEP_BLOCKED,
+        ),
+        updated_at__gte=fresh_spawn,
+    )
+    for workflow in workflows.only("id"):
+        if not _autonomous_goal_workflow_is_in_fresh_spawn_gap(workflow):
+            continue
+        return True
+    return False
 
 
 def _queued_autonomous_goal_workflow_exists(*, project: Project | None = None) -> bool:
@@ -817,6 +840,18 @@ def _start_next_queued_autonomous_goal_workflow(
             workflow, autonomous_goal, project=project
         )
         return workflow
+
+
+def _try_start_next_queued_autonomous_goal_workflow(
+    *, project: Project | None = None
+) -> SystemWorkflow | None:
+    try:
+        return _start_next_queued_autonomous_goal_workflow(project=project)
+    except OperationalError as exc:
+        if not db.is_database_locked_error(exc):
+            raise
+        logger.warning("skipping queued autonomous goal drain because database is locked")
+        return None
 
 
 def _spawn_autonomous_goal_workflow_and_continue_queue(
@@ -1183,10 +1218,20 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
         if len(interrupted_runs) != len(runs):
             return False
         system_agents._mark_system_agent_runs_failed(interrupted_runs, error)
+    stop_waiting_for_spawn = (
+        not runs and _autonomous_goal_workflow_is_in_fresh_spawn_gap(workflow)
+    )
     system_agents._block_workflow(workflow, error, surface_to_thread=False)
+    if stop_waiting_for_spawn:
+        workflow.refresh_from_db(fields=["state"])
+        workflow.state = {
+            **workflow.state,
+            _AUTONOMOUS_GOAL_STOP_WAITING_FOR_SPAWN_STATE_KEY: True,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
     if runs and terminal_instance_returned:
         _cleanup_autonomous_goal_workflow_worktree(workflow)
-    if not runs or terminal_instance_returned:
+    if (not runs and not stop_waiting_for_spawn) or terminal_instance_returned:
         _start_next_queued_autonomous_goal_workflow_on_commit()
     return True
 
@@ -1310,6 +1355,33 @@ def _autonomous_goal_spawn_needs_recovery(workflow: SystemWorkflow) -> bool:
     return not workflow.agent_runs.filter(
         status=SystemAgentRun.STATUS_RUNNING
     ).exists()
+
+
+def _autonomous_goal_workflow_is_in_fresh_spawn_gap(
+    workflow: SystemWorkflow,
+) -> bool:
+    fresh_spawn = timezone.now() - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+    workflow_updated_at = workflow.updated_at
+    if timezone.is_naive(workflow_updated_at):
+        workflow_updated_at = workflow_updated_at.replace(tzinfo=UTC)
+    if workflow_updated_at < fresh_spawn:
+        return False
+    if workflow.step not in (
+        system_agents.STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING,
+        system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+        system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+        system_agents.STEP_BLOCKED,
+    ):
+        return False
+    if (
+        workflow.status == SystemWorkflow.STATUS_BLOCKED
+        and not workflow.state.get(_AUTONOMOUS_GOAL_STOP_WAITING_FOR_SPAWN_STATE_KEY)
+    ):
+        return False
+    if workflow.agent_runs.exists():
+        return False
+    return not CodexInstance.objects.filter(workflow_id=workflow.pk).exists()
+
 
 def _recover_stranded_autonomous_goal_workflow(workflow: SystemWorkflow) -> None:
     """Recover an autonomous-goal workflow stranded by a dead spawn handler.
@@ -1480,7 +1552,7 @@ def _reconcile_cancelled_autonomous_goal_terminal_runs(
 ) -> int:
     workflows = SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        status=SystemWorkflow.STATUS_BLOCKED,
+        status__in=(SystemWorkflow.STATUS_BLOCKED, SystemWorkflow.STATUS_COMPLETED),
     )
     if main_thread_id is not None:
         workflows = workflows.filter(main_thread_id=main_thread_id)
