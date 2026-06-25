@@ -63,7 +63,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     )
     pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
     unresolved_failure_notice_goal_ids = _autonomous_goal_failure_notice_ids(goal_ids)
-    auto_proposal_running = _autonomous_goal_running_auto_proposal_exists()
+    autonomous_goal_queue_busy = autonomous_goals.autonomous_goal_queue_busy()
     accepted_session_blocking_goal_ids = (
         autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
             goals
@@ -130,7 +130,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
             accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
-            auto_proposal_running=auto_proposal_running,
+            autonomous_goal_queue_busy=autonomous_goal_queue_busy,
             no_change_goal_ids=no_change_goal_ids,
             auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
         )
@@ -151,14 +151,6 @@ def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
         ).values_list("autonomous_goal_id", flat=True)
         if isinstance(goal_id, int)
     }
-
-
-def _autonomous_goal_running_auto_proposal_exists() -> bool:
-    return SystemWorkflow.objects.filter(
-        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        status=SystemWorkflow.STATUS_RUNNING,
-        state__auto_proposal=True,
-    ).exists()
 
 
 def _autonomous_goal_no_change_ids(
@@ -187,7 +179,7 @@ def _autonomous_goal_run_badge(
     continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
     accepted_session_blocking_goal_ids: set[int],
-    auto_proposal_running: bool,
+    autonomous_goal_queue_busy: bool,
     no_change_goal_ids: set[int],
     auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
@@ -274,12 +266,12 @@ def _autonomous_goal_run_badge(
                 "auto-proposal safety threshold. It will try again as quota recovers."
             ),
         )
-    if goal.auto_proposal_enabled and auto_proposal_running:
+    if goal.auto_proposal_enabled and autonomous_goal_queue_busy:
         return AutonomousGoalRunBadge(
             state="queued",
             label="Queued",
             title="Autonomous goal is queued",
-            detail="Not running because another auto-proposal run is active.",
+            detail="Not running because another autonomous goal is already running.",
         )
     if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
         return AutonomousGoalRunBadge(

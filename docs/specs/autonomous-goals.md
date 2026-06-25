@@ -71,6 +71,9 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
   approval prompts.
 - `AG-background-queue`: AG-owned background sessions are globally queued so only one executes
   at a time.
+- `AG-manual-start-admission`: Manual Run and Run all do not create durable queued work.
+  They request admission to the global AG queue, start one eligible background session if
+  the queue is idle, and show visible retry feedback if another AG is already running.
 - `AG-independent-lifecycles`: Queueing does not make AG lifecycles dependent. Each AG remains
   independent except for the shared one-at-a-time execution queue.
 - `AG-stack-continuation`: A token budget allows repeated background attempts,
@@ -155,7 +158,10 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-accept-low-quota-auto`: Low quota prevents automatic AG starts and shows a low-quota reason.
 - `AG-accept-manual-quota-override`: Manual Run can start an AG below the automatic quota threshold.
 - `AG-accept-background-queue`: Multiple eligible AGs execute only one AG-owned background session at a
-  time, with queued state shown for waiting AGs.
+  time. Automatic starts waiting behind active AG work show queued state; manual starts
+  show visible retry feedback when the queue is occupied.
+- `AG-accept-run-all-admission`: Run all starts at most one eligible AG per request and leaves
+  the remaining manual goals eligible for a later request.
 - `AG-accept-accepted-session-block`: Accepting a Proposal starts a user-visible session and blocks only the
   producing AG until the session is Done or archived.
 - `AG-accept-inactive-accepted-session-block`: If the accepted session is inactive but not Done or archived, the AG
