@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast, override
 
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, models, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
@@ -604,7 +604,10 @@ def _queued_autonomous_goal_workflow_exists(*, project: Project | None = None) -
 
 
 def autonomous_goal_queue_busy() -> bool:
-    return _running_autonomous_goal_workflow_exists()
+    return (
+        _running_autonomous_goal_workflow_exists()
+        or _queued_autonomous_goal_workflow_exists()
+    )
 
 
 def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) -> bool:
@@ -831,7 +834,7 @@ def _spawn_autonomous_goal_workflow_and_continue_queue(
 def _continue_queue_if_workflow_stopped(workflow: SystemWorkflow) -> None:
     workflow.refresh_from_db(fields=["status", "updated_at"])
     if not workflow.is_active:
-        _start_next_queued_autonomous_goal_workflow()
+        _start_next_queued_autonomous_goal_workflow_on_commit()
 
 
 def _start_next_queued_autonomous_goal_workflow_on_commit() -> None:
@@ -1471,6 +1474,52 @@ def _cleanup_cancelled_autonomous_goal_terminal_run(
     _cleanup_autonomous_goal_workflow_worktree(workflow)
     _start_next_queued_autonomous_goal_workflow_on_commit()
 
+
+def _reconcile_cancelled_autonomous_goal_terminal_runs(
+    *, main_thread_id: str | None = None, workflow_id: int | None = None
+) -> int:
+    workflows = SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status=SystemWorkflow.STATUS_BLOCKED,
+    )
+    if main_thread_id is not None:
+        workflows = workflows.filter(main_thread_id=main_thread_id)
+    if workflow_id is not None:
+        workflows = workflows.filter(pk=workflow_id)
+    runs = (
+        SystemAgentRun.objects.select_related("instance", "workflow")
+        .filter(
+            workflow__in=workflows,
+            status=SystemAgentRun.STATUS_FAILED,
+            error__in=(
+                system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
+                *_AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERROR_VALUES,
+            ),
+            instance__status__in=(
+                CodexInstance.STATUS_COMPLETED,
+                CodexInstance.STATUS_FAILED,
+            ),
+        )
+        .filter(
+            models.Q(instance__workflow_routing_started_at__isnull=True)
+            | models.Q(
+                instance__workflow_routing_started_at__lt=timezone.now()
+                - system_agents._WORKFLOW_ROUTE_CLAIM_TIMEOUT
+            )
+        )
+        .order_by("created_at", "id")
+    )
+    reconciled = 0
+    routed_instance_ids: set[int] = set()
+    for run in runs:
+        instance = run.instance
+        if instance is None or instance.pk in routed_instance_ids:
+            continue
+        routed_instance_ids.add(instance.pk)
+        if system_agents.on_codex_instance_finished(instance):
+            reconciled += 1
+    return reconciled
+
 def _complete_autonomous_goal_workflow_after_proposal_resolution(
     workflow: SystemWorkflow, *, outcome_status: str
 ) -> None:
@@ -1543,7 +1592,7 @@ def _handle_autonomous_goal_agent_finished(
             token_delta,
         )
     if post_commit_action is None:
-        _start_next_queued_autonomous_goal_workflow()
+        _start_next_queued_autonomous_goal_workflow_on_commit()
         return
     for cwd in post_commit_action.cleanup_candidate_cwds:
         _cleanup_autonomous_goal_candidate_cwd(cwd)
@@ -1577,7 +1626,7 @@ def _handle_autonomous_goal_agent_finished(
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
         _continue_queue_if_workflow_stopped(workflow)
         return
-    _start_next_queued_autonomous_goal_workflow()
+    _start_next_queued_autonomous_goal_workflow_on_commit()
 
 def _handle_autonomous_goal_agent_finished_locked(
     instance: CodexInstance,

@@ -522,9 +522,13 @@ def reconcile_terminal_workflow_instances(
             workflow_id=workflow_id,
         )
     )
+    reconciled = autonomous_goals._reconcile_cancelled_autonomous_goal_terminal_runs(
+        main_thread_id=main_thread_id,
+        workflow_id=workflow_id,
+    )
     if not workflows:
-        return 0
-    reconciled = _reconcile_terminal_system_agent_instances(workflows)
+        return reconciled
+    reconciled += _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
     reconciled += _drive_orphaned_workflow_spawns(workflows)
     return reconciled
