@@ -802,6 +802,10 @@ def _continue_queue_if_workflow_stopped(workflow: SystemWorkflow) -> None:
         _start_next_queued_autonomous_goal_workflow()
 
 
+def _start_next_queued_autonomous_goal_workflow_on_commit() -> None:
+    transaction.on_commit(_start_next_queued_autonomous_goal_workflow)
+
+
 def _create_autonomous_goal_workflow_record(
     *,
     autonomous_goal: AutonomousGoal,
@@ -1141,11 +1145,14 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
         )
         if not interrupted_runs:
             return False
+        if len(interrupted_runs) != len(runs):
+            return False
         system_agents._mark_system_agent_runs_failed(interrupted_runs, error)
     system_agents._block_workflow(workflow, error, surface_to_thread=False)
     if runs and terminal_instance_returned:
         _cleanup_autonomous_goal_workflow_worktree(workflow)
-    _start_next_queued_autonomous_goal_workflow()
+    if not runs or terminal_instance_returned:
+        _start_next_queued_autonomous_goal_workflow_on_commit()
     return True
 
 def stop_running_autonomous_goal_stack_after_proposal_resolution(
@@ -1207,7 +1214,8 @@ def stop_running_autonomous_goal_stack_after_proposal_resolution(
         workflow = locked
     if cleanup_cwd and (not runs or terminal_instance_returned):
         _cleanup_autonomous_goal_candidate_cwd(cleanup_cwd)
-    _start_next_queued_autonomous_goal_workflow()
+    if not runs or terminal_instance_returned:
+        _start_next_queued_autonomous_goal_workflow_on_commit()
     return True
 
 def _autonomous_goal_proposal_resolution_error(outcome_status: str) -> str:
@@ -1419,7 +1427,14 @@ def _cleanup_cancelled_autonomous_goal_terminal_run(
         CodexInstance.STATUS_FAILED,
     ):
         return
+    if workflow.agent_runs.filter(
+        status=SystemAgentRun.STATUS_FAILED,
+        error=run.error,
+        instance__status__in=CodexInstance.ACTIVE_STATUSES,
+    ).exists():
+        return
     _cleanup_autonomous_goal_workflow_worktree(workflow)
+    _start_next_queued_autonomous_goal_workflow_on_commit()
 
 def _complete_autonomous_goal_workflow_after_proposal_resolution(
     workflow: SystemWorkflow, *, outcome_status: str
@@ -3016,19 +3031,20 @@ def _interrupt_autonomous_goal_runs(
     runs: list[SystemAgentRun],
 ) -> tuple[list[SystemAgentRun], bool]:
     interrupted_runs: list[SystemAgentRun] = []
-    terminal_instance_returned = False
+    terminal_instance_returned = True
     for run in runs:
         interrupted = codex_pool.interrupt_instance(
             run.instance_id, expected_thread_id=run.thread_id
         )
         if interrupted is None:
+            terminal_instance_returned = False
             continue
         interrupted_runs.append(run)
-        if interrupted.status in (
+        if interrupted.status not in (
             CodexInstance.STATUS_COMPLETED,
             CodexInstance.STATUS_FAILED,
         ):
-            terminal_instance_returned = True
+            terminal_instance_returned = False
     return interrupted_runs, terminal_instance_returned
 
 def _fail_autonomous_goal_run_and_block_workflow(
