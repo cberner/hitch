@@ -10675,6 +10675,44 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_recover_stranded_candidate_spawn_drains_next_manual_queue_item(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        goal = self._autonomous_goal()
+        workflow = self._stranded_autonomous_goal_workflow(
+            system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING, goal
+        )
+        queued_goal = AutonomousGoal.objects.create(
+            project=goal.project,
+            title="Queued goal",
+            goal="Start after recovery blocks the stranded head.",
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                queued_goal.pk
+            ),
+            cwd=goal.project.repo_path,
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": queued_goal.pk,
+                "auto_proposal": False,
+                "manual_run_all_queue": True,
+            },
+        )
+
+        autonomous_goals._recover_stranded_autonomous_goal_workflow(workflow)
+
+        workflow.refresh_from_db()
+        queued_workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_RUNNING)
+        mock_spawn.assert_called_once_with(queued_workflow, queued_goal)
+
+    @patch(
         "hitch.main.workflows.autonomous_goals."
         "_block_autonomous_goal_spawn_failure_if_active"
     )
@@ -13360,6 +13398,98 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIsNone(workflow)
         self.assertEqual(SystemWorkflow.objects.count(), 1)
         mock_spawn.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_manual_start_waits_when_stopped_autonomous_goal_worker_is_active(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        stopped_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Stopped goal",
+            goal="Still has a live interrupted worker.",
+        )
+        stopped_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                stopped_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"autonomous_goal_id": stopped_goal.pk, "auto_proposal": False},
+        )
+        CodexInstance.objects.create(
+            pid=123,
+            thread_id="stopped-thread",
+            cwd=project.repo_path,
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=stopped_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        waiting_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should not start while the old worker is active.",
+        )
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=waiting_goal,
+            use_worktrees=True,
+        )
+
+        self.assertIsNone(workflow)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        self.assertTrue(autonomous_goals.autonomous_goal_queue_busy())
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_manual_start_drains_idle_existing_queue_before_returning_busy(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        queued_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Recover this idle queue item.",
+        )
+        waiting_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should not jump ahead.",
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                queued_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": queued_goal.pk, "manual_run_all_queue": True},
+        )
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=waiting_goal,
+            use_worktrees=True,
+        )
+
+        queued_workflow.refresh_from_db()
+        self.assertIsNone(workflow)
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertFalse(
+            SystemWorkflow.objects.filter(
+                main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                    waiting_goal.pk
+                )
+            ).exists()
+        )
+        mock_spawn.assert_called_once_with(queued_workflow, queued_goal)
 
     @patch(
         "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"

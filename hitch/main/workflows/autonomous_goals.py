@@ -571,9 +571,19 @@ def _lock_autonomous_goal_queue() -> None:
 
 
 def _running_autonomous_goal_workflow_exists() -> bool:
-    return SystemWorkflow.objects.filter(
+    running_workflow_ids = SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status=SystemWorkflow.STATUS_RUNNING,
+    ).values("pk")
+    if running_workflow_ids.exists():
+        return True
+    return CodexInstance.objects.filter(
+        workflow_id__in=SystemWorkflow.objects.filter(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        ).values("pk"),
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists()
 
 
@@ -635,6 +645,10 @@ def start_autonomous_goal_workflow_if_queue_idle(
     autonomous_goal: AutonomousGoal,
     use_worktrees: bool = False,
 ) -> SystemWorkflow | None:
+    workflow: SystemWorkflow | None = None
+    autonomous_goal_to_spawn: AutonomousGoal | None = None
+    created = False
+    should_drain_existing_queue = False
     with transaction.atomic():
         _lock_autonomous_goal_queue()
         autonomous_goal = (
@@ -646,17 +660,23 @@ def start_autonomous_goal_workflow_if_queue_idle(
         if _running_autonomous_goal_workflow_exists():
             return None
         if _queued_autonomous_goal_workflow_exists():
-            return None
-        workflow, created = _create_autonomous_goal_workflow_record(
-            autonomous_goal=autonomous_goal,
-            auto_proposal=False,
-            default_branch_sha=None,
-            use_worktrees=use_worktrees,
-            stack_continuation_proposal=None,
-            status=SystemWorkflow.STATUS_RUNNING,
+            should_drain_existing_queue = True
+        else:
+            workflow, created = _create_autonomous_goal_workflow_record(
+                autonomous_goal=autonomous_goal,
+                auto_proposal=False,
+                default_branch_sha=None,
+                use_worktrees=use_worktrees,
+                stack_continuation_proposal=None,
+                status=SystemWorkflow.STATUS_RUNNING,
+            )
+            autonomous_goal_to_spawn = autonomous_goal
+    if should_drain_existing_queue:
+        _start_next_queued_autonomous_goal_workflow()
+    elif created and workflow is not None and autonomous_goal_to_spawn is not None:
+        _spawn_autonomous_goal_history_summary_or_candidate(
+            workflow, autonomous_goal_to_spawn
         )
-    if created:
-        _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
     return workflow
 
 
@@ -1304,6 +1324,7 @@ def _recover_stranded_autonomous_goal_workflow(workflow: SystemWorkflow) -> None
             _spawn_autonomous_goal_history_summary_or_fallback(
                 workflow, autonomous_goal
             )
+            _continue_queue_if_workflow_stopped(workflow)
             return
         candidate = workflow.state.get("candidate")
         if (
@@ -1313,6 +1334,7 @@ def _recover_stranded_autonomous_goal_workflow(workflow: SystemWorkflow) -> None
             _spawn_autonomous_goal_judge_or_block(
                 workflow, autonomous_goal, candidate
             )
+            _continue_queue_if_workflow_stopped(workflow)
             return
     _block_autonomous_goal_spawn_failure_if_active(
         workflow_id=workflow.pk,
@@ -1322,6 +1344,7 @@ def _recover_stranded_autonomous_goal_workflow(workflow: SystemWorkflow) -> None
             "the worker launched"
         ),
     )
+    _continue_queue_if_workflow_stopped(workflow)
 
 @engine.register
 class _AutonomousGoalHandler(engine.WorkflowHandler):
