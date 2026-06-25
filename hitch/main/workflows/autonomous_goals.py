@@ -179,6 +179,8 @@ _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
 
 _AUTONOMOUS_GOAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
 
+_AUTONOMOUS_GOAL_MANUAL_QUEUE_STATE_KEY = "manual_run_all_queue"
+
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -266,6 +268,9 @@ class _AutonomousGoalHistorySummaryUnpreservedError(RuntimeError):
 
 
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
+    if _start_next_queued_autonomous_goal_workflow() is not None:
+        return 1
+
     goals = AutonomousGoal.objects.select_related("project").filter(
         auto_proposal_enabled=True,
         deleted_at__isnull=True,
@@ -451,6 +456,8 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _running_autonomous_goal_workflow_exists():
         return False
+    if _queued_autonomous_goal_workflow_exists():
+        return False
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return False
     if stack_continuation_proposal is not None:
@@ -513,6 +520,8 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
     if _running_autonomous_goal_workflow_exists():
         return None
+    if _queued_autonomous_goal_workflow_exists():
+        return None
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
 
@@ -568,6 +577,13 @@ def _running_autonomous_goal_workflow_exists() -> bool:
     ).exists()
 
 
+def _queued_autonomous_goal_workflow_exists() -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status=SystemWorkflow.STATUS_QUEUED,
+    ).exists()
+
+
 def autonomous_goal_queue_busy() -> bool:
     return _running_autonomous_goal_workflow_exists()
 
@@ -577,6 +593,14 @@ def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) ->
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal.pk),
         status=SystemWorkflow.STATUS_RUNNING,
+    ).exists()
+
+
+def _autonomous_goal_pending_workflow_exists(autonomous_goal: AutonomousGoal) -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal.pk),
+        status__in=(SystemWorkflow.STATUS_RUNNING, SystemWorkflow.STATUS_QUEUED),
     ).exists()
 
 
@@ -621,15 +645,132 @@ def start_autonomous_goal_workflow_if_queue_idle(
         )
         if _running_autonomous_goal_workflow_exists():
             return None
+        if _queued_autonomous_goal_workflow_exists():
+            return None
         workflow, created = _create_autonomous_goal_workflow_record(
             autonomous_goal=autonomous_goal,
             auto_proposal=False,
             default_branch_sha=None,
             use_worktrees=use_worktrees,
             stack_continuation_proposal=None,
+            status=SystemWorkflow.STATUS_RUNNING,
         )
     if created:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
+    return workflow
+
+
+@dataclass(frozen=True)
+class AutonomousGoalBatchStartResult:
+    started_workflow: SystemWorkflow | None
+    queued_count: int
+
+
+def start_autonomous_goal_workflows_or_queue(
+    *,
+    autonomous_goals: list[AutonomousGoal],
+    use_worktrees: bool = False,
+) -> AutonomousGoalBatchStartResult:
+    goal_ids = [goal.pk for goal in autonomous_goals]
+    if not goal_ids:
+        return AutonomousGoalBatchStartResult(started_workflow=None, queued_count=0)
+
+    started_workflow: SystemWorkflow | None = None
+    started_goal: AutonomousGoal | None = None
+    queued_count = 0
+    should_drain_existing_queue = False
+    with transaction.atomic():
+        _lock_autonomous_goal_queue()
+        locked_goals = list(
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk__in=goal_ids, deleted_at__isnull=True)
+            .order_by("created_at", "id")
+        )
+        running = _running_autonomous_goal_workflow_exists()
+        queue_has_waiting = _queued_autonomous_goal_workflow_exists()
+        queue_occupied = running or queue_has_waiting
+        for autonomous_goal in locked_goals:
+            if _autonomous_goal_pending_workflow_exists(autonomous_goal):
+                continue
+            status = (
+                SystemWorkflow.STATUS_QUEUED
+                if queue_occupied or started_workflow is not None
+                else SystemWorkflow.STATUS_RUNNING
+            )
+            workflow, created = _create_autonomous_goal_workflow_record(
+                autonomous_goal=autonomous_goal,
+                auto_proposal=False,
+                default_branch_sha=None,
+                use_worktrees=use_worktrees,
+                stack_continuation_proposal=None,
+                status=status,
+            )
+            if status == SystemWorkflow.STATUS_RUNNING:
+                started_workflow = workflow
+                started_goal = autonomous_goal
+                queue_occupied = True
+            elif created:
+                queued_count += 1
+        should_drain_existing_queue = (
+            not running and queue_has_waiting and started_workflow is None
+        )
+
+    if started_workflow is not None and started_goal is not None:
+        _spawn_autonomous_goal_history_summary_or_candidate(
+            started_workflow, started_goal
+        )
+    elif should_drain_existing_queue:
+        started_workflow = _start_next_queued_autonomous_goal_workflow()
+    return AutonomousGoalBatchStartResult(
+        started_workflow=started_workflow,
+        queued_count=queued_count,
+    )
+
+
+def _start_next_queued_autonomous_goal_workflow() -> SystemWorkflow | None:
+    workflow: SystemWorkflow | None = None
+    autonomous_goal: AutonomousGoal | None = None
+    with transaction.atomic():
+        _lock_autonomous_goal_queue()
+        if _running_autonomous_goal_workflow_exists():
+            return None
+        workflow = (
+            SystemWorkflow.objects.select_for_update()
+            .filter(
+                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+                status=SystemWorkflow.STATUS_QUEUED,
+            )
+            .order_by("created_at", "id")
+            .first()
+        )
+        if workflow is None:
+            return None
+        autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
+            .first()
+        )
+        if autonomous_goal is None:
+            system_agents._block_workflow(
+                workflow,
+                "autonomous goal no longer exists",
+                surface_to_thread=False,
+            )
+            return None
+        if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+            system_agents._block_workflow(
+                workflow,
+                "autonomous goal has an accepted session waiting",
+                surface_to_thread=False,
+            )
+            return None
+        workflow.status = SystemWorkflow.STATUS_RUNNING
+        workflow.save(update_fields=["status", "updated_at"])
+
+    _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
     return workflow
 
 
@@ -640,6 +781,7 @@ def _create_autonomous_goal_workflow_record(
     default_branch_sha: str | None,
     use_worktrees: bool,
     stack_continuation_proposal: ProposedSession | None,
+    status: str = SystemWorkflow.STATUS_RUNNING,
 ) -> tuple[SystemWorkflow, bool]:
     main_thread_id = _autonomous_goal_main_thread_id(autonomous_goal.pk)
     state: dict[str, Any] = {
@@ -653,6 +795,8 @@ def _create_autonomous_goal_workflow_record(
         "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
         "web_search_mode": autonomous_goal.web_search_mode,
     }
+    if status == SystemWorkflow.STATUS_QUEUED:
+        state[_AUTONOMOUS_GOAL_MANUAL_QUEUE_STATE_KEY] = True
     if autonomous_goal.proposal_budget is not None:
         state[_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY] = (
             autonomous_goal.proposal_budget
@@ -688,7 +832,7 @@ def _create_autonomous_goal_workflow_record(
                 kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
                 main_thread_id=main_thread_id,
                 cwd=autonomous_goal.project.repo_path,
-                status=SystemWorkflow.STATUS_RUNNING,
+                status=status,
                 step=_initial_autonomous_goal_workflow_step(autonomous_goal),
                 state=state,
             )
@@ -696,7 +840,7 @@ def _create_autonomous_goal_workflow_record(
         existing_workflow = SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=main_thread_id,
-            status=SystemWorkflow.STATUS_RUNNING,
+            status__in=(SystemWorkflow.STATUS_RUNNING, SystemWorkflow.STATUS_QUEUED),
         ).first()
         if existing_workflow is None:
             raise
@@ -1034,6 +1178,7 @@ def stop_running_autonomous_goal_stack_after_proposal_resolution(
         workflow = locked
     if cleanup_cwd and (not runs or terminal_instance_returned):
         _cleanup_autonomous_goal_candidate_cwd(cleanup_cwd)
+    _start_next_queued_autonomous_goal_workflow()
     return True
 
 def _autonomous_goal_proposal_resolution_error(outcome_status: str) -> str:
@@ -1347,6 +1492,7 @@ def _handle_autonomous_goal_agent_finished(
     if post_commit_action.kind == _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
         return
+    _start_next_queued_autonomous_goal_workflow()
 
 def _handle_autonomous_goal_agent_finished_locked(
     instance: CodexInstance,

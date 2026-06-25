@@ -633,6 +633,7 @@ class SystemWorkflow(models.Model):
     KIND_AUTONOMOUS_GOAL_RUN = "autonomous_goal_run"
 
     STATUS_RUNNING = "running"
+    STATUS_QUEUED = "queued"
     STATUS_BLOCKED = "blocked"
     STATUS_COMPLETED = "completed"
     STATUS_FAILED = "failed"
@@ -640,6 +641,7 @@ class SystemWorkflow(models.Model):
 
     STATUS_CHOICES = (
         (STATUS_RUNNING, "running"),
+        (STATUS_QUEUED, "queued"),
         (STATUS_BLOCKED, "blocked"),
         (STATUS_COMPLETED, "completed"),
         (STATUS_FAILED, "failed"),

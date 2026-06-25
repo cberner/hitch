@@ -13361,6 +13361,141 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(SystemWorkflow.objects.count(), 1)
         mock_spawn.assert_not_called()
 
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_manual_run_all_starts_first_goal_and_queues_remaining_goals(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        first_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="First goal",
+            goal="Start immediately.",
+        )
+        second_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Second goal",
+            goal="Wait durably.",
+        )
+
+        result = autonomous_goals.start_autonomous_goal_workflows_or_queue(
+            autonomous_goals=[first_goal, second_goal],
+            use_worktrees=True,
+        )
+
+        self.assertIsNotNone(result.started_workflow)
+        self.assertEqual(result.queued_count, 1)
+        workflows = list(SystemWorkflow.objects.order_by("created_at", "id"))
+        self.assertEqual(
+            [workflow.status for workflow in workflows],
+            [SystemWorkflow.STATUS_RUNNING, SystemWorkflow.STATUS_QUEUED],
+        )
+        self.assertEqual(
+            [workflow.state["autonomous_goal_id"] for workflow in workflows],
+            [first_goal.pk, second_goal.pk],
+        )
+        self.assertTrue(workflows[1].state["manual_run_all_queue"])
+        mock_spawn.assert_called_once_with(workflows[0], first_goal)
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_next_manual_queue_item_starts_after_active_goal_finishes(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        first_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="First goal",
+            goal="Already finished.",
+        )
+        second_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Second goal",
+            goal="Start after the first.",
+        )
+        running_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                first_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED,
+            state={"autonomous_goal_id": first_goal.pk, "auto_proposal": False},
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                second_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": second_goal.pk,
+                "auto_proposal": False,
+                "manual_run_all_queue": True,
+            },
+        )
+
+        started = autonomous_goals._start_next_queued_autonomous_goal_workflow()
+
+        self.assertEqual(started, queued_workflow)
+        running_workflow.refresh_from_db()
+        queued_workflow.refresh_from_db()
+        self.assertEqual(running_workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_RUNNING)
+        mock_spawn.assert_called_once_with(queued_workflow, second_goal)
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_manual_run_all_appends_behind_idle_existing_queue(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        queued_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Already queued",
+            goal="Start before newly queued goals.",
+        )
+        new_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="New goal",
+            goal="Wait behind the existing queue.",
+        )
+        queued_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                queued_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_QUEUED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": queued_goal.pk,
+                "auto_proposal": False,
+                "manual_run_all_queue": True,
+            },
+        )
+
+        result = autonomous_goals.start_autonomous_goal_workflows_or_queue(
+            autonomous_goals=[new_goal],
+            use_worktrees=True,
+        )
+
+        queued_workflow.refresh_from_db()
+        new_workflow = SystemWorkflow.objects.get(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(new_goal.pk)
+        )
+        self.assertEqual(result.started_workflow, queued_workflow)
+        self.assertEqual(result.queued_count, 1)
+        self.assertEqual(queued_workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(new_workflow.status, SystemWorkflow.STATUS_QUEUED)
+        mock_spawn.assert_called_once_with(queued_workflow, queued_goal)
+
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
         "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",

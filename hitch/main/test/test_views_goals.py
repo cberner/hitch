@@ -629,9 +629,8 @@ class AutonomousGoalViewTests(TestCase):
             response,
             "Not running because another autonomous goal run is active.",
         )
-        self.assertContains(response, 'data-state="skipped"')
-        self.assertContains(response, ">Skipped</button>", html=False)
-        self.assertContains(response, "No useful docs proposal was found.")
+        self.assertNotContains(response, ">Skipped</button>", html=False)
+        self.assertNotContains(response, "No useful docs proposal was found.")
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
@@ -671,6 +670,43 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "remaining Codex quota is below")
         self.assertNotContains(response, ">Done</button>", html=False)
         self.assertNotContains(response, "The last run proposed useful work.")
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
+    def test_page_shows_quota_pause_instead_of_stale_skipped_run(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        self.mock_auto_proposals_paused_by_quota.return_value = True
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate": {"message": "No useful docs proposal was found."},
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="quota"')
+        self.assertContains(response, ">Quota</button>", html=False)
+        self.assertNotContains(response, ">Skipped</button>", html=False)
+        self.assertNotContains(response, "No useful docs proposal was found.")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -3017,9 +3053,9 @@ class AutonomousGoalViewTests(TestCase):
         mock_start.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflows_or_queue"
     )
-    def test_run_all_starts_first_selected_project_goal(
+    def test_run_all_starts_or_queues_selected_project_goals(
         self, mock_start: MagicMock
     ) -> None:
         project = _make_project()
@@ -3030,7 +3066,7 @@ class AutonomousGoalViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        AutonomousGoal.objects.create(
+        second = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful docs increments.",
@@ -3050,19 +3086,14 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.post(reverse("run_autonomous_goals"))
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
-            [first],
-        )
-        self.assertEqual(
-            [call.kwargs["use_worktrees"] for call in mock_start.call_args_list],
-            [True],
+        mock_start.assert_called_once_with(
+            autonomous_goals=[first, second],
+            use_worktrees=True,
         )
 
     @patch("hitch.main.workflows.autonomous_goals.autonomous_goal_queue_busy")
     @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle",
-        return_value=None,
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflows_or_queue",
     )
     def test_run_all_redirects_with_busy_notice_when_queue_active(
         self, mock_start: MagicMock, mock_queue_busy: MagicMock
@@ -3073,6 +3104,10 @@ class AutonomousGoalViewTests(TestCase):
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
+        )
+        mock_start.return_value = autonomous_goals.AutonomousGoalBatchStartResult(
+            started_workflow=None,
+            queued_count=0,
         )
         mock_queue_busy.return_value = True
 

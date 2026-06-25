@@ -208,6 +208,13 @@ def _autonomous_goal_run_badge(
                 title="Autonomous goal is running",
                 detail="This autonomous goal run is still working.",
             )
+        if workflow.status == SystemWorkflow.STATUS_QUEUED:
+            return AutonomousGoalRunBadge(
+                state="queued",
+                label="Queued",
+                title="Autonomous goal is queued",
+                detail="This autonomous goal run is waiting for the active run to finish.",
+            )
         if workflow.status == SystemWorkflow.STATUS_BLOCKED:
             return AutonomousGoalRunBadge(
                 state="blocked",
@@ -263,10 +270,6 @@ def _autonomous_goal_run_badge(
                 "for the tracked branch. It will try again after that branch changes."
             ),
         )
-    if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
-        completed_badge = _completed_autonomous_goal_run_badge(workflow)
-        if completed_badge is not None:
-            return completed_badge
     if goal.auto_proposal_enabled and auto_proposals_paused_by_quota:
         return AutonomousGoalRunBadge(
             state="quota",
@@ -284,6 +287,10 @@ def _autonomous_goal_run_badge(
             title="Autonomous goal is queued",
             detail="Not running because another autonomous goal run is active.",
         )
+    if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
+        completed_badge = _completed_autonomous_goal_run_badge(workflow)
+        if completed_badge is not None:
+            return completed_badge
     if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
         return AutonomousGoalRunBadge(
             state="ready",

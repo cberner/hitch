@@ -307,21 +307,24 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
+    runnable_goals = []
     for autonomous_goal in AutonomousGoal.objects.filter(
         project=project,
         deleted_at__isnull=True,
     ):
         if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
             continue
-        workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
-            autonomous_goal=autonomous_goal,
-            use_worktrees=True,
-        )
-        if workflow is not None:
-            break
-    else:
-        if goal_workflows.autonomous_goal_queue_busy():
-            return _redirect_autonomous_goals_run_busy()
+        runnable_goals.append(autonomous_goal)
+    result = goal_workflows.start_autonomous_goal_workflows_or_queue(
+        autonomous_goals=runnable_goals,
+        use_worktrees=True,
+    )
+    if (
+        result.started_workflow is None
+        and result.queued_count == 0
+        and goal_workflows.autonomous_goal_queue_busy()
+    ):
+        return _redirect_autonomous_goals_run_busy()
     return redirect("autonomous_goals")
 
 

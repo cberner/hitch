@@ -56,6 +56,7 @@ class SystemWorkflowActiveTests(SimpleTestCase):
     def test_is_active_covers_every_status(self) -> None:
         expected = {
             SystemWorkflow.STATUS_RUNNING: True,
+            SystemWorkflow.STATUS_QUEUED: False,
             SystemWorkflow.STATUS_BLOCKED: False,
             SystemWorkflow.STATUS_COMPLETED: False,
             SystemWorkflow.STATUS_FAILED: False,
