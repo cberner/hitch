@@ -2,6 +2,7 @@
 from datetime import datetime
 from typing import Any
 
+from django.contrib import messages
 from django.db import transaction
 from django.db.models import Q
 from django.http import (
@@ -21,6 +22,7 @@ from hitch.main.goals.autonomous_goal_form import (
 )
 from hitch.main.goals.autonomous_goal_proposal_stack import (
     _autonomous_goal_accepted_session_blocks_start,
+    _autonomous_goal_pending_proposal_blocks_start,
     _proposal_outcome_metadata,
 )
 from hitch.main.goals.autonomous_goal_run_display import (
@@ -293,10 +295,16 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
         raise Http404("autonomous goal not found")
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return redirect("autonomous_goals")
-    goal_workflows.start_autonomous_goal_workflow(
+    workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
         autonomous_goal=autonomous_goal,
         use_worktrees=True,
     )
+    if workflow is None:
+        messages.info(
+            request,
+            "Another autonomous goal is already running. Try again when it finishes.",
+        )
+        return redirect("autonomous_goals")
     return redirect("autonomous_goals")
 
 @require_http_methods(["POST"])
@@ -308,13 +316,36 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
         project=project,
         deleted_at__isnull=True,
     ):
-        if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+        if _autonomous_goal_run_all_skips_goal(autonomous_goal):
             continue
-        goal_workflows.start_autonomous_goal_workflow(
+        workflow = goal_workflows.start_autonomous_goal_workflow_if_queue_idle(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
+        if workflow is None:
+            messages.info(
+                request,
+                "Another autonomous goal is already running. Try again when it finishes.",
+            )
+            break
+        messages.info(
+            request,
+            "Started one autonomous goal. Run all again when it finishes to start the next.",
+        )
+        break
     return redirect("autonomous_goals")
+
+
+def _autonomous_goal_run_all_skips_goal(autonomous_goal: AutonomousGoal) -> bool:
+    if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
+        return True
+    if _autonomous_goal_pending_proposal_blocks_start(autonomous_goal):
+        return True
+    return ProposedSession.objects.filter(
+        autonomous_goal=autonomous_goal,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).exists()
+
 
 @require_http_methods(["GET"])
 def autonomous_goal_run_log(request: HttpRequest, workflow_id: int) -> HttpResponse:

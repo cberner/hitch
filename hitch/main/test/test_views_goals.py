@@ -624,15 +624,13 @@ class AutonomousGoalViewTests(TestCase):
             response,
             "It will try again after that branch changes.",
         )
-        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertContains(response, ">Queued</button>", html=False)
         self.assertContains(
             response,
-            "Auto-proposal is enabled. This goal will start when the scheduler runs "
-            "and quota allows.",
+            "Not running because another autonomous goal is already running.",
         )
-        self.assertContains(response, 'data-state="skipped"')
-        self.assertContains(response, ">Skipped</button>", html=False)
-        self.assertContains(response, "No useful docs proposal was found.")
+        self.assertNotContains(response, ">Skipped</button>", html=False)
+        self.assertNotContains(response, "No useful docs proposal was found.")
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
@@ -1093,7 +1091,47 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, ">Queued</button>", html=False)
         self.assertContains(
             response,
-            "Not running because another auto-proposal run is active.",
+            "Not running because another autonomous goal is already running.",
+        )
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
+    def test_page_queues_auto_goal_when_manual_goal_is_running(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Wait while manual automation is active.",
+            auto_proposal_enabled=True,
+        )
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Manual running goal",
+            goal="Owns the global queue.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": False},
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="queued"')
+        self.assertContains(response, ">Queued</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because another autonomous goal is already running.",
         )
 
     @patch(
@@ -2886,7 +2924,9 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNone(goal.deleted_at)
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
@@ -2911,7 +2951,9 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_always_uses_worktrees(
         self, mock_start: MagicMock
     ) -> None:
@@ -2932,7 +2974,9 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_skips_goal_blocked_by_accepted_session(
         self, mock_start: MagicMock
     ) -> None:
@@ -2962,7 +3006,50 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
+    def test_run_single_shows_busy_when_another_goal_is_running(self) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Running goal",
+            goal="Already owns the queue.",
+        )
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should wait.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk},
+        )
+
+        response = self.client.post(
+            reverse("run_autonomous_goal", args=[goal.pk]),
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            SystemWorkflow.objects.filter(
+                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
+            ).count(),
+            1,
+        )
+        self.assertContains(
+            response,
+            "Another autonomous goal is already running. Try again when it finishes.",
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
     def test_run_single_is_scoped_to_selected_project(
         self, mock_start: MagicMock
     ) -> None:
@@ -2980,8 +3067,101 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow")
-    def test_run_all_starts_each_selected_project_goal(
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
+    def test_run_all_skips_goals_with_accepted_or_pending_proposal(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        accepted_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Accepted goal",
+            goal="Has accepted work.",
+        )
+        pending_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Pending goal",
+            goal="Has pending proposal.",
+        )
+        next_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Next goal",
+            goal="Should run next.",
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/repo",
+            project=project,
+            derived_stage="implementation",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=accepted_goal,
+            title="Accepted proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=accepted,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=pending_goal,
+            title="Pending proposal",
+        )
+
+        response = self.client.post(reverse("run_autonomous_goals"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
+            [next_goal],
+        )
+        self.assertContains(
+            response,
+            "Started one autonomous goal. Run all again when it finishes to start the next.",
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
+    def test_run_all_skips_goal_with_unresolved_notice(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        first = AutonomousGoal.objects.create(
+            project=project,
+            title="Already ran",
+            goal="Has unresolved work.",
+        )
+        second = AutonomousGoal.objects.create(
+            project=project,
+            title="Next goal",
+            goal="Should run next.",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=first,
+            title="No proposal notice",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        )
+
+        response = self.client.post(reverse("run_autonomous_goals"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
+            [second],
+        )
+        self.assertContains(
+            response,
+            "Started one autonomous goal. Run all again when it finishes to start the next.",
+        )
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
+    )
+    def test_run_all_starts_one_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
         project = _make_project()
@@ -2992,7 +3172,7 @@ class AutonomousGoalViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        second = AutonomousGoal.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful docs increments.",
@@ -3009,16 +3189,58 @@ class AutonomousGoalViewTests(TestCase):
             goal="Should not run.",
         )
 
-        response = self.client.post(reverse("run_autonomous_goals"))
+        response = self.client.post(reverse("run_autonomous_goals"), follow=True)
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
-            [first, second],
+            [first],
         )
         self.assertEqual(
             [call.kwargs["use_worktrees"] for call in mock_start.call_args_list],
-            [True, True],
+            [True],
+        )
+        self.assertContains(
+            response,
+            "Started one autonomous goal. Run all again when it finishes to start the next.",
+        )
+
+    def test_run_all_shows_busy_when_another_goal_is_running(self) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Running goal",
+            goal="Already owns the queue.",
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should wait.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk},
+        )
+
+        response = self.client.post(reverse("run_autonomous_goals"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            SystemWorkflow.objects.filter(
+                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
+            ).count(),
+            1,
+        )
+        self.assertContains(
+            response,
+            "Another autonomous goal is already running. Try again when it finishes.",
         )
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")

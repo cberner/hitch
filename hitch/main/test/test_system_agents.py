@@ -13288,6 +13288,44 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_waits_when_manual_goal_is_running(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = _make_project()
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Running goal",
+            goal="Manual work owns the queue.",
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Auto goal",
+            goal="This should wait.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": False},
+        )
+
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
         "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
@@ -15518,6 +15556,67 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(started, 1)
         self.assertEqual(mock_spawn.call_count, 2)
+
+    @patch(
+        "hitch.main.workflows.autonomous_goals._spawn_autonomous_goal_history_summary_or_candidate"
+    )
+    def test_manual_start_if_queue_idle_starts_candidate(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should get queue admission.",
+        )
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=autonomous_goal,
+            use_worktrees=True,
+        )
+
+        self.assertIsNotNone(workflow)
+        assert workflow is not None
+        self.assertEqual(
+            workflow.main_thread_id,
+            f"autonomous-goal:{autonomous_goal.pk}",
+        )
+        self.assertFalse(workflow.state["auto_proposal"])
+        self.assertTrue(workflow.state["use_worktrees"])
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_manual_start_waits_when_another_goal_is_running(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Running goal",
+            goal="Already owns the queue.",
+        )
+        waiting_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Waiting goal",
+            goal="Should wait for queue admission.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                running_goal.pk
+            ),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk, "auto_proposal": False},
+        )
+
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=waiting_goal
+        )
+
+        self.assertIsNone(workflow)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_yolo_workflow_starts_candidate_thread_with_yolo_guidance(

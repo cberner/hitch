@@ -449,7 +449,7 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return False
-    if _running_auto_proposal_workflow_exists():
+    if autonomous_goal_queue_busy():
         return False
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return False
@@ -511,7 +511,7 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
     if _autonomous_goal_accepted_session_blocks_start(autonomous_goal):
         return None
-    if _running_auto_proposal_workflow_exists():
+    if autonomous_goal_queue_busy():
         return None
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
@@ -550,8 +550,8 @@ def _autonomous_goal_auto_merge_base_ref(
     )
     return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
-def _lock_auto_proposal_queue() -> None:
-    """Serialize the global auto-proposal check/create critical section."""
+def _lock_autonomous_goal_queue() -> None:
+    """Serialize the global autonomous-goal check/create critical section."""
     RefreshThrottle.objects.get_or_create(
         key=_AUTO_PROPOSAL_QUEUE_LOCK_KEY,
         defaults={"attempted_at": timezone.now()},
@@ -561,11 +561,22 @@ def _lock_auto_proposal_queue() -> None:
     )
 
 
+def _lock_auto_proposal_queue() -> None:
+    _lock_autonomous_goal_queue()
+
+
 def _running_auto_proposal_workflow_exists() -> bool:
     return SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         status=SystemWorkflow.STATUS_RUNNING,
         state__auto_proposal=True,
+    ).exists()
+
+
+def autonomous_goal_queue_busy() -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        status=SystemWorkflow.STATUS_RUNNING,
     ).exists()
 
 
@@ -601,6 +612,35 @@ def start_autonomous_goal_workflow(
     if created:
         _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
     return workflow
+
+
+def start_autonomous_goal_workflow_if_queue_idle(
+    *,
+    autonomous_goal: AutonomousGoal,
+    use_worktrees: bool = False,
+) -> SystemWorkflow | None:
+    with transaction.atomic():
+        _lock_autonomous_goal_queue()
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
+            .get()
+        )
+        Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
+        if autonomous_goal_queue_busy():
+            return None
+        workflow, created = _create_autonomous_goal_workflow_record(
+            autonomous_goal=autonomous_goal,
+            auto_proposal=False,
+            default_branch_sha=None,
+            use_worktrees=use_worktrees,
+            stack_continuation_proposal=None,
+        )
+    if created:
+        _spawn_autonomous_goal_history_summary_or_candidate(workflow, autonomous_goal)
+    return workflow
+
 
 def _create_autonomous_goal_workflow_record(
     *,
