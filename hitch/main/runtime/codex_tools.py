@@ -161,7 +161,9 @@ def _relevant_files_arg(
         return None
     if not isinstance(relevant_files, list):
         raise ProposedSessionError("relevant_files must be a list")
-    return [item for item in relevant_files if isinstance(item, str)]
+    if not all(isinstance(item, str) for item in relevant_files):
+        raise ProposedSessionError("relevant_files entries must be strings")
+    return list(relevant_files)
 
 
 def _string_arg(arguments: dict[str, Any], name: str, *, default: str = "") -> str:

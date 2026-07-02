@@ -391,6 +391,38 @@ class CodexToolTests(TestCase):
         self.assertEqual(proposal.relevant_files, [])
         self.assertEqual(ProposedSession.objects.count(), 1)
 
+    def test_dynamic_tool_call_rejects_non_string_relevant_file_entries(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Old title",
+            summary="Old summary",
+            prompt="Old prompt",
+            relevant_files=["old.py"],
+        )
+
+        response = handle_dynamic_tool_call(
+            {
+                "namespace": "hitch",
+                "tool": "propose_session",
+                "arguments": {
+                    "proposal_id": proposal.pk,
+                    "summary": "New summary",
+                    "relevant_files": [None],
+                },
+            },
+            ToolContext(cwd="/repo", thread_id="thread-1"),
+        )
+
+        self.assertFalse(response["success"])
+        self.assertIn(
+            "relevant_files entries must be strings",
+            response["contentItems"][0]["text"],
+        )
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.summary, "Old summary")
+        self.assertEqual(proposal.relevant_files, ["old.py"])
+
     def test_dynamic_tool_call_reports_invalid_input(self) -> None:
         response = handle_dynamic_tool_call(
             {"namespace": "hitch", "tool": "missing", "arguments": {}},
