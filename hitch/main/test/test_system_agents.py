@@ -9302,6 +9302,49 @@ class SpecCriticWorkflowTests(TestCase):
             kwargs["prompt"],
         )
 
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_interrupted_pr_feedback_worker_stops_workflow(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 2},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            error="worker process exited before reporting completion",
+            user_message_index=1,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        self.assertIsNone(instance.interrupt_requested_at)
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(workflow.state["error"], "QA workflow stopped by user")
+        self.assertNotIn(
+            system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state
+        )
+        mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
+        self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
+
     @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
     @patch(
         "hitch.main.workflows.pr_qa._open_or_find_pr_with_gh_cli",

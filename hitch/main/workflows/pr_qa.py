@@ -466,6 +466,10 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
+        if system_agents._instance_interrupt_requested(instance):
+            if workflow.is_active:
+                system_agents._block_workflow(workflow, "QA workflow stopped by user")
+            return
         if _retry_dead_system_feedback_worker(instance, workflow):
             return
         if not workflow.is_active:
