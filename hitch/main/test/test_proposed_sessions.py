@@ -364,6 +364,7 @@ class CodexToolTests(TestCase):
             title="Old title",
             summary="Old summary",
             prompt="Old prompt",
+            confidence=AutonomousGoal.CONFIDENCE_VERY_HIGH,
             relevant_files=["old.py"],
         )
 
@@ -374,6 +375,7 @@ class CodexToolTests(TestCase):
                 "arguments": {
                     "proposal_id": proposal.pk,
                     "summary": "New summary",
+                    "confidence": None,
                     "relevant_files": [],
                 },
             },
@@ -385,6 +387,7 @@ class CodexToolTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.title, "Old title")
         self.assertEqual(proposal.summary, "New summary")
+        self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_VERY_HIGH)
         self.assertEqual(proposal.relevant_files, [])
         self.assertEqual(ProposedSession.objects.count(), 1)
 

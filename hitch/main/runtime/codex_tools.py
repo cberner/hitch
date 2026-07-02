@@ -145,7 +145,12 @@ def _proposal_id_arg(arguments: dict[str, Any]) -> int | None:
 def _optional_string_arg(arguments: dict[str, Any], name: str) -> str | None:
     if name not in arguments:
         return None
-    return _string_arg(arguments, name)
+    value = arguments[name]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProposedSessionError(f"{name} must be a string")
+    return value
 
 
 def _relevant_files_arg(
