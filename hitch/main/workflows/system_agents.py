@@ -1246,13 +1246,14 @@ def _claim_workflow_turn_death_retry(
 
     Single source of the retry rule shared by every workflow turn: the
     workflow must still be active, the worker must have died before
-    reporting completion, and the per-step retry budget
+    reporting completion without a user Stop request, and the per-step retry budget
     (``_WORKFLOW_TURN_DEATH_RETRY_LIMIT``) must not be exhausted. Bumps and
     persists the per-kind count when it returns True.
     """
     if (
         not workflow.is_active
         or not retry_kind
+        or _instance_interrupt_requested(instance)
         or not _is_worker_exited_before_completion_error(instance.error)
     ):
         return False
@@ -1269,6 +1270,16 @@ def _claim_workflow_turn_death_retry(
     }
     workflow.save(update_fields=["state", "updated_at"])
     return True
+
+
+def _instance_interrupt_requested(instance: CodexInstance) -> bool:
+    """Return the latest Stop state even when the routed worker object is stale."""
+    if instance.interrupt_requested_at is not None:
+        return True
+    return CodexInstance.objects.filter(
+        pk=instance.pk,
+        interrupt_requested_at__isnull=False,
+    ).exists()
 
 
 def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
