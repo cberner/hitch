@@ -12,7 +12,9 @@ from django.db import connection
 from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
+    ProposedSessionUpdateInput,
     create_proposed_session,
+    update_proposed_session,
 )
 from hitch.main.models import AutonomousGoal
 
@@ -93,19 +95,35 @@ def handle_dynamic_tool_call(
 
 
 def _handle_propose_session(arguments: dict[str, Any], context: ToolContext) -> str:
+    proposal_id = _proposal_id_arg(arguments)
+    if proposal_id is not None:
+        relevant_files = _relevant_files_arg(arguments, default=None)
+        proposal = update_proposed_session(
+            ProposedSessionUpdateInput(
+                proposal_id=proposal_id,
+                title=_optional_string_arg(arguments, "title"),
+                summary=_optional_string_arg(arguments, "summary"),
+                prompt=_optional_string_arg(arguments, "prompt"),
+                cwd=context.cwd,
+                relevant_files=relevant_files,
+                confidence=_optional_string_arg(arguments, "confidence"),
+            )
+        )
+        return f"Updated proposed session #{proposal.pk}: {proposal.title}"
+
     title = _string_arg(arguments, "title")
     summary = _string_arg(arguments, "summary")
     prompt = _string_arg(arguments, "prompt")
-    relevant_files = arguments.get("relevant_files", [])
-    if not isinstance(relevant_files, list):
-        raise ProposedSessionError("relevant_files must be a list")
+    relevant_files = _relevant_files_arg(arguments, default=[])
+    if relevant_files is None:
+        relevant_files = []
     proposal = create_proposed_session(
         ProposedSessionInput(
             title=title,
             summary=summary,
             prompt=prompt,
             cwd=context.cwd,
-            relevant_files=[item for item in relevant_files if isinstance(item, str)],
+            relevant_files=relevant_files,
             confidence=_string_arg(
                 arguments, "confidence", default=AutonomousGoal.CONFIDENCE_MEDIUM
             ),
@@ -113,6 +131,32 @@ def _handle_propose_session(arguments: dict[str, Any], context: ToolContext) -> 
         )
     )
     return f"Created proposed session #{proposal.pk}: {proposal.title}"
+
+
+def _proposal_id_arg(arguments: dict[str, Any]) -> int | None:
+    value = arguments.get("proposal_id")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProposedSessionError("proposal_id must be an integer")
+    return int(value)
+
+
+def _optional_string_arg(arguments: dict[str, Any], name: str) -> str | None:
+    if name not in arguments:
+        return None
+    return _string_arg(arguments, name)
+
+
+def _relevant_files_arg(
+    arguments: dict[str, Any], *, default: list[str] | None
+) -> list[str] | None:
+    relevant_files = arguments.get("relevant_files", default)
+    if relevant_files is None:
+        return None
+    if not isinstance(relevant_files, list):
+        raise ProposedSessionError("relevant_files must be a list")
+    return [item for item in relevant_files if isinstance(item, str)]
 
 
 def _string_arg(arguments: dict[str, Any], name: str, *, default: str = "") -> str:
@@ -136,13 +180,20 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
         namespace=_HITCH_NAMESPACE,
         name=_PROPOSE_SESSION_TOOL,
         description=(
-            "Create a Hitch inbox proposal for a follow-up coding session. Use this "
-            "only when the user asks you to create proposed sessions or session "
-            "instructions explicitly authorize creating proposals."
+            "Create or edit a Hitch inbox proposal for a follow-up coding session. "
+            "Use this only when the user asks you to manage proposed sessions or "
+            "session instructions explicitly authorize creating proposals."
         ),
         input_schema={
             "type": "object",
             "properties": {
+                "proposal_id": {
+                    "type": "integer",
+                    "description": (
+                        "Existing proposal id to edit. Omit this field to create a "
+                        "new proposal."
+                    ),
+                },
                 "title": {
                     "type": "string",
                     "description": "Concise title for the proposed session.",
@@ -169,7 +220,19 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
                     ],
                 },
             },
-            "required": ["title", "summary", "prompt"],
+            "anyOf": [
+                {"required": ["title", "summary", "prompt"]},
+                {
+                    "required": ["proposal_id"],
+                    "anyOf": [
+                        {"required": ["title"]},
+                        {"required": ["summary"]},
+                        {"required": ["prompt"]},
+                        {"required": ["relevant_files"]},
+                        {"required": ["confidence"]},
+                    ],
+                },
+            ],
             "additionalProperties": False,
         },
         handler=_handle_propose_session,

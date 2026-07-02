@@ -100,13 +100,16 @@ acknowledge notices from Hitch background systems.
 ### 4.4 Codex-Created Proposals
 
 - `INBOX-codex-tool`: Hitch exposes a `hitch.propose_session` tool that lets a
-  Codex session create a Proposal Inbox item.
+  Codex session create or edit a Proposal Inbox item.
 - `INBOX-tool-authorization`: Codex may use the proposal tool whenever it decides
   a follow-up session would be useful.
-- `INBOX-tool-fields`: The tool requires title, summary, and prompt, and accepts
-  optional relevant files and confidence.
+- `INBOX-tool-fields`: To create a Proposal, the tool requires title, summary,
+  and prompt, and accepts optional relevant files and confidence. To edit a
+  Proposal, the tool requires a proposal id and at least one editable content
+  field.
 - `INBOX-tool-project-match`: Tool-created Proposals are assigned to the Hitch
-  project that matches the session cwd.
+  project that matches the session cwd. Tool-edited Proposals must already
+  belong to the Hitch project that matches the session cwd.
 - `INBOX-tool-source-session`: Tool-created Proposals record the source Codex
   thread when available.
 - `INBOX-tool-fallback`: If the dynamic tool is unavailable, Codex may use the
@@ -168,6 +171,8 @@ acknowledge notices from Hitch background systems.
   provisional start claim expires, the item returns to the active Inbox.
 - `INBOX-tool-creates-item`: A valid `hitch.propose_session` call creates a
   visible Proposal tied to the current Hitch project and source thread.
+- `INBOX-tool-edits-item`: A valid `hitch.propose_session` edit call updates an
+  unresolved Proposal tied to the current Hitch project.
 - `INBOX-resolution-race`: If two tabs resolve the same Inbox item, exactly one
   decision succeeds and the loser receives an already-resolved error.
 - `INBOX-project-filter-success`: Hidden projects' unresolved Inbox items do not

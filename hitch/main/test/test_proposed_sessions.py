@@ -12,7 +12,9 @@ from django.test import TestCase
 from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
+    ProposedSessionUpdateInput,
     create_proposed_session,
+    update_proposed_session,
 )
 from hitch.main.models import AutonomousGoal, ProposedSession, SessionMetadata
 from hitch.main.runtime.codex_tools import (
@@ -89,6 +91,158 @@ class ProposedSessionServiceTests(TestCase):
                     )
                 )
 
+    def test_update_proposed_session_edits_unresolved_project_proposal(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Old title",
+            summary="Old summary",
+            prompt="Old prompt",
+            confidence=AutonomousGoal.CONFIDENCE_MEDIUM,
+            relevant_files=["old.py"],
+        )
+
+        updated = update_proposed_session(
+            ProposedSessionUpdateInput(
+                proposal_id=proposal.pk,
+                title=" New title ",
+                cwd="/repo",
+                relevant_files=["new.py", "", "new.py"],
+                confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            )
+        )
+
+        self.assertEqual(updated.title, "New title")
+        self.assertEqual(updated.summary, "Old summary")
+        self.assertEqual(updated.prompt, "Old prompt")
+        self.assertEqual(updated.confidence, AutonomousGoal.CONFIDENCE_HIGH)
+        self.assertEqual(updated.relevant_files, ["new.py"])
+        self.assertEqual(ProposedSession.objects.count(), 1)
+
+    def test_update_proposed_session_rejects_invalid_targets(self) -> None:
+        project = _make_project()
+        resolved = ProposedSession.objects.create(
+            project=project,
+            title="Resolved",
+            summary="Summary",
+            prompt="Prompt",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        notice = ProposedSession.objects.create(
+            project=project,
+            title="Notice",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        )
+        other_project = _make_project(name="Other", repo_path="/other")
+        other_project_proposal = ProposedSession.objects.create(
+            project=other_project,
+            title="Other",
+            summary="Summary",
+            prompt="Prompt",
+        )
+        cases = [
+            (
+                resolved.pk,
+                ProposedSessionUpdateInput(
+                    proposal_id=resolved.pk,
+                    cwd="/repo",
+                    title="Updated",
+                ),
+                "proposal has already been resolved",
+            ),
+            (
+                notice.pk,
+                ProposedSessionUpdateInput(
+                    proposal_id=notice.pk,
+                    cwd="/repo",
+                    title="Updated",
+                ),
+                "proposal item is not editable",
+            ),
+            (
+                other_project_proposal.pk,
+                ProposedSessionUpdateInput(
+                    proposal_id=other_project_proposal.pk,
+                    cwd="/repo",
+                    title="Updated",
+                ),
+                "proposal does not match current Hitch project",
+            ),
+            (
+                0,
+                ProposedSessionUpdateInput(
+                    proposal_id=0,
+                    cwd="/repo",
+                    title="Updated",
+                ),
+                "proposal does not match current Hitch project",
+            ),
+        ]
+        for proposal_id, values, message in cases:
+            with (
+                self.subTest(proposal_id=proposal_id),
+                self.assertRaisesRegex(ProposedSessionError, message),
+            ):
+                update_proposed_session(values)
+
+    def test_update_proposed_session_requires_an_edit(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Title",
+            summary="Summary",
+            prompt="Prompt",
+        )
+
+        with self.assertRaisesRegex(
+            ProposedSessionError, "at least one editable field is required"
+        ):
+            update_proposed_session(
+                ProposedSessionUpdateInput(proposal_id=proposal.pk, cwd="/repo")
+            )
+
+    def test_update_proposed_session_rechecks_unresolved_status_on_write(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Old title",
+            summary="Old summary",
+            prompt="Old prompt",
+        )
+        real_filter = ProposedSession.objects.filter
+        filter_calls = 0
+
+        def filter_with_resolution_race(*args: Any, **kwargs: Any) -> Any:
+            nonlocal filter_calls
+            filter_calls += 1
+            if filter_calls == 2:
+                real_filter(pk=proposal.pk).update(
+                    outcome_status=ProposedSession.OUTCOME_ACCEPTED
+                )
+            return real_filter(*args, **kwargs)
+
+        with (
+            patch.object(
+                ProposedSession.objects,
+                "filter",
+                side_effect=filter_with_resolution_race,
+            ),
+            self.assertRaisesRegex(
+                ProposedSessionError, "proposal has already been resolved"
+            ),
+        ):
+            update_proposed_session(
+                ProposedSessionUpdateInput(
+                    proposal_id=proposal.pk,
+                    cwd="/repo",
+                    title="New title",
+                )
+            )
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.title, "Old title")
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+
 
 class ProposeSessionCommandTests(TestCase):
     def test_command_creates_json_response(self) -> None:
@@ -131,6 +285,39 @@ class ProposeSessionCommandTests(TestCase):
                 "/repo",
             )
 
+    def test_command_updates_json_response(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Old title",
+            summary="Old summary",
+            prompt="Old prompt",
+            relevant_files=["old.py"],
+        )
+        out = StringIO()
+
+        call_command(
+            "propose_session",
+            "--proposal-id",
+            str(proposal.pk),
+            "--title",
+            "New title",
+            "--clear-relevant-files",
+            "--cwd",
+            "/repo",
+            "--json",
+            stdout=out,
+        )
+
+        payload = json.loads(out.getvalue())
+        proposal.refresh_from_db()
+        self.assertEqual(payload["action"], "updated")
+        self.assertEqual(payload["id"], proposal.pk)
+        self.assertEqual(payload["project_id"], project.pk)
+        self.assertEqual(proposal.title, "New title")
+        self.assertEqual(proposal.summary, "Old summary")
+        self.assertEqual(proposal.relevant_files, [])
+
 
 class CodexToolTests(TestCase):
     def test_registered_specs_include_propose_session(self) -> None:
@@ -139,6 +326,7 @@ class CodexToolTests(TestCase):
         self.assertEqual(specs[0]["namespace"], "hitch")
         self.assertEqual(specs[0]["name"], "propose_session")
         self.assertIn("inputSchema", specs[0])
+        self.assertIn("proposal_id", specs[0]["inputSchema"]["properties"])
 
     def test_dynamic_tool_call_creates_proposal(self) -> None:
         project = _make_project()
@@ -168,6 +356,37 @@ class CodexToolTests(TestCase):
         self.assertEqual(proposal.project, project)
         self.assertEqual(proposal.source_session, source)
         self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_VERY_HIGH)
+
+    def test_dynamic_tool_call_updates_proposal(self) -> None:
+        project = _make_project()
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Old title",
+            summary="Old summary",
+            prompt="Old prompt",
+            relevant_files=["old.py"],
+        )
+
+        response = handle_dynamic_tool_call(
+            {
+                "namespace": "hitch",
+                "tool": "propose_session",
+                "arguments": {
+                    "proposal_id": proposal.pk,
+                    "summary": "New summary",
+                    "relevant_files": [],
+                },
+            },
+            ToolContext(cwd="/repo", thread_id="thread-1"),
+        )
+
+        self.assertTrue(response["success"])
+        self.assertIn("Updated proposed session", response["contentItems"][0]["text"])
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.title, "Old title")
+        self.assertEqual(proposal.summary, "New summary")
+        self.assertEqual(proposal.relevant_files, [])
+        self.assertEqual(ProposedSession.objects.count(), 1)
 
     def test_dynamic_tool_call_reports_invalid_input(self) -> None:
         response = handle_dynamic_tool_call(
@@ -247,6 +466,14 @@ class CodexToolTests(TestCase):
                     },
                 },
                 "relevant_files must be a list",
+            ),
+            (
+                {
+                    "namespace": "hitch",
+                    "tool": "propose_session",
+                    "arguments": {"proposal_id": "1", "title": "Title"},
+                },
+                "proposal_id must be an integer",
             ),
         ]
         for params, message in cases:
