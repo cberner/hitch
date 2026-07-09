@@ -20,6 +20,10 @@ from openai_codex import AppServerConfig, Codex
 
 from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_pool
+from hitch.main.sessions.session_settings import (
+    _effective_sandbox_policy_for_cwd,
+    _stored_settings,
+)
 
 
 @contextmanager
@@ -148,12 +152,14 @@ class CodexIntegrationTests(TestCase):
         self.assertEqual(instance.prompt, "Implement the plan.")
         self.assertEqual(instance.cwd, repo)
         self.assertEqual(instance.pid, 4321)
+        expected_sandbox = _effective_sandbox_policy_for_cwd(
+            _stored_settings(response.wsgi_request), repo
+        )
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             model=expected_model,
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy=expected_sandbox or None,
             approval_mode="auto_review",
-            plan_mode=False,
             collaboration_mode="default",
         )
