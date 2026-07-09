@@ -6,7 +6,6 @@ from typing import Any, NamedTuple
 
 from django.core import signing
 from django.http import HttpRequest, HttpResponse
-from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import coding_agents
 from hitch.main.models import ApprovalRequest, AutonomousGoal, Project
@@ -126,6 +125,7 @@ _COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 # silently drop the cookie). Real Codex model ids are tens of chars; 256
 # is comfortably more than that without leaving room for abuse.
 _MODEL_MAX_LEN = 256
+_REASONING_EFFORT_MAX_LEN = 32
 
 # UX-facing character cap on the developer prompt; mirrored by the textarea's
 # ``maxlength``. This bounds the input length but is NOT the real guard against
@@ -346,11 +346,9 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
         _EFFORT_COOKIE,
         to_cookie=str,
         from_cookie=str,
-        import_value=lambda raw: (
-            raw
-            if not raw or raw in {effort.value for effort in ReasoningEffort}
-            else _SKIP_IMPORT
-        ),
+        import_value=lambda raw: raw
+        if len(raw) <= _REASONING_EFFORT_MAX_LEN
+        else _SKIP_IMPORT,
     ),
     _SettingSpec(
         "sandbox_policy",

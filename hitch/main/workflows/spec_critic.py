@@ -31,6 +31,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
+from hitch.main import caches
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
@@ -100,7 +101,9 @@ def _classify_spec_critic_prompt_with_codex(
 ) -> bool | None:
     try:
         with app_server_pool.borrow_codex(Codex, enable_memories=False) as codex:
-            model = _smallest_available_codex_model(list(codex.models().data))
+            model = _smallest_available_codex_model(
+                caches._models_data_from_codex(codex)
+            )
             thread = codex.thread_start(
                 cwd=cwd or os.getcwd(),
                 ephemeral=True,

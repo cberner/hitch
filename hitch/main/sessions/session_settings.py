@@ -12,6 +12,7 @@ from typing import Any
 
 from django.http import HttpRequest
 from django.urls import reverse
+from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import caches, coding_agents
 from hitch.main import repos as repos_module
@@ -411,11 +412,22 @@ def _cached_models_and_settings(request: HttpRequest) -> tuple[list[Any], Resolv
     return models_data, _resolved_settings(request, models_data)
 
 
+def _effort_option_value(option: Any) -> str:
+    effort = getattr(option, "reasoning_effort", None)
+    if effort is None:
+        return ""
+    return getattr(effort, "value", str(effort))
+
+
 def _supported_effort_values(model_obj: Any) -> set[str]:
-    """Return the set of effort enum string values ``model_obj`` accepts."""
+    """Return the set of effort string values ``model_obj`` accepts."""
     return {
-        getattr(opt.reasoning_effort, "value", str(opt.reasoning_effort))
-        for opt in (getattr(model_obj, "supported_reasoning_efforts", None) or [])
+        effort
+        for effort in (
+            _effort_option_value(opt)
+            for opt in (getattr(model_obj, "supported_reasoning_efforts", None) or [])
+        )
+        if effort
     }
 
 
@@ -424,6 +436,33 @@ def _model_default_effort(model_obj: Any) -> str:
     if default is None:
         return ""
     return getattr(default, "value", str(default))
+
+
+def _reasoning_effort_values(
+    models_data: list[Any], *, current_effort: str = ""
+) -> list[str]:
+    """Return renderable/valid effort values for a model catalog snapshot.
+
+    Codex can advertise new effort strings before the installed Python SDK enum
+    knows about them, so the catalog metadata is the source of truth. The SDK
+    enum remains the baseline for local-dev/no-model-data states.
+    """
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+
+    for effort in ReasoningEffort:
+        add(effort.value)
+    for model_obj in models_data:
+        for option in getattr(model_obj, "supported_reasoning_efforts", None) or []:
+            add(_effort_option_value(option))
+        add(_model_default_effort(model_obj))
+    add(current_effort)
+    return values
 
 
 def _project_for_proposed_session(

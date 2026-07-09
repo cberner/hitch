@@ -6943,7 +6943,6 @@ class CodexWorkerCommandTests(TestCase):
 
         cases: list[tuple[str, str, Callable[[dict[str, object]], None]]] = [
             ("--reasoning-effort", "high", _assert_value("effort", ReasoningEffort.high)),
-            ("--reasoning-effort", "ludicrous", _assert_absent("effort")),
             (
                 "--sandbox-policy",
                 "workspaceWrite",
@@ -6976,6 +6975,53 @@ class CodexWorkerCommandTests(TestCase):
                         cli_value,
                     )
                 assert_capture(captured)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_sdk_unknown_reasoning_effort_posts_raw_turn_params(
+        self, mock_codex: MagicMock
+    ) -> None:
+        captured_params: dict[str, object] = {}
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+
+        def _capture_turn_start(
+            _thread_id: str, _input: object, *, params: object
+        ) -> object:
+            captured_params["input"] = _input
+            captured_params["params"] = params
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        codex_ctx._client.turn_start.side_effect = _capture_turn_start
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "turn-1", TurnStatus.completed
+        )
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--model",
+                "gpt-5.6",
+                "--reasoning-effort",
+                "ultra",
+            )
+
+        codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        params = captured_params["params"]
+        assert isinstance(params, dict)
+        self.assertEqual(params["model"], "gpt-5.6")
+        self.assertEqual(params["effort"], "ultra")
+        self.assertEqual(params["threadId"], "thread-1")
+        wire_input = captured_params["input"]
+        assert isinstance(wire_input, list)
+        first_input = wire_input[0]
+        assert isinstance(first_input, dict)
+        self.assertEqual(first_input["type"], "text")
+        self.assertEqual(first_input["text"], "hi")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_user_reviewer_modes_bypass_thread_turn(

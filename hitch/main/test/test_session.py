@@ -17,7 +17,7 @@ from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import AppServerError
 
-from hitch.main import demo
+from hitch.main import caches, demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
@@ -200,6 +200,13 @@ def _write_rollout_tempfile(lines: list[str], *, binary: bytes | None = None) ->
 def _patch_thread(test: TestCase, mock_codex: MagicMock, thread: SimpleNamespace) -> None:
     client = mock_codex.return_value.__enter__.return_value
     client._client.thread_resume.return_value.thread = thread
+
+
+def _clear_models_cache() -> None:
+    with caches._MODELS_REFRESH_LOCK:
+        caches._MODELS_CACHE_VALUE = {}
+        caches._MODELS_CACHE_FETCHED_AT = {}
+        caches._MODELS_REFRESH_IN_FLIGHT = set()
 
 
 def _make_rollout(test: TestCase, lines: list[str], *, binary: bytes | None = None) -> Path:
@@ -496,6 +503,7 @@ class SessionViewTests(TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.addCleanup(_clear_models_cache)
 
     @patch("hitch.main.views.common.Codex")
     def test_renders_primary_nav_menu_instead_of_back_link(
@@ -571,15 +579,12 @@ class SessionViewTests(TestCase):
             hitch_model="stale-model",
             hitch_reasoning_effort="high",
         )
+        mock_codex.return_value.__enter__.return_value.models.return_value.data = models
 
-        with (
-            patch("hitch.main.caches._cached_models_data", return_value=models),
-            patch("hitch.main.caches._start_models_refresh_thread"),
-        ):
-            response = cast(HttpResponse, self.client.get(reverse("update_settings")))
+        response = cast(HttpResponse, self.client.get(reverse("update_settings")))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_not_called()
+        mock_codex.assert_called_once()
         self.assertContains(response, 'value="gpt-current" selected')
         self.assertEqual(_cookie_value(response, "hitch_model"), "gpt-current")
         self.assertEqual(_cookie_value(response, "hitch_reasoning_effort"), "medium")

@@ -12,6 +12,7 @@ sites and the internal sibling calls between the helpers below.
 import logging
 import threading
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from django.db import close_old_connections, transaction
@@ -61,6 +62,90 @@ def _models_cache_has_value(*, enable_memories: bool) -> bool:
         return enable_memories in _MODELS_CACHE_FETCHED_AT
 
 
+def _string_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return getattr(value, "value", str(value))
+
+
+def _raw_reasoning_effort_option(raw: Any) -> SimpleNamespace | None:
+    if isinstance(raw, dict):
+        effort = _string_value(raw.get("reasoningEffort") or raw.get("reasoning_effort"))
+        description = _string_value(raw.get("description"))
+    else:
+        effort = _string_value(raw)
+        description = ""
+    if not effort:
+        return None
+    return SimpleNamespace(
+        reasoning_effort=SimpleNamespace(value=effort),
+        description=description,
+    )
+
+
+def _raw_model(raw: Any) -> SimpleNamespace | None:
+    if not isinstance(raw, dict):
+        return None
+    model_id = _string_value(raw.get("id"))
+    if not model_id:
+        return None
+    display_name = _string_value(
+        raw.get("displayName") or raw.get("display_name") or model_id
+    )
+    default_effort = _string_value(
+        raw.get("defaultReasoningEffort") or raw.get("default_reasoning_effort")
+    )
+    supported_efforts = [
+        option
+        for option in (
+            _raw_reasoning_effort_option(item)
+            for item in (
+                raw.get("supportedReasoningEfforts")
+                or raw.get("supported_reasoning_efforts")
+                or []
+            )
+        )
+        if option is not None
+    ]
+    return SimpleNamespace(
+        id=model_id,
+        display_name=display_name,
+        is_default=bool(raw.get("isDefault") or raw.get("is_default")),
+        default_reasoning_effort=SimpleNamespace(value=default_effort),
+        supported_reasoning_efforts=supported_efforts,
+    )
+
+
+def _models_data_from_raw_response(raw: Any) -> list[Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("model/list response must be an object")
+    data = raw.get("data")
+    if not isinstance(data, list):
+        raise ValueError("model/list response data must be a list")
+    return [model for model in (_raw_model(item) for item in data) if model is not None]
+
+
+def _models_data_from_codex(codex: Any) -> list[Any]:
+    raw_request = getattr(getattr(codex, "_client", None), "_request_raw", None)
+    if callable(raw_request):
+        try:
+            return _models_data_from_raw_response(
+                raw_request("model/list", {"includeHidden": False})
+            )
+        except Exception:
+            pass
+    return list(codex.models().data)
+
+
+def _fetch_models_data(*, enable_memories: bool, codex_cls: Any = None) -> list[Any]:
+    with app_server_pool.borrow_codex(
+        codex_cls or Codex, enable_memories=enable_memories
+    ) as codex:
+        models_data = _models_data_from_codex(codex)
+    _store_models_cache(enable_memories=enable_memories, models_data=models_data)
+    return models_data
+
+
 def _cached_models_for_session_detail(*, enable_memories: bool) -> list[Any]:
     models_data = _cached_models_data(enable_memories=enable_memories)
     _schedule_models_refresh(enable_memories=enable_memories)
@@ -105,21 +190,13 @@ def _start_models_refresh_thread(*, enable_memories: bool) -> None:
 
 
 def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
-    refreshed = False
-    models_data: list[Any] = []
     try:
         close_old_connections()
-        with app_server_pool.borrow_codex(
-            Codex, enable_memories=enable_memories
-        ) as codex:
-            models_data = list(codex.models().data)
-        refreshed = True
+        _fetch_models_data(enable_memories=enable_memories)
     except Exception:
         logger.exception("failed to refresh models cache")
     finally:
         close_old_connections()
-        if refreshed:
-            _store_models_cache(enable_memories=enable_memories, models_data=models_data)
         with _MODELS_REFRESH_LOCK:
             _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
 

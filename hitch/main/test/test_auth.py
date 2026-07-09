@@ -113,6 +113,24 @@ class AuthViewTests(TestCase):
             "Prefer focused tests.",
         )
 
+    def test_login_imports_provider_advertised_effort_unknown_to_sdk_enum(self) -> None:
+        user = _make_user()
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "gpt-5.6", _EFFORT_COOKIE: "ultra"},
+        )
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "gpt-5.6")
+        self.assertEqual(settings.reasoning_effort, "ultra")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
+
     def test_login_without_settings_cookies_preserves_db_settings(self) -> None:
         user = _make_user()
         UserSettings.objects.create(
