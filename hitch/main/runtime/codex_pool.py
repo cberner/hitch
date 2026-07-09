@@ -37,6 +37,7 @@ from django.db import transaction
 from django.utils import timezone
 from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
+from pydantic import ValidationError
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
@@ -153,8 +154,9 @@ def spawn_new_session(
     )
 
     def _create_and_persist(codex: Codex) -> tuple[str, str | None]:
-        response = codex._client.thread_start(start_kwargs)
-        thread = response.thread
+        thread_id, thread_path = _thread_start_tolerating_sdk_metadata(
+            codex, start_kwargs
+        )
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
         # something triggers a metadata persist. Without this step, the
@@ -168,8 +170,8 @@ def spawn_new_session(
         # once the first turn streams in, so this is usually invisible in
         # the UI. Callers can pass ``thread_name`` when the prompt starts
         # with generic instructions and a better task title is known.
-        codex._client.thread_set_name(thread.id, _initial_thread_name(name_source))
-        return thread.id, _thread_path_value(thread)
+        codex._client.thread_set_name(thread_id, _initial_thread_name(name_source))
+        return thread_id, thread_path
 
     # ``thread_set_name`` triggers the CODEX_HOME state-DB persist, whose
     # one-time migration path has no SQLITE_BUSY retry; a lock there kills the
@@ -241,10 +243,11 @@ def create_session_thread(
         start_kwargs["baseInstructions"] = base_instructions
 
     def _create_and_persist(codex: Codex) -> str:
-        response = codex._client.thread_start(start_kwargs)
-        thread = response.thread
-        codex._client.thread_set_name(thread.id, _initial_thread_name(name))
-        return thread.id
+        thread_id, _thread_path = _thread_start_tolerating_sdk_metadata(
+            codex, start_kwargs
+        )
+        codex._client.thread_set_name(thread_id, _initial_thread_name(name))
+        return thread_id
 
     # See ``spawn_new_session``: retry the open+create when the ``thread_set_name``
     # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
@@ -279,6 +282,45 @@ def thread_path_for_instance(instance: object) -> str:
 def _thread_path_value(thread: object) -> str:
     value = getattr(thread, "path", "")
     return value if isinstance(value, str) else ""
+
+
+def _thread_start_tolerating_sdk_metadata(
+    codex: Codex, start_kwargs: dict[str, Any]
+) -> tuple[str, str]:
+    try:
+        response = codex._client.thread_start(start_kwargs)
+        thread = response.thread
+        return _thread_id_value(thread), _thread_path_value(thread)
+    except ValidationError:
+        logger.warning(
+            "Codex SDK could not validate thread/start metadata; falling back "
+            "to raw start",
+        )
+        return _raw_thread_start(codex, start_kwargs)
+
+
+def _raw_thread_start(codex: Codex, start_kwargs: dict[str, Any]) -> tuple[str, str]:
+    raw_request = getattr(getattr(codex, "_client", None), "_request_raw", None)
+    if not callable(raw_request):
+        raise RuntimeError("Codex client does not expose raw requests")
+    response = raw_request("thread/start", start_kwargs)
+    if not isinstance(response, dict):
+        raise RuntimeError("thread/start response must be an object")
+    thread = response.get("thread")
+    if not isinstance(thread, dict):
+        raise RuntimeError("thread/start response missing thread object")
+    thread_id = thread.get("id")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise RuntimeError("thread/start response missing thread id")
+    thread_path = thread.get("path")
+    return thread_id, thread_path if isinstance(thread_path, str) else ""
+
+
+def _thread_id_value(thread: object) -> str:
+    value = getattr(thread, "id", "")
+    if isinstance(value, str) and value:
+        return value
+    raise RuntimeError("thread/start response missing thread id")
 
 
 def spawn_turn(

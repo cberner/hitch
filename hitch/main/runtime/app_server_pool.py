@@ -15,10 +15,12 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
+import re
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Generator
+from types import SimpleNamespace
 from typing import Any
 
 from django.conf import settings
@@ -279,23 +281,36 @@ def _thread_resume_tolerating_sdk_metadata(
 ) -> Any:
     try:
         return codex.thread_resume(thread_id, **resume_kwargs)
-    except ValidationError as exc:
-        if not _can_raw_resume_after_validation_error(exc):
-            raise
-        logger.warning(
-            "Codex SDK could not validate thread/resume metadata for %s; "
-            "falling back to raw resume",
-            thread_id,
-        )
+    except ValidationError:
+        _log_raw_resume_fallback(thread_id)
         return _raw_thread_resume(codex, thread_id=thread_id, resume_kwargs=resume_kwargs)
 
-def _can_raw_resume_after_validation_error(exc: ValidationError) -> bool:
-    """Resume only needs ``thread.id``; tolerate SDK drift in sibling metadata."""
-    for error in exc.errors():
-        loc = error.get("loc", ())
-        if isinstance(loc, tuple) and loc and loc[0] == "thread":
-            return False
-    return True
+def thread_resume_response_tolerating_sdk_metadata(
+    codex: Codex,
+    *,
+    thread_id: str,
+    resume_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    """Return a ``thread/resume`` response, falling back on SDK response drift."""
+    resume_kwargs = resume_kwargs or {}
+    try:
+        if resume_kwargs:
+            return codex._client.thread_resume(
+                thread_id, _thread_resume_params(thread_id, resume_kwargs)
+            )
+        return codex._client.thread_resume(thread_id)
+    except ValidationError:
+        _log_raw_resume_fallback(thread_id)
+        return _raw_thread_resume_response(
+            codex, thread_id=thread_id, resume_kwargs=resume_kwargs
+        )
+
+def _log_raw_resume_fallback(thread_id: str) -> None:
+    logger.warning(
+        "Codex SDK could not validate thread/resume metadata for %s; "
+        "falling back to raw resume",
+        thread_id,
+    )
 
 def _raw_thread_resume(
     codex: Codex,
@@ -303,6 +318,17 @@ def _raw_thread_resume(
     thread_id: str,
     resume_kwargs: dict[str, Any],
 ) -> Thread:
+    response = _raw_thread_resume_response(
+        codex, thread_id=thread_id, resume_kwargs=resume_kwargs
+    )
+    return Thread(codex._client, response.thread.id)
+
+def _raw_thread_resume_response(
+    codex: Codex,
+    *,
+    thread_id: str,
+    resume_kwargs: dict[str, Any],
+) -> Any:
     raw_request = getattr(getattr(codex, "_client", None), "_request_raw", None)
     if not callable(raw_request):
         raise RuntimeError("Codex client does not expose raw requests")
@@ -315,18 +341,36 @@ def _raw_thread_resume(
     resumed_thread_id = thread.get("id")
     if not isinstance(resumed_thread_id, str) or not resumed_thread_id:
         raise RuntimeError("thread/resume response missing thread id")
-    return Thread(codex._client, resumed_thread_id)
+    return _namespace_from_json(response)
 
 def _thread_resume_payload(thread_id: str, resume_kwargs: dict[str, Any]) -> dict[str, Any]:
+    return _thread_resume_params(thread_id, resume_kwargs).model_dump(
+        by_alias=True, exclude_none=True, mode="json"
+    )
+
+def _thread_resume_params(
+    thread_id: str, resume_kwargs: dict[str, Any]
+) -> ThreadResumeParams:
     kwargs = {
         _THREAD_RESUME_PARAM_ALIASES.get(key, key): value
         for key, value in resume_kwargs.items()
     }
-    params = ThreadResumeParams(thread_id=thread_id, **kwargs)
-    dumped = params.model_dump(by_alias=True, exclude_none=True, mode="json")
-    if not isinstance(dumped, dict):
-        raise TypeError("thread resume params did not dump to an object")
-    return dumped
+    return ThreadResumeParams(thread_id=thread_id, **kwargs)
+
+def _namespace_from_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return SimpleNamespace(
+            **{
+                _snake_case_json_key(key): _namespace_from_json(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, list):
+        return [_namespace_from_json(item) for item in value]
+    return value
+
+def _snake_case_json_key(value: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
 
 _SHARED_POOL_MAX = 4
 

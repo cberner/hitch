@@ -400,7 +400,9 @@ def _candidate_thread_user_message_index(
 ) -> int:
     resumed = app_server_pool.run_borrowed_op_with_retry(
         common.Codex,
-        lambda codex: codex._client.thread_resume(thread_id),
+        lambda codex: app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+            codex, thread_id=thread_id
+        ),
         enable_memories=settings.enable_memories,
     )
     return _count_user_entries(list(_entries_for(resumed.thread)))

@@ -65,7 +65,9 @@ def _resumed_thread_cwd(request: HttpRequest, session_id: str) -> str | None:
     try:
         resumed = app_server_pool.run_borrowed_op_with_retry(
             common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
+            lambda codex: app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                codex, thread_id=session_id
+            ),
             enable_memories=settings.enable_memories,
         )
     except InvalidRequestError:
@@ -203,7 +205,9 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     try:
         resumed = app_server_pool.run_borrowed_op_with_retry(
             common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
+            lambda codex: app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                codex, thread_id=session_id
+            ),
             enable_memories=settings.enable_memories,
         )
     except InvalidRequestError:

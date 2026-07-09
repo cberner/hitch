@@ -469,7 +469,9 @@ def _render_session_detail(
             # The resume response already carries the full thread including turns,
             # so a follow-up ``thread/read`` would just be a redundant round-trip.
             try:
-                resumed = codex._client.thread_resume(session_id)
+                resumed = app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                    codex, thread_id=session_id
+                )
             except InvalidRequestError as exc:
                 if require_system_agent_thread and _thread_resume_missing_or_invalid(exc):
                     raise Http404("system session not found") from None

@@ -46,7 +46,7 @@ from openai_codex.generated.v2_all import (
     WorkspaceWriteSandboxPolicy,
 )
 from openai_codex.models import Notification
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from hitch.main import coding_agents, demo, formatting
 from hitch.main.management.commands import codex_worker as codex_worker_module
@@ -90,6 +90,20 @@ def _thread_start_payload(codex: MagicMock) -> dict[str, Any]:
     payload = codex._client.thread_start.call_args.args[0]
     assert isinstance(payload, dict)
     return payload
+
+
+def _thread_start_validation_error(*, loc: tuple[str, ...]) -> ValidationError:
+    return ValidationError.from_exception_data(
+        "ThreadStartResponse",
+        [
+            {
+                "type": "enum",
+                "loc": loc,
+                "input": "max",
+                "ctx": {"expected": "'none'"},
+            }
+        ],
+    )
 
 
 def _completed_event(turn_id: str, status: TurnStatus, error_message: str | None = None) -> SimpleNamespace:
@@ -228,6 +242,50 @@ class SpawnNewSessionTests(TestCase):
         # begin with '-'.
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+        )
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
+    def test_raw_thread_start_fallback_before_worker_launch(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        thread_path = "/root/.codex/sessions/rollout-thread-raw.jsonl"
+        codex: MagicMock = mock_codex.return_value.__enter__.return_value
+        codex._client.thread_start.side_effect = _thread_start_validation_error(
+            loc=("reasoningEffort",)
+        )
+        codex._client._request_raw.return_value = {
+            "thread": {"id": "thread-raw", "path": thread_path}
+        }
+        mock_launch.return_value = SimpleNamespace(pid=4242)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                model="gpt-5.6-sol",
+            )
+
+        self.assertEqual(instance.thread_id, "thread-raw")
+        self.assertEqual(codex_pool.thread_path_for_instance(instance), thread_path)
+        codex._client._request_raw.assert_called_once()
+        raw_method, raw_payload = codex._client._request_raw.call_args.args
+        self.assertEqual(raw_method, "thread/start")
+        self.assertEqual(raw_payload["cwd"], "/repo")
+        self.assertIsNone(raw_payload["developerInstructions"])
+        self.assertEqual(raw_payload["model"], "gpt-5.6-sol")
+        self.assertEqual(raw_payload["dynamicTools"][0]["namespace"], "hitch")
+        self.assertEqual(raw_payload["dynamicTools"][0]["name"], "propose_session")
+        codex._client.thread_set_name.assert_called_once_with("thread-raw", "hi")
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            model="gpt-5.6-sol",
             reasoning_effort=None,
             sandbox_policy=None,
             approval_mode=None,

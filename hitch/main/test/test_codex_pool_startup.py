@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -220,12 +221,26 @@ def _thread_resume_validation_error(*, loc: tuple[str, ...]) -> ValidationError:
 
 
 class _RawResumeClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        error: ValidationError | None = None,
+        raw_response: object | None = None,
+    ) -> None:
+        self.error = error
+        self.raw_response = raw_response or {"thread": {"id": "thread-raw"}}
+        self.thread_resume_calls: list[tuple[object, ...]] = []
         self.raw_requests: list[tuple[str, object]] = []
+
+    def thread_resume(self, *args: object) -> object:
+        self.thread_resume_calls.append(args)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(thread=SimpleNamespace(id=args[0]))
 
     def _request_raw(self, method: str, params: object) -> object:
         self.raw_requests.append((method, params))
-        return {"thread": {"id": "thread-raw"}}
+        return self.raw_response
 
 
 class _ValidationFailingCodex(_FakeCodex):
@@ -238,6 +253,12 @@ class _ValidationFailingCodex(_FakeCodex):
     def thread_resume(self, _thread_id: str, **_kwargs: object) -> object:
         self.resume_calls += 1
         raise self._error
+
+
+class _ClientValidationFailingCodex(_FakeCodex):
+    def __init__(self, client: _RawResumeClient) -> None:
+        super().__init__()
+        self._client = client
 
 
 class OpenCodexResumedTests(SimpleTestCase):
@@ -285,21 +306,45 @@ class OpenCodexResumedTests(SimpleTestCase):
         )
         self.assertTrue(codex.closed)
 
-    def test_resume_validation_inside_thread_is_not_masked(self) -> None:
+    def test_raw_resume_fallback_tolerates_nested_thread_metadata(self) -> None:
         codex = _ValidationFailingCodex(
             _thread_resume_validation_error(loc=("thread", "reasoningEffort"))
         )
-        with (
-            self.assertRaises(ValidationError),
-            app_server_pool.open_codex_resumed(
-                cast("Callable[[], Any]", lambda: codex),
-                thread_id="t1",
-            ),
-        ):
-            pass
+        with app_server_pool.open_codex_resumed(
+            cast("Callable[[], Any]", lambda: codex),
+            thread_id="t1",
+        ) as (_opened, thread):
+            self.assertEqual(thread.id, "thread-raw")
 
-        self.assertEqual(codex._client.raw_requests, [])
+        self.assertEqual(codex._client.raw_requests[0][0], "thread/resume")
         self.assertTrue(codex.closed)
+
+    def test_client_resume_response_raw_fallback_for_live_resumes(self) -> None:
+        error = _thread_resume_validation_error(loc=("reasoningEffort",))
+        client = _RawResumeClient(
+            error=error,
+            raw_response={
+                "model": "gpt-5.6-sol",
+                "thread": {
+                    "id": "thread-raw",
+                    "path": "/tmp/rollout.jsonl",
+                    "updatedAt": "2026-07-09T22:00:00Z",
+                },
+            },
+        )
+        codex = _ClientValidationFailingCodex(client)
+
+        resumed = app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+            cast("Any", codex),
+            thread_id="t1",
+        )
+
+        self.assertEqual(resumed.model, "gpt-5.6-sol")
+        self.assertEqual(resumed.thread.id, "thread-raw")
+        self.assertEqual(resumed.thread.path, "/tmp/rollout.jsonl")
+        self.assertEqual(resumed.thread.updated_at, "2026-07-09T22:00:00Z")
+        self.assertEqual(client.thread_resume_calls, [("t1",)])
+        self.assertEqual(client.raw_requests[0][0], "thread/resume")
 
     def test_retries_locked_resume_with_fresh_server(self) -> None:
         servers: list[_ResumableCodex] = []

@@ -330,7 +330,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 common.Codex, enable_memories=settings.enable_memories
             ) as codex:
                 try:
-                    resumed = codex._client.thread_resume(session_id)
+                    resumed = app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                        codex, thread_id=session_id
+                    )
                 except InvalidRequestError as exc:
                     if not _thread_resume_archived_error(exc):
                         raise
@@ -342,7 +344,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                         ) from exc
                     _unarchive_session_for_turn(session_id, settings, codex=codex)
                     session_unarchived_for_turn = True
-                    resumed = codex._client.thread_resume(session_id)
+                    resumed = app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                        codex, thread_id=session_id
+                    )
                 thread = resumed.thread
                 thread_entries = list(_entries_for(thread))
                 models_data = common._models_for_plan_mode_fallback(codex)
@@ -404,7 +408,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             with app_server_pool.borrow_codex(
                 common.Codex, enable_memories=settings.enable_memories
             ) as codex:
-                resumed = codex._client.thread_resume(session_id)
+                resumed = app_server_pool.thread_resume_response_tolerating_sdk_metadata(
+                    codex, thread_id=session_id
+                )
                 models_data = common._models_for_plan_mode_fallback(codex)
         collaboration_model = (
             common._plan_mode_model_from_models(resumed, settings, models_data)
