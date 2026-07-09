@@ -119,6 +119,7 @@ from hitch.main.sessions.session_settings import (
     _effective_approval_mode_for_session,
     _effective_sandbox_policy_for_cwd,
     _format_disk_usage_max_percent,
+    _reasoning_effort_values,
     _resolved_settings,
     _selected_project_for_settings,
     _session_approval_mode_override,
@@ -247,10 +248,12 @@ def _settings_context(
         ],
         "effort_options": [
             {
-                "value": effort.value,
-                "supported": not current_supported or effort.value in current_supported,
+                "value": effort,
+                "supported": not current_supported or effort in current_supported,
             }
-            for effort in ReasoningEffort
+            for effort in _reasoning_effort_values(
+                models_data, current_effort=current_settings.reasoning_effort
+            )
         ],
         "sandbox_options": [
             {"id": value, "display_name": label}
@@ -1568,7 +1571,7 @@ def _plan_mode_model_from_models(
 
 def _models_for_plan_mode_fallback(codex: Codex) -> list[Any]:
     try:
-        return list(codex.models().data)
+        return caches._models_data_from_codex(codex)
     except Exception:
         logger.exception("failed to fetch models for plan mode fallback")
         return []

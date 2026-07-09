@@ -96,9 +96,9 @@ def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
         if models_data:
             return _resolved_settings(request, models_data)
 
-    with app_server_pool.borrow_codex(common.Codex, enable_memories=enable_memories) as codex:
-        models_data = list(codex.models().data)
-    caches._store_models_cache(enable_memories=enable_memories, models_data=models_data)
+    models_data = caches._fetch_models_data(
+        enable_memories=enable_memories, codex_cls=common.Codex
+    )
     return _resolved_settings(request, models_data)
 
 def _posted_new_session_target(

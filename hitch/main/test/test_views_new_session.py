@@ -210,6 +210,58 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
     @patch("hitch.main.repos.discover_repos")
+    def test_new_session_post_uses_raw_models_when_sdk_rejects_new_efforts(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        ctx = mock_codex.return_value.__enter__.return_value
+        ctx._client._request_raw.return_value = {
+            "data": [
+                {
+                    "id": "gpt-5.6",
+                    "displayName": "GPT-5.6",
+                    "isDefault": True,
+                    "defaultReasoningEffort": "ultra",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "max", "description": "max"},
+                        {"reasoningEffort": "ultra", "description": "ultra"},
+                    ],
+                }
+            ]
+        }
+        ctx.models.side_effect = AssertionError("typed model list should not be used")
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "gpt-5.6", "hitch_reasoning_effort": "ultra"},
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Refactor the login flow", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_called_once()
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="Refactor the login flow",
+            model="gpt-5.6",
+            reasoning_effort="ultra",
+        )
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
+        self.assertNotIn("hitch_reasoning_effort", response.cookies)
+        self.assertEqual(
+            [model.id for model in caches._cached_models_data(enable_memories=False)],
+            ["gpt-5.6"],
+        )
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_post_refreshes_expired_model_cache(
         self,
         mock_discover: MagicMock,

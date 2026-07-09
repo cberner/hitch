@@ -1,4 +1,5 @@
 """Settings and project management endpoints."""
+import logging
 import math
 from typing import Any
 
@@ -11,9 +12,6 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError
-from openai_codex.generated.v2_all import (
-    ReasoningEffort,
-)
 
 from hitch.main import caches, coding_agents
 from hitch.main import repos as repos_module
@@ -33,7 +31,8 @@ from hitch.main.sessions.project_visibility import (
 )
 from hitch.main.sessions.session_settings import (
     _authenticated_user,
-    _cached_models_and_settings,
+    _reasoning_effort_values,
+    _resolved_settings,
     _save_user_settings,
     _stored_settings,
     _supported_effort_values,
@@ -42,9 +41,11 @@ from hitch.main.sessions.settings_cookies import (
     _DEFAULT_APPROVAL_MODE,
     _EXTRA_SYSTEM_PROMPT_MAX_LEN,
     _MODEL_MAX_LEN,
+    _REASONING_EFFORT_MAX_LEN,
     _VALID_APPROVAL_MODES,
     _VALID_SANDBOX_POLICIES,
     _VALID_WEB_SEARCH_MODES,
+    ResolvedSettings,
     SettingsValues,
     _apply_cookie_updates,
     _extra_system_prompt_cookie_fits,
@@ -54,7 +55,28 @@ from hitch.main.sessions.settings_cookies import (
 from hitch.main.views import common
 from hitch.main.workflows import system_agents
 
+logger = logging.getLogger(__name__)
+
 _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOICES}
+
+def _fresh_models_data(*, enable_memories: bool) -> list[Any]:
+    return caches._fetch_models_data(
+        enable_memories=enable_memories, codex_cls=common.Codex
+    )
+
+def _fresh_models_and_settings(
+    request: HttpRequest,
+) -> tuple[list[Any], ResolvedSettings]:
+    stored_settings = _stored_settings(request)
+    try:
+        models_data = _fresh_models_data(enable_memories=stored_settings.enable_memories)
+    except Exception:
+        logger.exception("failed to fetch fresh models for settings")
+        models_data = caches._cached_models_data(
+            enable_memories=stored_settings.enable_memories
+        )
+        return models_data, _resolved_settings(request, models_data)
+    return models_data, _resolved_settings(request, models_data)
 
 def _apply_live_global_approval_mode(effective_approval_mode: str) -> None:
     explicit_override_thread_ids = SessionMetadata.objects.filter(
@@ -149,7 +171,7 @@ def _creatable_project_repos(discovered_repos: list[str]) -> list[str]:
 @require_http_methods(["GET", "POST"])
 def update_settings(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
-        models_data, resolved_settings = _cached_models_and_settings(request)
+        models_data, resolved_settings = _fresh_models_and_settings(request)
         next_url = common._safe_next_url(request) or reverse("index")
         response = render(
             request,
@@ -194,6 +216,8 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     user = _authenticated_user(request)
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
+    if len(effort) > _REASONING_EFFORT_MAX_LEN:
+        return HttpResponseBadRequest("invalid reasoning effort")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
         return HttpResponseBadRequest("extra system prompt is too long")
     # The character cap above does not bound the encoded cookie size, so a
@@ -204,9 +228,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     # too big for the cookie still saves correctly; don't block them on it.
     if user is None and not _extra_system_prompt_cookie_fits(extra_system_prompt):
         return HttpResponseBadRequest("extra system prompt is too long")
-    valid_efforts = {e.value for e in ReasoningEffort}
-    if effort and effort not in valid_efforts:
-        return HttpResponseBadRequest("invalid reasoning effort")
     if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:
         return HttpResponseBadRequest("invalid sandbox policy")
     # Approval mode always carries one of the dialog's values. An empty
@@ -260,15 +281,16 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         # the chosen model doesn't support) gets a clean 400 instead of
         # quietly poisoning every subsequent turn at runtime.
         enable_memories_value = enable_memories == "true"
-        cache_has_value = caches._models_cache_has_value(enable_memories=enable_memories_value)
-        models_data = caches._cached_models_data(enable_memories=enable_memories_value)
-        if cache_has_value:
-            caches._schedule_models_refresh(enable_memories=enable_memories_value)
-        else:
-            with app_server_pool.borrow_codex(
-                common.Codex, enable_memories=enable_memories_value
-            ) as codex:
-                models_data = list(codex.models().data)
+        try:
+            models_data = _fresh_models_data(enable_memories=enable_memories_value)
+        except Exception:
+            logger.exception("failed to fetch fresh models for settings validation")
+            models_data = caches._cached_models_data(
+                enable_memories=enable_memories_value
+            )
+        valid_efforts = set(_reasoning_effort_values(models_data))
+        if effort and effort not in valid_efforts:
+            return HttpResponseBadRequest("invalid reasoning effort")
         compat_error = _validate_settings_against_models(model, effort, models_data)
         if compat_error:
             return HttpResponseBadRequest(compat_error)

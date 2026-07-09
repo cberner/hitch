@@ -504,13 +504,11 @@ def _run_turn(
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
     )
+    raw_effort = reasoning_effort.strip() if reasoning_effort else None
     effort: ReasoningEffort | None = None
-    if reasoning_effort:
-        # Unknown strings are ignored rather than crashing the worker — Codex
-        # will fall back to the model's default effort in that case, which is
-        # preferable to losing the whole turn over a stale enum value.
+    if raw_effort:
         with contextlib.suppress(ValueError):
-            effort = ReasoningEffort(reasoning_effort)
+            effort = ReasoningEffort(raw_effort)
     policy = _build_sandbox_policy(sandbox_policy)
     # Serialise writes between the SDK reader thread (which calls the
     # approval handler) and the main thread (which appends streamed turn
@@ -604,6 +602,7 @@ def _run_turn(
                 input_image_paths=_instance_input_image_paths(instance),
                 model=model,
                 effort=effort,
+                raw_effort=raw_effort,
                 sandbox_policy=policy,
                 approval_mode=approval_mode,
                 collaboration_mode=collaboration_mode,
@@ -859,6 +858,7 @@ def _start_turn(
     input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
+    raw_effort: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     collaboration_mode: str | None,
@@ -896,12 +896,26 @@ def _start_turn(
             input_image_paths=input_image_paths,
             model=model,
             effort=effort,
+            raw_effort=raw_effort,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
             output_schema=output_schema,
         )
     if collaboration_mode:
         raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
+
+    if raw_effort and effort is None:
+        return _start_raw_turn(
+            codex,
+            thread,
+            prompt=prompt,
+            input_image_paths=input_image_paths,
+            model=model,
+            effort=raw_effort,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+            output_schema=output_schema,
+        )
 
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         typed_input = _typed_turn_input(prompt, input_image_paths)
@@ -935,6 +949,45 @@ def _start_turn(
     if mode is not None:
         turn_kwargs["approval_mode"] = mode
     return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
+
+
+def _start_raw_turn(
+    codex: Codex,
+    thread: Thread,
+    *,
+    prompt: str,
+    input_image_paths: list[str] | None,
+    model: str | None,
+    effort: str,
+    sandbox_policy: SandboxPolicy | None,
+    approval_mode: str | None,
+    output_schema: dict[str, Any] | None,
+) -> TurnHandle:
+    typed_input = _typed_turn_input(prompt, input_image_paths)
+    wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
+    params: dict[str, Any] = {
+        "threadId": thread.id,
+        "input": wire_input,
+        "effort": effort,
+    }
+    if model is not None:
+        params["model"] = model
+    if sandbox_policy is not None:
+        params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
+    if output_schema is not None:
+        params["outputSchema"] = output_schema
+    if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
+        params["approvalPolicy"] = AskForApprovalValue.on_request.value
+        params["approvalsReviewer"] = ApprovalsReviewer.user.value
+    else:
+        mode = _build_approval_mode(approval_mode)
+        if mode is not None:
+            approval_policy, approvals_reviewer = _approval_mode_params(mode)
+            params["approvalPolicy"] = approval_policy
+            if approvals_reviewer is not None:
+                params["approvalsReviewer"] = approvals_reviewer
+    response = codex._client.turn_start(thread.id, wire_input, params=params)
+    return TurnHandle(codex._client, thread.id, response.turn.id)
 
 
 def _start_plan_turn(
@@ -978,20 +1031,22 @@ def _start_default_collaboration_turn(
     input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
+    raw_effort: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("default collaboration mode requires a model")
-    collaboration_mode = CollaborationMode(
-        mode=ModeKind.default,
-        settings=CodexModeSettings(
-            developer_instructions=_DEFAULT_COLLABORATION_INSTRUCTIONS,
-            model=model,
-            reasoning_effort=effort,
-        ),
-    )
+    effort_value = raw_effort or (effort.value if effort is not None else None)
+    collaboration_mode = {
+        "mode": ModeKind.default.value,
+        "settings": {
+            "developer_instructions": _DEFAULT_COLLABORATION_INSTRUCTIONS,
+            "model": model,
+            "reasoning_effort": effort_value,
+        },
+    }
     return _start_collaboration_turn(
         codex,
         thread,
@@ -1010,17 +1065,22 @@ def _start_collaboration_turn(
     *,
     prompt: str,
     input_image_paths: list[str] | None,
-    collaboration_mode: CollaborationMode,
+    collaboration_mode: CollaborationMode | dict[str, Any],
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     typed_input = _typed_turn_input(prompt, input_image_paths)
     wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
+    collaboration_payload = (
+        collaboration_mode
+        if isinstance(collaboration_mode, dict)
+        else collaboration_mode.model_dump(mode="json", by_alias=True)
+    )
     params: dict[str, Any] = {
         "threadId": thread.id,
         "input": wire_input,
-        "collaborationMode": collaboration_mode.model_dump(mode="json", by_alias=True),
+        "collaborationMode": collaboration_payload,
     }
     if sandbox_policy is not None:
         params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
