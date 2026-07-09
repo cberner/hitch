@@ -23,6 +23,9 @@ from typing import Any
 
 from django.conf import settings
 from openai_codex import AppServerConfig, Codex, TransportClosedError
+from openai_codex.api import Thread
+from openai_codex.generated.v2_all import ThreadResumeParams
+from pydantic import ValidationError
 
 from hitch.main.runtime import codex_pool, server_lifecycle
 from hitch.main.runtime.db import is_database_locked_error
@@ -36,6 +39,15 @@ _APPSERVER_WORKER_START_MAX_ATTEMPTS = 24
 _APPSERVER_START_BACKOFF_BASE_SECONDS = 0.2
 
 _APPSERVER_START_BACKOFF_MAX_SECONDS = 5.0
+
+_THREAD_RESUME_PARAM_ALIASES = {
+    "approval_policy": "approvalPolicy",
+    "approvals_reviewer": "approvalsReviewer",
+    "base_instructions": "baseInstructions",
+    "developer_instructions": "developerInstructions",
+    "model_provider": "modelProvider",
+    "service_tier": "serviceTier",
+}
 
 def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
     """Call ``factory`` to construct a ``Codex``, retrying a locked init.
@@ -222,7 +234,9 @@ def open_codex_resumed(
             entered = codex.__enter__()
             if configure is not None:
                 configure(entered)
-            thread = entered.thread_resume(thread_id, **resume_kwargs)
+            thread = _thread_resume_tolerating_sdk_metadata(
+                entered, thread_id=thread_id, resume_kwargs=resume_kwargs
+            )
         except TransportClosedError as exc:
             if entered is not None and codex is not None:
                 codex.__exit__(type(exc), exc, exc.__traceback__)
@@ -256,6 +270,63 @@ def open_codex_resumed(
         return
     assert last_error is not None
     raise last_error
+
+def _thread_resume_tolerating_sdk_metadata(
+    codex: Codex,
+    *,
+    thread_id: str,
+    resume_kwargs: dict[str, Any],
+) -> Any:
+    try:
+        return codex.thread_resume(thread_id, **resume_kwargs)
+    except ValidationError as exc:
+        if not _can_raw_resume_after_validation_error(exc):
+            raise
+        logger.warning(
+            "Codex SDK could not validate thread/resume metadata for %s; "
+            "falling back to raw resume",
+            thread_id,
+        )
+        return _raw_thread_resume(codex, thread_id=thread_id, resume_kwargs=resume_kwargs)
+
+def _can_raw_resume_after_validation_error(exc: ValidationError) -> bool:
+    """Resume only needs ``thread.id``; tolerate SDK drift in sibling metadata."""
+    for error in exc.errors():
+        loc = error.get("loc", ())
+        if isinstance(loc, tuple) and loc and loc[0] == "thread":
+            return False
+    return True
+
+def _raw_thread_resume(
+    codex: Codex,
+    *,
+    thread_id: str,
+    resume_kwargs: dict[str, Any],
+) -> Thread:
+    raw_request = getattr(getattr(codex, "_client", None), "_request_raw", None)
+    if not callable(raw_request):
+        raise RuntimeError("Codex client does not expose raw requests")
+    response = raw_request("thread/resume", _thread_resume_payload(thread_id, resume_kwargs))
+    if not isinstance(response, dict):
+        raise RuntimeError("thread/resume response must be an object")
+    thread = response.get("thread")
+    if not isinstance(thread, dict):
+        raise RuntimeError("thread/resume response missing thread object")
+    resumed_thread_id = thread.get("id")
+    if not isinstance(resumed_thread_id, str) or not resumed_thread_id:
+        raise RuntimeError("thread/resume response missing thread id")
+    return Thread(codex._client, resumed_thread_id)
+
+def _thread_resume_payload(thread_id: str, resume_kwargs: dict[str, Any]) -> dict[str, Any]:
+    kwargs = {
+        _THREAD_RESUME_PARAM_ALIASES.get(key, key): value
+        for key, value in resume_kwargs.items()
+    }
+    params = ThreadResumeParams(thread_id=thread_id, **kwargs)
+    dumped = params.model_dump(by_alias=True, exclude_none=True, mode="json")
+    if not isinstance(dumped, dict):
+        raise TypeError("thread resume params did not dump to an object")
+    return dumped
 
 _SHARED_POOL_MAX = 4
 
