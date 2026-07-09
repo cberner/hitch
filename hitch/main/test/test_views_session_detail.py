@@ -11,9 +11,11 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from django.test import (
+    SimpleTestCase,
     TestCase,
 )
 from django.urls import reverse
+from openai_codex.errors import InternalRpcError, InvalidRequestError
 
 from hitch.main import demo, views
 from hitch.main.models import (
@@ -2112,6 +2114,140 @@ class SessionDetailFastPathTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         client._client.thread_resume.assert_called_once_with("active")
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_active_session_detail_renders_pending_when_rollout_resume_not_ready(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(
+            thread_id="pending-rollout",
+            cwd="/repo",
+            codex_path="/root/.codex/sessions/rollout-pending-rollout.jsonl",
+            codex_preview="First prompt",
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="pending-rollout",
+            cwd="/repo",
+            prompt="First prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+        )
+        client = _setup_codex(mock_codex)
+        errors = (
+            InternalRpcError(
+                -32603,
+                "failed to read thread: thread-store internal error: failed to read "
+                "thread /root/.codex/sessions/rollout-pending-rollout.jsonl: "
+                "rollout at /root/.codex/sessions/rollout-pending-rollout.jsonl "
+                "is empty",
+                None,
+            ),
+            InvalidRequestError(
+                -32600,
+                "no rollout found for thread id pending-rollout",
+                None,
+            ),
+        )
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            for error in errors:
+                with self.subTest(error=error.message):
+                    client._client.thread_resume.side_effect = error
+                    response = self.client.get(
+                        reverse("session", kwargs={"session_id": "pending-rollout"})
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertContains(response, "First prompt")
+                    self.assertContains(response, "data-live-root")
+        self.assertEqual(client._client.thread_resume.call_count, len(errors))
+
+
+class PendingSessionResumeTests(SimpleTestCase):
+    def test_requires_active_owner_and_cwd(self) -> None:
+        metadata = SessionMetadata(thread_id="pending-rollout", cwd="/repo")
+
+        self.assertIsNone(
+            session_resume._pending_resume_for_active_session(
+                "pending-rollout",
+                metadata,
+                active_instance=None,
+                active_system_workflow=None,
+            )
+        )
+
+        metadata.cwd = ""
+        active_instance = CodexInstance(
+            pid=1,
+            thread_id="pending-rollout",
+            cwd="",
+            events_path="/tmp/events.jsonl",
+        )
+        self.assertIsNone(
+            session_resume._pending_resume_for_active_session(
+                "pending-rollout",
+                metadata,
+                active_instance=active_instance,
+                active_system_workflow=None,
+            )
+        )
+
+    def test_uses_active_workflow_without_instance(self) -> None:
+        workflow = SystemWorkflow(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="pending-rollout",
+            cwd="/workflow",
+        )
+
+        resumed = session_resume._pending_resume_for_active_session(
+            "pending-rollout",
+            None,
+            active_instance=None,
+            active_system_workflow=workflow,
+        )
+
+        self.assertIsNotNone(resumed)
+        assert resumed is not None
+        self.assertEqual(resumed.thread.cwd, "/workflow")
+        self.assertEqual(resumed.thread.preview, "")
+        self.assertIsNone(resumed.thread.updated_at)
+        self.assertEqual(resumed.model, "")
+        self.assertEqual(resumed.reasoning_effort, "")
+
+    def test_uses_active_instance_fallback_metadata(self) -> None:
+        started_at = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata(thread_id="pending-rollout", cwd="/metadata")
+        active_instance = CodexInstance(
+            pid=1,
+            thread_id="pending-rollout",
+            cwd="",
+            prompt="First prompt",
+            events_path="/tmp/events.jsonl",
+            started_at=started_at,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+        )
+
+        resumed = session_resume._pending_resume_for_active_session(
+            "pending-rollout",
+            metadata,
+            active_instance=active_instance,
+            active_system_workflow=None,
+        )
+
+        self.assertIsNotNone(resumed)
+        assert resumed is not None
+        self.assertEqual(resumed.thread.cwd, "/metadata")
+        self.assertEqual(resumed.thread.preview, "First prompt")
+        self.assertEqual(resumed.thread.updated_at, started_at.timestamp())
+        self.assertEqual(resumed.model, "gpt-5.5")
+        self.assertEqual(resumed.reasoning_effort, "xhigh")
+
 
 class PendingPlanStateTests(TestCase):
     def test_approval_declined_does_not_clear_pending_plan(self) -> None:

@@ -215,6 +215,61 @@ def _metadata_resume_for_inactive_session(
     )
 
 
+def _pending_resume_for_active_session(
+    session_id: str,
+    metadata: SessionMetadata | None,
+    *,
+    active_instance: CodexInstance | None,
+    active_system_workflow: SystemWorkflow | None,
+) -> _MetadataResume | None:
+    if active_instance is None and active_system_workflow is None:
+        return None
+    cwd = ""
+    if active_instance is not None and active_instance.cwd:
+        cwd = active_instance.cwd
+    elif active_system_workflow is not None and active_system_workflow.cwd:
+        cwd = active_system_workflow.cwd
+    elif metadata is not None:
+        cwd = metadata.cwd
+    if not cwd:
+        return None
+    updated_at = (
+        updated_at_seconds(metadata.codex_updated_at)
+        if metadata is not None and metadata.codex_updated_at is not None
+        else None
+    )
+    if updated_at is None and active_instance is not None:
+        updated_at = active_instance.started_at.timestamp()
+    preview = ""
+    if metadata is not None and metadata.codex_preview:
+        preview = metadata.codex_preview
+    elif active_instance is not None:
+        preview = active_instance.prompt
+    thread = _MetadataThread(
+        id=session_id,
+        cwd=cwd,
+        path="",
+        name=metadata.codex_name if metadata is not None else "",
+        preview=preview,
+        created_at=(
+            updated_at_seconds(metadata.codex_created_at)
+            if metadata is not None
+            else None
+        ),
+        updated_at=updated_at,
+        archived=False,
+        thread_source=metadata.codex_thread_source if metadata is not None else "",
+    )
+    return _MetadataResume(
+        thread=thread,
+        entries=(),
+        model=active_instance.model if active_instance is not None else "",
+        reasoning_effort=(
+            active_instance.reasoning_effort if active_instance is not None else ""
+        ),
+    )
+
+
 def _metadata_thread(
     metadata: SessionMetadata, *, rollout_path: Path | None = None
 ) -> _MetadataThread:
