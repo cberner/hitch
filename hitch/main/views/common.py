@@ -28,7 +28,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from openai_codex import Codex as Codex
-from openai_codex.errors import InvalidRequestError
+from openai_codex.errors import InternalRpcError, InvalidRequestError
 from openai_codex.generated.v2_all import (
     ReasoningEffort,
     SortDirection,
@@ -109,6 +109,7 @@ from hitch.main.sessions.session_pr_plan import (
 )
 from hitch.main.sessions.session_resume import (
     _metadata_resume_for_inactive_session,
+    _pending_resume_for_active_session,
     _session_detail_metadata,
 )
 from hitch.main.sessions.session_settings import (
@@ -470,8 +471,38 @@ def _render_session_detail(
             # so a follow-up ``thread/read`` would just be a redundant round-trip.
             try:
                 resumed = codex._client.thread_resume(session_id)
-            except InvalidRequestError as exc:
-                if require_system_agent_thread and _thread_resume_missing_or_invalid(exc):
+            except (InternalRpcError, InvalidRequestError) as exc:
+                if not require_system_agent_thread and _thread_resume_rollout_pending(exc):
+                    pending_resume = _pending_resume_for_active_session(
+                        session_id,
+                        metadata,
+                        active_instance=active_instance,
+                        active_system_workflow=active_system_workflow,
+                    )
+                    if pending_resume is not None:
+                        logger.warning(
+                            "rendering pending session detail while rollout is not readable: %s",
+                            session_id,
+                        )
+                        models_data = caches._cached_models_for_session_detail(
+                            enable_memories=initial_settings.enable_memories
+                        )
+                        resolved_settings = _resolved_settings(request, models_data)
+                        plan_model = _plan_mode_model_from_models(
+                            pending_resume, resolved_settings.values, models_data
+                        )
+                        return (
+                            pending_resume,
+                            pending_resume.thread,
+                            models_data,
+                            resolved_settings,
+                            plan_model,
+                        )
+                if (
+                    require_system_agent_thread
+                    and isinstance(exc, InvalidRequestError)
+                    and _thread_resume_missing_or_invalid(exc)
+                ):
                     raise Http404("system session not found") from None
                 raise
             thread = resumed.thread
@@ -825,6 +856,22 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
             re.search(
                 r"\bthread(?:\s+id)?(?:\s+\S+)?\s+not found\b",
                 message,
+            )
+        )
+    )
+
+def _thread_resume_rollout_pending(
+    exc: InternalRpcError | InvalidRequestError,
+) -> bool:
+    message = exc.message.lower()
+    return (
+        "no rollout found for thread id" in message
+        or (
+            "failed to read thread" in message
+            and "rollout at " in message
+            and (
+                " is empty" in message
+                or "does not start with session metadata" in message
             )
         )
     )
