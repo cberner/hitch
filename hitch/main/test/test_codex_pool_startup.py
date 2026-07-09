@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
+from pydantic import ValidationError
 
 from hitch.main.runtime import app_server_pool, reconciliation
 
@@ -204,6 +205,41 @@ class _ResumableCodex(_FakeCodex):
         return ("thread", _thread_id)
 
 
+def _thread_resume_validation_error(*, loc: tuple[str, ...]) -> ValidationError:
+    return ValidationError.from_exception_data(
+        "ThreadResumeResponse",
+        [
+            {
+                "type": "enum",
+                "loc": loc,
+                "input": "max",
+                "ctx": {"expected": "'none'"},
+            }
+        ],
+    )
+
+
+class _RawResumeClient:
+    def __init__(self) -> None:
+        self.raw_requests: list[tuple[str, object]] = []
+
+    def _request_raw(self, method: str, params: object) -> object:
+        self.raw_requests.append((method, params))
+        return {"thread": {"id": "thread-raw"}}
+
+
+class _ValidationFailingCodex(_FakeCodex):
+    def __init__(self, error: ValidationError) -> None:
+        super().__init__()
+        self._error = error
+        self._client = _RawResumeClient()
+        self.resume_calls = 0
+
+    def thread_resume(self, _thread_id: str, **_kwargs: object) -> object:
+        self.resume_calls += 1
+        raise self._error
+
+
 class OpenCodexResumedTests(SimpleTestCase):
     def test_yields_resumed_thread_and_closes_on_exit(self) -> None:
         codex = _ResumableCodex()
@@ -217,6 +253,52 @@ class OpenCodexResumedTests(SimpleTestCase):
             self.assertEqual(thread, ("thread", "t1"))
             self.assertEqual(configured, [codex])
             self.assertFalse(codex.closed)
+        self.assertTrue(codex.closed)
+
+    def test_raw_resume_fallback_for_sdk_metadata_validation(self) -> None:
+        codex = _ValidationFailingCodex(
+            _thread_resume_validation_error(loc=("reasoningEffort",))
+        )
+        with app_server_pool.open_codex_resumed(
+            cast("Callable[[], Any]", lambda: codex),
+            thread_id="t1",
+            resume_kwargs={
+                "base_instructions": "Base.",
+                "developer_instructions": "Dev.",
+            },
+        ) as (_opened, thread):
+            self.assertEqual(thread.id, "thread-raw")
+
+        self.assertEqual(codex.resume_calls, 1)
+        self.assertEqual(
+            codex._client.raw_requests,
+            [
+                (
+                    "thread/resume",
+                    {
+                        "baseInstructions": "Base.",
+                        "developerInstructions": "Dev.",
+                        "threadId": "t1",
+                    },
+                )
+            ],
+        )
+        self.assertTrue(codex.closed)
+
+    def test_resume_validation_inside_thread_is_not_masked(self) -> None:
+        codex = _ValidationFailingCodex(
+            _thread_resume_validation_error(loc=("thread", "reasoningEffort"))
+        )
+        with (
+            self.assertRaises(ValidationError),
+            app_server_pool.open_codex_resumed(
+                cast("Callable[[], Any]", lambda: codex),
+                thread_id="t1",
+            ),
+        ):
+            pass
+
+        self.assertEqual(codex._client.raw_requests, [])
         self.assertTrue(codex.closed)
 
     def test_retries_locked_resume_with_fresh_server(self) -> None:

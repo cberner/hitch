@@ -453,9 +453,9 @@ class SpawnNewSessionTests(TestCase):
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         """The settings dialog's model selector flows into
-        ``thread_start(model=...)``; effort, sandbox policy and approval
-        mode flow into the worker as CLI args. Pin every wiring so a
-        refactor can't quietly drop one of them.
+        ``thread_start(model=...)`` and the worker turn; effort, sandbox
+        policy and approval mode flow into the worker as CLI args. Pin every
+        wiring so a refactor can't quietly drop one of them.
         """
         codex = _stub_codex_thread_start(mock_codex)
         mock_launch.return_value = SimpleNamespace(pid=1)
@@ -468,8 +468,8 @@ class SpawnNewSessionTests(TestCase):
                 cwd="/repo",
                 prompt="hi",
                 developer_instructions="Prefer small, typed changes.",
-                model="gpt-5",
-                reasoning_effort="high",
+                model="gpt-5.6-sol",
+                reasoning_effort="max",
                 sandbox_policy="workspaceWrite",
                 approval_mode="deny_all",
             )
@@ -479,11 +479,12 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(
             payload["developerInstructions"], "Prefer small, typed changes."
         )
-        self.assertEqual(payload["model"], "gpt-5")
+        self.assertEqual(payload["model"], "gpt-5.6-sol")
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
-            reasoning_effort="high",
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
         )
@@ -1780,6 +1781,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
                 {"collaboration_mode": "default"},
                 [("--collaboration-mode", "default")],
             ),
+            ({"model": "gpt-5.6-sol"}, [("--model", "gpt-5.6-sol")]),
             (
                 {"model": "gpt-5.4", "plan_mode": True},
                 [("--model", "gpt-5.4"), ("--plan-mode", None)],
@@ -7005,16 +7007,16 @@ class CodexWorkerCommandTests(TestCase):
                 "--instance-id",
                 str(instance.pk),
                 "--model",
-                "gpt-5.6",
+                "gpt-5.6-sol",
                 "--reasoning-effort",
-                "ultra",
+                "max",
             )
 
         codex_ctx.thread_resume.return_value.turn.assert_not_called()
         params = captured_params["params"]
         assert isinstance(params, dict)
-        self.assertEqual(params["model"], "gpt-5.6")
-        self.assertEqual(params["effort"], "ultra")
+        self.assertEqual(params["model"], "gpt-5.6-sol")
+        self.assertEqual(params["effort"], "max")
         self.assertEqual(params["threadId"], "thread-1")
         wire_input = captured_params["input"]
         assert isinstance(wire_input, list)

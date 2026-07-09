@@ -188,7 +188,7 @@ def spawn_new_session(
         input_image_paths=input_image_paths,
         base_instructions=base_instructions,
         developer_instructions=developer_instructions,
-        model=model if plan_mode else None,
+        model=model,
         stored_model=model,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
@@ -1693,7 +1693,9 @@ def _spawn_worker(
             launch_kwargs["web_search_mode"] = web_search_mode
         if enable_memories:
             launch_kwargs["enable_memories"] = True
-        if model or plan_mode:
+        if model:
+            launch_kwargs["model"] = model
+        if plan_mode:
             launch_kwargs["model"] = model
             launch_kwargs["plan_mode"] = plan_mode
         if collaboration_mode:
