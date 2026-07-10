@@ -87,6 +87,7 @@ from hitch.main.sessions.session_entry_display import (
     _display_title,
     _entries_for,
     _filter_demo_agent_entries,
+    _latest_user_turn_failure,
     _pending_user_author,
     _pending_user_prompt,
     _pending_user_timestamp,
@@ -724,6 +725,7 @@ def _render_session_detail(
     )
     settings_context = _settings_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
+    latest_user_turn_failure = _latest_user_turn_failure(session_id)
     workflow_status_text = _workflow_status_text(active_system_workflow)
     pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
     workflow_accepts_steering = _workflow_accepts_qa_pause_steering(
@@ -800,6 +802,7 @@ def _render_session_detail(
             "workflow_status_text": workflow_status_text,
             "pr_workflow_progress": pr_workflow_progress,
             "active_worker_status_text": active_worker_status_text,
+            "latest_user_turn_failure": latest_user_turn_failure,
             "live_status_text": live_status_text,
             # Carried into the Stop button so the click targets the
             # specific worker the page is streaming, not "whichever

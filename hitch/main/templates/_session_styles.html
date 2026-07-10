@@ -478,6 +478,20 @@
             font-style: italic;
             box-shadow: none;
         }
+        .message.turn-failure {
+            background: var(--status-error-bg);
+            border-color: var(--status-error-fg);
+            color: var(--status-error-fg);
+            box-shadow: none;
+        }
+        .turn-failure-title {
+            margin-bottom: 0.35rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .message.turn-failure .body { color: inherit; }
         .message .body {
             white-space: pre-wrap;
             word-wrap: break-word;

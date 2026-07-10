@@ -130,7 +130,7 @@
         </div>
         <div class="session-tab-panel" id="session-panel-conversation" role="tabpanel" aria-labelledby="session-tab-conversation">
         {% endif %}
-        {% if system_prompt or entries or pending_user_prompt or active_worker or active_system_workflow or session_demo %}
+        {% if system_prompt or entries or latest_user_turn_failure or pending_user_prompt or active_worker or active_system_workflow or session_demo %}
         <section class="thread" data-thread>
             {% if session_demo and not active_demo_worker %}
             <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
@@ -161,6 +161,18 @@
                 </details>
                 {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
             {% endfor %}
+            {% if latest_user_turn_failure %}
+            <div class="entry" data-turn-failure>
+                <div class="entry-header">
+                    <span class="role">Hitch</span>
+                    <time data-ts="{{ latest_user_turn_failure.timestamp }}">{{ latest_user_turn_failure.timestamp }}</time>
+                </div>
+                <div class="message turn-failure" role="alert">
+                    <div class="turn-failure-title">Agent turn failed</div>
+                    <div class="body">{{ latest_user_turn_failure.message }}</div>
+                </div>
+            </div>
+            {% endif %}
             {% if pending_user_prompt %}
             <div class="entry" data-pending-user>
                 <div class="entry-header">
