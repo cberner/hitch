@@ -1183,9 +1183,17 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
 
 class LaunchWorkerProcessSystemdTests(TestCase):
-    def test_scope_unit_name_is_deployment_scoped(self) -> None:
+    def test_scope_unit_name_is_stable_and_deployment_scoped(self) -> None:
+        with self.settings(BASE_DIR=Path("/srv/hitch-a")):
+            first = codex_pool._scope_unit_for_instance(7)
+            same_deployment = codex_pool._scope_unit_for_instance(7)
+        with self.settings(BASE_DIR=Path("/srv/hitch-b")):
+            other_deployment = codex_pool._scope_unit_for_instance(7)
+
+        self.assertEqual(first, same_deployment)
+        self.assertNotEqual(first, other_deployment)
         self.assertRegex(
-            codex_pool._scope_unit_for_instance(7),
+            first,
             r"\Ahitch-codex-worker-[a-f0-9]{12}-7\.service\Z",
         )
 
