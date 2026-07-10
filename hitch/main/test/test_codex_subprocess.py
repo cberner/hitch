@@ -2510,6 +2510,358 @@ class ReconcileAndLookupTests(TestCase):
         )
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_keeps_retryable_error_as_context(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "type": "commandExecution",
+                                "status": "completed",
+                                "command": (
+                                    "/bin/bash -lc "
+                                    '"sed -n \'90,390p\' src/multimap_table.rs"'
+                                ),
+                            },
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 4/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=16,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn("command completed:", instance.error)
+        self.assertIn("src/multimap_table.rs", instance.error)
+        self.assertIn(
+            "last retryable error: Reconnecting... 4/5: request timed out",
+            instance.error,
+        )
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_adds_newer_retryable_context_to_error_detail(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "turn failed",
+                                "additionalDetails": "executor exited",
+                            },
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 4/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=20,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("last event: turn failed: executor exited", instance.error)
+        self.assertIn(
+            "last retryable error: Reconnecting... 4/5: request timed out",
+            instance.error,
+        )
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_keeps_retryable_error_after_late_hitch_event(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 4/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "approval/resolved",
+                        "payload": {
+                            "id": 99,
+                            "method": "exec",
+                            "decision": "accept",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=19,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn(
+            "last event: retryable error: Reconnecting... 4/5: request timed out",
+            instance.error,
+        )
+        self.assertNotIn("approval/resolved", instance.error)
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_uses_recorded_order_for_retryable_progress(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 4/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                        "recordedAt": 200,
+                        "eventSeq": 2,
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "thread/goal/updated",
+                        "payload": {"threadId": "t", "objective": "older goal"},
+                        "recordedAt": 100,
+                        "eventSeq": 1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=22,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "last event: retryable error: Reconnecting... 4/5: request timed out",
+            instance.error,
+        )
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_keeps_retryable_error_after_malformed_event_method(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 4/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps({"method": 123, "payload": {}})
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=21,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "last event: retryable error: Reconnecting... 4/5: request timed out",
+            instance.error,
+        )
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_drops_stale_retryable_error_after_progress(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 2/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "type": "commandExecution",
+                                "status": "completed",
+                                "command": "/bin/bash -lc 'just test'",
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=17,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("command completed:", instance.error)
+        self.assertIn("/bin/bash -lc 'just test'", instance.error)
+        self.assertNotIn("last retryable error", instance.error)
+        self.assertNotIn("Reconnecting... 2/5", instance.error)
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_treats_approved_auto_approval_as_progress(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            action = {"command": "/bin/bash -lc 'just test'"}
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "error",
+                        "payload": {
+                            "error": {
+                                "message": "Reconnecting... 2/5",
+                                "additionalDetails": "request timed out",
+                            },
+                            "willRetry": True,
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "item/autoApprovalReview/completed",
+                        "payload": {
+                            "action": action,
+                            "review": {"status": "approved"},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=18,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = reconciliation.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(
+            instance.error,
+            "worker process exited before reporting completion",
+        )
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_worker_log_tail(
         self, _mock_worker_alive: MagicMock
     ) -> None:
