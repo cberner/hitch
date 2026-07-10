@@ -760,11 +760,41 @@ class PruneWorkerLogsDbTests(SimpleTestCase):
 
 
 class SpawnFailureTests(TestCase):
+    @patch(
+        "hitch.main.runtime.codex_pool.session_index.record_turn_activity",
+        side_effect=RuntimeError("database is locked"),
+    )
+    def test_session_activity_failure_is_best_effort(
+        self, mock_record_activity: MagicMock
+    ) -> None:
+        ended_at = timezone.now()
+        instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="t",
+            cwd="/repo",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_FAILED,
+            ended_at=ended_at,
+        )
+
+        with self.assertLogs("hitch.main.runtime.codex_pool", level="ERROR"):
+            codex_pool._record_session_activity(instance)
+
+        mock_record_activity.assert_called_once_with("t", updated_at=ended_at)
+
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_marks_instance_failed_when_launch_raises(
         self, mock_launch: MagicMock
     ) -> None:
         mock_launch.side_effect = OSError("boom")
+        stale = timezone.now() - timedelta(days=3)
+        metadata = SessionMetadata.objects.create(
+            thread_id="t",
+            cwd="/repo",
+            codex_created_at=stale,
+            codex_updated_at=stale,
+            codex_last_synced_at=stale,
+        )
 
         with (
             _events_dir() as events_dir,
@@ -791,6 +821,8 @@ class SpawnFailureTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.input_image_paths, [])
         self.assertEqual(instance.input_attachment_paths, [])
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_updated_at, instance.ended_at)
 
 
 class SpawnTurnTests(TestCase):
@@ -826,6 +858,33 @@ class SpawnTurnTests(TestCase):
             sandbox_policy=None,
             approval_mode=None,
         )
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    def test_spawn_turn_immediately_bumps_session_index(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        stale = timezone.now() - timedelta(days=3)
+        metadata = SessionMetadata.objects.create(
+            thread_id="thread-xyz",
+            cwd="/repo",
+            codex_created_at=stale,
+            codex_updated_at=stale,
+            codex_last_synced_at=stale,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+            )
+
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_updated_at, instance.started_at)
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_persists_auto_qa_enabled(self, mock_launch: MagicMock) -> None:
@@ -2193,6 +2252,14 @@ class ReconcileAndLookupTests(TestCase):
         dead_running = self._make(pid=10, status=CodexInstance.STATUS_RUNNING)
         live_running = self._make(pid=11, status=CodexInstance.STATUS_RUNNING)
         completed = self._make(pid=12, status=CodexInstance.STATUS_COMPLETED)
+        stale = timezone.now() - timedelta(days=3)
+        metadata = SessionMetadata.objects.create(
+            thread_id=dead_running.thread_id,
+            cwd=dead_running.cwd,
+            codex_created_at=stale,
+            codex_updated_at=stale,
+            codex_last_synced_at=stale,
+        )
         mock_worker_alive.side_effect = lambda instance: instance.pk == live_running.pk
 
         n = reconciliation.reconcile_dead()
@@ -2207,6 +2274,8 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(live_running.ended_at)
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_updated_at, dead_running.ended_at)
 
     @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
     @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
@@ -4473,6 +4542,14 @@ class InterruptActiveTests(TestCase):
         # app-server child dies with the worker) and write status
         # ourselves since the worker no longer has the chance to.
         instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        stale = timezone.now() - timedelta(days=3)
+        metadata = SessionMetadata.objects.create(
+            thread_id=instance.thread_id,
+            cwd=instance.cwd,
+            codex_created_at=stale,
+            codex_updated_at=stale,
+            codex_last_synced_at=stale,
+        )
         CodexInstance.objects.filter(pk=instance.pk).update(
             interrupt_requested_at=timezone.now()
         )
@@ -4486,6 +4563,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
         self.assertIsNotNone(instance.ended_at)
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_updated_at, instance.ended_at)
 
     @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)

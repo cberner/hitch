@@ -734,6 +734,9 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
             continue
         codex_pool._resolve_dangling_requests(instance.pk)
         instance.refresh_from_db()
+        # A dead worker cannot run its own completion hook. Preserve the turn's
+        # terminal activity in the cached index before routing the failure.
+        codex_pool._record_session_activity(instance)
         # The worker died without reporting completion, so its systemd cgroup may
         # still hold grandchildren the codex sandbox reparented into their own
         # session (a process-group signal would miss them). Reap the cgroup so a

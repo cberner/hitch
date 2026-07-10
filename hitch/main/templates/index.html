@@ -790,13 +790,26 @@
                 dateStyle: "medium",
                 timeStyle: "short",
             });
+            const updatedTimes = [];
             for (const el of document.querySelectorAll("time[data-updated-at]")) {
                 const seconds = Number(el.dataset.updatedAt);
                 if (!Number.isFinite(seconds) || seconds <= 0) continue;
                 const date = new Date(seconds * 1000);
                 el.dateTime = date.toISOString();
                 el.title = date.toString();
-                el.textContent = `${absolute.format(date)} (${window.hitch.relativeFromNow(date)})`;
+                updatedTimes.push({ el, date, absolute: absolute.format(date) });
+            }
+            function formatUpdatedTimestamps() {
+                for (const timestamp of updatedTimes) {
+                    timestamp.el.textContent = `${timestamp.absolute} (${window.hitch.relativeFromNow(timestamp.date)})`;
+                }
+            }
+            if (updatedTimes.length) {
+                formatUpdatedTimestamps();
+                window.setInterval(formatUpdatedTimestamps, 30_000);
+                document.addEventListener("visibilitychange", () => {
+                    if (!document.hidden) formatUpdatedTimestamps();
+                });
             }
             const archiveToast = document.querySelector("[data-archive-toast]");
             const archiveUndo = document.querySelector("[data-archive-undo]");

@@ -97,6 +97,26 @@ class SessionIndexRefreshTests(TestCase):
             SessionMetadata.objects.filter(thread_id="missing-thread").exists()
         )
 
+    def test_record_turn_activity_does_not_regress_newer_activity(self) -> None:
+        newer = datetime(2026, 6, 6, tzinfo=UTC)
+        last_synced = datetime(2026, 6, 7, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="overlapping-thread",
+            cwd="/repo",
+            codex_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            codex_updated_at=newer,
+            codex_last_synced_at=last_synced,
+        )
+
+        session_index.record_turn_activity(
+            "overlapping-thread",
+            updated_at=datetime(2026, 5, 5, tzinfo=UTC),
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="overlapping-thread")
+        self.assertEqual(metadata.codex_updated_at, newer)
+        self.assertEqual(metadata.codex_last_synced_at, last_synced)
+
     def test_upsert_thread_does_not_regress_worker_bump(self) -> None:
         # A worker turn on an isolated sqlite_home bumped the cached row; the web
         # home still reports the pre-turn (older) updated_at. A DB-only refresh
