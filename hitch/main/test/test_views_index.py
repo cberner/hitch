@@ -6815,7 +6815,10 @@ class IndexViewTests(TestCase):
         )
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
-    def test_usage_refresh_keeps_disappeared_file_cache_repair_pending(self) -> None:
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_stamps_disappeared_file_cache_after_failed_repair(
+        self, mock_codex: MagicMock
+    ) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
         SessionMetadata.objects.filter(thread_id="missing-path").update(
@@ -6839,6 +6842,22 @@ class IndexViewTests(TestCase):
         self.assertTrue(cache_state.cache_usable)
         self.assertTrue(cache_state.refresh_pending)
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("resume failed")
+
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
+        )
+
+        metadata.refresh_from_db()
+        cache.refresh_from_db()
+        self.assertEqual(cache.rollout_path, missing_path)
+        self.assertEqual(cache.rollout_mtime_ns, 0)
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
     def test_usage_refresh_keeps_existing_terminal_missing_path_cache(
