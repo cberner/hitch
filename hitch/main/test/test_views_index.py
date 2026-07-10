@@ -6815,6 +6815,53 @@ class IndexViewTests(TestCase):
         )
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_keeps_existing_terminal_missing_path_cache(
+        self, mock_codex: MagicMock
+    ) -> None:
+        missing_path = "/nonexistent/rollout.jsonl"
+        _seed_usage_metadata("missing-path", path=missing_path)
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="missing-path",
+            rollout_path=missing_path,
+            rollout_mtime_ns=123,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("resume failed")
+
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="missing-path")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
+        self.assertEqual(cache.rollout_path, missing_path)
+        self.assertEqual(cache.rollout_mtime_ns, 123)
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_missing_metadata_path_handles_unexpected_resume_error(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = RuntimeError("boom")
+
+        refreshed_path = token_usage._refresh_missing_usage_metadata_path(
+            client, "missing-path", projects=[]
+        )
+
+        self.assertIsNone(refreshed_path)
+
     def test_usage_refresh_keeps_pathless_old_cache_repair_pending(self) -> None:
         _seed_usage_metadata("missing-path")
         SessionMetadata.objects.filter(thread_id="missing-path").update(
