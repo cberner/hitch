@@ -4591,6 +4591,17 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
             [],
         )
 
+    @patch.object(sys, "argv", ["manage.py", "test"])
+    def test_default_proc_scan_disabled_under_django_tests(self) -> None:
+        self.assertEqual(
+            list(
+                reconciliation._iter_codex_app_server_pids(
+                    deployment_id=self._DEPLOYMENT
+                )
+            ),
+            [],
+        )
+
 
 class NukeCodexAppServersTests(SimpleTestCase):
     _DEPLOYMENT = "/srv/hitch"
@@ -4687,6 +4698,14 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self.assertEqual(
                 reconciliation.nuke_codex_app_servers(proc_root=proc_root), 0
             )
+
+    @patch.object(sys, "argv", ["manage.py", "test"])
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_default_proc_scan_disabled_under_django_tests(
+        self, mock_kill: MagicMock
+    ) -> None:
+        self.assertEqual(reconciliation.nuke_codex_app_servers(), 0)
+        mock_kill.assert_not_called()
 
 
 class ReapOrphanedAppServersTests(TestCase):
@@ -4814,6 +4833,14 @@ class ReapOrphanedAppServersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_kill.assert_called_once()
 
+    @patch.object(sys, "argv", ["manage.py", "test"])
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_default_proc_scan_disabled_under_django_tests(
+        self, mock_kill: MagicMock
+    ) -> None:
+        self.assertEqual(reconciliation.reap_orphaned_app_servers(), 0)
+        mock_kill.assert_not_called()
+
 
 class CountRunningCodexAppServersTests(SimpleTestCase):
     def _write_app_server(
@@ -4876,6 +4903,10 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
         self.assertEqual(
             reconciliation.count_running_codex_app_servers(proc_root=missing), 0
         )
+
+    @patch.object(sys, "argv", ["manage.py", "test"])
+    def test_default_proc_scan_disabled_under_django_tests(self) -> None:
+        self.assertEqual(reconciliation.count_running_codex_app_servers(), 0)
 
 
 class InterruptActiveTests(TestCase):

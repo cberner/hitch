@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def _host_proc_scan_disabled_for_test_run(
     *, proc_root: Path, manage_py: str | None
 ) -> bool:
-    """Keep Django tests from reaping real deployment workers.
+    """Keep Django tests from reaping real deployment processes.
 
     Use ``sys.argv`` rather than ``settings.TESTING`` because tests can override
     that setting while still running against a test DB. Explicit proc fixtures
@@ -338,6 +338,8 @@ def _matched_app_server_pids(
     pair to one. Linux-only; without ``/proc`` the map is empty.
     """
     matched: dict[int, Path] = {}
+    if _host_proc_scan_disabled_for_test_run(proc_root=proc_root, manage_py=None):
+        return matched
     if not proc_root.exists():
         return matched
     for entry in proc_root.iterdir():
