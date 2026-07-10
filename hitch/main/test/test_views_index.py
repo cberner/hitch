@@ -6625,6 +6625,48 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].codex_path, "/nonexistent/rollout.jsonl")
 
     @patch("hitch.main.views.common.Codex")
+    def test_usage_page_treats_checked_missing_path_zero_cache_as_terminal(
+        self, mock_codex: MagicMock
+    ) -> None:
+        missing_path = "/nonexistent/rollout.jsonl"
+        _seed_usage_metadata("missing", path=missing_path)
+        SessionMetadata.objects.filter(thread_id="missing").update(
+            usage_last_checked_at=datetime.now(UTC)
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="missing",
+            rollout_path=missing_path,
+            rollout_mtime_ns=0,
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            context_tokens=0,
+            model_context_window=0,
+            daily_usage={},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        client = _setup_codex(mock_codex)
+
+        with (
+            patch(
+                "hitch.main.sessions.token_usage._start_usage_token_refresh_thread"
+            ) as start_refresh,
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Refreshing session token usage...")
+        lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
+        self.assertFalse(lifetime_usage["refresh_pending"])
+        self.assertEqual(lifetime_usage["refresh_pending_count"], 0)
+        start_refresh.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
     def test_usage_page_uses_indexed_usage_when_session_list_fails(
         self, mock_codex: MagicMock
     ) -> None:
@@ -6725,6 +6767,115 @@ class IndexViewTests(TestCase):
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="local-session")
         self.assertEqual(cache.total_tokens, 1_000)
 
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_caches_zero_when_missing_path_cannot_be_repaired(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _seed_usage_metadata("missing-path")
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("resume failed")
+
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("missing-path", "")]
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="missing-path")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
+        self.assertEqual(cache.rollout_path, "")
+        self.assertEqual(cache.total_tokens, 0)
+        self.assertEqual(cache.daily_usage, {})
+        self.assertIsNotNone(metadata.usage_last_checked_at)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
+
+    def test_usage_refresh_keeps_pathless_old_cache_repair_pending(self) -> None:
+        _seed_usage_metadata("missing-path")
+        SessionMetadata.objects.filter(thread_id="missing-path").update(
+            usage_last_checked_at=datetime.now(UTC)
+        )
+        cache = ArchivedSessionTokenUsage.objects.create(
+            thread_id="missing-path",
+            rollout_path="/old/rollout.jsonl",
+            rollout_mtime_ns=1_000_000_000,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="missing-path")
+        cache_state = token_usage._usage_token_cache_state(metadata, cache)
+
+        self.assertTrue(cache_state.cache_usable)
+        self.assertTrue(cache_state.refresh_pending)
+        self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_caches_zero_for_unrepairable_invalid_path(
+        self, mock_codex: MagicMock
+    ) -> None:
+        missing_path = "/nonexistent/rollout.jsonl"
+        _seed_usage_metadata("missing-path", path=missing_path)
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("resume failed")
+
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="missing-path")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
+        self.assertEqual(cache.rollout_path, missing_path)
+        self.assertEqual(cache.total_tokens, 0)
+        self.assertEqual(
+            cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION
+        )
+        self.assertIsNotNone(metadata.usage_last_checked_at)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_refresh_replaces_unusable_cache_when_path_cannot_be_repaired(
+        self, mock_codex: MagicMock
+    ) -> None:
+        missing_path = "/nonexistent/rollout.jsonl"
+        _seed_usage_metadata("stale-cache", path=missing_path)
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="stale-cache",
+            rollout_path=missing_path,
+            rollout_mtime_ns=1_000_000_000,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("resume failed")
+
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("stale-cache", missing_path)]
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="stale-cache")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="stale-cache")
+        self.assertEqual(cache.rollout_path, missing_path)
+        self.assertEqual(cache.total_tokens, 0)
+        self.assertEqual(
+            cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION
+        )
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
+
     def test_usage_refresh_zeros_stale_cache_when_rollout_has_no_usage(self) -> None:
         rollout_path = _make_rollout(self, ["{}"])
         os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
@@ -6738,6 +6889,7 @@ class IndexViewTests(TestCase):
             output_tokens=600,
             total_tokens=1_000,
             daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
 
         token_usage._refresh_usage_token_cache_best_effort(
@@ -6763,6 +6915,7 @@ class IndexViewTests(TestCase):
             output_tokens=600,
             total_tokens=1_000,
             daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = AppServerError("resume failed")
@@ -6773,8 +6926,13 @@ class IndexViewTests(TestCase):
 
         cache.refresh_from_db()
         self.assertEqual(cache.total_tokens, 1_000)
+        self.assertEqual(cache.rollout_path, "/old/rollout.jsonl")
         metadata = SessionMetadata.objects.get(thread_id="missing")
         self.assertIsNotNone(metadata.usage_last_checked_at)
+        cache_state = token_usage._usage_token_cache_state(metadata, cache)
+        self.assertTrue(cache_state.cache_usable)
+        self.assertTrue(cache_state.refresh_pending)
+        self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
 
     def test_usage_refresh_marks_checked_rows_in_chunks(self) -> None:
         for index in range(5):
