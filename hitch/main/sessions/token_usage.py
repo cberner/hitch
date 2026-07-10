@@ -825,7 +825,7 @@ def _write_missing_path_terminal_token_usage_cache(
 ) -> None:
     cache_usable = _cached_token_usage_usable_without_rollout_state(cache)
     if cache_usable and cache is not None:
-        if cache.rollout_path == (missing_path or ""):
+        if cache.rollout_path == (missing_path or "") and cache.rollout_mtime_ns == 0:
             return
         usage = _token_usage_from_cache(cache)
         daily_usage = _daily_token_usage_from_cache(cache)
