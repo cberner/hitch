@@ -1245,6 +1245,7 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn(
             "FROM docker.io/library/python:3.13-slim-trixie", containerfile
         )
+        self.assertIn("ca-certificates git libatomic1", containerfile)
         self.assertIn("COPY --from=node /usr/local/bin/node", containerfile)
         self.assertIn(
             "ln -s ../lib/node_modules/npm/bin/npm-cli.js", containerfile
