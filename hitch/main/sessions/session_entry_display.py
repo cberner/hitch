@@ -197,6 +197,27 @@ def _active_worker_status_text(active: CodexInstance | None) -> str:
     return streaming.qa_agent_status_text_for_instance(active)
 
 
+def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
+    """Return display data when the most recent user turn failed."""
+    latest = (
+        CodexInstance.objects.filter(
+            thread_id=session_id,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        .only("status", "error", "started_at", "ended_at")
+        .order_by("-started_at", "-pk")
+        .first()
+    )
+    if latest is None or latest.status != CodexInstance.STATUS_FAILED:
+        return None
+    timestamp = latest.ended_at or latest.started_at
+    return {
+        "message": latest.error.strip()
+        or "The agent turn ended without an error message.",
+        "timestamp": int(timestamp.timestamp()),
+    }
+
+
 def _apply_system_authors(
     entries: list[dict[str, Any]], session_id: str
 ) -> list[dict[str, Any]]:

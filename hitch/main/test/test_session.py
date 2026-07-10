@@ -3140,6 +3140,56 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotContains(response, 'class="jump-latest" data-jump-latest')
 
     @patch("hitch.main.views.common.Codex")
+    def test_inactive_thread_surfaces_latest_user_turn_failure(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        ended_at = timezone.now().replace(microsecond=0)
+        instance = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_FAILED,
+            error="This content was flagged for possible cybersecurity risk.",
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(ended_at=ended_at)
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, "data-turn-failure")
+        self.assertContains(response, "Agent turn failed")
+        self.assertContains(
+            response,
+            "This content was flagged for possible cybersecurity risk.",
+        )
+        self.assertContains(response, f'data-ts="{int(ended_at.timestamp())}"')
+
+    @patch("hitch.main.views.common.Codex")
+    def test_completed_user_turn_supersedes_prior_failure(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        failed = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_FAILED,
+            error="old failure",
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        completed = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        CodexInstance.objects.filter(pk=failed.pk).update(
+            started_at=timezone.now() - timedelta(minutes=1)
+        )
+        CodexInstance.objects.filter(pk=completed.pk).update(started_at=timezone.now())
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertNotContains(response, "data-turn-failure")
+        self.assertNotContains(response, "old failure")
+
+    @patch("hitch.main.views.common.Codex")
     def test_connection_indicator_retries_before_showing_fatal_loss(
         self, mock_codex: MagicMock
     ) -> None:
