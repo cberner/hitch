@@ -1,6 +1,6 @@
-FROM node:24-trixie-slim AS node
+FROM docker.io/library/node:24-trixie-slim AS node
 
-FROM python:3.13-slim-trixie
+FROM docker.io/library/python:3.13-slim-trixie
 
 ARG UV_VERSION=0.9.11
 ARG CODEX_VERSION=0.131.0-alpha.4

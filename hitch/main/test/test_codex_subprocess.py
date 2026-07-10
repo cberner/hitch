@@ -1239,7 +1239,12 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn("scripts/test-in-podman test-integration", justfile)
         self.assertIn("scripts/test-in-podman coverage", justfile)
         self.assertIn("scripts/test-in-podman pre", justfile)
-        self.assertIn("FROM node:24-trixie-slim AS node", containerfile)
+        self.assertIn(
+            "FROM docker.io/library/node:24-trixie-slim AS node", containerfile
+        )
+        self.assertIn(
+            "FROM docker.io/library/python:3.13-slim-trixie", containerfile
+        )
         self.assertIn("COPY --from=node /usr/local/bin/node", containerfile)
         self.assertIn(
             "ln -s ../lib/node_modules/npm/bin/npm-cli.js", containerfile
