@@ -1228,6 +1228,25 @@ class SystemdInstallRecipeTests(SimpleTestCase):
             justfile,
         )
 
+    def test_test_recipes_force_direct_worker_isolation(self) -> None:
+        justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+
+        self.assertIn(
+            "HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test "
+            "--exclude-tag integration --settings hitch.settings.dev",
+            justfile,
+        )
+        self.assertIn(
+            "HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test "
+            "--tag integration --settings hitch.settings.dev",
+            justfile,
+        )
+        self.assertIn(
+            "HITCH_CODEX_WORKER_ISOLATION=direct uv run coverage run ./manage.py test "
+            "--exclude-tag integration --settings hitch.settings.dev",
+            justfile,
+        )
+
     def test_global_worker_isolation_default_stays_auto(self) -> None:
         common_settings = (
             Path(settings.BASE_DIR) / "hitch" / "settings" / "common.py"

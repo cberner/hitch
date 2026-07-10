@@ -28,14 +28,16 @@ pre: sync
   uv run ruff check .
   uv run mypy .
 
+# Test sessions may inherit the production service's systemd worker isolation.
+# Keep test-spawned workers direct so QA runs don't create user-systemd units.
 test: pre
-  uv run python -Wa ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+  HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test --exclude-tag integration --settings hitch.settings.dev
 
 test-integration: pre
-  uv run python -Wa ./manage.py test --tag integration --settings hitch.settings.dev
+  HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test --tag integration --settings hitch.settings.dev
 
 coverage: pre
-  uv run coverage run ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+  HITCH_CODEX_WORKER_ISOLATION=direct uv run coverage run ./manage.py test --exclude-tag integration --settings hitch.settings.dev
   uv run coverage report
   uv run coverage xml
   uv run coverage html
