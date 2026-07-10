@@ -1230,6 +1230,7 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
     def test_test_recipes_run_in_podman_with_isolated_state(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+        containerfile = (Path(settings.BASE_DIR) / "Containerfile.test").read_text()
         test_wrapper = (
             Path(settings.BASE_DIR) / "scripts" / "test-in-podman"
         ).read_text()
@@ -1238,6 +1239,13 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn("scripts/test-in-podman test-integration", justfile)
         self.assertIn("scripts/test-in-podman coverage", justfile)
         self.assertIn("scripts/test-in-podman pre", justfile)
+        self.assertIn("FROM node:24-trixie-slim AS node", containerfile)
+        self.assertIn("COPY --from=node /usr/local/bin/node", containerfile)
+        self.assertIn(
+            "ln -s ../lib/node_modules/npm/bin/npm-cli.js", containerfile
+        )
+        self.assertNotIn("COPY --from=node /usr/local/bin/npm", containerfile)
+        self.assertNotIn("nodejs npm", containerfile)
         self.assertIn("--read-only", test_wrapper)
         self.assertIn('--network "${network}"', test_wrapper)
         self.assertIn('network="none"', test_wrapper)
