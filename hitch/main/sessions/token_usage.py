@@ -269,6 +269,15 @@ def _cached_token_usage_matches_missing_rollout_path(
     )
 
 
+def _missing_path_refresh_is_terminal(
+    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+) -> bool:
+    return (
+        metadata.usage_last_checked_at is not None
+        and _cached_token_usage_matches_missing_rollout_path(metadata, cache)
+    )
+
+
 def _cached_token_usage_has_daily_usage(
     cache: ArchivedSessionTokenUsage, rollout_path: Path | None
 ) -> bool:
@@ -488,29 +497,17 @@ def _usage_token_cache_state(
     if not metadata.thread_id:
         return _UsageTokenCacheState(refresh_pending=False, cache_usable=False)
     if not metadata.codex_path:
-        missing_path_cache_is_current = _cached_token_usage_matches_missing_rollout_path(
-            metadata, cache
-        )
         cache_usable = _cached_token_usage_usable_without_rollout_state(cache)
         return _UsageTokenCacheState(
-            refresh_pending=(
-                not missing_path_cache_is_current
-                or _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
-            ),
+            refresh_pending=not _missing_path_refresh_is_terminal(metadata, cache),
             cache_usable=cache_usable,
         )
     if cache is None:
         return _UsageTokenCacheState(refresh_pending=True, cache_usable=False)
     rollout_state = _rollout_file_state_from_value(metadata.codex_path)
     if rollout_state is None:
-        missing_path_cache_is_current = _cached_token_usage_matches_missing_rollout_path(
-            metadata, cache
-        )
         return _UsageTokenCacheState(
-            refresh_pending=(
-                not missing_path_cache_is_current
-                or _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
-            ),
+            refresh_pending=not _missing_path_refresh_is_terminal(metadata, cache),
             cache_usable=_cached_token_usage_usable_without_rollout_state(cache),
         )
     cache_is_current = _cached_token_usage_matches_rollout_state(cache, rollout_state)
@@ -596,16 +593,10 @@ def _usage_token_refresh_needed(
     metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
     if not metadata.codex_path:
-        return not (
-            _cached_token_usage_matches_missing_rollout_path(metadata, cache)
-            and not _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
-        )
+        return not _missing_path_refresh_is_terminal(metadata, cache)
     rollout_state = _rollout_file_state_from_value(metadata.codex_path)
     if rollout_state is None:
-        return not (
-            _cached_token_usage_matches_missing_rollout_path(metadata, cache)
-            and not _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
-        )
+        return not _missing_path_refresh_is_terminal(metadata, cache)
     if cache is None:
         return True
     if not _cached_token_usage_matches_rollout_state(cache, rollout_state):
@@ -669,12 +660,12 @@ def _refresh_usage_token_cache_best_effort(
                             refreshed_path = _refresh_missing_usage_metadata_path(
                                 codex, item.thread_id, projects=projects
                             )
-                            if refreshed_path:
+                            if refreshed_path is not None:
                                 path = refreshed_path
                                 missing_path = refreshed_path
                             rollout_state = _rollout_file_state_from_value(path)
                         if rollout_state is None:
-                            _write_missing_path_zero_token_usage_cache(
+                            _write_missing_path_terminal_token_usage_cache(
                                 item.thread_id,
                                 missing_path,
                                 cached_usage_by_thread_id.get(item.thread_id),
@@ -754,15 +745,15 @@ def _usage_token_refresh_work_batches(
 
 def _refresh_missing_usage_metadata_path(
     codex: Codex, thread_id: str, *, projects: list[Project]
-) -> str:
+) -> str | None:
     try:
         resumed = codex._client.thread_resume(thread_id)
     except (AppServerError, InvalidRequestError):
         logger.warning("failed to refresh usage metadata for %s", thread_id)
-        return ""
+        return None
     except Exception:
         logger.exception("failed to refresh usage metadata for %s", thread_id)
-        return ""
+        return None
     thread = getattr(resumed, "thread", None)
     metadata = session_index.upsert_thread(thread, projects=projects)
     if metadata is not None:
@@ -826,22 +817,29 @@ def _write_zero_token_usage_cache(
     )
 
 
-def _write_missing_path_zero_token_usage_cache(
+def _write_missing_path_terminal_token_usage_cache(
     thread_id: str,
     missing_path: str,
     cache: ArchivedSessionTokenUsage | None,
 ) -> None:
-    if _cached_token_usage_usable_without_rollout_state(cache):
-        return
+    cache_usable = _cached_token_usage_usable_without_rollout_state(cache)
+    if cache_usable and cache is not None:
+        if cache.rollout_path == (missing_path or ""):
+            return
+        usage = _token_usage_from_cache(cache)
+        daily_usage = _daily_token_usage_from_cache(cache)
+    else:
+        usage = dict.fromkeys(_TOKEN_USAGE_KEYS, 0)
+        daily_usage = {}
     ArchivedSessionTokenUsage.objects.update_or_create(
         thread_id=thread_id,
         defaults={
             **_token_usage_cache_defaults(
                 missing_path or None,
                 0,
-                dict.fromkeys(_TOKEN_USAGE_KEYS, 0),
+                usage,
             ),
-            "daily_usage": {},
+            "daily_usage": daily_usage,
         },
     )
 
