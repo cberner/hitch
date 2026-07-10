@@ -1257,6 +1257,7 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn('network="host"', test_wrapper)
         self.assertIn("--tmpfs /home/hitch:rw,nosuid,nodev,mode=0700", test_wrapper)
         self.assertIn("--env HITCH_CODEX_WORKER_ISOLATION=direct", test_wrapper)
+        self.assertIn("--env PYTHONPATH=/workspace", test_wrapper)
         self.assertIn("--env HITCH_HOME_DIR=/home/hitch/.hitch", test_wrapper)
         self.assertIn("--env CODEX_HOME=/home/hitch/.codex", test_wrapper)
 

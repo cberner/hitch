@@ -54,6 +54,7 @@ container_args=(
   --env HITCH_HOME_DIR=/home/hitch/.hitch
   --env CODEX_HOME=/home/hitch/.codex
   --env HITCH_CODEX_WORKER_ISOLATION=direct
+  --env PYTHONPATH=/workspace
   --env MYPY_CACHE_DIR=/tmp/hitch-mypy-cache
   --env RUFF_CACHE_DIR=/tmp/hitch-ruff-cache
   --env PYTHONDONTWRITEBYTECODE=1
