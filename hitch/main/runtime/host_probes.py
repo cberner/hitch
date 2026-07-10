@@ -157,8 +157,8 @@ def probe_worker_scopes(
 
     A unit is *leaked* when its instance row is already terminal (and past the
     shutdown grace window) yet processes remain in its cgroup, and none of them
-    is a live ``codex_worker`` (a live worker means the non-unique unit name was
-    reused by a fresh launch, not a leak).
+    is a live ``codex_worker`` (a live worker means the cgroup belongs to an
+    active launch, not an orphaned grandchild leak).
     """
     infos = _scan_worker_scope_procs(proc_root)
     by_scope: dict[str, list[_ProcInfo]] = {}

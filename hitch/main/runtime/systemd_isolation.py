@@ -1,11 +1,11 @@
-"""systemd-scoped worker isolation: launch, cgroup limits, scope reaping.
+"""systemd-managed worker isolation: launch, cgroup limits, unit reaping.
 
-Workers optionally run in transient systemd scopes so memory limits apply
+Workers optionally run in transient systemd services so memory limits apply
 and leaked grandchildren (sandbox processes that re-parent into their own
 sessions) can be reaped through the cgroup rather than a process group.
 Spawn coordination stays in ``codex_pool``; this module owns the
 systemd-run launch path, the slice/limit property assembly, and the
-scope/cgroup probes the interrupt and reconcile paths use.
+unit/cgroup probes the interrupt and reconcile paths use.
 """
 
 from __future__ import annotations
@@ -110,10 +110,10 @@ def _reap_scope_cgroup(instance: CodexInstance) -> None:
     to sweep and their already-dead pid must never be re-signaled, so they are
     skipped.
 
-    Unit names are not deployment-unique, so a collected unit's name can be
-    reused by another checkout: skip the reap if a live worker now holds the
-    unit (it can't be ours -- ours is already dead) rather than killing an
-    unrelated launch's worker.
+    Legacy unit names are not deployment-unique, so a collected unit's name can
+    be reused by another checkout. Skip the reap whenever a live worker now
+    holds the unit (it can't be ours -- ours is already dead) rather than
+    killing an unrelated launch's worker.
     """
     if not instance.systemd_scope_unit:
         return
