@@ -13,6 +13,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from django.db.models.functions import Coalesce
+
 from hitch.main import demo
 from hitch.main.formatting import render_markdown
 from hitch.main.models import (
@@ -198,14 +200,17 @@ def _active_worker_status_text(active: CodexInstance | None) -> str:
 
 
 def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
-    """Return display data when the most recent user turn failed."""
+    """Return display data when the latest user-turn lifecycle event is a failure."""
     latest = (
         CodexInstance.objects.filter(
             thread_id=session_id,
             purpose=CodexInstance.PURPOSE_USER,
         )
         .only("status", "error", "started_at", "ended_at")
-        .order_by("-started_at", "-pk")
+        # User turns may overlap. A later-ending older turn must supersede a
+        # newer-started turn that already finished, while a newly started active
+        # turn should supersede failures that ended before it began.
+        .order_by(Coalesce("ended_at", "started_at").desc(), "-pk")
         .first()
     )
     if latest is None or latest.status != CodexInstance.STATUS_FAILED:
