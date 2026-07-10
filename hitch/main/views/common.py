@@ -384,7 +384,7 @@ def _usage_context(request: HttpRequest) -> UsageContext:
         if session_index_state.totals_available
         else None
     )
-    if session_index_state.totals_available:
+    if lifetime_usage is not None and lifetime_usage["refresh_pending"]:
         token_usage._schedule_usage_token_refresh(usage_metadata)
     return UsageContext(
         template_context={
