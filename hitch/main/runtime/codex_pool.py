@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar, cast
 
@@ -41,6 +41,7 @@ from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
+from hitch.main.sessions import session_index
 
 logger = logging.getLogger(__name__)
 
@@ -883,7 +884,23 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
         return None
     _resolve_dangling_requests(instance.pk)
     instance.refresh_from_db()
+    _record_session_activity(instance)
     return instance
+
+
+def _record_session_activity(
+    instance: CodexInstance, *, updated_at: datetime | None = None
+) -> None:
+    """Best-effort recency update for a turn lifecycle transition."""
+    try:
+        session_index.record_turn_activity(
+            instance.thread_id,
+            updated_at=updated_at or instance.ended_at or timezone.now(),
+        )
+    except Exception:
+        logger.exception(
+            "failed to record session activity for worker %s", instance.pk
+        )
 
 
 def resolve_dangling_requests_for_instance(instance_pk: int) -> None:
@@ -1683,6 +1700,10 @@ def _spawn_worker(
         instance.events_path = str(target_dir / f"{instance.pk}.jsonl")
         instance.save(update_fields=["events_path"])
 
+    # A submitted prompt is session activity even if the detached worker is
+    # killed before its own completion hook can run.
+    _record_session_activity(instance, updated_at=instance.started_at)
+
     try:
         launch_kwargs: dict[str, Any] = {
             "instance_id": instance.pk,
@@ -1710,6 +1731,7 @@ def _spawn_worker(
         instance.ended_at = timezone.now()
         instance.error = f"failed to launch worker process: {exc!r}"
         instance.save(update_fields=["status", "ended_at", "error"])
+        _record_session_activity(instance)
         cleanup_input_images_for(instance)
         raise
     launch_pid = getattr(launch, "pid", 0)

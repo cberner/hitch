@@ -86,6 +86,7 @@ from hitch.main.runtime.app_server_pool import open_codex_resumed
 from hitch.main.runtime.codex_events import GOAL_METHODS
 from hitch.main.runtime.codex_pool import (
     WorkerSqliteHome,
+    _record_session_activity,
     acquire_worker_sqlite_home,
     app_server_config,
     cleanup_requested_input_images_for,
@@ -101,7 +102,6 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     is_dynamic_tool_call,
 )
-from hitch.main.sessions import session_index
 
 logger = logging.getLogger(__name__)
 
@@ -363,13 +363,7 @@ class Command(BaseCommand):
             # index never reads, so bump the session's recency directly to keep
             # the list ordered by real activity. Best-effort: a failed bump must
             # not fail an already-finished turn.
-            try:
-                session_index.record_turn_activity(
-                    instance.thread_id,
-                    updated_at=instance.ended_at or timezone.now(),
-                )
-            except Exception:
-                _worker_log(instance_id, "failed to record turn activity")
+            _record_session_activity(instance)
             # _run_turn has closed the app-server (and its log-DB handle) by the
             # time it returns or raises, so pruning only unlinks a released file;
             # releasing then frees the leased slot (or removes an overflow home).

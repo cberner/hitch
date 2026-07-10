@@ -8011,3 +8011,62 @@ class SharedTimeHelperTests(TestCase):
                 self.assertEqual(results["recent"], "just now")
             finally:
                 browser.close()
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_index_refreshes_relative_timestamps(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[])
+        html = self.client.get(reverse("index")).content.decode()
+        script_marker = """<script>
+        (function () {
+            const absolute"""
+        timestamp = 1_700_000_000
+        instrumentation = f"""
+        <time data-updated-at="{timestamp}"></time>
+        <script>
+            window.__testNow = {timestamp * 1000 + 10_000};
+            Date.now = () => window.__testNow;
+            window.__testIntervals = [];
+            window.setInterval = (callback, delay) => {{
+                window.__testIntervals.push({{ callback, delay }});
+                return window.__testIntervals.length;
+            }};
+        </script>
+        {script_marker}"""
+        html = html.replace(script_marker, instrumentation, 1)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                result = page.evaluate(
+                    """
+                    () => {
+                        const el = document.querySelector(
+                            "time[data-updated-at='1700000000']");
+                        const before = el.textContent;
+                        window.__testNow += 5 * 60 * 1000;
+                        const timer = window.__testIntervals.find(
+                            (candidate) => candidate.delay === 30_000);
+                        timer.callback();
+                        return { before, after: el.textContent, delay: timer.delay };
+                    }
+                    """
+                )
+                self.assertIn("just now", result["before"])
+                self.assertIn("minute", result["after"])
+                self.assertEqual(result["delay"], 30_000)
+            finally:
+                browser.close()

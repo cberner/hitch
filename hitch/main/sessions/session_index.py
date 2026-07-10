@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.utils import timezone
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
@@ -324,7 +324,7 @@ def update_cached_archived(thread_id: str, *, archived: bool) -> None:
 
 
 def record_turn_activity(thread_id: str, *, updated_at: datetime | None = None) -> None:
-    """Bump a session's recency after a worker turn completes.
+    """Advance a session's recency for a worker lifecycle transition.
 
     Worker turns run against an isolated Codex ``sqlite_home`` (see
     ``codex_pool``), so their thread-metadata writes never reach the web home's
@@ -334,10 +334,15 @@ def record_turn_activity(thread_id: str, *, updated_at: datetime | None = None) 
     giving up either the DB-only listing speed or the per-worker isolation.
     No-op when the row is absent (a later refresh creates it from the web home,
     where the thread was registered at creation, and subsequent turns bump it).
+    Overlapping turns can report transitions out of order, so an older activity
+    timestamp must never overwrite a newer one.
     """
     now = timezone.now()
-    SessionMetadata.objects.filter(thread_id=thread_id).update(
-        codex_updated_at=updated_at or now,
+    activity_at = updated_at or now
+    SessionMetadata.objects.filter(thread_id=thread_id).filter(
+        Q(codex_updated_at__isnull=True) | Q(codex_updated_at__lt=activity_at)
+    ).update(
+        codex_updated_at=activity_at,
         codex_last_synced_at=now,
     )
 
