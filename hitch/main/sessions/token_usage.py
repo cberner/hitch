@@ -265,6 +265,7 @@ def _cached_token_usage_matches_missing_rollout_path(
     return (
         cache is not None
         and cache.rollout_path == metadata.codex_path
+        and cache.rollout_mtime_ns == 0
         and _cached_token_usage_usable_without_rollout_state(cache)
     )
 
