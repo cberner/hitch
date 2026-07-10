@@ -4356,6 +4356,19 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
         pid_dir.mkdir()
         (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
 
+    def test_default_host_proc_scan_is_disabled_during_test_process(self) -> None:
+        with (
+            patch("hitch.main.runtime.reconciliation.sys.argv", ["manage.py", "test"]),
+            patch.object(
+                Path,
+                "iterdir",
+                side_effect=AssertionError("scanned host proc"),
+            ),
+        ):
+            found = list(reconciliation._iter_running_worker_pids())
+
+        self.assertEqual(found, [])
+
     def test_matches_our_worker_and_scopes_out_other_deployments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)

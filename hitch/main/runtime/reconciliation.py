@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 from collections.abc import Iterable
 from datetime import timedelta
 from pathlib import Path
@@ -23,6 +24,19 @@ from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_pool, rate_limit, systemd_isolation, worker_errors
 
 logger = logging.getLogger(__name__)
+
+
+def _host_proc_scan_disabled_for_test_run(
+    *, proc_root: Path, manage_py: str | None
+) -> bool:
+    """Keep Django tests from reaping real deployment workers.
+
+    Use ``sys.argv`` rather than ``settings.TESTING`` because tests can override
+    that setting while still running against a test DB. Explicit proc fixtures
+    pass a ``proc_root`` or ``manage_py`` and remain enabled.
+    """
+    return "test" in sys.argv and manage_py is None and proc_root == Path("/proc")
+
 
 def reconcile_dead() -> int:
     """Mark workers as failed whose PID is no longer alive.
@@ -62,6 +76,8 @@ def _iter_running_worker_pids(
     yields nothing, so the orphan reap is simply a no-op there rather than
     guessing.
     """
+    if _host_proc_scan_disabled_for_test_run(proc_root=proc_root, manage_py=manage_py):
+        return
     if not proc_root.exists():
         return
     marker = (manage_py or codex_pool._our_manage_py()).encode()
