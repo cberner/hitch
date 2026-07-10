@@ -1,0 +1,23 @@
+FROM python:3.13-slim-trixie
+
+ARG UV_VERSION=0.9.11
+ARG CODEX_VERSION=0.131.0-alpha.4
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/hitch-venv
+ENV UV_PROJECT_ENVIRONMENT=/opt/hitch-venv
+ENV PATH="/opt/hitch-venv/bin:/usr/local/bin:${PATH}"
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}" \
+    && npm install -g "@openai/codex@${CODEX_VERSION}"
+
+WORKDIR /workspace
+
+COPY pyproject.toml uv.lock README.md LICENSE ./
+
+RUN uv sync --all-groups --locked --no-install-project

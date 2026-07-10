@@ -129,6 +129,9 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 0.9.11 uv --locked
 
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
       - name: Run tests
         run: just test
 

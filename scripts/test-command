@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${1:-}"
+
+mkdir -p "${HOME}" "${HITCH_HOME_DIR}" "${CODEX_HOME}"
+chmod 700 "${HOME}" "${HITCH_HOME_DIR}" "${CODEX_HOME}"
+
+pre() {
+  ruff check .
+  mypy .
+}
+
+case "${mode}" in
+  pre)
+    pre
+    ;;
+  test)
+    python -Wa ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+    ;;
+  test-integration)
+    python -Wa ./manage.py test --tag integration --settings hitch.settings.dev
+    ;;
+  coverage)
+    coverage run ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+    coverage report
+    coverage xml
+    coverage html
+    ;;
+  *)
+    echo "usage: $0 {pre|test|test-integration|coverage}" >&2
+    exit 64
+    ;;
+esac

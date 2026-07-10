@@ -69,6 +69,8 @@ just run_qwen
 Prerequisites:
 
 - [`uv`](https://docs.astral.sh/uv/) and [`just`](https://just.systems/) on PATH
+- [`podman`](https://podman.io/) on PATH for `just test`, `just
+  test-integration`, and `just coverage`
 - [`ollama`](https://ollama.com) on PATH (the recipe will start `ollama serve`
   in the background if nothing is listening on `:11434`)
 - a `codex` binary on PATH; the version must match the `openai-codex` SDK
@@ -88,3 +90,11 @@ What the recipe does:
 
 If you have a ChatGPT account and would rather use the model Codex picks
 up from your own `~/.codex/config.toml`, run `just run` instead.
+
+## Tests
+
+`just test`, `just test-integration`, and `just coverage` run inside a Podman
+container. The container uses an isolated `HOME`, `HITCH_HOME_DIR`, and
+`CODEX_HOME`, keeps worker isolation set to `direct`, and does not mount the
+host's Hitch state. Integration tests use host networking so they can reach the
+local Ollama service on `127.0.0.1:11434`.

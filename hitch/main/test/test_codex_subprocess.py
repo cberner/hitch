@@ -1228,24 +1228,24 @@ class SystemdInstallRecipeTests(SimpleTestCase):
             justfile,
         )
 
-    def test_test_recipes_force_direct_worker_isolation(self) -> None:
+    def test_test_recipes_run_in_podman_with_isolated_state(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+        test_wrapper = (
+            Path(settings.BASE_DIR) / "scripts" / "test-in-podman"
+        ).read_text()
 
-        self.assertIn(
-            "HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test "
-            "--exclude-tag integration --settings hitch.settings.dev",
-            justfile,
-        )
-        self.assertIn(
-            "HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test "
-            "--tag integration --settings hitch.settings.dev",
-            justfile,
-        )
-        self.assertIn(
-            "HITCH_CODEX_WORKER_ISOLATION=direct uv run coverage run ./manage.py test "
-            "--exclude-tag integration --settings hitch.settings.dev",
-            justfile,
-        )
+        self.assertIn("scripts/test-in-podman test", justfile)
+        self.assertIn("scripts/test-in-podman test-integration", justfile)
+        self.assertIn("scripts/test-in-podman coverage", justfile)
+        self.assertIn("scripts/test-in-podman pre", justfile)
+        self.assertIn("--read-only", test_wrapper)
+        self.assertIn('--network "${network}"', test_wrapper)
+        self.assertIn('network="none"', test_wrapper)
+        self.assertIn('network="host"', test_wrapper)
+        self.assertIn("--tmpfs /home/hitch:rw,nosuid,nodev,mode=0700", test_wrapper)
+        self.assertIn("--env HITCH_CODEX_WORKER_ISOLATION=direct", test_wrapper)
+        self.assertIn("--env HITCH_HOME_DIR=/home/hitch/.hitch", test_wrapper)
+        self.assertIn("--env CODEX_HOME=/home/hitch/.codex", test_wrapper)
 
     def test_global_worker_isolation_default_stays_auto(self) -> None:
         common_settings = (

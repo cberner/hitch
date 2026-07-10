@@ -12,8 +12,10 @@ This file tells coding agents how to work productively in this repository.
 
 **Run `just test` and confirm it passes after making any change that can affect the codebase
 in the current working directory.**
-This target runs the `pre` recipe first, which executes `uv sync --all-groups`,
-`uv run ruff check .`, and `uv run mypy .`, and then runs the Django test suite.
+This target builds the Podman test image, runs the `test-pre` recipe first, and
+then runs the Django test suite inside a container with isolated Hitch and
+Codex state. The image build performs `uv sync --all-groups --locked`;
+`test-pre` runs `ruff check .` and `mypy .` in the container.
 If any of those fail, fix the underlying issue — do not bypass checks.
 
 ## Style guide
