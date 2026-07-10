@@ -16,6 +16,10 @@ from typing import Any
 from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_pool
 
+# Forwarded SDK notifications live under these namespaces. Hitch bridge frames
+# such as approval/resolved do not prove worker/Codex progress after a retry.
+_CODEX_STREAM_PROGRESS_PREFIXES = ("item/", "turn/", "thread/")
+
 
 def _dead_worker_error(instance: CodexInstance) -> str:
     if instance.error:
@@ -43,17 +47,23 @@ def _dead_worker_last_event_detail(events_path: str) -> str:
     except OSError:
         return ""
 
-    auto_approval_started_detail = ""
-    completed_auto_approval_keys: set[str] = set()
-    failed_command_detail = ""
-    fallback_detail = ""
-    for line in reversed(recent_lines):
+    recent_events: list[tuple[tuple[int, int, int, int], dict[str, Any]]] = []
+    for file_index, line in enumerate(recent_lines):
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
         if not isinstance(event, dict):
             continue
+        recent_events.append((_event_order_key(event, file_index), event))
+
+    auto_approval_started_detail = ""
+    completed_auto_approval_keys: set[str] = set()
+    failed_command_detail = ""
+    fallback_detail = ""
+    retryable_error_detail = ""
+    newer_progress_seen = False
+    for _order, event in sorted(recent_events, reverse=True):
         method = event.get("method")
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -62,7 +72,7 @@ def _dead_worker_last_event_detail(events_path: str) -> str:
             completed_auto_approval_keys.add(_auto_approval_event_key(payload))
             detail = _auto_approval_event_detail(payload)
             if detail:
-                return detail
+                return _with_retryable_error_context(detail, retryable_error_detail)
         if (
             method == "item/autoApprovalReview/started"
             and _auto_approval_event_key(payload) not in completed_auto_approval_keys
@@ -73,12 +83,21 @@ def _dead_worker_last_event_detail(events_path: str) -> str:
         if method == "error":
             detail = _error_event_detail(payload)
             if detail:
-                return detail
+                if _error_event_will_retry(payload):
+                    if not retryable_error_detail and not newer_progress_seen:
+                        retryable_error_detail = detail
+                    continue
+                return _with_retryable_error_context(detail, retryable_error_detail)
         if method == "item/completed" and not failed_command_detail:
             failed_command_detail = _failed_command_event_detail(payload)
         if not fallback_detail:
             fallback_detail = _last_visible_event_detail(method, payload)
-    return failed_command_detail or auto_approval_started_detail or fallback_detail
+        if _event_is_progress_after_retryable_error(method):
+            newer_progress_seen = True
+    return _with_retryable_error_context(
+        failed_command_detail or auto_approval_started_detail or fallback_detail,
+        retryable_error_detail,
+    )
 
 def _auto_approval_event_detail(payload: dict[str, Any]) -> str:
     review = payload.get("review")
@@ -121,6 +140,32 @@ def _error_event_detail(payload: dict[str, Any]) -> str:
     if message and details:
         return f"{message}: {details}"
     return message or details
+
+def _error_event_will_retry(payload: dict[str, Any]) -> bool:
+    return payload.get("willRetry") is True
+
+def _with_retryable_error_context(detail: str, retryable_error_detail: str) -> str:
+    if not retryable_error_detail:
+        return detail
+    if not detail:
+        return f"retryable error: {retryable_error_detail}"
+    return f"{detail}; last retryable error: {retryable_error_detail}"
+
+def _event_is_progress_after_retryable_error(method: object) -> bool:
+    """Only SDK stream events prove Codex recovered from an older retry."""
+    if not isinstance(method, str):
+        return False
+    return method.startswith(_CODEX_STREAM_PROGRESS_PREFIXES)
+
+def _event_order_key(event: dict[str, Any], file_index: int) -> tuple[int, int, int, int]:
+    """Prefer SDK arrival order; fall back to append order for older logs."""
+    recorded_at = event.get("recordedAt")
+    if type(recorded_at) is not int:
+        return (0, file_index, 0, file_index)
+    event_seq = event.get("eventSeq")
+    if type(event_seq) is not int:
+        event_seq = 0
+    return (1, recorded_at, event_seq, file_index)
 
 def _failed_command_event_detail(payload: dict[str, Any]) -> str:
     item = payload.get("item")
