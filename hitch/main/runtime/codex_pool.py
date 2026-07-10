@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -2099,7 +2100,13 @@ def _worker_isolation() -> str:
 
 
 def _scope_unit_for_instance(instance_id: int) -> str:
-    return f"hitch-codex-worker-{instance_id}.service"
+    return f"hitch-codex-worker-{_deployment_unit_suffix()}-{instance_id}.service"
+
+
+def _deployment_unit_suffix() -> str:
+    """Stable, systemd-safe discriminator for this checkout's worker units."""
+    base_dir = os.path.realpath(os.fspath(settings.BASE_DIR))
+    return hashlib.sha256(base_dir.encode("utf-8")).hexdigest()[:12]
 
 
 _SYSTEMD_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")

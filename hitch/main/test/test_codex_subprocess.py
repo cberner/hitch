@@ -1183,6 +1183,12 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
 
 class LaunchWorkerProcessSystemdTests(TestCase):
+    def test_scope_unit_name_is_deployment_scoped(self) -> None:
+        self.assertRegex(
+            codex_pool._scope_unit_for_instance(7),
+            r"\Ahitch-codex-worker-[a-f0-9]{12}-7\.service\Z",
+        )
+
     @override_settings(
         CODEX_WORKER_ISOLATION="systemd",
         CODEX_WORKER_MEMORY_HIGH="4G",
@@ -1203,6 +1209,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         proc.pid = 999
         proc.wait.return_value = 0
         mock_popen.return_value = proc
+        expected_scope = codex_pool._scope_unit_for_instance(7)
 
         with (
             tempfile.TemporaryDirectory() as raw,
@@ -1214,7 +1221,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         argv = args[0]
         self.assertEqual(launch.pid, 0)
         self.assertIsNone(launch.proc)
-        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
+        self.assertEqual(launch.scope_unit, expected_scope)
         self.assertEqual(
             argv[:5],
             [
@@ -1226,7 +1233,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             ],
         )
         self.assertNotIn("--pipe", argv)
-        self.assertIn("--unit=hitch-codex-worker-7", argv)
+        self.assertIn(f"--unit={expected_scope.removesuffix('.service')}", argv)
         self.assertIn("--slice=hitch-codex-workers.slice", argv)
         self.assertIn("--setenv=DJANGO_SETTINGS_MODULE", argv)
         self.assertIn("--property=StandardOutput=null", argv)
@@ -1270,12 +1277,13 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         proc.pid = 999
         proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
         mock_popen.return_value = proc
+        expected_scope = codex_pool._scope_unit_for_instance(7)
 
         launch = codex_pool._launch_worker_process(instance_id=7)
 
         self.assertEqual(launch.pid, 0)
         self.assertIs(launch.proc, proc)
-        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
+        self.assertEqual(launch.scope_unit, expected_scope)
         proc.wait.assert_called_once_with(timeout=0.25)
         proc.kill.assert_not_called()
 
@@ -1691,12 +1699,13 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         proc.pid = 999
         proc.wait.return_value = 0
         mock_popen.return_value = proc
+        expected_scope = codex_pool._scope_unit_for_instance(7)
 
         launch = codex_pool._launch_worker_process(instance_id=7)
 
         argv = mock_popen.call_args.args[0]
         self.assertEqual(launch.pid, 0)
-        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
+        self.assertEqual(launch.scope_unit, expected_scope)
         self.assertEqual(argv[0], "/usr/bin/systemd-run")
         mock_user_manager.assert_called_once_with()
         mock_ensure_slice.assert_called_once_with()
@@ -3316,6 +3325,20 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             )
 
         self.assertEqual(unit, "hitch-codex-worker-7.service")
+
+    def test_worker_unit_from_pid_cgroup_returns_deployment_service(self) -> None:
+        with tempfile.TemporaryDirectory() as proc_root:
+            pid_dir = Path(proc_root) / "703"
+            pid_dir.mkdir()
+            (pid_dir / "cgroup").write_bytes(
+                b"0::/user.slice/hitch-codex-worker-abc123def456-7.service\n"
+            )
+
+            unit = systemd_isolation._worker_unit_from_pid_cgroup(
+                703, 7, proc_root=Path(proc_root)
+            )
+
+        self.assertEqual(unit, "hitch-codex-worker-abc123def456-7.service")
 
     def test_worker_unit_from_pid_cgroup_returns_legacy_scope(self) -> None:
         with tempfile.TemporaryDirectory() as proc_root:

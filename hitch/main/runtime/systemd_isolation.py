@@ -25,7 +25,9 @@ from hitch.main.runtime import codex_pool
 
 logger = logging.getLogger(__name__)
 
-_WORKER_UNIT_RE = re.compile(r"hitch-codex-worker-(\d+)\.(?:service|scope)")
+_WORKER_UNIT_RE = re.compile(
+    r"hitch-codex-worker-(?:[a-f0-9]{12}-)?(?P<instance_id>\d+)\.(?:service|scope)"
+)
 
 def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
     try:
@@ -49,11 +51,12 @@ def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
 def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) -> bool:
     """Whether any live ``codex_worker`` process currently runs in ``scope_unit``.
 
-    Worker unit names are not deployment-unique, so once our dead worker's unit
-    is collected another Hitch checkout under the same user can create a unit
-    with the same name. We only reap a unit whose own worker is already gone, so
-    a *live* ``codex_worker`` in it means the name was reused by a different
-    launch -- signaling it would kill that launch's worker and grandchildren.
+    Legacy worker unit names were not deployment-unique, so once our dead
+    worker's unit is collected another Hitch checkout under the same user can
+    create a unit with the same name. We only reap a unit whose own worker is
+    already gone, so a *live* ``codex_worker`` in it means the name was reused
+    by a different launch -- signaling it would kill that launch's worker and
+    grandchildren.
     Linux-only; without ``/proc`` it reports ``False`` (the reap is then
     best-effort, as before).
     """
@@ -87,7 +90,7 @@ def _worker_unit_from_pid_cgroup(
         return None
     decoded = cgroup.decode("utf-8", errors="replace")
     for match in _WORKER_UNIT_RE.finditer(decoded):
-        if match.group(1) == str(instance_id):
+        if match.group("instance_id") == str(instance_id):
             return match.group(0)
     return None
 

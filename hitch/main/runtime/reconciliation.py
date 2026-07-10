@@ -203,7 +203,7 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
             or codex_pool._scope_unit_for_instance(instance_id)
         )
     if scope_unit:
-        # The unit name (``hitch-codex-worker-<id>``) is not
+        # Legacy unit names (``hitch-codex-worker-<id>``) were not
         # deployment-unique, so ``systemctl kill <unit>`` could hit another
         # checkout's reused unit if our systemd worker exited since the scan.
         # Reverify the scanned pid is still our deployment's worker for this

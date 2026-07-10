@@ -29,10 +29,12 @@ from django.utils import timezone
 
 from hitch.main.models import CodexInstance
 
-# Worker units are named ``hitch-codex-worker-<instance id>.service``. Legacy
-# scope units used ``.scope``; support both suffixes so the health page still
-# sees workers launched before the service-mode change.
-_SCOPE_RE = re.compile(r"hitch-codex-worker-(\d+)\.(?:service|scope)")
+# Worker units are named ``hitch-codex-worker-<deployment>-<instance id>.service``.
+# Legacy units omitted the deployment discriminator and legacy scope units used
+# ``.scope``; support all forms so the health page still sees old workers.
+_SCOPE_RE = re.compile(
+    r"hitch-codex-worker-(?:[a-f0-9]{12}-)?(?P<instance_id>\d+)\.(?:service|scope)"
+)
 _SOCKET_INODE_RE = re.compile(r"socket:\[(\d+)\]")
 # Process names expected inside a healthy worker unit. Anything else is a
 # sandbox grandchild (the build/test/bench runners that leak).
@@ -138,7 +140,7 @@ def _scan_worker_scope_procs(proc_root: Path) -> list[_ProcInfo]:
             _ProcInfo(
                 pid=int(entry.name),
                 scope_unit=match.group(0),
-                scope_instance_id=int(match.group(1)),
+                scope_instance_id=int(match.group("instance_id")),
                 comm=comm,
                 cmdline=cmdline,
                 rss_bytes=_rss_bytes_from_status(_read_text(entry / "status")),

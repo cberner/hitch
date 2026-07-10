@@ -541,6 +541,23 @@ class WorkerScopeProbeTests(TestCase):
         self.assertEqual(probe.leaked, [])
         self.assertEqual(probe.active_count, 1)
 
+    def test_deployment_scoped_worker_service_is_detected(self) -> None:
+        instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
+        scope = f"hitch-codex-worker-abc123def456-{instance.pk}.service"
+        _write_proc_pid(
+            self.proc,
+            57,
+            scope_unit=scope,
+            argv=["python3", "manage.py", "codex_worker", "--instance-id", str(instance.pk)],
+            comm="python3",
+            vmrss_kb=120_000,
+        )
+
+        probe = host_probes.probe_worker_scopes(proc_root=self.proc, now=self.now)
+
+        self.assertEqual(probe.leaked, [])
+        self.assertEqual(probe.active_count, 1)
+
     def test_legacy_scope_worker_is_still_detected(self) -> None:
         instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
         scope = f"hitch-codex-worker-{instance.pk}.scope"
