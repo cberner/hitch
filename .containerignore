@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.coverage
+.coverage.*
+.mypy_cache
+.ruff_cache
+.venv
+__pycache__
+htmlcov
+coverage.xml
+db.sqlite3
+db.sqlite3-*

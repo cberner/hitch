@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 {pre|test|test-integration|coverage}" >&2
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 64
+fi
+
+mode="$1"
+case "${mode}" in
+  pre|test|test-integration|coverage) ;;
+  *)
+    usage
+    exit 64
+    ;;
+esac
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+image="${HITCH_TEST_IMAGE:-localhost/hitch-test:latest}"
+podman="${PODMAN:-podman}"
+run_tmp="$(mktemp -d "${TMPDIR:-/tmp}/hitch-test-podman.XXXXXX")"
+cleanup() {
+  rm -rf "${run_tmp}"
+}
+trap cleanup EXIT
+
+"${podman}" build \
+  --file "${repo_dir}/Containerfile.test" \
+  --tag "${image}" \
+  "${repo_dir}"
+
+network="none"
+if [ "${mode}" = "test-integration" ]; then
+  network="host"
+fi
+
+container_args=(
+  run
+  --rm
+  --read-only
+  --network "${network}"
+  --security-opt label=disable
+  --pids-limit 4096
+  --mount "type=bind,source=${run_tmp},target=/tmp"
+  --tmpfs /var/tmp:rw,nosuid,nodev,exec,mode=1777
+  --tmpfs /home/hitch:rw,nosuid,nodev,mode=0700
+  --mount "type=bind,source=${repo_dir},target=/workspace"
+  --workdir /workspace
+  --env HOME=/home/hitch
+  --env HITCH_HOME_DIR=/home/hitch/.hitch
+  --env CODEX_HOME=/home/hitch/.codex
+  --env HITCH_CODEX_WORKER_ISOLATION=direct
+  --env MYPY_CACHE_DIR=/tmp/hitch-mypy-cache
+  --env RUFF_CACHE_DIR=/tmp/hitch-ruff-cache
+  --env PYTHONDONTWRITEBYTECODE=1
+  --env TMPDIR=/tmp
+)
+
+if [ "${mode}" = "test-integration" ]; then
+  container_args+=(--env "OLLAMA_HOST=${OLLAMA_HOST:-http://127.0.0.1:11434}")
+fi
+
+"${podman}" "${container_args[@]}" "${image}" /workspace/scripts/test-command "${mode}"

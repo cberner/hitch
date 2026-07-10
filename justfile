@@ -28,19 +28,20 @@ pre: sync
   uv run ruff check .
   uv run mypy .
 
+test-pre:
+  scripts/test-in-podman pre
+
 # Test sessions may inherit the production service's systemd worker isolation.
-# Keep test-spawned workers direct so QA runs don't create user-systemd units.
-test: pre
-  HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+# Run the suite in Podman with an isolated HOME/HITCH_HOME_DIR/CODEX_HOME so QA
+# cannot touch the deployment database, Codex state, or worker units.
+test: test-pre
+  scripts/test-in-podman test
 
-test-integration: pre
-  HITCH_CODEX_WORKER_ISOLATION=direct uv run python -Wa ./manage.py test --tag integration --settings hitch.settings.dev
+test-integration: test-pre
+  scripts/test-in-podman test-integration
 
-coverage: pre
-  HITCH_CODEX_WORKER_ISOLATION=direct uv run coverage run ./manage.py test --exclude-tag integration --settings hitch.settings.dev
-  uv run coverage report
-  uv run coverage xml
-  uv run coverage html
+coverage: test-pre
+  scripts/test-in-podman coverage
 
 format:
   uv run ruff format .
