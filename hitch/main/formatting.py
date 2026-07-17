@@ -14,10 +14,13 @@ link validator drops bare ``javascript:`` URLs, but it runs *after* the
 destination is percent-encoded, so an entity-encoded control character
 (``[x](java&#9;script:alert(1))`` -> ``java%09script:alert(1)``) slips past it
 while browsers still strip the tab and execute it; ``_is_safe_link`` re-checks
-the decoded scheme to close that hole. The ``image`` rule is also disabled so that an
-``![alt](https://attacker.example/pixel)`` in an agent reply doesn't make
-the browser fetch a third-party URL the moment the session page is viewed
-(IP/referrer leakage); image syntax degrades to a clickable link instead.
+the decoded scheme to close that hole. Slash-rooted destinations are also left
+as literal markdown: a server-local filesystem path is indistinguishable from a
+site-relative URL here, and Hitch has no route that can safely open the file. The
+``image`` rule is disabled so that an ``![alt](https://attacker.example/pixel)``
+in an agent reply doesn't make the browser fetch a third-party URL when the
+session page is viewed (IP/referrer leakage); safe image syntax degrades to a
+clickable link instead.
 """
 
 import re
@@ -33,11 +36,12 @@ from markdown_it import MarkdownIt
 # same way before deciding whether a scheme is dangerous.
 _LINK_CONTROL_CHARS = re.compile(r"[\x00-\x20\x7f]+")
 _DANGEROUS_LINK_SCHEMES = ("javascript:", "vbscript:", "data:", "file:")
+_REJECTED_LINK_PREFIXES = _DANGEROUS_LINK_SCHEMES + ("/",)
 
 
 def _is_safe_link(url: str) -> bool:
     cleaned = _LINK_CONTROL_CHARS.sub("", unquote(url)).strip().lower()
-    return not cleaned.startswith(_DANGEROUS_LINK_SCHEMES)
+    return not cleaned.startswith(_REJECTED_LINK_PREFIXES)
 
 
 _RENDERER = (
@@ -45,9 +49,10 @@ _RENDERER = (
     .enable("table")
     .disable("image")
 )
-# Override the built-in validator (see module docstring) to also reject
-# encoded-control-character scheme smuggling. markdown-it looks this up on the
-# instance, so assigning the attribute is the supported override hook.
+# Override the built-in validator (see module docstring) to also reject encoded
+# control-character scheme smuggling and slash-rooted destinations. markdown-it
+# looks this up on the instance, so assigning the attribute is the supported
+# override hook.
 _RENDERER.validateLink = _is_safe_link  # type: ignore[method-assign]
 
 _FENCED_CODE = re.compile(r"^```", re.MULTILINE)
