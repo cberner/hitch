@@ -151,6 +151,27 @@ class LooksLikeMarkdownTests(SimpleTestCase):
 class RenderMarkdownTests(SimpleTestCase):
     """Rendering produces safe HTML; agent-supplied script tags stay inert."""
 
+    def test_codex_response_keeps_absolute_file_citation_non_navigable(self) -> None:
+        text = """Changed:
+
+- [formatting.py](/root/hitch/hitch/main/formatting.py:38)
+- [worker.py](/opt/hitch/hitch/main/worker.py:12)
+- [deployment guide](https://example.com/deployment)
+"""
+
+        self.assertTrue(looks_like_markdown(text))
+        html = render_markdown(text)
+
+        self.assertIn(
+            "[formatting.py](/root/hitch/hitch/main/formatting.py:38)", html
+        )
+        self.assertNotIn('href="/root/hitch/hitch/main/formatting.py:38"', html)
+        self.assertIn("[worker.py](/opt/hitch/hitch/main/worker.py:12)", html)
+        self.assertNotIn('href="/opt/hitch/hitch/main/worker.py:12"', html)
+        self.assertIn(
+            '<a href="https://example.com/deployment">deployment guide</a>', html
+        )
+
     def test_rendering_cases(self) -> None:
         cases: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
             ("heading renders as h1", "# Title", ("<h1>Title</h1>",), ()),
@@ -204,6 +225,18 @@ class RenderMarkdownTests(SimpleTestCase):
                 "[ok](https://example.com)",
                 ('<a href="https://example.com">ok</a>',),
                 (),
+            ),
+            (
+                "arbitrary absolute file link does not navigate through Hitch",
+                "[operator guide](/srv/nompiler/docs/operator.md:48)",
+                ("[operator guide](/srv/nompiler/docs/operator.md:48)",),
+                ("<a ", "href="),
+            ),
+            (
+                "encoded absolute file link does not navigate through Hitch",
+                "[worker](%2Fworkspace%2Fhitch%2Fworker.py%3A12)",
+                ("[worker](%2Fworkspace%2Fhitch%2Fworker.py%3A12)",),
+                ("<a ", "href="),
             ),
             (
                 "image syntax does not emit img tag",
