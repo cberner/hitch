@@ -1317,8 +1317,9 @@ def _is_worker_exited_before_completion_error(error: str) -> bool:
 
 
 def _is_retryable_workflow_turn_error(instance: CodexInstance) -> bool:
-    if instance.codex_error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED:
-        return True
+    error_info: object = instance.codex_error_info
+    if error_info is not None:
+        return error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED
     normalized = instance.error.strip()
     return (
         _is_worker_exited_before_completion_error(normalized)
