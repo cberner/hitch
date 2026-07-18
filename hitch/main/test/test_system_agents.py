@@ -9165,13 +9165,22 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.assert_called_once()
         self.assertEqual(mock_spawn_turn.call_args.kwargs["prompt"], "prompt")
 
-    def test_legacy_overload_message_remains_retryable(self) -> None:
+    def test_legacy_overload_message_fallback_without_error_info(self) -> None:
         instance = _instance(
             status=CodexInstance.STATUS_FAILED,
             error="Selected model is at capacity. Please try a different model.",
         )
 
         self.assertTrue(system_agents._is_retryable_workflow_turn_error(instance))
+
+    def test_structured_error_info_overrides_legacy_overload_message(self) -> None:
+        instance = _instance(
+            status=CodexInstance.STATUS_FAILED,
+            error="Selected model is at capacity. Please try a different model.",
+            codex_error_info="badRequest",
+        )
+
+        self.assertFalse(system_agents._is_retryable_workflow_turn_error(instance))
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_qa_feedback_worker_blocks_after_retry_budget(
