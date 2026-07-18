@@ -89,6 +89,7 @@ def _instance(
     enable_memories: bool = False,
     user_message_index: int | None = None,
     error: str = "",
+    codex_error_info: Any = None,
 ) -> CodexInstance:
     return CodexInstance.objects.create(
         pid=1,
@@ -115,6 +116,7 @@ def _instance(
         display_author=display_author,
         user_message_index=user_message_index,
         error=error,
+        codex_error_info=codex_error_info,
     )
 
 
@@ -9127,6 +9129,51 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["user_message_index"], 2)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_overloaded_qa_feedback_worker_is_retried_once(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 2},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            error="Provider wording may change.",
+            codex_error_info=CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
+        self.assertEqual(
+            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
+            {"qa_feedback": 1},
+        )
+        mock_spawn_turn.assert_called_once()
+        self.assertEqual(mock_spawn_turn.call_args.kwargs["prompt"], "prompt")
+
+    def test_legacy_overload_message_remains_retryable(self) -> None:
+        instance = _instance(
+            status=CodexInstance.STATUS_FAILED,
+            error="Selected model is at capacity. Please try a different model.",
+        )
+
+        self.assertTrue(system_agents._is_retryable_workflow_turn_error(instance))
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_dead_qa_feedback_worker_blocks_after_retry_budget(
         self, mock_spawn_turn: MagicMock
     ) -> None:
@@ -16221,7 +16268,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_dead_autonomous_goal_candidate_worker_is_retried_once(
+    def test_overloaded_autonomous_goal_candidate_worker_is_retried_once(
         self, mock_spawn: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
         project = _make_project()
@@ -16263,10 +16310,8 @@ class AutonomousGoalWorkflowTests(TestCase):
             ),
             status=CodexInstance.STATUS_FAILED,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            error=(
-                "worker process exited before reporting completion; "
-                "last event: command failed: `/bin/bash -lc \"which sqlite3\"`"
-            ),
+            error="Capacity details are provider-controlled.",
+            codex_error_info=CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
         )
         run = SystemAgentRun.objects.create(
             workflow=workflow,
@@ -16288,7 +16333,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         run.refresh_from_db()
         workflow.refresh_from_db()
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("which sqlite3", run.error)
+        self.assertIn("provider-controlled", run.error)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(
             workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING

@@ -69,6 +69,7 @@ from openai_codex.generated.v2_all import (
     TextUserInput,
     Turn,
     TurnCompletedNotification,
+    TurnError,
     TurnStartParams,
     TurnStatus,
     UserInput,
@@ -373,6 +374,7 @@ class Command(BaseCommand):
                 sqlite_lease.release()
 
         instance.ended_at = timezone.now()
+        instance.codex_error_info = None
         # The TurnCompletedNotification carries the actual outcome — including
         # ``interrupted`` and ``failed`` terminal states the SDK does not
         # raise on — so map it through rather than blanket-marking completed.
@@ -384,6 +386,7 @@ class Command(BaseCommand):
         else:
             instance.status = CodexInstance.STATUS_FAILED
             error = final_turn.error
+            instance.codex_error_info = _serialized_codex_error_info(error)
             instance.error = (
                 error.message
                 if error is not None and error.message
@@ -421,9 +424,16 @@ def _commit_terminal_status(instance: CodexInstance) -> None:
         status=instance.status,
         ended_at=instance.ended_at,
         error=instance.error,
+        codex_error_info=instance.codex_error_info,
     )
     if updated == 0:
         instance.refresh_from_db()
+
+
+def _serialized_codex_error_info(error: TurnError | None) -> Any:
+    if error is None or error.codex_error_info is None:
+        return None
+    return error.codex_error_info.model_dump(mode="json", by_alias=True)
 
 
 def _notify_system_agents(instance: CodexInstance) -> None:
