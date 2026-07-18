@@ -538,6 +538,7 @@ class CodexInstance(models.Model):
         (STATUS_COMPLETED, "completed"),
         (STATUS_FAILED, "failed"),
     )
+    CODEX_ERROR_SERVER_OVERLOADED: ClassVar[str] = "serverOverloaded"
     # Single source of truth for "this worker is live": a worker is active while
     # STARTING or RUNNING and terminal once COMPLETED or FAILED. Every "is this
     # instance active?" check (queryset filters and ``is_active``) reads this so
@@ -599,6 +600,10 @@ class CodexInstance(models.Model):
     # SDK interrupt" to SIGKILL. Null means no Stop has been issued yet.
     interrupt_requested_at = models.DateTimeField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
+    # Preserve the SDK's machine-readable terminal error alongside the message
+    # rendered to users. Depending on the Codex error variant this is either a
+    # string discriminator or an object with structured details.
+    codex_error_info = models.JSONField(default=None, blank=True, null=True)
     purpose = models.CharField(
         max_length=32, choices=PURPOSE_CHOICES, default=PURPOSE_USER
     )

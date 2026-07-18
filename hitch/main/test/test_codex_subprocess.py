@@ -30,6 +30,7 @@ from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
+    CodexErrorInfo,
     DangerFullAccessSandboxPolicy,
     ReasoningEffort,
     SandboxPolicy,
@@ -92,7 +93,12 @@ def _thread_start_payload(codex: MagicMock) -> dict[str, Any]:
     return payload
 
 
-def _completed_event(turn_id: str, status: TurnStatus, error_message: str | None = None) -> SimpleNamespace:
+def _completed_event(
+    turn_id: str,
+    status: TurnStatus,
+    error_message: str | None = None,
+    error_info: str | None = None,
+) -> SimpleNamespace:
     """Build a turn/completed event whose payload is a real
     TurnCompletedNotification — the worker's status logic narrows on the
     SDK type, not on duck-typed shapes, so the test must use the real model.
@@ -105,7 +111,18 @@ def _completed_event(turn_id: str, status: TurnStatus, error_message: str | None
                 id=turn_id,
                 items=[],
                 status=status,
-                error=TurnError(message=error_message) if error_message else None,
+                error=(
+                    TurnError(
+                        message=error_message,
+                        codex_error_info=(
+                            CodexErrorInfo.model_validate(error_info)
+                            if error_info
+                            else None
+                        ),
+                    )
+                    if error_message
+                    else None
+                ),
             ),
         ),
     )
@@ -7390,13 +7407,25 @@ class CodexWorkerCommandTests(TestCase):
 
         cases = [
             (
-                [_completed_event("turn-1", TurnStatus.failed, error_message="model said no")],
+                [
+                    _completed_event(
+                        "turn-1",
+                        TurnStatus.failed,
+                        error_message="model said no",
+                        error_info=CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
+                    )
+                ],
                 "model said no",
+                CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
             ),
-            ([_completed_event("turn-1", TurnStatus.interrupted)], "interrupted"),
-            ([], "turn/completed"),
+            (
+                [_completed_event("turn-1", TurnStatus.interrupted)],
+                "interrupted",
+                None,
+            ),
+            ([], "turn/completed", None),
         ]
-        for events, expected_in_error in cases:
+        for events, expected_in_error, expected_error_info in cases:
             with self.subTest(case=expected_in_error):
                 codex_ctx.thread_resume.reset_mock()
                 codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
@@ -7412,6 +7441,7 @@ class CodexWorkerCommandTests(TestCase):
                     instance.refresh_from_db()
                 self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
                 self.assertIn(expected_in_error, instance.error)
+                self.assertEqual(instance.codex_error_info, expected_error_info)
                 self.assertIsNotNone(instance.ended_at)
                 self.assertEqual(instance.input_image_paths, [str(image_path)])
                 self.assertEqual(instance.input_attachment_paths, [str(image_path)])

@@ -200,6 +200,9 @@ _WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
 _WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
     "worker process exited before reporting completion"
 )
+_LEGACY_SERVER_OVERLOADED_ERROR = (
+    "Selected model is at capacity. Please try a different model."
+)
 
 
 _SECONDS_PER_MINUTE = 60
@@ -1239,22 +1242,23 @@ def _handle_demo_agent_finished(
             workflow.save(update_fields=["status", "updated_at"])
 
 
-def _claim_workflow_turn_death_retry(
+def _claim_workflow_turn_retry(
     workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str
 ) -> bool:
-    """Record one more death-retry for this step if the dead turn may be retried.
+    """Record one more bounded retry for a transient workflow-turn failure.
 
     Single source of the retry rule shared by every workflow turn: the
-    workflow must still be active, the worker must have died before
-    reporting completion without a user Stop request, and the per-step retry budget
+    workflow must still be active, the failure must be recoverable without a
+    user Stop request, and the per-step retry budget
     (``_WORKFLOW_TURN_DEATH_RETRY_LIMIT``) must not be exhausted. Bumps and
-    persists the per-kind count when it returns True.
+    persists the per-kind count when it returns True. The persisted state key
+    retains its original ``death`` name for compatibility.
     """
     if (
         not workflow.is_active
         or not retry_kind
         or _instance_interrupt_requested(instance)
-        or not _is_worker_exited_before_completion_error(instance.error)
+        or not _is_retryable_workflow_turn_error(instance)
     ):
         return False
     retries = _workflow_turn_death_retries(workflow.state)
@@ -1310,6 +1314,16 @@ def _state_without_workflow_turn_death_retry(
 
 def _is_worker_exited_before_completion_error(error: str) -> bool:
     return error.strip().startswith(_WORKER_EXITED_BEFORE_COMPLETION_ERROR)
+
+
+def _is_retryable_workflow_turn_error(instance: CodexInstance) -> bool:
+    if instance.codex_error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED:
+        return True
+    normalized = instance.error.strip()
+    return (
+        _is_worker_exited_before_completion_error(normalized)
+        or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
+    )
 
 
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:

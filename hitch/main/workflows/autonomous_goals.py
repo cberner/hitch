@@ -1399,8 +1399,10 @@ def _handle_autonomous_goal_agent_finished_locked(
                 raw_output=raw_output,
             )
         error = f"autonomous goal worker failed: {instance.error}"
-        if system_agents._is_worker_exited_before_completion_error(instance.error):
-            retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
+        if system_agents._is_retryable_workflow_turn_error(instance):
+            retry_action = _retry_transient_autonomous_goal_worker(
+                instance, run, workflow
+            )
             if retry_action is not None:
                 return retry_action
             retry_action = _retry_budgeted_failed_autonomous_goal_candidate(
@@ -2042,7 +2044,7 @@ def _state_after_autonomous_goal_proposal_progress(
     next_state.pop(_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY, None)
     return next_state
 
-def _retry_dead_autonomous_goal_worker(
+def _retry_transient_autonomous_goal_worker(
     instance: CodexInstance,
     run: SystemAgentRun,
     workflow: SystemWorkflow,
@@ -2059,7 +2061,7 @@ def _retry_dead_autonomous_goal_worker(
         action_kind = _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
     else:
         return None
-    if not system_agents._claim_workflow_turn_death_retry(workflow, instance, retry_kind):
+    if not system_agents._claim_workflow_turn_retry(workflow, instance, retry_kind):
         return None
 
     run.status = SystemAgentRun.STATUS_FAILED

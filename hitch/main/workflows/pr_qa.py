@@ -470,7 +470,7 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             if workflow.is_active:
                 system_agents._block_workflow(workflow, "QA workflow stopped by user")
             return
-        if _retry_dead_system_feedback_worker(instance, workflow):
+        if _retry_system_feedback_worker(instance, workflow):
             return
         if not workflow.is_active:
             # A feedback/notice turn that fails after the workflow already
@@ -502,11 +502,11 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     except Exception as exc:
         system_agents._block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
-def _retry_dead_system_feedback_worker(
+def _retry_system_feedback_worker(
     instance: CodexInstance, workflow: SystemWorkflow
 ) -> bool:
     retry_kind = _feedback_worker_retry_kind(workflow)
-    if not system_agents._claim_workflow_turn_death_retry(workflow, instance, retry_kind):
+    if not system_agents._claim_workflow_turn_retry(workflow, instance, retry_kind):
         return False
     try:
         system_agents._spawn_workflow_turn(
@@ -527,7 +527,7 @@ def _retry_dead_system_feedback_worker(
         label = "PR feedback" if retry_kind == "pr_feedback" else "QA feedback"
         system_agents._block_workflow(
             workflow,
-            f"failed to retry {label} turn after worker exit: {exc!r}",
+            f"failed to retry {label} turn after transient failure: {exc!r}",
         )
     return True
 
