@@ -40,14 +40,6 @@
         </select>
     </label>
     <label>
-        Coding agent
-        <select name="coding_agent">
-            {% for option in coding_agent_options %}
-            <option value="{{ option.id }}" {% if option.id == current_coding_agent %}selected{% endif %}>{{ option.display_name }}</option>
-            {% endfor %}
-        </select>
-    </label>
-    <label>
         Extra developer prompt
         <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional developer instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
     </label>

@@ -105,7 +105,6 @@ def spawn_new_session(
     prompt: str,
     input_image_paths: list[str] | None = None,
     thread_name: str | None = None,
-    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -144,8 +143,6 @@ def spawn_new_session(
         "developerInstructions": developer_instructions,
         "model": model,
     }
-    if base_instructions:
-        start_kwargs["baseInstructions"] = base_instructions
     if thread_source is not None:
         start_kwargs["threadSource"] = thread_source.value
     if purpose == CodexInstance.PURPOSE_USER:
@@ -188,7 +185,6 @@ def spawn_new_session(
         cwd=cwd,
         prompt=prompt,
         input_image_paths=input_image_paths,
-        base_instructions=base_instructions,
         developer_instructions=developer_instructions,
         model=model,
         stored_model=model,
@@ -218,7 +214,6 @@ def create_session_thread(
     *,
     cwd: str,
     name: str,
-    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     enable_memories: bool = False,
@@ -239,9 +234,6 @@ def create_session_thread(
         "model": model,
         "dynamicTools": registered_dynamic_tool_specs(),
     }
-    if base_instructions:
-        start_kwargs["baseInstructions"] = base_instructions
-
     def _create_and_persist(codex: Codex) -> str:
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
@@ -299,7 +291,6 @@ def spawn_turn(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
-    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     purpose: str = CodexInstance.PURPOSE_USER,
     workflow_id: int | None = None,
@@ -318,9 +309,6 @@ def spawn_turn(
     text is copied from prior rows; omitted tool/config values mean Codex
     default for this turn, not "inherit the last worker row."
     """
-    if base_instructions is None:
-        previous = latest_for_thread(thread_id)
-        base_instructions = previous.base_instructions if previous is not None else None
     if developer_instructions is None:
         previous = latest_for_thread(thread_id)
         developer_instructions = (
@@ -331,7 +319,6 @@ def spawn_turn(
         cwd=cwd,
         prompt=prompt,
         input_image_paths=input_image_paths,
-        base_instructions=base_instructions or None,
         developer_instructions=developer_instructions or None,
         model=model,
         stored_model=stored_model,
@@ -1622,7 +1609,6 @@ def _spawn_worker(
     cwd: str,
     prompt: str,
     input_image_paths: list[str] | None = None,
-    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     stored_model: str | None = None,
@@ -1666,7 +1652,6 @@ def _spawn_worker(
             prompt=prompt,
             input_image_paths=normalized_input_image_paths,
             input_attachment_paths=normalized_input_image_paths,
-            base_instructions=base_instructions or "",
             developer_instructions=developer_instructions or "",
             enable_memories=enable_memories,
             model=(stored_model if stored_model is not None else model) or "",

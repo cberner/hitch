@@ -59,7 +59,6 @@ from hitch.main.test.support import (
 )
 from hitch.main.test.views_helpers import (
     _APPROVAL_COOKIE,
-    _CODING_AGENT_COOKIE,
     _LAST_SELECTED_REPO_COOKIE,
     _PR_PROMPT,
     _QA_PROMPT,
@@ -4532,7 +4531,6 @@ class IndexViewTests(TestCase):
             agent_kind=system_agents.PR_QA_AGENT_KIND,
             display_author=system_agents.QA_DISPLAY_AUTHOR,
             developer_instructions="developer " * 2000,
-            base_instructions="base " * 2000,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
@@ -4556,7 +4554,6 @@ class IndexViewTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             developer_instructions="developer " * 2000,
-            base_instructions="base " * 2000,
         )
 
         with CaptureQueriesContext(connection) as captured:
@@ -4595,12 +4592,12 @@ class IndexViewTests(TestCase):
             )
         )
         self.assertTrue(
-            {"prompt", "developer_instructions", "base_instructions"}.issubset(
+            {"prompt", "developer_instructions"}.issubset(
                 run.instance.get_deferred_fields()
             )
         )
         self.assertTrue(
-            {"prompt", "developer_instructions", "base_instructions"}.issubset(
+            {"prompt", "developer_instructions"}.issubset(
                 instance.get_deferred_fields()
             )
         )
@@ -7415,24 +7412,8 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "parseNewSessionQaCommand")
         self.assertContains(response, 'toLowerCase() !== "/plan"')
         self.assertContains(response, 'toLowerCase() !== "/qa"')
+        self.assertNotContains(response, 'name="coding_agent"')
         self.assertContains(response, "Enter a prompt or attach an image.")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_new_session_page_exposes_coding_agent_override(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _setup_codex(mock_codex)
-        mock_discover.return_value = [Path("/home/user/proj")]
-        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
-
-        response = self.client.get(reverse("new_session"))
-
-        self.assertContains(response, "data-new-session-coding-agent")
-        self.assertContains(response, "Use settings (HITCH)")
-        self.assertContains(response, 'name="coding_agent"')
-        self.assertContains(response, 'value="codex"')
-        self.assertContains(response, 'value="hitch"')
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")

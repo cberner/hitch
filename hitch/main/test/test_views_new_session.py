@@ -22,7 +22,7 @@ from django.test import (
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import caches, coding_agents, views
+from hitch.main import caches, views
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
@@ -47,7 +47,6 @@ from hitch.main.test.support import (
 from hitch.main.test.views_helpers import (
     _AUTO_PR_COOKIE,
     _AUTO_QA_COOKIE,
-    _CODING_AGENT_COOKIE,
     _ENABLE_MEMORIES_COOKIE,
     _EXTRA_SYSTEM_PROMPT_COOKIE,
     _GIF_BYTES,
@@ -2289,16 +2288,6 @@ class NewSessionViewTests(TestCase):
                 {"hitch_approval_mode": "prompt_user"},
                 {"approval_mode": "prompt_user"},
             ),
-            (
-                "hitch coding agent",
-                {_CODING_AGENT_COOKIE: "hitch"},
-                {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
-            ),
-            (
-                "hitch spec writer coding agent",
-                {_CODING_AGENT_COOKIE: "hitch_spec_writer"},
-                {"base_instructions": coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS},
-            ),
         ]
 
         for index, (label, cookies, expected) in enumerate(cases):
@@ -2417,77 +2406,6 @@ class NewSessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self._assert_new_session_spawn(mock_spawn, web_search_mode="disabled")
-
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.repos.discover_repos")
-    def test_new_session_coding_agent_override_matrix(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        _setup_codex(mock_codex, models=[])
-        cases: list[tuple[str, dict[str, str], dict[str, str], dict[str, Any]]] = [
-            (
-                "hitch override from codex setting",
-                {_CODING_AGENT_COOKIE: "codex"},
-                {"coding_agent": "hitch"},
-                {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
-            ),
-            (
-                "hitch spec writer override from codex setting",
-                {_CODING_AGENT_COOKIE: "codex"},
-                {"coding_agent": "hitch_spec_writer"},
-                {"base_instructions": coding_agents.HITCH_SPEC_WRITER_BASE_INSTRUCTIONS},
-            ),
-            (
-                "codex override from hitch setting",
-                {_CODING_AGENT_COOKIE: "hitch"},
-                {"coding_agent": "codex"},
-                {},
-            ),
-        ]
-
-        for index, (label, cookies, data, expected) in enumerate(cases):
-            with self.subTest(label=label):
-                client = Client()
-                _seed_cookies(client, **cookies)
-                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-{index}")
-                mock_spawn.reset_mock()
-
-                response = client.post(
-                    reverse("new_session"),
-                    data={"prompt": "do thing", "cwd": self.REPO, **data},
-                )
-
-                self.assertEqual(response.status_code, 302)
-                self._assert_new_session_spawn(mock_spawn, **expected)
-
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.repos.discover_repos")
-    def test_new_session_rejects_invalid_coding_agent_override(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "do thing",
-                "cwd": self.REPO,
-                "coding_agent": "not-a-real-agent",
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertContains(response, "invalid coding agent", status_code=400)
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -2706,24 +2624,6 @@ class NewSessionViewTests(TestCase):
                     "reasoning_effort": "medium",
                     "developer_instructions": None,
                     "web_search_mode": "disabled",
-                    "open_pr_on_lgtm": False,
-                },
-            ),
-            (
-                "qa hitch coding agent override",
-                {"prompt": "/QA", "cwd": self.REPO, "coding_agent": "hitch"},
-                {},
-                {
-                    "name": _QA_PROMPT,
-                    "developer_instructions": None,
-                    "model": "gpt-5.4",
-                    "base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS,
-                },
-                {
-                    "model": "gpt-5.4",
-                    "reasoning_effort": "medium",
-                    "developer_instructions": None,
-                    "base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS,
                     "open_pr_on_lgtm": False,
                 },
             ),

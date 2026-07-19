@@ -2,6 +2,7 @@
 
 
 
+from django.core.exceptions import FieldDoesNotExist
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import (
@@ -97,3 +98,97 @@ class ApprovalModeLiveEditableMigrationTests(TransactionTestCase):
             self.assertFalse(
                 CodexInstance.objects.get(thread_id=thread_id).approval_mode_live_editable
             )
+
+
+class StagedCustomCodingAgentRemovalMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0064_codexinstance_codex_error_info")]
+    migrate_to = [("main", "0065_remove_custom_coding_agent_fields")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_keeps_legacy_worker_column_and_supports_rollback(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        legacy_codex_instance_model = old_apps.get_model("main", "CodexInstance")
+        legacy_instance = legacy_codex_instance_model.objects.create(
+            pid=1,
+            thread_id="legacy-worker-before-migration",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            base_instructions="legacy prompt",
+        )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        CodexInstance = new_apps.get_model("main", "CodexInstance")
+        UserSettings = new_apps.get_model("main", "UserSettings")
+
+        with self.assertRaises(FieldDoesNotExist):
+            CodexInstance._meta.get_field("base_instructions")
+        with self.assertRaises(FieldDoesNotExist):
+            UserSettings._meta.get_field("coding_agent")
+
+        instance = CodexInstance.objects.create(
+            pid=2,
+            thread_id="new-worker",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+        )
+        legacy_codex_instance_model.objects.create(
+            pid=3,
+            thread_id="legacy-worker-after-migration",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            base_instructions="legacy follow-up prompt",
+        )
+        legacy_instance.refresh_from_db()
+        self.assertEqual(legacy_instance.base_instructions, "legacy prompt")
+
+        with connection.cursor() as cursor:
+            codex_columns = {
+                column.name: column
+                for column in connection.introspection.get_table_description(
+                    cursor, CodexInstance._meta.db_table
+                )
+            }
+            settings_columns = {
+                column.name
+                for column in connection.introspection.get_table_description(
+                    cursor, UserSettings._meta.db_table
+                )
+            }
+
+        self.assertTrue(codex_columns["base_instructions"].null_ok)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT base_instructions FROM {CodexInstance._meta.db_table} "
+                "WHERE id = %s",
+                [instance.pk],
+            )
+            self.assertIsNone(cursor.fetchone()[0])
+        self.assertNotIn("coding_agent", settings_columns)
+
+        rolled_back_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        rolled_back_codex_instance_model = rolled_back_apps.get_model(
+            "main", "CodexInstance"
+        )
+        self.assertEqual(
+            rolled_back_codex_instance_model.objects.get(
+                pk=instance.pk
+            ).base_instructions,
+            "",
+        )

@@ -14,7 +14,7 @@ from django.http import HttpRequest
 from django.urls import reverse
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.models import (
@@ -39,8 +39,6 @@ from hitch.main.sessions.settings_cookies import (
     ResolvedSettings,
     SessionProjectVisibility,
     SettingsValues,
-    _effective_coding_agent,
-    _option_label,
     _read_cookie,
     _settings_cookie_updates,
     _web_search_mode_label,
@@ -93,7 +91,6 @@ def _new_session_form_context(
     current_new_session_auto_qa = (
         current_settings.auto_qa_enabled and not current_new_session_auto_pr
     )
-    current_coding_agent = _effective_coding_agent(current_settings)
     return {
         "repos": repos,
         "new_session_projects": new_session_projects,
@@ -117,13 +114,6 @@ def _new_session_form_context(
         "current_new_session_auto_pr": current_new_session_auto_pr,
         "current_new_session_auto_qa": current_new_session_auto_qa,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
-        "new_session_coding_agent_options": [
-            {"id": value, "display_name": label}
-            for value, label in coding_agents.CODING_AGENT_OPTIONS
-        ],
-        "new_session_default_coding_agent_label": _option_label(
-            coding_agents.CODING_AGENT_OPTIONS, current_coding_agent
-        ),
         "new_session_web_search_options": [
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS

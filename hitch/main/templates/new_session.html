@@ -334,15 +334,6 @@
                     </select>
                 </label>
                 <label>
-                    Coding agent
-                    <select name="coding_agent" data-new-session-coding-agent>
-                        <option value="" selected>Use settings ({{ new_session_default_coding_agent_label }})</option>
-                        {% for option in new_session_coding_agent_options %}
-                        <option value="{{ option.id }}">{{ option.display_name }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <label>
                     Web search
                     <select name="web_search_mode">
                         <option value="" selected>Use settings ({{ new_session_default_web_search_label }})</option>

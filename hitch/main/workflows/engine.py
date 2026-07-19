@@ -81,7 +81,6 @@ SHARED_STATE_KEYS = frozenset(
         "sandbox_policy",
         "approval_mode",
         "web_search_mode",
-        "base_instructions",
         "developer_instructions",
         "enable_memories",
         "next_user_message_index",

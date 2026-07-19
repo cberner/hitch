@@ -263,7 +263,6 @@ class OpenCodexResumedTests(SimpleTestCase):
             cast("Callable[[], Any]", lambda: codex),
             thread_id="t1",
             resume_kwargs={
-                "base_instructions": "Base.",
                 "developer_instructions": "Dev.",
             },
         ) as (_opened, thread):
@@ -276,7 +275,6 @@ class OpenCodexResumedTests(SimpleTestCase):
                 (
                     "thread/resume",
                     {
-                        "baseInstructions": "Base.",
                         "developerInstructions": "Dev.",
                         "threadId": "t1",
                     },

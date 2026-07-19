@@ -12,7 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
 from hitch.main.goals.autonomous_goal_run_display import (
@@ -387,14 +387,6 @@ def _posted_web_search_override(
         return value, None
     return "", "invalid web search setting"
 
-def _posted_new_session_coding_agent(raw: str | None) -> tuple[str, str | None]:
-    value = (raw or "").strip()
-    if not value:
-        return "", None
-    if value in coding_agents.VALID_CODING_AGENTS:
-        return value, None
-    return "", "invalid coding agent"
-
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
@@ -482,7 +474,6 @@ def _start_candidate_proposal_session(
     cwd: str,
     target: _NewSessionTarget,
     settings: SettingsValues,
-    spawn_settings: SettingsValues,
     cookie_updates: dict[str, str],
     auto_pr_enabled: bool,
     auto_qa_enabled: bool,
@@ -497,7 +488,6 @@ def _start_candidate_proposal_session(
             "candidate session cwd is not an allowed repository"
         )
     prompt = _candidate_proposal_continuation_prompt(prompt)
-    base_instructions = common._base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = common._developer_instructions_for_project(settings, project)
     auto_merge_to_local_branch, auto_merge_branch = (
@@ -528,8 +518,6 @@ def _start_candidate_proposal_session(
         }
         if web_search_mode:
             workflow_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            workflow_kwargs["base_instructions"] = base_instructions
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
@@ -580,8 +568,6 @@ def _start_candidate_proposal_session(
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
         spawn_kwargs["web_search_mode"] = web_search_mode
-    if base_instructions:
-        spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
@@ -846,11 +832,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     if proposed_session_error is not None:
         return HttpResponseBadRequest(proposed_session_error)
-    coding_agent_override, coding_agent_error = _posted_new_session_coding_agent(
-        request.POST.get("coding_agent")
-    )
-    if coding_agent_error is not None:
-        return HttpResponseBadRequest(coding_agent_error)
     cwd = target.cwd
     if not prompt and not has_input_images:
         return HttpResponseBadRequest("prompt is required")
@@ -871,11 +852,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # new-session click.
     resolved_settings = _new_session_post_settings(request)
     settings = resolved_settings.values
-    spawn_settings = (
-        settings._replace(coding_agent=coding_agent_override)
-        if coding_agent_override
-        else settings
-    )
     use_worktrees, use_worktrees_error = _posted_bool_override(
         request.POST.get("use_worktrees"),
         default=settings.use_worktrees,
@@ -946,7 +922,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             cwd=cwd,
             target=target,
             settings=settings,
-            spawn_settings=spawn_settings,
             cookie_updates=cookie_updates,
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
@@ -962,7 +937,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             thread_name = proposed_session.title
         else:
             thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
-        base_instructions = common._base_instructions_for_settings(spawn_settings)
         create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,
             "name": thread_name,
@@ -972,8 +946,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         }
         if web_search_mode:
             create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            create_thread_kwargs["base_instructions"] = base_instructions
         proposal_claimed = False
         if proposed_session is not None:
             claim_response = _claim_new_session_proposal_start(
@@ -1018,8 +990,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         }
         if web_search_mode:
             workflow_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            workflow_kwargs["base_instructions"] = base_instructions
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
@@ -1092,9 +1062,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["web_search_mode"] = web_search_mode
     if proposed_session is not None:
         spawn_kwargs["thread_name"] = proposed_session.title
-    base_instructions = common._base_instructions_for_settings(spawn_settings)
-    if base_instructions:
-        spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
@@ -1129,8 +1096,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         }
         if web_search_mode:
             spec_create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            spec_create_thread_kwargs["base_instructions"] = base_instructions
         try:
             thread_id = codex_pool.create_session_thread(**spec_create_thread_kwargs)
         except Exception:
@@ -1150,8 +1115,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "auto_pr_enabled": auto_pr_enabled,
             "auto_qa_enabled": auto_qa_enabled,
         }
-        if base_instructions:
-            spec_workflow_kwargs["base_instructions"] = base_instructions
         if web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
         try:
