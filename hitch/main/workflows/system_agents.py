@@ -43,6 +43,7 @@ from hitch.main.runtime.sdk_values import (
     is_nonbool_int,
     string_from_any,
 )
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
 from hitch.main.workflows import engine
 from hitch.main.workflows.agent_io import (
@@ -88,6 +89,9 @@ AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
 AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR = "Autonomous goal proposal accepted by user"
 AUTONOMOUS_GOAL_PROPOSAL_REJECTED_ERROR = "Autonomous goal proposal rejected by user"
 AUTONOMOUS_GOAL_PROPOSAL_DISMISSED_ERROR = "Autonomous goal proposal dismissed by user"
+
+WorkflowStartBlockedByArchiveError = session_lifecycle.WorkflowStartBlockedError
+
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
@@ -896,7 +900,9 @@ def _clear_workflow_instance_routing_claim(instance: CodexInstance) -> None:
         instance.workflow_routing_started_at = None
 
 
-def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
+def _maybe_start_auto_review_workflow(
+    instance: CodexInstance, *, lifecycle_lock_held: bool = False
+) -> None:
     if (
         instance.purpose != CodexInstance.PURPOSE_USER
         or instance.workflow_id is not None
@@ -952,14 +958,48 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
         if auto_merge_branch:
             workflow_kwargs["open_pr_on_lgtm"] = False
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+        if lifecycle_lock_held:
+            workflow_kwargs["lifecycle_lock_held"] = True
         workflow = pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         if isinstance(workflow, SystemWorkflow):
             _record_auto_review_workflow_for_proposals(
                 instance, workflow, automation=automation
             )
+    except WorkflowStartBlockedByArchiveError:
+        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
+        return
     except Exception:
         CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
         raise
+
+
+def retry_deferred_auto_review_for_thread(
+    thread_id: str, *, lifecycle_lock_held: bool = False
+) -> None:
+    """Retry the latest auto-review deferred while its session was archived."""
+    instance = (
+        CodexInstance.objects.filter(
+            thread_id=thread_id,
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id__isnull=True,
+            status=CodexInstance.STATUS_COMPLETED,
+            plan_mode=False,
+        )
+        .filter(
+            models.Q(auto_pr_enabled=True, auto_pr_triggered_at__isnull=True)
+            | models.Q(
+                auto_pr_enabled=False,
+                auto_qa_enabled=True,
+                auto_qa_triggered_at__isnull=True,
+            )
+        )
+        .order_by("-started_at", "-pk")
+        .first()
+    )
+    if instance is not None:
+        _maybe_start_auto_review_workflow(
+            instance, lifecycle_lock_held=lifecycle_lock_held
+        )
 
 
 def _accepted_auto_pr_proposal_title(thread_id: str) -> str:
@@ -989,6 +1029,14 @@ def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
     return _auto_review_requires_visible_approval(
         instance
     ) or _completed_turn_has_pending_proposed_plan(instance)
+
+
+def auto_review_waits_for_unarchive(instance: CodexInstance) -> bool:
+    """Whether a completed turn's unclaimed auto-review is durably deferred."""
+    return SessionMetadata.objects.filter(
+        thread_id=instance.thread_id,
+        codex_archived=True,
+    ).exists()
 
 
 def _auto_review_requires_visible_approval(instance: CodexInstance) -> bool:

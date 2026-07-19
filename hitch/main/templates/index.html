@@ -533,13 +533,17 @@
             margin: 1rem 0 0;
         }
 
-        .archive-toast {
+        .archive-notices {
             position: fixed;
             left: 50%;
             bottom: calc(1rem + var(--safe-bottom));
             z-index: 30;
             transform: translateX(-50%);
             width: min(28rem, calc(100% - 2rem));
+            display: grid;
+            gap: 0.5rem;
+        }
+        .archive-toast {
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -558,8 +562,13 @@
             padding: 0.35rem 0.8rem;
             flex: 0 0 auto;
         }
+        .archive-error-toast {
+            border-color: color-mix(in srgb, var(--status-error-fg) 35%, var(--border));
+            background: var(--status-error-bg);
+            color: var(--status-error-fg);
+        }
         @media (max-width: 640px) {
-            .archive-toast {
+            .archive-notices {
                 bottom: calc(5rem + var(--safe-bottom));
             }
         }
@@ -746,9 +755,14 @@
     </main>
 
     {% if not system_session_list %}
-    <div class="archive-toast" data-archive-toast hidden aria-live="polite">
-        <span data-archive-toast-text>Session archived</span>
-        <button type="button" class="button secondary" data-archive-undo>Undo</button>
+    <div class="archive-notices">
+        <div class="archive-toast" data-archive-toast hidden aria-live="polite">
+            <span data-archive-toast-text>Session archived</span>
+            <button type="button" class="button secondary" data-archive-undo>Undo</button>
+        </div>
+        <div class="archive-toast archive-error-toast" data-archive-error-toast hidden role="alert">
+            <span data-archive-error-text></span>
+        </div>
     </div>
 
     <dialog class="new-session" data-visible-projects-dialog aria-labelledby="visible-projects-title">
@@ -814,6 +828,8 @@
             const archiveToast = document.querySelector("[data-archive-toast]");
             const archiveUndo = document.querySelector("[data-archive-undo]");
             const archiveToastText = document.querySelector("[data-archive-toast-text]");
+            const archiveErrorToast = document.querySelector("[data-archive-error-toast]");
+            const archiveErrorText = document.querySelector("[data-archive-error-text]");
             const pendingArchives = new Map();
             const swipableRows = new WeakSet();
             // Rows whose 5s archive grace period is still open, kept ordered by
@@ -912,7 +928,15 @@
             function postArchiveState(row, archived) {
                 const body = new URLSearchParams({ archived: archived ? "true" : "false" });
                 return window.hitch.postForm(row.dataset.sessionArchiveUrl, body, { xhr: true }).then((response) => {
-                    if (!response.ok) throw new Error("archive request failed");
+                    if (response.ok) return;
+                    if (response.status === 409) {
+                        const fallback = "Archive conflicts with another session action.";
+                        if (typeof response.text !== "function") throw new Error(fallback);
+                        return response.text().then((message) => {
+                            throw new Error(message.trim() || fallback);
+                        });
+                    }
+                    throw new Error("archive request failed");
                 });
             }
 
@@ -938,27 +962,20 @@
                 }
                 if (archiveToastText) archiveToastText.textContent = "Session archived";
                 if (archiveUndo) {
-                    // Re-reveal Undo in case a prior error notice hid it.
                     archiveUndo.hidden = false;
                     archiveUndo.disabled = false;
                 }
-                window.clearTimeout(archiveErrorTimeout);
                 if (archiveToast) archiveToast.hidden = false;
             }
 
             function showArchiveError(message) {
-                // Reuse the aria-live toast to report a failed archive action.
-                // A pending grace period and its Undo button take priority, so
-                // don't clobber an active Undo toast; otherwise show an
-                // Undo-less notice that auto-hides (unless a real archive claims
-                // the toast in the meantime).
-                if (undoStack.length > 0) return;
-                if (archiveToastText) archiveToastText.textContent = message;
-                if (archiveUndo) archiveUndo.hidden = true;
-                if (archiveToast) archiveToast.hidden = false;
+                // A conflict must stay visible without taking away another
+                // row's still-valid Undo action.
+                if (archiveErrorText) archiveErrorText.textContent = message;
+                if (archiveErrorToast) archiveErrorToast.hidden = false;
                 window.clearTimeout(archiveErrorTimeout);
                 archiveErrorTimeout = window.setTimeout(() => {
-                    if (undoStack.length === 0 && archiveToast) archiveToast.hidden = true;
+                    if (archiveErrorToast) archiveErrorToast.hidden = true;
                 }, 5000);
             }
 
@@ -981,9 +998,15 @@
                     const timeout = window.setTimeout(() => finalizeArchive(row), 5000);
                     pendingArchives.set(row, timeout);
                     showArchiveToast(row);
-                }).catch(() => {
+                }).catch((error) => {
                     row.dataset.pendingArchive = "false";
                     row.classList.remove("pending-archive");
+                    const message = error instanceof Error ? error.message : "";
+                    showArchiveError(
+                        message && message !== "archive request failed"
+                            ? message
+                            : "Couldn't archive session"
+                    );
                 });
             }
 

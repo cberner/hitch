@@ -40,8 +40,11 @@
                     <form method="post" action="{{ set_archived_url }}" role="none">
                         {% csrf_token %}
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
-                        <button type="submit" role="menuitem">{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                        <button type="submit" role="menuitem"{% if active_system_workflow and not is_archived %} disabled aria-describedby="archive-active-workflow-note" data-archive-blocked{% endif %}>{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
                     </form>
+                    {% if active_system_workflow and not is_archived %}
+                    <p class="session-menu-note" id="archive-active-workflow-note">Stop the workflow before archiving.</p>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -51,6 +54,13 @@
     <main data-session-main
           data-stream-url="{{ stream_url }}"
           class="{% if task_plan.visible %}has-task-plan{% endif %}">
+        {% if messages %}
+        <div class="session-messages" role="alert" aria-live="polite">
+            {% for message in messages %}
+            <p class="session-message{% if message.tags %} {{ message.tags }}{% endif %}">{{ message }}</p>
+            {% endfor %}
+        </div>
+        {% endif %}
         <aside class="task-plan"
                data-task-plan
                data-recorded-at="{% if task_plan %}{{ task_plan.recorded_at }}{% else %}0{% endif %}"

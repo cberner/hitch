@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 from django.test import TestCase
+from django.utils import timezone
 from openai_codex import AppServerError, Codex
 
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
@@ -24,6 +25,30 @@ def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
 
 
 class SessionIndexRefreshTests(TestCase):
+    def test_archive_state_is_durable_without_existing_index_row(self) -> None:
+        session_index.update_cached_archived("newly-archived", archived=True)
+
+        metadata = SessionMetadata.objects.get(thread_id="newly-archived")
+        self.assertTrue(metadata.codex_archived)
+
+    def test_stale_active_observation_does_not_undo_archive(self) -> None:
+        SessionMetadata.objects.create(
+            thread_id="archive-race",
+            cwd="/repo",
+            codex_archived=False,
+        )
+        observed_at = timezone.now()
+        session_index.update_cached_archived("archive-race", archived=True)
+
+        session_index.upsert_thread(
+            _thread("archive-race"),
+            projects=[],
+            observed_at=observed_at,
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="archive-race")
+        self.assertTrue(metadata.codex_archived)
+
     def test_local_session_stores_and_preserves_codex_path(self) -> None:
         metadata = session_index.upsert_local_session(
             thread_id="local-thread",

@@ -3,9 +3,11 @@ import logging
 import os
 import uuid
 from collections.abc import Iterable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from django.contrib import messages as django_messages
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -29,6 +31,7 @@ from hitch.main.runtime.input_images import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions.message_intent import (
     _is_fix_pr_activation,
     _is_pr_activation,
@@ -196,10 +199,20 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     input_images_owned = False
     steer_image_paths: list[str] = []
     session_unarchived_for_turn = False
+    session_unarchive_recorded = False
+    lifecycle_lock_held = False
+    lifecycle_stack = ExitStack()
 
     def restore_archived_session_for_rejected_turn() -> None:
         if session_unarchived_for_turn:
             _restore_archived_session_for_rejected_turn(session_id, settings)
+
+    def hold_lifecycle_lock() -> None:
+        nonlocal lifecycle_lock_held
+        if lifecycle_lock_held:
+            return
+        lifecycle_stack.enter_context(session_lifecycle.hold(session_id))
+        lifecycle_lock_held = True
 
     try:
         if raw_active:
@@ -271,23 +284,29 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # moments later, so a live ``thread_resume`` here only duplicates that
         # rollout read (and its lazy state-DB migration) on the request path.
         # Fall back to a live resume for active/workflow/uncached-cwd threads.
+        hold_lifecycle_lock()
         metadata = _session_detail_metadata(session_id)
 
-        def record_session_unarchived_for_accepted_turn() -> None:
-            if not session_unarchived_for_turn:
+        def record_session_unarchived_for_accepted_turn(
+            *, best_effort: bool = True
+        ) -> None:
+            nonlocal session_unarchive_recorded
+            if not session_unarchived_for_turn or session_unarchive_recorded:
                 return
-            # Runs after the turn is already spawned: a transient failure here
-            # (e.g. "database is locked") must not 500 the request -- that
-            # would re-archive the session underneath the live worker and
-            # delete the input images it was handed.
+            # Post-spawn bookkeeping is best effort: a transient failure must
+            # not re-archive underneath a live worker. Workflow starts record
+            # first because their durable-state guard reads this metadata.
             try:
-                _record_session_unarchived(session_id)
+                _record_session_unarchived(session_id, thread=thread)
             except Exception:
+                if not best_effort:
+                    raise
                 logger.exception(
                     "failed to record session %s unarchived for accepted turn",
                     session_id,
                 )
                 return
+            session_unarchive_recorded = True
             if metadata is not None:
                 metadata.codex_archived = False
                 metadata.codex_archived_at = None
@@ -300,6 +319,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 raise _TurnRejectedError(
                     HttpResponseBadRequest("thread cwd is not an allowed repository")
                 )
+            hold_lifecycle_lock()
+            metadata = _session_detail_metadata(session_id)
+            should_unarchive_for_turn = _metadata_indicates_archived(metadata)
+            force_live_resume = _metadata_rollout_path_indicates_archived(metadata)
+        if should_unarchive_for_turn:
             _unarchive_session_for_turn(session_id, settings)
             session_unarchived_for_turn = True
             force_live_resume = True
@@ -340,6 +364,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                                 "thread cwd is not an allowed repository"
                             )
                         ) from exc
+                    hold_lifecycle_lock()
                     _unarchive_session_for_turn(session_id, settings, codex=codex)
                     session_unarchived_for_turn = True
                     resumed = codex._client.thread_resume(session_id)
@@ -497,6 +522,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             }
             if should_forward_web_search_mode:
                 workflow_kwargs["web_search_mode"] = web_search_mode
+            if lifecycle_lock_held:
+                workflow_kwargs["lifecycle_lock_held"] = True
+            if session_unarchived_for_turn:
+                record_session_unarchived_for_accepted_turn(best_effort=False)
             if fix_pr_activation:
                 pr_url = _fix_pr_url_for_thread(session_id, thread)
                 if not pr_url:
@@ -597,6 +626,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
             if should_forward_web_search_mode:
                 spec_workflow_kwargs["web_search_mode"] = web_search_mode
+            if lifecycle_lock_held:
+                spec_workflow_kwargs["lifecycle_lock_held"] = True
+            if session_unarchived_for_turn:
+                record_session_unarchived_for_accepted_turn(best_effort=False)
             spec_critic.start_spec_critic_workflow(**spec_workflow_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
@@ -612,6 +645,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         common._cleanup_saved_input_images(steer_image_paths)
         common._cleanup_saved_input_images(input_image_paths)
         return rejected.response
+    except system_agents.WorkflowStartBlockedByArchiveError:
+        restore_archived_session_for_rejected_turn()
+        common._cleanup_saved_input_images(steer_image_paths)
+        common._cleanup_saved_input_images(input_image_paths)
+        django_messages.error(
+            request,
+            "This session is archived or already running work.",
+        )
+        return redirect("session", session_id=session_id)
     except codex_pool.InputAttachmentLimitExceededError as exc:
         restore_archived_session_for_rejected_turn()
         common._cleanup_saved_input_images(steer_image_paths)
@@ -623,6 +665,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         if not input_images_owned:
             common._cleanup_saved_input_images(input_image_paths)
         raise
+    finally:
+        lifecycle_stack.close()
 
 def _duplicate_saved_input_images(paths: Iterable[str]) -> list[str]:
     source_paths = [Path(path) for path in paths if path]

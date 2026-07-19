@@ -326,6 +326,41 @@ class _DesignGateCase(NamedTuple):
 
 
 class PrQaWorkflowTests(TestCase):
+    def test_pr_qa_start_rejects_archived_or_other_workflow(self) -> None:
+        for blocker in ("archived", "spec critic"):
+            with self.subTest(blocker=blocker):
+                thread_id = f"blocked-{blocker}"
+                if blocker == "archived":
+                    SessionMetadata.objects.create(
+                        thread_id=thread_id,
+                        cwd="/repo",
+                        codex_archived=True,
+                    )
+                else:
+                    SystemWorkflow.objects.create(
+                        kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+                        main_thread_id=thread_id,
+                        cwd="/repo",
+                        status=SystemWorkflow.STATUS_RUNNING,
+                    )
+
+                with self.assertRaises(
+                    system_agents.WorkflowStartBlockedByArchiveError
+                ):
+                    pr_qa.start_pr_qa_workflow(
+                        main_thread_id=thread_id,
+                        cwd="/repo",
+                        sandbox_policy=None,
+                        approval_mode=None,
+                    )
+
+                self.assertFalse(
+                    SystemWorkflow.objects.filter(
+                        kind=SystemWorkflow.KIND_PR_QA,
+                        main_thread_id=thread_id,
+                    ).exists()
+                )
+
     @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_qa_workflow_starts_hidden_subagent_thread(
@@ -3068,6 +3103,18 @@ class SpecCriticWorkflowTests(TestCase):
 
         with self.assertRaises(RuntimeError):
             system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_qa_triggered_at)
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    def test_auto_qa_clears_trigger_when_session_was_archived(
+        self, mock_start: MagicMock
+    ) -> None:
+        mock_start.side_effect = system_agents.WorkflowStartBlockedByArchiveError
+        instance = _instance(auto_qa_enabled=True)
+
+        system_agents.on_codex_instance_finished(instance)
 
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_qa_triggered_at)
@@ -19065,6 +19112,16 @@ class AutoReviewIntentionallySkippedTests(TestCase):
         # auto_review mode, no pending proposed plan -> would fire, not skipped.
         instance = _instance(approval_mode="auto_review", auto_pr_enabled=True)
         self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
+
+    def test_archived_turn_waits_for_unarchive(self) -> None:
+        SessionMetadata.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            codex_archived=True,
+        )
+        instance = _instance(approval_mode="auto_review", auto_qa_enabled=True)
+
+        self.assertTrue(system_agents.auto_review_waits_for_unarchive(instance))
 
 
 class ClaimWorkflowTransitionTests(TestCase):

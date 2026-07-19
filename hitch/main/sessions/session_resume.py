@@ -85,8 +85,10 @@ def _thread_resume_archived_error(exc: InvalidRequestError) -> bool:
     return " is archived" in message and "unarchive" in message
 
 
-def _record_session_unarchived(session_id: str) -> None:
-    session_index.update_cached_archived(session_id, archived=False)
+def _record_session_unarchived(session_id: str, *, thread: Any | None = None) -> None:
+    session_index.update_cached_archived(
+        session_id, archived=False, thread=thread
+    )
     SessionMetadata.objects.filter(thread_id=session_id).update(codex_path="")
     ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
 
@@ -153,12 +155,19 @@ def _session_detail_metadata(session_id: str) -> SessionMetadata | None:
     return metadata
 
 
-def _stored_rollout_path_for_thread(session_id: str) -> Path | None:
+def _stored_rollout_path_for_thread(
+    session_id: str, *, archived: bool | None = None
+) -> Path | None:
     if not session_id:
         return None
     codex_home = codex_pool.codex_home_dir()
     pattern = f"rollout-*-{glob.escape(session_id)}.jsonl"
-    for base_name in ("sessions", _ARCHIVED_SESSIONS_DIR):
+    base_names = (
+        (_ARCHIVED_SESSIONS_DIR, "sessions")
+        if archived
+        else ("sessions", _ARCHIVED_SESSIONS_DIR)
+    )
+    for base_name in base_names:
         base = codex_home / base_name
         if not base.is_dir():
             continue
@@ -186,11 +195,16 @@ def _metadata_resume_for_inactive_session(
     active_system_workflow: SystemWorkflow | None,
     require_system_agent_thread: bool,
 ) -> _MetadataResume | None:
-    if (
-        metadata is None
-        or active_instance is not None
-        or active_system_workflow is not None
-        or require_system_agent_thread
+    if metadata is None or require_system_agent_thread:
+        return None
+    archived = (
+        _metadata_indicates_archived(metadata)
+        or _metadata_rollout_path_indicates_archived(metadata)
+    )
+    # Archived Codex threads cannot be resumed. Their rollout remains the
+    # authoritative detail source even if stale workflow state is still active.
+    if not archived and (
+        active_instance is not None or active_system_workflow is not None
     ):
         return None
     rollout_path = _rollout_path_from_value(metadata.codex_path)
@@ -201,7 +215,7 @@ def _metadata_resume_for_inactive_session(
         return None
     thread = _metadata_thread(metadata, rollout_path=rollout_path)
     entries = tuple(collapse_flat_entries(list(rollout_data.flat_entries)))
-    if not _entries_include_transcript(entries):
+    if not archived and not _entries_include_transcript(entries):
         return None
     latest_instance = _latest_instance_for_next_message(session_id)
     return _MetadataResume(

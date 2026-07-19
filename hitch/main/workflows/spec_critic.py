@@ -39,6 +39,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import app_server_pool, codex_pool
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.workflows import engine, system_agents
 from hitch.main.workflows.agent_io import (
     SPEC_REQUIREMENTS_AGENT_KIND,
@@ -162,6 +163,7 @@ def start_spec_critic_workflow(
     auto_qa_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
+    lifecycle_lock_held: bool = False,
 ) -> SystemWorkflow:
     """Start the Spec Critic workflow for the visible implementation turn.
 
@@ -178,7 +180,12 @@ def start_spec_critic_workflow(
     if not auto_merge_to_local_branch:
         auto_merge_branch = ""
     try:
-        with transaction.atomic():
+        with session_lifecycle.hold_for_workflow_start(
+            main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+        ), transaction.atomic():
+            session_lifecycle.ensure_workflow_start_allowed(
+                main_thread_id, kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND
+            )
             workflow = SystemWorkflow.objects.create(
                 kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
                 main_thread_id=main_thread_id,

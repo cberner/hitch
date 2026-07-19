@@ -8027,15 +8027,15 @@ class UnarchiveFailureTests(TestCase):
                 )
                 page.wait_for_function(
                     "() => { const t = document.querySelector("
-                    "'[data-archive-toast]');"
+                    "'[data-archive-error-toast]');"
                     " return t && !t.hidden && document.querySelector("
-                    "'[data-archive-toast-text]').textContent"
+                    "'[data-archive-error-text]').textContent"
                     ".includes('Couldn'); }"
                 )
-                # No Undo on a failed unarchive, and the row stays archived.
+                # No successful-archive notice, and the row stays archived.
                 self.assertTrue(
                     page.evaluate(
-                        "() => document.querySelector('[data-archive-undo]').hidden"
+                        "() => document.querySelector('[data-archive-toast]').hidden"
                     )
                 )
                 self.assertEqual(

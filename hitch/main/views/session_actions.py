@@ -1,6 +1,7 @@
 """Per-session action endpoints: rename, archive, project, approval mode, demo."""
 import json
 
+from django.contrib import messages
 from django.db import IntegrityError, transaction
 from django.http import (
     HttpRequest,
@@ -22,11 +23,14 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.runtime import app_server_pool, codex_pool
+from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
+from hitch.main.runtime.db import run_ignoring_database_locks
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
+from hitch.main.sessions.session_resume import _stored_rollout_path_for_thread
 from hitch.main.sessions.session_settings import (
     _allowed_session_cwds,
     _effective_approval_mode,
@@ -40,6 +44,20 @@ from hitch.main.sessions.settings_cookies import (
 )
 from hitch.main.views import common
 from hitch.main.workflows import system_agents
+
+_ARCHIVE_ACTIVE_WORK_MESSAGE = (
+    "Stop the active workflow before archiving this session."
+)
+_ARCHIVE_BUSY_MESSAGE = "This session is changing. Try archiving again."
+
+
+def _archive_conflict_response(
+    request: HttpRequest, session_id: str, message: str
+) -> HttpResponse:
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return HttpResponse(message, status=409, content_type="text/plain")
+    messages.error(request, message)
+    return redirect("session", session_id=session_id)
 
 
 def _apply_live_session_approval_mode(
@@ -149,23 +167,78 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
-    settings = _stored_settings(request)
-    with app_server_pool.borrow_codex(
-        common.Codex, enable_memories=settings.enable_memories
-    ) as codex:
+    with session_lifecycle.hold(session_id, blocking=False) as acquired:
+        if not acquired:
+            return _archive_conflict_response(
+                request, session_id, _ARCHIVE_BUSY_MESSAGE
+            )
         if archived == "true":
-            codex.thread_archive(session_id)
-        else:
-            codex.thread_unarchive(session_id)
-    if archived == "true":
-        demo.cleanup_demo_for_session(session_id)
-    session_index.update_cached_archived(session_id, archived=archived == "true")
-    # Codex moves this thread's rollout in/out of ``archived_sessions/`` when
-    # the archive bit flips, which invalidates *this* thread's cached usage
-    # row. Other threads' caches still match their rollouts, so leave them
-    # alone — a blanket wipe forces /profile and /usage to re-parse every
-    # archived rollout file the next time they render.
-    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+            run_ignoring_database_locks(
+                lambda: reconciliation.reconcile_dead_for_thread(session_id),
+                description="archive dead-worker reconcile",
+            )
+            if session_lifecycle.archive_has_active_work(session_id):
+                return _archive_conflict_response(
+                    request, session_id, _ARCHIVE_ACTIVE_WORK_MESSAGE
+                )
+        settings = _stored_settings(request)
+        is_archived = archived == "true"
+        thread_for_metadata = None
+        with app_server_pool.borrow_codex(
+            common.Codex, enable_memories=settings.enable_memories
+        ) as codex:
+            metadata_exists = SessionMetadata.objects.filter(
+                thread_id=session_id
+            ).exists()
+            if not metadata_exists and is_archived:
+                thread_for_metadata = codex._client.thread_resume(session_id).thread
+            if is_archived:
+                codex.thread_archive(session_id)
+            else:
+                codex.thread_unarchive(session_id)
+                if not metadata_exists:
+                    thread_for_metadata = codex._client.thread_resume(session_id).thread
+            rollout_path = _stored_rollout_path_for_thread(
+                session_id, archived=is_archived
+            )
+            try:
+                with transaction.atomic():
+                    session_index.update_cached_archived(
+                        session_id,
+                        archived=is_archived,
+                        thread=thread_for_metadata,
+                    )
+                    SessionMetadata.objects.filter(thread_id=session_id).update(
+                        codex_path=str(rollout_path) if rollout_path is not None else ""
+                    )
+            except Exception:
+                # Keep Codex and local metadata on the same side when a
+                # transient database failure follows the RPC.
+                try:
+                    if is_archived:
+                        codex.thread_unarchive(session_id)
+                    else:
+                        codex.thread_archive(session_id)
+                except Exception:
+                    common.logger.exception(
+                        "failed to restore archive state for session %s",
+                        session_id,
+                    )
+                raise
+        if not is_archived:
+            system_agents.retry_deferred_auto_review_for_thread(
+                session_id, lifecycle_lock_held=True
+            )
+        if is_archived:
+            demo.cleanup_demo_for_session(session_id)
+            SystemWorkflow.objects.filter(
+                kind=demo.DEMO_WORKFLOW_KIND,
+                main_thread_id=session_id,
+                status=SystemWorkflow.STATUS_RUNNING,
+            ).update(status=SystemWorkflow.STATUS_FAILED, updated_at=timezone.now())
+        if rollout_path is not None:
+            # This thread's rollout moved, so only its file-keyed cache is stale.
+            ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":
@@ -182,6 +255,15 @@ def _mark_workflow_failed(workflow: SystemWorkflow) -> None:
 
 @require_http_methods(["POST"])
 def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
+    with session_lifecycle.hold(session_id):
+        if SessionMetadata.objects.filter(
+            thread_id=session_id, codex_archived=True
+        ).exists():
+            return HttpResponseBadRequest("session is archived or unknown")
+        return _start_session_demo(request, session_id)
+
+
+def _start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     if system_agents.active_workflow_for_thread(session_id) is not None:
         return HttpResponseBadRequest("PR workflow is running for this session")
     active_instance = codex_pool.latest_active_for_thread(session_id)

@@ -391,6 +391,67 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
+    def test_archived_session_detail_uses_rollout_while_workflow_is_active(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines(
+                "Archived during QA", "Keep the archived transcript visible"
+            ),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="archived-during-workflow",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_preview="Archived during QA",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_archived=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="archived-during-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "archived-during-workflow"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Archived during QA")
+        self.assertContains(response, "Keep the archived transcript visible")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_archived_empty_rollout_renders_without_sdk_resume(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(self, [])
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="archived-empty",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_archived=True,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "archived-empty"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No messages in this session yet.")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_recovers_missing_rollout_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:

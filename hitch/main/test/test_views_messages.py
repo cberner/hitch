@@ -30,6 +30,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_pool
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
     _make_model,
@@ -715,6 +716,32 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
+    def test_spawns_follow_up_while_holding_lifecycle_lock(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        def assert_locked(**_kwargs: object) -> None:
+            with session_lifecycle.hold("abc", blocking=False) as acquired:
+                self.assertFalse(acquired)
+
+        mock_spawn.side_effect = assert_locked
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
     def test_first_follow_up_uses_project_developer_prompt(
         self,
         mock_codex: MagicMock,
@@ -873,6 +900,60 @@ class SendMessageViewTests(TestCase):
         self.assertTrue(
             ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
         )
+
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_archived_qa_follow_up_owns_unarchive_through_workflow_start(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_spawn_qa: MagicMock,
+    ) -> None:
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line(
+                    "event_msg", {"type": "user_message", "message": "Implement it"}
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_archived=True,
+            codex_archived_at=timezone.now(),
+        )
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        workflow = SystemWorkflow.objects.get(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        mock_spawn_qa.assert_called_once_with(workflow)
+        mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
+            "abc"
+        )
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.codex_archived)
+        self.assertIsNone(metadata.codex_archived_at)
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
@@ -1252,6 +1333,7 @@ class SendMessageViewTests(TestCase):
             initial_user_message_index=0,
             auto_pr_enabled=False,
             auto_qa_enabled=False,
+            lifecycle_lock_held=True,
         )
 
     @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
@@ -2362,6 +2444,7 @@ class SendMessageViewTests(TestCase):
                     "developer_instructions": None,
                     "enable_memories": False,
                     "initial_user_message_index": 0,
+                    "lifecycle_lock_held": True,
                 }
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
@@ -2455,6 +2538,7 @@ class SendMessageViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=1,
+            lifecycle_lock_held=True,
         )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")

@@ -36,6 +36,7 @@ from hitch.main.test.views_helpers import (
     _run_borrowed_with,
     _session,
 )
+from hitch.main.workflows import system_agents
 
 
 class SetSessionNameViewTests(TestCase):
@@ -496,9 +497,98 @@ class SetSessionApprovalModeViewTests(TestCase):
         self.assertEqual(running.approval_mode, "prompt_user")
 
 class SetSessionArchivedViewTests(TestCase):
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=Path("/archived/rollout-abc.jsonl"),
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_first_archive_preserves_resumed_thread_metadata(
+        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(
+                cwd="/repo",
+                name="CLI session",
+                preview="Implement the parser",
+                created_at=1,
+                updated_at=2,
+                path="/active/rollout-abc.jsonl",
+                thread_source="cli",
+            )
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertEqual(metadata.cwd, "/repo")
+        self.assertEqual(metadata.codex_name, "CLI session")
+        self.assertEqual(metadata.codex_display_title, "CLI session")
+        self.assertEqual(metadata.codex_preview, "Implement the parser")
+        self.assertEqual(metadata.codex_thread_source, "cli")
+        self.assertEqual(metadata.codex_path, "/archived/rollout-abc.jsonl")
+        self.assertTrue(metadata.codex_archived)
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=None,
+    )
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.views.common.Codex")
+    def test_unarchive_retries_auto_review_deferred_by_archive(
+        self,
+        mock_codex: MagicMock,
+        mock_start: MagicMock,
+        _mock_rollout_path: MagicMock,
+    ) -> None:
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_archived=True,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Implement it",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            auto_qa_enabled=True,
+            approval_mode="auto_review",
+        )
+        mock_start.side_effect = [
+            system_agents.WorkflowStartBlockedByArchiveError(),
+            MagicMock(),
+        ]
+        system_agents.on_codex_instance_finished(instance)
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_qa_triggered_at)
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "false"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        instance.refresh_from_db()
+        self.assertIsNotNone(instance.auto_qa_triggered_at)
+        self.assertEqual(mock_start.call_count, 2)
+        self.assertTrue(mock_start.call_args.kwargs["lifecycle_lock_held"])
+        mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
+            "abc"
+        )
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=Path("/moved/rollout-abc.jsonl"),
+    )
     @patch("hitch.main.views.common.Codex")
     def test_updates_archive_state_and_response_shape(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
     ) -> None:
         client = mock_codex.return_value.__enter__.return_value
         cases: list[
@@ -544,6 +634,10 @@ class SetSessionArchivedViewTests(TestCase):
         for label, data, ajax, status, location, expected_call, seed_cache in cases:
             with self.subTest(label=label):
                 ArchivedSessionTokenUsage.objects.all().delete()
+                SessionMetadata.objects.update_or_create(
+                    thread_id="abc",
+                    defaults={"cwd": "/repo", "codex_path": "/stale/rollout.jsonl"},
+                )
                 client.thread_archive.reset_mock()
                 client.thread_unarchive.reset_mock()
                 if seed_cache:
@@ -577,6 +671,10 @@ class SetSessionArchivedViewTests(TestCase):
                 else:
                     client.thread_unarchive.assert_called_once_with("abc")
                     client.thread_archive.assert_not_called()
+                self.assertEqual(
+                    SessionMetadata.objects.get(thread_id="abc").codex_path,
+                    "/moved/rollout-abc.jsonl",
+                )
                 if seed_cache:
                     # The toggled session's cache is dropped because its
                     # rollout path moves when codex archives/unarchives it,
@@ -595,8 +693,183 @@ class SetSessionArchivedViewTests(TestCase):
                     )
 
     @patch("hitch.main.views.common.Codex")
-    def test_archive_keeps_cached_usage_for_unrelated_sessions(
+    def test_archive_conflict_preserves_active_workflow(
         self, mock_codex: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+        )
+        url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+
+        ajax_response = self.client.post(
+            url,
+            data={"archived": "true"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        html_response = self.client.post(url, data={"archived": "true"})
+
+        self.assertEqual(ajax_response.status_code, 409)
+        self.assertContains(
+            ajax_response,
+            "Stop the active workflow",
+            status_code=409,
+        )
+        self.assertRedirects(
+            html_response,
+            reverse("session", kwargs={"session_id": "abc"}),
+            fetch_redirect_response=False,
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        mock_codex.assert_not_called()
+
+    @patch(
+        "hitch.main.views.session_actions.reconciliation.reconcile_dead_for_thread",
+        return_value=0,
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_archive_conflict_preserves_active_main_thread_turn(
+        self, mock_codex: MagicMock, _mock_reconcile: MagicMock
+    ) -> None:
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Apply QA feedback",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        mock_codex.assert_not_called()
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=Path("/moved/rollout-abc.jsonl"),
+    )
+    @patch("hitch.main.views.session_actions.reconciliation.reconcile_dead_for_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_archive_reconciles_dead_main_thread_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_reconcile: MagicMock,
+        _mock_rollout_path: MagicMock,
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Interrupted turn",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        def reap(_thread_id: str) -> int:
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_FAILED
+            )
+            return 1
+
+        mock_reconcile.side_effect = reap
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_reconcile.assert_called_once_with("abc")
+        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
+            "abc"
+        )
+
+    @patch("hitch.main.views.common.Codex")
+    def test_archive_allows_terminal_demo_workflow(
+        self, mock_codex: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Start demo",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            instance=instance,
+            thread_id="abc",
+            agent_kind=demo.DEMO_AGENT_KIND,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
+            "abc"
+        )
+
+    @patch("hitch.main.views.common.Codex")
+    def test_unarchive_bookkeeping_failure_restores_both_states(
+        self, mock_codex: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            codex_archived=True,
+            codex_path="/archived/rollout.jsonl",
+        )
+        client = mock_codex.return_value.__enter__.return_value
+
+        with (
+            patch(
+                "hitch.main.views.session_actions.session_index.update_cached_archived",
+                side_effect=RuntimeError("database unavailable"),
+            ),
+            self.assertRaisesMessage(RuntimeError, "database unavailable"),
+        ):
+            self.client.post(
+                reverse("set_session_archived", kwargs={"session_id": "abc"}),
+                data={"archived": "false"},
+            )
+
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertTrue(metadata.codex_archived)
+        self.assertEqual(metadata.codex_path, "/archived/rollout.jsonl")
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_called_once_with("abc")
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=Path("/moved/rollout-abc.jsonl"),
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_archive_keeps_cached_usage_for_unrelated_sessions(
+        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
     ) -> None:
         ArchivedSessionTokenUsage.objects.create(
             thread_id="abc", total_tokens=100
@@ -623,6 +896,35 @@ class SetSessionArchivedViewTests(TestCase):
             ).values_list("thread_id", "total_tokens")
         )
         self.assertEqual(other_totals, {"other-1": 200, "other-2": 300})
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=None,
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_archive_keeps_usage_cache_when_moved_rollout_is_not_found(
+        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(
+            thread_id="abc", cwd="/repo", codex_path="/stale/rollout.jsonl"
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc", total_tokens=100
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(SessionMetadata.objects.get(thread_id="abc").codex_path, "")
+        self.assertTrue(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
+            "abc"
+        )
 
     @patch("hitch.main.demo.subprocess.run")
     @patch("hitch.main.views.common.Codex")

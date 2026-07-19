@@ -747,6 +747,7 @@ def _usage_token_refresh_work_batches(
 def _refresh_missing_usage_metadata_path(
     codex: Codex, thread_id: str, *, projects: list[Project]
 ) -> str | None:
+    observed_at = timezone.now()
     try:
         resumed = codex._client.thread_resume(thread_id)
     except (AppServerError, InvalidRequestError):
@@ -756,7 +757,11 @@ def _refresh_missing_usage_metadata_path(
         logger.exception("failed to refresh usage metadata for %s", thread_id)
         return None
     thread = getattr(resumed, "thread", None)
-    metadata = session_index.upsert_thread(thread, projects=projects)
+    metadata = session_index.upsert_thread(
+        thread,
+        projects=projects,
+        observed_at=observed_at,
+    )
     if metadata is not None:
         return metadata.codex_path
     path = getattr(thread, "path", None)

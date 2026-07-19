@@ -39,6 +39,7 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_events, codex_pool, rate_limit
 from hitch.main.runtime.sdk_values import positive_int, string_from_any, truncate_for_prompt
+from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.workflows import engine, system_agents
 from hitch.main.workflows.agent_io import _parse_pr_monitor_output, _parse_qa_output, _string_list
 from hitch.main.workflows.gh_cli import (
@@ -125,13 +126,19 @@ def start_pr_qa_workflow(
     open_pr_on_lgtm: bool = True,
     auto_merge_branch: str = "",
     pr_title: str = "",
+    lifecycle_lock_held: bool = False,
 ) -> SystemWorkflow:
     """Start a QA workflow before optionally running the work-agent PR prompt."""
     auto_merge_branch = auto_merge_branch.strip()
     pr_title = " ".join(pr_title.split())
     open_pr_on_lgtm = open_pr_on_lgtm and not auto_merge_branch
     try:
-        with transaction.atomic():
+        with session_lifecycle.hold_for_workflow_start(
+            main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+        ), transaction.atomic():
+            session_lifecycle.ensure_workflow_start_allowed(
+                main_thread_id, kind=SystemWorkflow.KIND_PR_QA
+            )
             workflow = SystemWorkflow.objects.create(
                 kind=SystemWorkflow.KIND_PR_QA,
                 main_thread_id=main_thread_id,
@@ -187,13 +194,19 @@ def start_pr_monitor_workflow(
     enable_memories: bool = False,
     web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
+    lifecycle_lock_held: bool = False,
 ) -> SystemWorkflow:
     """Start PR monitoring for an already-opened PR, skipping the QA step."""
     pr_handoff = _compact_pr_handoff(
         _pr_handoff_from_github_url(pr_url, source_tool="fix_pr_slash")
     )
     try:
-        with transaction.atomic():
+        with session_lifecycle.hold_for_workflow_start(
+            main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+        ), transaction.atomic():
+            session_lifecycle.ensure_workflow_start_allowed(
+                main_thread_id, kind=SystemWorkflow.KIND_PR_QA
+            )
             workflow = SystemWorkflow.objects.create(
                 kind=SystemWorkflow.KIND_PR_QA,
                 main_thread_id=main_thread_id,

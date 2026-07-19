@@ -15,6 +15,7 @@ from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
 
 from hitch.main.models import Project, SessionIndexSyncState, SessionMetadata
 from hitch.main.repos import same_repo_or_worktree
+from hitch.main.sessions import lifecycle as session_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -219,13 +220,44 @@ def mark_synced(*, archived: bool, complete: bool, next_cursor: str = "") -> Non
     )
 
 
-def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | None:
+def upsert_thread(
+    thread: Any,
+    *,
+    projects: list[Project],
+    observed_at: datetime | None = None,
+) -> SessionMetadata | None:
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
         return None
+    with session_lifecycle.hold(thread_id, blocking=False) as acquired:
+        if not acquired:
+            return SessionMetadata.objects.filter(thread_id=thread_id).first()
+        return _upsert_thread_locked(
+            thread,
+            thread_id=thread_id,
+            projects=projects,
+            observed_at=observed_at,
+        )
+
+
+def _upsert_thread_locked(
+    thread: Any,
+    *,
+    thread_id: str,
+    projects: list[Project],
+    observed_at: datetime | None,
+) -> SessionMetadata:
     cwd = _thread_cwd(thread) or ""
     archived = _thread_is_archived(thread)
     existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
+    if (
+        observed_at is not None
+        and existing is not None
+        and existing.codex_last_synced_at is not None
+        and existing.codex_last_synced_at > observed_at
+        and existing.codex_archived != archived
+    ):
+        return existing
     defaults = _codex_defaults(
         thread_id=thread_id,
         cwd=cwd,
@@ -312,14 +344,37 @@ def update_cached_name(thread_id: str, name: str) -> None:
     )
 
 
-def update_cached_archived(thread_id: str, *, archived: bool) -> None:
+def update_cached_archived(
+    thread_id: str, *, archived: bool, thread: Any | None = None
+) -> None:
     now = timezone.now()
     archived_at = now if archived else None
-    SessionMetadata.objects.filter(thread_id=thread_id).update(
-        codex_archived=archived,
-        codex_archived_at=archived_at,
-        codex_updated_at=now,
-        codex_last_synced_at=now,
+    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
+    defaults: dict[str, Any] = {
+        "codex_archived": archived,
+        "codex_archived_at": archived_at,
+        "codex_updated_at": now,
+        "codex_last_synced_at": now,
+    }
+    if existing is None and thread is not None:
+        cwd = _thread_cwd(thread) or ""
+        defaults = _codex_defaults(
+            thread_id=thread_id,
+            cwd=cwd,
+            name=getattr(thread, "name", None),
+            preview=getattr(thread, "preview", None),
+            created_at=_timestamp_to_datetime(getattr(thread, "created_at", None)),
+            updated_at=_timestamp_to_datetime(getattr(thread, "updated_at", None)),
+            archived=archived,
+            path=getattr(thread, "path", None),
+            thread_source=_metadata_value(getattr(thread, "thread_source", None)),
+            existing=None,
+        )
+        defaults["project"] = _project_for_cwd(cwd, Project.objects.all())
+        defaults["project_cleared"] = False
+    SessionMetadata.objects.update_or_create(
+        thread_id=thread_id,
+        defaults=defaults,
     )
 
 
@@ -441,9 +496,16 @@ def _refresh_source(
             kwargs["archived"] = True
         if cursor:
             kwargs["cursor"] = cursor
+        observed_at = timezone.now()
         response = codex.thread_list(**kwargs)
         for thread in response.data:
-            if (metadata := upsert_thread(thread, projects=projects)) is not None:
+            if (
+                metadata := upsert_thread(
+                    thread,
+                    projects=projects,
+                    observed_at=observed_at,
+                )
+            ) is not None:
                 seen_thread_ids.add(metadata.thread_id)
                 synced += 1
         pages += 1
