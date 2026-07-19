@@ -146,6 +146,13 @@
         .session-menu button:disabled:focus {
             background: transparent;
         }
+        .session-menu-note {
+            max-width: 14rem;
+            margin: 0.15rem 0.65rem 0.4rem;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            line-height: 1.35;
+        }
 
         {% include "_button_styles.html" %}
 
@@ -155,6 +162,20 @@
             max-width: 900px;
             margin: 0 auto;
             padding: 1rem 1rem 2rem;
+        }
+        .session-messages {
+            display: grid;
+            gap: 0.5rem;
+            margin: 0 0 1rem;
+        }
+        .session-message {
+            margin: 0;
+            border: 1px solid color-mix(in srgb, var(--status-error-fg) 35%, var(--border));
+            border-radius: var(--radius-sm);
+            background: var(--status-error-bg);
+            color: var(--status-error-fg);
+            padding: 0.65rem 0.75rem;
+            font-size: 0.9rem;
         }
 
         .session-body { min-width: 0; }

@@ -12,6 +12,7 @@ from django.http import (
 )
 from django.shortcuts import render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError
 from openai_codex.generated.v2_all import (
@@ -626,12 +627,17 @@ def _materialized_session_list_page_from_codex(
     *,
     include_archived: bool,
 ) -> SessionListPage:
+    observed_at = timezone.now()
     threads = common._all_threads(codex)
     if include_archived:
         threads.extend(common._all_threads(codex, archived=True))
     _add_thread_derived_hidden_ids(query, threads)
     for thread in threads:
-        session_index.upsert_thread(thread, projects=query.projects)
+        session_index.upsert_thread(
+            thread,
+            projects=query.projects,
+            observed_at=observed_at,
+        )
     metadata_by_thread = _metadata_by_thread_id(threads)
     qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
         threads, query.hidden_thread_ids
@@ -742,12 +748,17 @@ def _peek_source_session(
                 source.exhausted = True
                 return None
             source.seen_cursors.add(source.cursor)
+            observed_at = timezone.now()
             source.page = _thread_list_page(
                 codex, archived=source.archived, cursor=source.cursor
             )
             _add_thread_derived_hidden_ids(query, source.page.threads)
             for thread in source.page.threads:
-                session_index.upsert_thread(thread, projects=query.projects)
+                session_index.upsert_thread(
+                    thread,
+                    projects=query.projects,
+                    observed_at=observed_at,
+                )
             source.next_page_cursor = source.page.next_cursor
             source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
             detect_materialized_order = (
@@ -832,10 +843,15 @@ def _visible_session_page_from_codex(
                 return _materialized_visible_session_page(sessions)
             return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
         seen_cursors.add(cursor)
+        observed_at = timezone.now()
         page = _thread_list_page(codex, archived=archived, cursor=cursor)
         _add_thread_derived_hidden_ids(query, page.threads)
         for thread in page.threads:
-            session_index.upsert_thread(thread, projects=query.projects)
+            session_index.upsert_thread(
+                thread,
+                projects=query.projects,
+                observed_at=observed_at,
+            )
         can_materialize_qa_activity = (
             materialized_fallback_allowed
             and not query.system_only

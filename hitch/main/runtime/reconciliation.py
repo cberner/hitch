@@ -577,7 +577,9 @@ def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     try:
         from hitch.main.workflows import system_agents
 
-        if system_agents.auto_review_intentionally_skipped(instance):
+        if system_agents.auto_review_intentionally_skipped(
+            instance
+        ) or system_agents.auto_review_waits_for_unarchive(instance):
             return False
     except Exception:
         # If we cannot determine intent, prefer leaving a completed turn intact
