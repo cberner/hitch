@@ -575,7 +575,6 @@ class CodexInstance(models.Model):
     # app-server in-memory state from the request process that created the
     # thread.
     developer_instructions = models.TextField(blank=True, default="")
-    base_instructions = models.TextField(blank=True, default="")
     enable_memories = models.BooleanField(default=False)
     model = models.CharField(max_length=256, blank=True, default="")
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
@@ -894,7 +893,6 @@ class UserSettings(models.Model):
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
-    coding_agent = models.CharField(max_length=32, blank=True, default="")
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)

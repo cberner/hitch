@@ -7,7 +7,6 @@ from typing import Any, NamedTuple
 from django.core import signing
 from django.http import HttpRequest, HttpResponse
 
-from hitch.main import coding_agents
 from hitch.main.models import ApprovalRequest, AutonomousGoal, Project
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
@@ -23,7 +22,6 @@ class SettingsValues(NamedTuple):
     reasoning_effort: str
     sandbox_policy: str
     approval_mode: str
-    coding_agent: str
     extra_system_prompt: str
     use_worktrees: bool
     auto_pr_enabled: bool
@@ -101,7 +99,6 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
-_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -145,12 +142,6 @@ _EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
 _COOKIE_MAX_VALUE_BYTES = 4000
 
 _LAST_SELECTED_REPO_MAX_LEN = 4096
-
-
-def _effective_coding_agent(settings: SettingsValues) -> str:
-    if settings.coding_agent in coding_agents.VALID_CODING_AGENTS:
-        return settings.coding_agent
-    return coding_agents.DEFAULT_CODING_AGENT
 
 
 def _option_label(
@@ -364,21 +355,6 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
         from_cookie=str,
         import_value=lambda raw: (
             raw if raw in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
-        ),
-    ),
-    _SettingSpec(
-        "coding_agent",
-        _CODING_AGENT_COOKIE,
-        to_cookie=lambda value: (
-            value
-            if value in coding_agents.VALID_CODING_AGENTS
-            else coding_agents.DEFAULT_CODING_AGENT
-        ),
-        from_cookie=str,
-        import_value=lambda raw: (
-            raw
-            if raw in coding_agents.VALID_CODING_AGENTS
-            else coding_agents.DEFAULT_CODING_AGENT
         ),
     ),
     _SettingSpec(

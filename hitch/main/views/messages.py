@@ -464,9 +464,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         should_forward_web_search_mode = bool(web_search_mode) or bool(
             previous_web_search_mode
         )
-        base_instructions = common._base_instructions_for_follow_up(
-            settings, previous_instance
-        )
         auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
         auto_qa_enabled = (
             False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
@@ -500,8 +497,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             }
             if should_forward_web_search_mode:
                 workflow_kwargs["web_search_mode"] = web_search_mode
-            if base_instructions:
-                workflow_kwargs["base_instructions"] = base_instructions
             if fix_pr_activation:
                 pr_url = _fix_pr_url_for_thread(session_id, thread)
                 if not pr_url:
@@ -538,8 +533,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["input_image_paths"] = input_image_paths
         if should_forward_web_search_mode:
             spawn_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            spawn_kwargs["base_instructions"] = base_instructions
         if previous_instance is None and developer_instructions:
             spawn_kwargs["developer_instructions"] = developer_instructions
         if settings.enable_memories:
@@ -602,8 +595,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if auto_merge_to_local_branch:
                 spec_workflow_kwargs["auto_merge_to_local_branch"] = True
                 spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-            if base_instructions:
-                spec_workflow_kwargs["base_instructions"] = base_instructions
             if should_forward_web_search_mode:
                 spec_workflow_kwargs["web_search_mode"] = web_search_mode
             spec_critic.start_spec_critic_workflow(**spec_workflow_kwargs)

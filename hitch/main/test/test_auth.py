@@ -23,7 +23,6 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
-_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -65,7 +64,6 @@ class AuthViewTests(TestCase):
                 _EFFORT_COOKIE: "high",
                 _SANDBOX_COOKIE: "workspaceWrite",
                 _APPROVAL_COOKIE: "deny_all",
-                _CODING_AGENT_COOKIE: "hitch",
                 _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
                     "Prefer focused tests."
                 ),
@@ -89,7 +87,6 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.reasoning_effort, "high")
         self.assertEqual(settings.sandbox_policy, "workspaceWrite")
         self.assertEqual(settings.approval_mode, "deny_all")
-        self.assertEqual(settings.coding_agent, "hitch")
         self.assertEqual(settings.extra_system_prompt, "Prefer focused tests.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
@@ -98,7 +95,6 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
         self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
-        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
@@ -139,7 +135,6 @@ class AuthViewTests(TestCase):
             reasoning_effort="low",
             sandbox_policy="readOnly",
             approval_mode="deny_all",
-            coding_agent="hitch",
             extra_system_prompt="Stored prompt.",
             use_worktrees=True,
             auto_pr_enabled=True,
@@ -157,14 +152,12 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.model, "stored-model")
         self.assertEqual(settings.reasoning_effort, "low")
         self.assertEqual(settings.sandbox_policy, "readOnly")
-        self.assertEqual(settings.coding_agent, "hitch")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
         self.assertTrue(settings.auto_qa_enabled)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(settings.last_selected_repo, "/home/user/stored")
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "stored-model")
-        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
@@ -180,7 +173,6 @@ class AuthViewTests(TestCase):
             model="stored-model",
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
-            coding_agent="hitch",
             use_worktrees=True,
             auto_pr_enabled=True,
             auto_qa_enabled=True,
@@ -195,7 +187,6 @@ class AuthViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "stored-model")
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "workspaceWrite")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
-        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
@@ -403,7 +394,6 @@ class AuthenticatedSettingsTests(TestCase):
                 "reasoning_effort": "",
                 "sandbox_policy": "readOnly",
                 "approval_mode": "deny_all",
-                "coding_agent": "hitch",
                 "extra_system_prompt": "  Keep it small.  ",
                 "use_worktrees": "true",
                 "auto_pr": "true",
@@ -417,7 +407,6 @@ class AuthenticatedSettingsTests(TestCase):
         settings = UserSettings.objects.get(user=user)
         self.assertEqual(settings.sandbox_policy, "readOnly")
         self.assertEqual(settings.approval_mode, "deny_all")
-        self.assertEqual(settings.coding_agent, "hitch")
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
@@ -426,7 +415,6 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "readOnly")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
-        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
@@ -441,7 +429,6 @@ class AuthenticatedSettingsTests(TestCase):
             reasoning_effort="high",
             sandbox_policy="dangerFullAccess",
             approval_mode="deny_all",
-            coding_agent="hitch",
             extra_system_prompt="Keep it small.",
             use_worktrees=True,
             auto_pr_enabled=True,
@@ -461,7 +448,6 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.reasoning_effort, "high")
         self.assertEqual(settings.sandbox_policy, "dangerFullAccess")
         self.assertEqual(settings.approval_mode, "deny_all")
-        self.assertEqual(settings.coding_agent, "hitch")
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)

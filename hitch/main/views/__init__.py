@@ -101,9 +101,6 @@ from hitch.main.views.common import (
     _attach_lazy_intermediate_context as _attach_lazy_intermediate_context,
 )
 from hitch.main.views.common import (
-    _base_instructions_for_settings as _base_instructions_for_settings,
-)
-from hitch.main.views.common import (
     _cache_intermediate_detail as _cache_intermediate_detail,
 )
 from hitch.main.views.common import (
@@ -354,9 +351,6 @@ from hitch.main.views.new_session import (
 )
 from hitch.main.views.new_session import (
     _posted_bool_override as _posted_bool_override,
-)
-from hitch.main.views.new_session import (
-    _posted_new_session_coding_agent as _posted_new_session_coding_agent,
 )
 from hitch.main.views.new_session import (
     _posted_new_session_target as _posted_new_session_target,

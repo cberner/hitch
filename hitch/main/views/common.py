@@ -35,7 +35,7 @@ from openai_codex.generated.v2_all import (
     ThreadSortKey,
 )
 
-from hitch.main import caches, coding_agents, demo
+from hitch.main import caches, demo
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import build_worktree_diff
@@ -143,7 +143,6 @@ from hitch.main.sessions.settings_cookies import (
     SessionProjectVisibility,
     SettingsValues,
     _apply_cookie_updates,
-    _effective_coding_agent,
     _option_label,
     _web_search_mode_label,
 )
@@ -265,10 +264,6 @@ def _settings_context(
             {"id": value, "display_name": label}
             for value, label in _APPROVAL_MODE_OPTIONS
         ],
-        "coding_agent_options": [
-            {"id": value, "display_name": label}
-            for value, label in coding_agents.CODING_AGENT_OPTIONS
-        ],
         "web_search_options": [
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS
@@ -277,7 +272,6 @@ def _settings_context(
         "current_effort": current_settings.reasoning_effort,
         "current_sandbox": current_settings.sandbox_policy,
         "current_approval": current_settings.approval_mode,
-        "current_coding_agent": _effective_coding_agent(current_settings),
         "current_extra_system_prompt": current_settings.extra_system_prompt,
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
@@ -1296,25 +1290,6 @@ def _session_approval_mode_context(
         ],
         "current_session_approval_mode": override,
     }
-
-def _base_instructions_for_settings(
-    settings: SettingsValues, *, explicit_default: bool = False
-) -> str | None:
-    agent = _effective_coding_agent(settings)
-    if agent == coding_agents.CODING_AGENT_CODEX:
-        if explicit_default and settings.coding_agent == coding_agents.CODING_AGENT_CODEX:
-            return coding_agents.default_codex_base_instructions()
-        return None
-    return coding_agents.base_instructions_for(agent)
-
-
-def _base_instructions_for_follow_up(
-    settings: SettingsValues, previous_instance: CodexInstance | None
-) -> str | None:
-    if previous_instance is not None:
-        return previous_instance.base_instructions or None
-    return _base_instructions_for_settings(settings, explicit_default=True)
-
 
 def _project_for_thread(
     thread: Any,

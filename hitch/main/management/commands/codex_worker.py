@@ -558,8 +558,6 @@ def _run_turn(
     notification_order: NotificationOrdering = _fallback_notification_order
     control_path = control_path_for(instance)
     resume_kwargs: dict[str, Any] = {}
-    if instance.base_instructions:
-        resume_kwargs["base_instructions"] = instance.base_instructions
     if instance.developer_instructions:
         resume_kwargs["developer_instructions"] = instance.developer_instructions
 

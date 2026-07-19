@@ -154,7 +154,6 @@ def start_spec_critic_workflow(
     approval_mode: str | None,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     enable_memories: bool = False,
     web_search_mode: str | None = None,
@@ -193,7 +192,6 @@ def start_spec_critic_workflow(
                     "approval_mode": approval_mode or "",
                     "model": model or "",
                     "reasoning_effort": reasoning_effort or "",
-                    "base_instructions": base_instructions or "",
                     "developer_instructions": developer_instructions or "",
                     "enable_memories": enable_memories,
                     "web_search_mode": web_search_mode or "",
@@ -762,7 +760,6 @@ def _spawn_spec_critic_analysis_runs(workflow: SystemWorkflow) -> list[SystemAge
         instance = codex_pool.spawn_new_session(
             cwd=workflow.cwd,
             prompt=prompt,
-            base_instructions=_state_string(workflow, "base_instructions") or None,
             developer_instructions=_state_string(workflow, "developer_instructions")
             or None,
             model=_state_string(workflow, "model") or None,
@@ -800,7 +797,6 @@ def _spawn_spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentR
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
         prompt=prompt,
-        base_instructions=_state_string(workflow, "base_instructions") or None,
         developer_instructions=_state_string(workflow, "developer_instructions") or None,
         model=_state_string(workflow, "model") or None,
         reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
@@ -858,7 +854,6 @@ def _spawn_spec_critic_implementation_turn(
         stored_model=_state_string(workflow, "model") or None,
         reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
         stored_reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-        base_instructions=_state_string(workflow, "base_instructions") or None,
         developer_instructions=_state_string(workflow, "developer_instructions") or None,
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         approval_mode=_state_string(workflow, "approval_mode") or None,

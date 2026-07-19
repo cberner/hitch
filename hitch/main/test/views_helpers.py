@@ -50,7 +50,6 @@ _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _VISIBLE_SESSION_PROJECTS_COOKIE = "hitch_visible_session_project_ids"
 _SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
-_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
     "Rebase on the default branch, clean it up, and then open a PR"

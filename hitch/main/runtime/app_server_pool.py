@@ -43,7 +43,6 @@ _APPSERVER_START_BACKOFF_MAX_SECONDS = 5.0
 _THREAD_RESUME_PARAM_ALIASES = {
     "approval_policy": "approvalPolicy",
     "approvals_reviewer": "approvalsReviewer",
-    "base_instructions": "baseInstructions",
     "developer_instructions": "developerInstructions",
     "model_provider": "modelProvider",
     "service_tier": "serviceTier",

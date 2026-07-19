@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError
 
-from hitch.main import caches, coding_agents
+from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.models import (
     CodexInstance,
@@ -192,7 +192,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
-    coding_agent = request.POST.get("coding_agent", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
@@ -237,10 +236,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid approval mode")
     if not approval:
         approval = _DEFAULT_APPROVAL_MODE
-    if coding_agent and coding_agent not in coding_agents.VALID_CODING_AGENTS:
-        return HttpResponseBadRequest("invalid coding agent")
-    if not coding_agent:
-        coding_agent = coding_agents.DEFAULT_CODING_AGENT
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
@@ -300,7 +295,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         reasoning_effort=effort,
         sandbox_policy=sandbox,
         approval_mode=approval,
-        coding_agent=coding_agent,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
