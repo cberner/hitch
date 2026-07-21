@@ -1138,6 +1138,23 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
         self.assertIn("Environment=HITCH_CODEX_WORKER_ISOLATION=systemd", justfile)
 
+    def test_systemd_deployment_ignores_only_git_pull_failures(self) -> None:
+        justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+
+        self.assertEqual(
+            [
+                line.strip()
+                for line in justfile.splitlines()
+                if line.strip().startswith("ExecStartPre=")
+            ],
+            [
+                'ExecStartPre=-${GIT_BIN} -C "${REPO_DIR}" pull --ff-only origin '
+                "${BRANCH}",
+                'ExecStartPre="${UV_BIN}" run ./manage.py migrate '
+                "--settings hitch.settings.dev",
+            ],
+        )
+
     def test_systemd_deployment_runs_runserver_without_autoreloader(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
 

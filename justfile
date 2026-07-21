@@ -57,9 +57,10 @@ sync:
   uv sync --all-groups
 
 # Install a per-user systemd unit that serves Hitch from this repo. Prompts for
-# the public domain name, wires it into ADDITIONAL_ALLOWED_HOSTS, and re-pulls
-# the install-time branch + applies migrations on every (re)start so a crash
-# loop self-heals.
+# the public domain name, wires it into ADDITIONAL_ALLOWED_HOSTS, and attempts
+# to re-pull the install-time branch before applying migrations on every
+# (re)start. Pull failures must not turn a restart into an outage: the checked
+# out revision is still a deployable fallback.
 install-systemd:
   #!/usr/bin/env bash
   set -euo pipefail
@@ -107,9 +108,10 @@ install-systemd:
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
   Environment=HITCH_ENABLE_DEBUG_TOOLBAR=0
   Environment=HITCH_CODEX_WORKER_ISOLATION=systemd
-  # Re-sync to the install-time branch and apply migrations on every (re)start
-  # so a crash loop picks up fixes pushed since the last successful boot.
-  ExecStartPre="${GIT_BIN}" -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
+  # Re-sync to the install-time branch when possible. The leading dash makes
+  # the update best-effort so local edits or a GitHub outage do not prevent the
+  # already-checked-out version from serving requests.
+  ExecStartPre=-${GIT_BIN} -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
   ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.dev
   ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --settings hitch.settings.dev
   Restart=always
