@@ -35,6 +35,7 @@ from hitch.main.sessions import session_index
 from hitch.main.sessions.message_intent import (
     _is_fix_pr_activation,
     _is_pr_activation,
+    _is_pr_now_activation,
     _is_qa_activation,
     _message_intent,
 )
@@ -469,6 +470,7 @@ def _start_candidate_proposal_session(
     candidate_session: SessionMetadata,
     prompt: str,
     plan_mode: bool,
+    pr_now_activation: bool,
     qa_activation: bool,
     qa_workflow_activation: bool,
     cwd: str,
@@ -520,7 +522,7 @@ def _start_candidate_proposal_session(
             workflow_kwargs["web_search_mode"] = web_search_mode
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
-        if auto_merge_branch:
+        if auto_merge_branch and not pr_now_activation:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         claim_response = _claim_candidate_proposal_start(
             proposed_session=proposed_session,
@@ -530,7 +532,10 @@ def _start_candidate_proposal_session(
         if claim_response is not None:
             return claim_response
         try:
-            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
+            if pr_now_activation:
+                pr_qa.start_pr_now_workflow(**workflow_kwargs)
+            else:
+                pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         except Exception:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             raise
@@ -815,9 +820,12 @@ def _remember_repo_and_redirect(
 def _post_new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    pr_now_activation = _is_pr_now_activation(request)
     fix_pr_activation = _is_fix_pr_activation(request)
     qa_activation = _is_qa_activation(request)
-    qa_workflow_activation = pr_activation or qa_activation or fix_pr_activation
+    qa_workflow_activation = (
+        pr_activation or pr_now_activation or qa_activation or fix_pr_activation
+    )
     prompt = intent.prompt
     plan_mode = False if qa_workflow_activation else intent.plan_mode
     has_input_images = common._has_input_image_uploads(request)
@@ -917,6 +925,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             candidate_session=candidate_session,
             prompt=prompt,
             plan_mode=plan_mode,
+            pr_now_activation=pr_now_activation,
             qa_activation=qa_activation,
             qa_workflow_activation=qa_workflow_activation,
             cwd=cwd,
@@ -936,7 +945,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if proposed_session is not None:
             thread_name = proposed_session.title
         else:
-            thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
+            thread_name = (
+                _PR_SLASH_PROMPT
+                if pr_activation or pr_now_activation
+                else _QA_SLASH_PROMPT
+            )
         create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,
             "name": thread_name,
@@ -992,10 +1005,13 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             workflow_kwargs["web_search_mode"] = web_search_mode
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
-        if auto_merge_branch:
+        if auto_merge_branch and not pr_now_activation:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         try:
-            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
+            if pr_now_activation:
+                pr_qa.start_pr_now_workflow(**workflow_kwargs)
+            else:
+                pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         except Exception:
             if proposal_claimed:
                 assert proposed_session is not None

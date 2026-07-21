@@ -308,6 +308,7 @@
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
                 const slashPr = composer.querySelector("[data-slash-pr]");
+                const slashPrNow = composer.querySelector("[data-slash-pr-now]");
                 const slashFixPr = composer.querySelector("[data-slash-fix-pr]");
                 const slashQa = composer.querySelector("[data-slash-qa]");
                 const imageButton = composer.querySelector("[data-image-button]");
@@ -326,6 +327,7 @@
                 // settles correctly as the mobile virtual keyboard animates in.
                 const composerKeyboardSettleDelays = [50, 150, 300, 500];
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const prNowCommand = "/pr-now";
                 const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
                 const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
                 const workflowLocked = composer.dataset.workflowLocked === "true";
@@ -441,6 +443,12 @@
                     if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                     return prPrompt;
                 };
+                const parsePrNowCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== prNowCommand) return null;
+                    return prNowCommand;
+                };
                 const parseFixPrCommand = () => {
                     const text = input.value.trim();
                     const parts = text.split(/\s+/, 2);
@@ -455,6 +463,7 @@
                 };
                 const syncNextMessageConfig = () => {
                     const workflowCommand = parsePrCommand() !== null
+                        || parsePrNowCommand() !== null
                         || parseFixPrCommand() !== null
                         || parseQaCommand() !== null;
                     const planMode = !workflowCommand && (
@@ -547,6 +556,16 @@
                         requestSubmit(composer, submit);
                     });
                 }
+                if (slashPrNow) {
+                    slashPrNow.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        clearImages();
+                        input.value = prNowCommand;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
                 if (slashFixPr) {
                     slashFixPr.addEventListener("click", () => {
                         setPlanMode(false, true);
@@ -615,11 +634,19 @@
                         clearImages();
                     } else {
                         const prCommandPrompt = parsePrCommand();
-                        const fixPrCommandPrompt = prCommandPrompt === null ? parseFixPrCommand() : null;
+                        const prNowCommandPrompt = prCommandPrompt === null ? parsePrNowCommand() : null;
+                        const fixPrCommandPrompt = (
+                            prCommandPrompt === null && prNowCommandPrompt === null
+                        ) ? parseFixPrCommand() : null;
                         const qaCommandPrompt = (
-                            prCommandPrompt === null && fixPrCommandPrompt === null
+                            prCommandPrompt === null
+                            && prNowCommandPrompt === null
+                            && fixPrCommandPrompt === null
                         ) ? parseQaCommand() : null;
-                        const workflowCommandPrompt = prCommandPrompt || fixPrCommandPrompt || qaCommandPrompt;
+                        const workflowCommandPrompt = prCommandPrompt
+                            || prNowCommandPrompt
+                            || fixPrCommandPrompt
+                            || qaCommandPrompt;
                         const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
                         if (workflowCommandPrompt !== null) {
                             setPlanMode(false, true);

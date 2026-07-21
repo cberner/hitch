@@ -181,6 +181,68 @@ def start_pr_qa_workflow(
         system_agents._block_workflow(workflow, f"failed to start QA agent: {exc!r}")
     return workflow
 
+
+def start_pr_now_workflow(
+    *,
+    main_thread_id: str,
+    cwd: str,
+    sandbox_policy: str | None,
+    approval_mode: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    developer_instructions: str | None = None,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+    initial_user_message_index: int = 0,
+    lifecycle_lock_held: bool = False,
+) -> SystemWorkflow:
+    """Open and monitor a PR without running the QA review first."""
+    try:
+        with session_lifecycle.hold_for_workflow_start(
+            main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+        ), transaction.atomic():
+            session_lifecycle.ensure_workflow_start_allowed(
+                main_thread_id, kind=SystemWorkflow.KIND_PR_QA
+            )
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id=main_thread_id,
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
+                max_iterations=system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS,
+                state={
+                    "pr_prompt": system_agents.PR_SLASH_PROMPT,
+                    "sandbox_policy": sandbox_policy or "",
+                    "approval_mode": approval_mode or "",
+                    "model": model or "",
+                    "reasoning_effort": reasoning_effort or "",
+                    "developer_instructions": developer_instructions or "",
+                    "enable_memories": enable_memories,
+                    "web_search_mode": web_search_mode or "",
+                    "next_user_message_index": max(initial_user_message_index, 0),
+                    "open_pr_on_lgtm": True,
+                    "auto_merge_branch": "",
+                    "pr_title": "",
+                },
+            )
+    except IntegrityError:
+        existing_workflow = SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        if existing_workflow is None:
+            raise
+        return existing_workflow
+
+    try:
+        _spawn_pr_prompt(workflow)
+    except Exception as exc:
+        system_agents._block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
+    return workflow
+
+
 def start_pr_monitor_workflow(
     *,
     main_thread_id: str,
