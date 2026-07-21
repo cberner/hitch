@@ -414,6 +414,57 @@ class PrQaWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
 
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_start_pr_now_workflow_skips_qa_and_starts_pr_prompt(
+        self, mock_spawn_turn: MagicMock, mock_spawn_new_session: MagicMock
+    ) -> None:
+        mock_spawn_turn.return_value = MagicMock(spec=CodexInstance)
+
+        workflow = pr_qa.start_pr_now_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            web_search_mode="live",
+            initial_user_message_index=4,
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        self.assertEqual(
+            workflow.max_iterations, system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS
+        )
+        self.assertEqual(workflow.state["next_user_message_index"], 5)
+        self.assertEqual(
+            workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 4
+        )
+        self.assertEqual(workflow.state["auto_merge_branch"], "")
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn_new_session.assert_not_called()
+        mock_spawn_turn.assert_called_once_with(
+            thread_id="main-thread",
+            cwd="/repo",
+            prompt=system_agents.PR_SLASH_PROMPT,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions="Use repo conventions.",
+            sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
+            enable_memories=True,
+            web_search_mode="live",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            agent_kind="",
+            display_author="",
+            user_message_index=4,
+        )
+
     @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
     def test_surface_workflow_failure_is_idempotent_across_stale_copies(
         self, mock_spawn: MagicMock

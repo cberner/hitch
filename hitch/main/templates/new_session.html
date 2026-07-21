@@ -475,6 +475,13 @@
                 if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                 return prPrompt;
             }
+            function parseNewSessionPrNowCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if ((parts[0] || "").toLowerCase() !== "/pr-now") return null;
+                return "/pr-now";
+            }
             function parseNewSessionQaCommand() {
                 if (!newSessionInput) return null;
                 const text = newSessionInput.value.trim();
@@ -547,8 +554,15 @@
                 });
                 newSessionForm.addEventListener("submit", (event) => {
                     const prCommandPrompt = parseNewSessionPrCommand();
-                    const qaCommandPrompt = prCommandPrompt === null ? parseNewSessionQaCommand() : null;
-                    const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
+                    const prNowCommandPrompt = (
+                        prCommandPrompt === null ? parseNewSessionPrNowCommand() : null
+                    );
+                    const qaCommandPrompt = (
+                        prCommandPrompt === null && prNowCommandPrompt === null
+                    ) ? parseNewSessionQaCommand() : null;
+                    const workflowCommandPrompt = prCommandPrompt
+                        || prNowCommandPrompt
+                        || qaCommandPrompt;
                     const commandPrompt = workflowCommandPrompt === null ? parseNewSessionPlanCommand() : null;
                     if (workflowCommandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(false);

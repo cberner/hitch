@@ -1679,7 +1679,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_start_workflow: MagicMock,
     ) -> None:
-        for prompt in ("/pr", "/qa", "/fix-pr"):
+        for prompt in ("/pr", "/pr-now", "/qa", "/fix-pr"):
             with self.subTest(prompt=prompt):
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
@@ -2448,6 +2448,40 @@ class SendMessageViewTests(TestCase):
                 }
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_now_workflow")
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_pr_now_slash_skips_qa_workflow_entry_point(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_pr_now: MagicMock,
+        mock_start_pr_qa: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/PR-NOW", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_pr_qa.assert_not_called()
+        mock_start_pr_now.assert_called_once_with(
+            main_thread_id="abc",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            lifecycle_lock_held=True,
+        )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")

@@ -783,7 +783,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
 
-        for prompt in ("/pr", "/qa"):
+        for prompt in ("/pr", "/pr-now", "/qa"):
             with self.subTest(prompt=prompt):
                 response = self.client.post(
                     reverse("new_session"),
@@ -804,6 +804,49 @@ class NewSessionViewTests(TestCase):
                 mock_create_thread.assert_not_called()
                 mock_spawn.assert_not_called()
                 mock_start_workflow.assert_not_called()
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_now_workflow")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.create_session_thread")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_pr_now_skips_qa_workflow_entry_point(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_pr_now: MagicMock,
+        mock_start_pr_qa: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_thread.return_value = "pr-now-thread"
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/PR-NOW", "cwd": self.REPO, "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_create_thread.assert_called_once_with(
+            cwd=self.REPO,
+            name=_PR_PROMPT,
+            developer_instructions=None,
+            model="gpt-5.4",
+            enable_memories=False,
+        )
+        mock_start_pr_qa.assert_not_called()
+        mock_start_pr_now.assert_called_once_with(
+            main_thread_id="pr-now-thread",
+            cwd=self.REPO,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+        )
 
     @patch(
         "hitch.main.views.common.goal_workflows."

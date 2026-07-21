@@ -4397,6 +4397,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "PR")
         self.assertContains(response, "QA")
         self.assertContains(response, "data-slash-pr")
+        self.assertContains(response, "data-slash-pr-now")
         self.assertContains(response, "data-slash-qa")
         self.assertContains(
             response,
@@ -4409,6 +4410,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "syncNextMessageConfig")
         self.assertContains(response, 'parsePlanCommand() !== null')
         self.assertContains(response, "parsePrCommand")
+        self.assertContains(response, "parsePrNowCommand")
         self.assertContains(response, "parseQaCommand")
         self.assertContains(response, '"turn/plan/updated":')
         self.assertContains(response, '"item/plan/delta":')

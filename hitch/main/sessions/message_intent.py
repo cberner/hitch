@@ -11,6 +11,7 @@ from hitch.main.sessions.session_settings import _QA_SLASH_PROMPT
 
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"
+_PR_NOW_SLASH_COMMAND = "/pr-now"
 _FIX_PR_SLASH_COMMAND = "/fix-pr"
 _QA_SLASH_COMMAND = "/qa"
 
@@ -52,6 +53,8 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         )
     if command == _PR_SLASH_COMMAND:
         return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+    if command == _PR_NOW_SLASH_COMMAND:
+        return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
     if command == _FIX_PR_SLASH_COMMAND:
         return _MessageIntent(_FIX_PR_SLASH_COMMAND, False, False, False)
     if command == _QA_SLASH_COMMAND:
@@ -70,6 +73,12 @@ def _is_pr_activation(request: HttpRequest) -> bool:
         bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
         or prompt in _PR_PROMPT_ALIASES
     )
+
+
+def _is_pr_now_activation(request: HttpRequest) -> bool:
+    prompt = request.POST.get("prompt", "").strip()
+    parts = prompt.split(maxsplit=1)
+    return bool(parts and parts[0].lower() == _PR_NOW_SLASH_COMMAND)
 
 
 def _is_fix_pr_activation(request: HttpRequest) -> bool:

@@ -35,6 +35,7 @@ from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions.message_intent import (
     _is_fix_pr_activation,
     _is_pr_activation,
+    _is_pr_now_activation,
     _is_qa_activation,
     _message_intent,
 )
@@ -120,9 +121,12 @@ def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[st
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    pr_now_activation = _is_pr_now_activation(request)
     fix_pr_activation = _is_fix_pr_activation(request)
     qa_activation = _is_qa_activation(request)
-    qa_workflow_activation = pr_activation or qa_activation or fix_pr_activation
+    qa_workflow_activation = (
+        pr_activation or pr_now_activation or qa_activation or fix_pr_activation
+    )
     prompt = intent.prompt
     plan_mode = intent.plan_mode
     has_input_images = common._has_input_image_uploads(request)
@@ -538,6 +542,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                     pr_url=pr_url,
                     **workflow_kwargs,
                 )
+                record_session_unarchived_for_accepted_turn()
+                return redirect("session", session_id=session_id)
+            if pr_now_activation:
+                pr_qa.start_pr_now_workflow(**workflow_kwargs)
                 record_session_unarchived_for_accepted_turn()
                 return redirect("session", session_id=session_id)
             if qa_activation:
