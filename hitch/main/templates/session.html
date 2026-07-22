@@ -102,6 +102,8 @@
             <p class="meta">
                 {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}"{% if session_stage.refreshing %} data-refreshing="true"{% endif %}>{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
+                <span class="meta-item"><span class="meta-label">model</span><code>{{ session_model }}</code></span>
+                <span class="meta-item"><span class="meta-label">reasoning</span><code>{{ session_reasoning }}</code></span>
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
                 <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>
             </p>

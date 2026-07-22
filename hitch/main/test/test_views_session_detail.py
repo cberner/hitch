@@ -218,8 +218,18 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "Read from rollout")
         self.assertContains(response, "Rollout answer")
         self.assertContains(response, "Indexed session")
-        self.assertContains(response, "gpt-5.4")
-        self.assertContains(response, "high")
+        self.assertContains(
+            response,
+            '<span class="meta-item"><span class="meta-label">model</span>'
+            "<code>gpt-5.4</code></span>",
+            html=True,
+        )
+        self.assertContains(
+            response,
+            '<span class="meta-item"><span class="meta-label">reasoning</span>'
+            "<code>high</code></span>",
+            html=True,
+        )
         self.assertContains(response, f'href="{pr_url}"')
         self.assertContains(
             response,
