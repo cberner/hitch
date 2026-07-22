@@ -7541,6 +7541,7 @@ class ProjectViewTests(TestCase):
         project = Project.objects.get(repo_path="/repo")
         self.assertEqual(project.name, "Hitch")
         self.assertEqual(project.repo_path, "/repo")
+        self.assertTrue(project.auto_pull_enabled)
         self.assertEqual(_cookie_value(response, "hitch_selected_project_id"), str(project.pk))
         self.assertEqual(
             _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
