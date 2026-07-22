@@ -741,6 +741,7 @@ def _render_session_detail(
     approval_mode = _effective_approval_mode_for_session(
         settings, session_id, metadata
     )
+    session_model, session_reasoning = _session_model_and_reasoning(resumed)
     response = render(
         request,
         "session.html",
@@ -810,6 +811,8 @@ def _render_session_detail(
             "pending_user_author": _pending_user_author(active_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance),
             "token_usage": session_token_usage,
+            "session_model": session_model,
+            "session_reasoning": session_reasoning,
             "next_message_config": _next_message_config(
                 settings,
                 resumed,
@@ -1144,8 +1147,7 @@ def _next_message_config(
     approval_mode: str | None = None,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
-    model = string_value(getattr(resumed, "model", None))
-    reasoning = string_value(getattr(resumed, "reasoning_effort", None))
+    model, reasoning = _session_model_and_reasoning(resumed)
     plan_model_value = plan_model or "Unknown"
     sandbox_value = _option_label(
         _SANDBOX_POLICY_OPTIONS,
@@ -1157,10 +1159,10 @@ def _next_message_config(
     )
     web_search_value = _web_search_mode_label(settings.web_search_mode)
     return [
-        {"label": "model", "value": model or "Unknown", "plan_value": plan_model_value},
+        {"label": "model", "value": model, "plan_value": plan_model_value},
         {
             "label": "reasoning",
-            "value": reasoning or "Model default",
+            "value": reasoning,
             "plan_value": _PLAN_MODE_REASONING_EFFORT,
         },
         {
@@ -1179,6 +1181,15 @@ def _next_message_config(
             "plan_value": web_search_value,
         },
     ]
+
+
+def _session_model_and_reasoning(resumed: Any) -> tuple[str, str]:
+    """Return the model configuration represented by the resumed session."""
+    model = string_value(getattr(resumed, "model", None)) or "Unknown"
+    reasoning = (
+        string_value(getattr(resumed, "reasoning_effort", None)) or "Model default"
+    )
+    return model, reasoning
 
 @dataclass(frozen=True)
 class _ApprovalResolvedEvent:
