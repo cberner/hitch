@@ -916,6 +916,16 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(
             "image attachments are not supported for PR workflow requests"
         )
+    if (
+        not qa_workflow_activation
+        and source_project is not None
+        and source_project.auto_pull_enabled
+    ):
+        try:
+            repos_module.pull_default_branch_from_origin(source_project.repo_path)
+        except repos_module.AutoPullError as exc:
+            return HttpResponseBadRequest(f"could not update project before session: {exc}")
+
     candidate_session = _candidate_session_to_continue_from_proposal(proposed_session)
     if candidate_session is not None:
         assert proposed_session is not None

@@ -23,6 +23,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from hitch.main import caches, views
+from hitch.main import repos as repos_module
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
@@ -1207,8 +1208,10 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.repos.pull_default_branch_from_origin")
     def test_new_session_accepts_candidate_worktree_and_starts_turn(
         self,
+        mock_pull: MagicMock,
         mock_turn: MagicMock,
         mock_new_session: MagicMock,
         mock_codex: MagicMock,
@@ -1220,7 +1223,7 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
-        project = _make_project(repo_path=self.REPO)
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
         goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
@@ -1251,6 +1254,7 @@ class NewSessionViewTests(TestCase):
             auto_merge_to_local_branch=False,
             auto_merge_branch="",
         )
+        mock_pull.side_effect = lambda _cwd: self.assertFalse(mock_turn.called)
 
         response = self.client.post(
             reverse("new_session"),
@@ -1263,6 +1267,7 @@ class NewSessionViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
+        mock_pull.assert_called_once_with(self.REPO)
         self.assertEqual(
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "candidate-thread"}),
@@ -1308,6 +1313,65 @@ class NewSessionViewTests(TestCase):
         )
         mock_new_session.assert_not_called()
         mock_spec_critic_should_run.assert_not_called()
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.repos.pull_default_branch_from_origin")
+    def test_candidate_auto_pull_failure_starts_no_turn_or_workflow(
+        self,
+        mock_pull: MagicMock,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+        mock_pull.side_effect = repos_module.AutoPullError("git pull failed")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertContains(
+            response,
+            "could not update project before session: git pull failed",
+            status_code=400,
+        )
+        mock_pull.assert_called_once_with(self.REPO)
+        mock_turn.assert_not_called()
+        mock_start_workflow.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertTrue(candidate.is_hidden_system_session)
 
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
@@ -2727,6 +2791,34 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
+    @patch("hitch.main.repos.pull_default_branch_from_origin")
+    def test_qa_with_auto_pull_enabled_preserves_dirty_checkout(
+        self,
+        mock_pull: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
+        mock_pull.side_effect = repos_module.AutoPullError(
+            "project repository has uncommitted changes"
+        )
+        mock_create_thread.return_value = "dirty-qa-thread"
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/qa", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_pull.assert_not_called()
+        mock_create_thread.assert_called_once()
+        mock_start_workflow.assert_called_once()
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
     def test_oneoff_qa_slash_does_not_persist_global_auto_review(
         self,
@@ -3044,6 +3136,74 @@ class NewSessionViewTests(TestCase):
             sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.repos.pull_default_branch_from_origin")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_auto_pull_updates_project_before_creating_worktree(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_pull: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
+        worktree = Path("/home/user/.hitch/worktrees/proj/session")
+        mock_create_worktree.return_value = ManagedWorktree(
+            path=worktree,
+            branch="hitch/proj/session",
+            source_repo=Path(self.REPO),
+        )
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+        mock_pull.side_effect = lambda _cwd: self.assertFalse(
+            mock_create_worktree.called
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_pull.assert_called_once_with(self.REPO)
+        mock_create_worktree.assert_called_once_with(self.REPO)
+        self.assertEqual(mock_spawn.call_args.kwargs["cwd"], str(worktree))
+
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.repos.pull_default_branch_from_origin")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_auto_pull_failure_blocks_new_session(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_pull: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+        mock_pull.side_effect = repos_module.AutoPullError(
+            "project repository has uncommitted changes"
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "could not update project before session: "
+            "project repository has uncommitted changes",
+            status_code=400,
+        )
+        mock_create_worktree.assert_not_called()
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.common.create_worktree_for_session")
     @patch("hitch.main.views.common.Codex")

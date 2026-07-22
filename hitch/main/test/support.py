@@ -86,6 +86,7 @@ def _make_model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
 
 def _make_project(name: str = "Hitch", repo_path: str = "/repo", **kwargs: Any) -> Project:
     """Create a Project with the defaults the test suite overwhelmingly uses."""
+    kwargs.setdefault("auto_pull_enabled", False)
     return Project.objects.create(name=name, repo_path=repo_path, **kwargs)
 
 

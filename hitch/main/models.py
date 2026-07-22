@@ -45,7 +45,7 @@ class Project(models.Model):
         choices=AUTO_PR_CHOICES,
         default=AUTO_PR_FOLLOW_GLOBAL,
     )
-    auto_pull_enabled = models.BooleanField(default=False)
+    auto_pull_enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
