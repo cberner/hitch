@@ -9487,6 +9487,30 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"item/completed", body)
         self.assertIn(b"Hello", body)
 
+    def test_initial_backlog_keeps_only_latest_diff_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                for diff in ("old diff", "current diff"):
+                    fh.write(
+                        json.dumps(
+                            {
+                                "method": "turn/diff/updated",
+                                "payload": {"diff": diff},
+                            }
+                        )
+                        + "\n"
+                    )
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertNotIn(b"old diff", body)
+        self.assertIn(b"current diff", body)
+
     def test_initial_backlog_preserves_partial_agent_deltas(
         self,
     ) -> None:

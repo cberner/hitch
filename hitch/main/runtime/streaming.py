@@ -337,6 +337,14 @@ def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
         for method, line in zip(methods, lines, strict=True)
     ]
     completed_item_ids: set[str] = set()
+    latest_diff_index = next(
+        (
+            index
+            for index in range(len(methods) - 1, -1, -1)
+            if methods[index] == "turn/diff/updated"
+        ),
+        None,
+    )
 
     for event in events:
         if event is None:
@@ -350,12 +358,19 @@ def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
             if item_id:
                 completed_item_ids.add(item_id)
 
-    for line, method, event in zip(lines, methods, events, strict=True):
+    for index, (line, method, event) in enumerate(
+        zip(lines, methods, events, strict=True)
+    ):
         # The session JS does not render command output deltas, and backlog
         # copies can be megabytes each; completed tool summaries arrive via
         # item/completed. Check only the event method so command text like
         # "rg outputDelta" does not make the owning item disappear.
         if _is_item_output_delta(method):
+            continue
+        # Each diff update is a full snapshot. Replaying superseded snapshots
+        # makes reconnect responses grow with every edit while conveying no
+        # additional state to the browser.
+        if method == "turn/diff/updated" and index != latest_diff_index:
             continue
         if event is None:
             yield _data_frame(line)
