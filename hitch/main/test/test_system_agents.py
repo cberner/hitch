@@ -6094,6 +6094,141 @@ class SpecCriticWorkflowTests(TestCase):
         feedback = gh_observations._gh_review_thread_feedback(threads)
         self.assertIn("outdated conversation", feedback)
 
+    def test_pr_monitor_formats_automated_review_threads_as_concise_findings(
+        self,
+    ) -> None:
+        threads = [
+            {
+                "isResolved": False,
+                "path": "app.py",
+                "line": 42,
+                "comments": {
+                    "nodes": [
+                        {
+                            "body": (
+                                "**<sub>![P1 Badge](https://img.example/P1)</sub> "
+                                "Keep the useful title** Details in `app.py`."
+                                "<details><summary>About Codex in GitHub</summary>"
+                                "Generic product help that should be omitted."
+                                "</details>"
+                            )
+                        }
+                    ]
+                },
+            }
+        ]
+
+        feedback = gh_observations._gh_review_thread_feedback(threads)
+
+        self.assertEqual(
+            feedback,
+            "- path=app.py, line=42, text=Keep the useful title Details in `app.py`.",
+        )
+
+    def test_pr_monitor_preserves_actionable_details_content(self) -> None:
+        feedback = gh_observations._untrusted_prompt_excerpt(
+            (
+                "The request fails."
+                "<details><summary>Stack trace</summary>"
+                "ValueError: invalid project state"
+                "</details>"
+            ),
+            350,
+        )
+
+        self.assertEqual(
+            feedback,
+            "The request fails. Stack trace ValueError: invalid project state",
+        )
+
+    def test_pr_monitor_preserves_review_image_description_and_url(self) -> None:
+        feedback = gh_observations._untrusted_prompt_excerpt(
+            "Screenshot: ![incorrect result](https://example.test/failure.png)",
+            350,
+        )
+
+        self.assertEqual(
+            feedback,
+            "Screenshot: incorrect result (https://example.test/failure.png)",
+        )
+
+    def test_pr_monitor_preserves_literal_double_asterisks(self) -> None:
+        feedback = gh_observations._untrusted_prompt_excerpt(
+            "**Preserve authored syntax**\n\nCheck `**/*.py` and `x ** 2`.",
+            350,
+        )
+
+        self.assertEqual(
+            feedback,
+            "Preserve authored syntax Check `**/*.py` and `x ** 2`.",
+        )
+
+    def test_pr_actionable_feedback_preserves_finding_boundaries(self) -> None:
+        feedback = pr_monitor_format._pr_actionable_feedback(
+            [
+                {
+                    "key": "review",
+                    "label": "Review",
+                    "status": "blocked",
+                    "actionable": True,
+                    "feedback": "Address review findings.",
+                }
+            ],
+            {
+                "feedback": (
+                    "Unresolved review threads:\n"
+                    "- path=app.py, line=10, text=First finding\n"
+                    "- path=views.py, line=20, text=Second finding"
+                )
+            },
+        )
+
+        self.assertIn(
+            "Unresolved review threads:\n- path=app.py, line=10, text=First finding\n"
+            "- path=views.py, line=20, text=Second finding",
+            feedback,
+        )
+
+    def test_pr_actionable_feedback_truncates_between_findings(self) -> None:
+        first_finding = "- path=first.py, line=10, text=" + ("a" * 1100)
+        second_finding = "- path=second.py, line=20, text=" + ("b" * 1300)
+
+        feedback = pr_monitor_format._truncate_structured_feedback(
+            f"Unresolved review threads:\n{first_finding}\n{second_finding}",
+            2400,
+        )
+
+        self.assertIn(first_finding, feedback)
+        self.assertNotIn("path=second.py", feedback)
+        self.assertTrue(feedback.endswith("... (additional feedback omitted)"))
+        self.assertLessEqual(len(feedback), 2400)
+
+    def test_pr_actionable_feedback_uses_non_colliding_fence(self) -> None:
+        feedback = pr_monitor_format._pr_actionable_feedback(
+            [
+                {
+                    "key": "review",
+                    "label": "Review",
+                    "status": "blocked",
+                    "actionable": True,
+                    "feedback": "Address review findings.",
+                }
+            ],
+            {
+                "feedback": (
+                    "Finding with a payload fence:\n"
+                    "```\n"
+                    "untrusted content after the fence"
+                )
+            },
+        )
+
+        self.assertIn(
+            "````text\nFinding with a payload fence:\n```\n"
+            "untrusted content after the fence\n````",
+            feedback,
+        )
+
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_monitor_observation_fetches_github_state_with_gh(
         self, mock_run: MagicMock

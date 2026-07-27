@@ -29,6 +29,19 @@ _PR_GATE_PENDING = "pending"
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
 )
+_GITHUB_CODEX_HELP_DETAILS_RE = re.compile(
+    r"<details\b[^>]*>\s*<summary\b[^>]*>[^<]*About Codex in GitHub"
+    r".*?</details>",
+    re.IGNORECASE | re.DOTALL,
+)
+_GITHUB_IMAGE_RE = re.compile(r"!\[([^]]*)]\(([^)]*)\)")
+_GITHUB_CODEX_PRIORITY_BADGE_ALT_RE = re.compile(r"^P[0-3] Badge$", re.IGNORECASE)
+_GITHUB_PRESENTATION_TAG_RE = re.compile(
+    r"</?(?:details|sub|summary|br)\b[^>]*>", re.IGNORECASE
+)
+_GITHUB_LEADING_BOLD_TITLE_RE = re.compile(
+    r"^\s*\*\*\s*(.+?)\*\*(?=\s)"
+)
 
 _CI_PASSING_STATUSES = frozenset(
     {"neutral", "pass", "passed", "skipped", "success", "successful"}
@@ -461,7 +474,7 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
         comments = thread.get("comments")
         nodes = comments.get("nodes") if isinstance(comments, dict) else None
         bodies = [
-            _untrusted_prompt_excerpt(string_from_any(comment.get("body")), 500)
+            _untrusted_prompt_excerpt(string_from_any(comment.get("body")), 350)
             for comment in _list_dicts(nodes)
             if string_from_any(comment.get("body"))
         ]
@@ -496,7 +509,26 @@ def _list_dicts(value: Any) -> list[dict[str, Any]]:
 
 
 def _untrusted_prompt_excerpt(text: str, max_chars: int) -> str:
-    return truncate_for_prompt(text, max_chars).replace("`", "'")
+    """Render untrusted GitHub text compactly without dropping authored content.
+
+    Only positively identified Codex boilerplate is discarded. Other presentation
+    markup is converted to semantic plain text so evidence remains in the prompt.
+    """
+    text = _GITHUB_CODEX_HELP_DETAILS_RE.sub(" ", text)
+    text = _GITHUB_IMAGE_RE.sub(_plain_text_github_image, text)
+    text = _GITHUB_PRESENTATION_TAG_RE.sub(" ", text)
+    text = _GITHUB_LEADING_BOLD_TITLE_RE.sub(r"\1", text, count=1)
+    return truncate_for_prompt(text, max_chars)
+
+
+def _plain_text_github_image(match: re.Match[str]) -> str:
+    alt = match.group(1).strip()
+    url = match.group(2).strip()
+    if _GITHUB_CODEX_PRIORITY_BADGE_ALT_RE.fullmatch(alt):
+        return " "
+    if alt and url:
+        return f"{alt} ({url})"
+    return alt or url
 
 
 def _github_pr_url_from_text(text: str) -> str:
