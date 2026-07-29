@@ -741,7 +741,9 @@ def _render_session_detail(
     approval_mode = _effective_approval_mode_for_session(
         settings, session_id, metadata
     )
-    session_model, session_reasoning = _session_model_and_reasoning(resumed)
+    session_model, session_reasoning = _session_model_and_reasoning(
+        resumed, fallback=active_instance
+    )
     response = render(
         request,
         "session.html",
@@ -1183,11 +1185,19 @@ def _next_message_config(
     ]
 
 
-def _session_model_and_reasoning(resumed: Any) -> tuple[str, str]:
-    """Return the model configuration represented by the resumed session."""
-    model = string_value(getattr(resumed, "model", None)) or "Unknown"
+def _session_model_and_reasoning(
+    resumed: Any, *, fallback: Any | None = None
+) -> tuple[str, str]:
+    """Return the resumed model configuration, filling gaps from persisted state."""
+    model = (
+        string_value(getattr(resumed, "model", None))
+        or string_value(getattr(fallback, "model", None))
+        or "Unknown"
+    )
     reasoning = (
-        string_value(getattr(resumed, "reasoning_effort", None)) or "Model default"
+        string_value(getattr(resumed, "reasoning_effort", None))
+        or string_value(getattr(fallback, "reasoning_effort", None))
+        or "Model default"
     )
     return model, reasoning
 

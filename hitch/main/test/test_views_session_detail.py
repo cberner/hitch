@@ -2174,9 +2174,13 @@ class SessionDetailFastPathTests(TestCase):
             prompt="still running",
             events_path="/tmp/events.jsonl",
             status=CodexInstance.STATUS_RUNNING,
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
         )
         client = _setup_codex(mock_codex)
         client._client.thread_resume.return_value = SimpleNamespace(
+            model="gpt-5.6-sol",
+            reasoning_effort=None,
             thread=_session("active", name="Active session")
         )
 
@@ -2184,6 +2188,8 @@ class SessionDetailFastPathTests(TestCase):
             response = self.client.get(reverse("session", kwargs={"session_id": "active"}))
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
+        self.assertEqual(response.context["session_reasoning"], "xhigh")
         client._client.thread_resume.assert_called_once_with("active")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
