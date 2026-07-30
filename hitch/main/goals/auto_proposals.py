@@ -78,7 +78,10 @@ def start_auto_proposal_scheduler() -> bool:
 
 
 def _auto_proposal_scheduler_enabled() -> bool:
-    return server_lifecycle.background_work_enabled(env_var=_SCHEDULER_ENV)
+    return server_lifecycle.background_work_enabled(
+        env_var=_SCHEDULER_ENV,
+        include_wsgi_server_commands=True,
+    )
 
 
 def _auto_proposal_scheduler_loop() -> None:

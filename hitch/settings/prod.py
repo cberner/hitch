@@ -2,6 +2,7 @@ import os
 
 from django.core.exceptions import ImproperlyConfigured
 
+from hitch.settings import common
 from hitch.settings.common import *  # noqa: F403
 
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -23,11 +24,7 @@ if (
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.environ.get("ADDITIONAL_ALLOWED_HOSTS", "").split(",")
-    if host.strip()
-]
+ALLOWED_HOSTS = common.additional_allowed_hosts()
 if not ALLOWED_HOSTS:
     raise ImproperlyConfigured(
         "ADDITIONAL_ALLOWED_HOSTS must contain at least one production host"

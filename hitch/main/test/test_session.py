@@ -3343,6 +3343,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'indicator.addEventListener("click"')
         self.assertContains(response, "function retryNow()")
         self.assertContains(response, "function clearRetryTimer()")
+        self.assertContains(response, "function handleReconnect(event)")
+        self.assertContains(response, 'source.addEventListener("reconnect", handleReconnect)')
         self.assertContains(response, "new EventSource(streamUrl)")
         self.assertContains(response, "const seenEvents = new Set()")
         self.assertContains(response, "if (seenEvents.has(key)) return;")

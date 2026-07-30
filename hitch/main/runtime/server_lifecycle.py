@@ -33,18 +33,26 @@ def background_work_enabled(
     The owner must be a single long-lived serving process. Django's autoreloader
     parent imports the app before it forks the ``RUN_MAIN=true`` child, so
     plain ``runserver`` without either marker is a watcher, not an owner.
+
+    Environment overrides may disable work in a serving process, but may never
+    turn a management command into an owner. Migrations import app configs
+    before the schema is current, so starting background database work there
+    can race or break the migration itself.
     """
+    if getattr(settings, "TESTING", False):
+        return False
+
+    if not is_single_serving_process(
+        include_wsgi_server_commands=include_wsgi_server_commands
+    ):
+        return False
+
     if env_var is not None:
         configured = _configured_bool(env_var)
         if configured is not None:
             return configured
 
-    if getattr(settings, "TESTING", False):
-        return False
-
-    return is_single_serving_process(
-        include_wsgi_server_commands=include_wsgi_server_commands
-    )
+    return True
 
 
 def is_single_serving_process(*, include_wsgi_server_commands: bool = False) -> bool:
@@ -127,13 +135,13 @@ class SchedulerHandle:
         with self._lock:
             if self._started:
                 return False
-            thread = threading.Thread(
-                target=target,
-                name=self._thread_name,
-                daemon=True,
-            )
-            started_at = timezone.now()
             try:
+                thread = threading.Thread(
+                    target=target,
+                    name=self._thread_name,
+                    daemon=True,
+                )
+                started_at = timezone.now()
                 thread.start()
             except Exception:
                 # A failed OS thread start must remain retryable. Marking the

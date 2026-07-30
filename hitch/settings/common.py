@@ -17,6 +17,28 @@ import django_stubs_ext
 
 django_stubs_ext.monkeypatch()
 
+
+def additional_allowed_hosts() -> list[str]:
+    """Return normalized hosts configured for non-local deployments."""
+    return [
+        host.strip().lower()
+        for host in os.environ.get("ADDITIONAL_ALLOWED_HOSTS", "").split(",")
+        if host.strip()
+    ]
+
+
+def csrf_trusted_origins(allowed_hosts: list[str]) -> list[str]:
+    """Build Django origin patterns for an already-validated host list."""
+    return [
+        f"{scheme}://{origin_host}"
+        for host in allowed_hosts
+        if host != "*"
+        for origin_host in (
+            (host[1:], f"*{host}") if host.startswith(".") else (host,)
+        )
+        for scheme in ("http", "https")
+    ]
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 

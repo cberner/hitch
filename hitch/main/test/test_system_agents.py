@@ -14990,6 +14990,18 @@ class AutonomousGoalWorkflowTests(TestCase):
                 {claim_key: now.replace(tzinfo=None).isoformat()}, now=now
             )
         )
+        self.assertFalse(
+            ProposedSession.accepted_session_start_claim_is_active(
+                {
+                    claim_key: (
+                        now
+                        + ProposedSession.ACCEPTED_SESSION_START_CLAIM_CLOCK_SKEW
+                        + timedelta(seconds=1)
+                    ).isoformat()
+                },
+                now=now,
+            )
+        )
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
@@ -15066,6 +15078,37 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.goals.autonomous_goal_proposal_stack.rollout.session_stage_data",
+        side_effect=ValueError("broken rollout"),
+    )
+    def test_accepted_session_rollout_error_is_logged(
+        self, mock_stage_data: MagicMock
+    ) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        rollout_path = Path(temp_dir.name) / "rollout.jsonl"
+        rollout_path.write_text("{}\n", encoding="utf-8")
+
+        with self.assertLogs(
+            autonomous_goal_proposal_stack.logger,
+            level="ERROR",
+        ) as captured:
+            evidence = (
+                autonomous_goal_proposal_stack._accepted_session_rollout_evidence(
+                    str(rollout_path)
+                )
+            )
+
+        assert evidence is not None
+        self.assertFalse(evidence.done)
+        self.assertFalse(evidence.superseded_by_lifecycle)
+        self.assertIn(
+            f"failed to read accepted-session rollout stage from {rollout_path}",
+            "\n".join(captured.output),
+        )
+        mock_stage_data.assert_called_once_with(rollout_path)
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",

@@ -79,6 +79,12 @@ def _counting_factory() -> tuple[Callable[[], Any], list[Any]]:
     return factory, built
 
 
+def _isolate_shared_pool(test_case: SimpleTestCase) -> None:
+    saved_pool = app_server_pool._SHARED_POOL
+    app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
+    test_case.addCleanup(setattr, app_server_pool, "_SHARED_POOL", saved_pool)
+
+
 class SharedCodexPoolTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
@@ -239,9 +245,7 @@ class BorrowCodexTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
         # borrow_codex uses the module-level singleton; isolate each test.
-        saved_pool = app_server_pool._SHARED_POOL
-        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
-        self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
+        _isolate_shared_pool(self)
 
     def test_testing_bypass_opens_and_closes_per_borrow(self) -> None:
         # Under TESTING the pool is bypassed: borrow_codex behaves like
@@ -299,9 +303,7 @@ class _ProbeCodex(_FakeCodex):
 class RunBorrowedOpWithRetryTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        saved_pool = app_server_pool._SHARED_POOL
-        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
-        self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
+        _isolate_shared_pool(self)
 
     @override_settings(TESTING=False)
     def test_uses_warm_server_without_constructing(self) -> None:
@@ -404,9 +406,7 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
 class CodexPoolKeepaliveTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        saved_pool = app_server_pool._SHARED_POOL
-        app_server_pool._SHARED_POOL = app_server_pool._SharedCodexPool()
-        self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
+        _isolate_shared_pool(self)
 
     def test_disabled_under_testing(self) -> None:
         self.assertFalse(app_server_pool.start_codex_pool_keepalive())

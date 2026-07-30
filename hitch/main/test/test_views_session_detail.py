@@ -2453,13 +2453,9 @@ class SessionStreamViewTests(TestCase):
             + f"?baseline={baseline}&active={active}&workflow={workflow}&demo={demo}"
         )
 
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_returns_idle_heartbeat_stream_without_active_worker(self) -> None:
-        # Without an active worker the SSE channel stays open emitting
-        # heartbeat events with ``working: false`` so the page's connection
-        # indicator can show ``connected, idle``. The cap is patched down
-        # so the test doesn't sit in the recycle loop.
+        # Without an active worker the SSE channel reports connected-idle,
+        # then recycles immediately so dormant tabs cannot pin WSGI threads.
         response = self.client.get(self._stream_url("thread-1"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/event-stream")
@@ -2468,6 +2464,7 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": false', body)
+        self.assertIn(b"event: reconnect", body)
 
         # A terminal worker counts as ``no active worker`` for routing
         # purposes; the stream should stay idle without re-tailing old events.
@@ -2487,6 +2484,26 @@ class SessionStreamViewTests(TestCase):
 
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": false', body)
+        self.assertIn(b"event: reconnect", body)
+
+    @patch(
+        "hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances"
+    )
+    @patch("hitch.main.views.session_detail.reconciliation.reconcile_dead_if_due")
+    @patch("hitch.main.views.session_detail.reconciliation.reconcile_dead_for_thread")
+    def test_idle_reconnect_does_not_run_reconciliation(
+        self,
+        reconcile_thread: MagicMock,
+        reconcile_global: MagicMock,
+        reconcile_workflow: MagicMock,
+    ) -> None:
+        response = self.client.get(self._stream_url("thread-idle"))
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b"event: reconnect", body)
+        reconcile_thread.assert_not_called()
+        reconcile_global.assert_not_called()
+        reconcile_workflow.assert_not_called()
 
     @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)

@@ -1999,6 +1999,21 @@
                 window.location.reload();
             }
 
+            function handleReconnect(event) {
+                bump();
+                if (source) source.close();
+                let delay = 5000;
+                try {
+                    const requested = Number(JSON.parse(event.data).afterMs);
+                    if (Number.isFinite(requested) && requested >= 1000) delay = requested;
+                } catch {}
+                clearRetryTimer();
+                retryTimer = window.setTimeout(() => {
+                    retryTimer = 0;
+                    connect();
+                }, delay);
+            }
+
             function connect() {
                 if (streamEnded) return;
                 if (source) source.close();
@@ -2006,6 +2021,7 @@
                 source.addEventListener("heartbeat", handleHeartbeat);
                 source.addEventListener("message", handleMessage);
                 source.addEventListener("end", handleEnd);
+                source.addEventListener("reconnect", handleReconnect);
                 source.addEventListener("error", markConnectionProblem);
             }
 

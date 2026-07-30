@@ -44,11 +44,23 @@ class AutoProposalSchedulerTests(SimpleTestCase):
     def test_scheduler_disabled_for_management_commands(self) -> None:
         self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
 
-    @override_settings(TESTING=True)
+    @override_settings(TESTING=False)
     @patch.dict(os.environ, {"HITCH_AUTO_PROPOSAL_SCHEDULER": "1"}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "migrate"])
-    def test_scheduler_env_override_can_enable(self) -> None:
+    def test_scheduler_env_override_cannot_enable_during_migration(self) -> None:
+        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
+    def test_scheduler_enabled_for_wsgi_server_process(self) -> None:
         self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {"HITCH_AUTO_PROPOSAL_SCHEDULER": "0"}, clear=True)
+    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
+    def test_scheduler_env_override_can_disable_server_owner(self) -> None:
+        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
 
     @patch(
         "hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows",

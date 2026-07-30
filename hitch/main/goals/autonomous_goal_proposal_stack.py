@@ -9,6 +9,7 @@ Leaf module: imports nothing from ``system_agents`` to avoid an import cycle.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,8 @@ from hitch.main.runtime import rollout
 from hitch.main.runtime.rollout_state import _rollout_file_state_from_value
 from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sequences import unique_nonempty
+
+logger = logging.getLogger(__name__)
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
@@ -470,6 +473,10 @@ def _accepted_session_rollout_evidence(
     try:
         stage_data = rollout.session_stage_data(rollout_state.path)
     except Exception:
+        logger.exception(
+            "failed to read accepted-session rollout stage from %s",
+            rollout_state.path,
+        )
         return _AcceptedSessionRolloutEvidence(
             done=False,
             superseded_by_lifecycle=False,

@@ -409,12 +409,23 @@ def _track_worker_process(instance_id: int, proc: subprocess.Popen[bytes]) -> No
     with _TRACKED_WORKER_PROCS_LOCK:
         _REAPED_WORKERS.discard((proc.pid, instance_id))
         _TRACKED_WORKER_PROCS[proc.pid] = (instance_id, proc)
-    threading.Thread(
-        target=_wait_for_tracked_worker,
-        args=(proc.pid, instance_id, proc),
-        name=f"codex-worker-reaper-{proc.pid}",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_wait_for_tracked_worker,
+            args=(proc.pid, instance_id, proc),
+            name=f"codex-worker-reaper-{proc.pid}",
+            daemon=True,
+        ).start()
+    except Exception:
+        # The detached worker is already live, so failing its request now would
+        # report a launch failure while the turn continues in the background.
+        # Keep the Popen in the registry: reconcile_dead polls this same handle
+        # and will reap it on the next sweep even without the waiter thread.
+        logger.exception(
+            "failed to start reaper thread for Codex worker pid %s; "
+            "falling back to reconciliation",
+            proc.pid,
+        )
 
 
 def _wait_for_tracked_worker(

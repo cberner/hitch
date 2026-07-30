@@ -23,9 +23,6 @@ from unittest.mock import MagicMock, patch
 
 from django.conf import settings
 from django.contrib.staticfiles.handlers import StaticFilesHandler
-from django.contrib.staticfiles.management.commands.runserver import (
-    Command as StaticRunserverCommand,
-)
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -66,7 +63,6 @@ from hitch.main.management.commands.codex_worker import (
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
-    SessionDemo,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
@@ -1159,24 +1155,22 @@ class SystemdInstallRecipeTests(SimpleTestCase):
             ],
         )
 
-    def test_systemd_deployment_serves_static_without_autoreloader(self) -> None:
+    def test_systemd_deployment_runs_one_high_capacity_gunicorn_worker(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
 
         self.assertIn(
-            'ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --insecure '
-            "--settings hitch.settings.prod",
+            'ExecStart="${UV_BIN}" run gunicorn --workers 1 --threads 64 '
+            "--timeout 300 --bind 127.0.0.1:8000 hitch.static_wsgi:application",
             justfile,
         )
+        self.assertNotIn("Environment=HITCH_AUTO_PROPOSAL_SCHEDULER", justfile)
 
     @override_settings(DEBUG=False)
-    def test_insecure_runserver_handler_serves_admin_static_with_debug_off(self) -> None:
-        handler = StaticRunserverCommand().get_handler(
-            use_static_handler=True,
-            insecure_serving=True,
-        )
+    def test_static_wsgi_serves_admin_static_with_debug_off(self) -> None:
+        from hitch.static_wsgi import application
 
-        self.assertIsInstance(handler, StaticFilesHandler)
-        response = handler.get_response(
+        self.assertIsInstance(application, StaticFilesHandler)
+        response = application.get_response(
             RequestFactory().get("/static/admin/css/base.css")
         )
         self.addCleanup(response.close)
@@ -3459,6 +3453,29 @@ class ReconcileAndLookupTests(TestCase):
             with codex_pool._TRACKED_WORKER_PROCS_LOCK:
                 self.assertNotIn(pid, codex_pool._TRACKED_WORKER_PROCS)
                 self.assertNotIn((pid, instance.pk), codex_pool._REAPED_WORKERS)
+        finally:
+            _forget_worker_pid(pid)
+
+    @patch("hitch.main.runtime.codex_pool.threading.Thread")
+    def test_reaper_thread_start_failure_keeps_worker_tracked_for_sweep(
+        self, thread_cls: MagicMock
+    ) -> None:
+        pid = 98769
+        instance = self._make(pid=pid, status=CodexInstance.STATUS_RUNNING)
+        proc = MagicMock(pid=pid)
+        thread_cls.return_value.start.side_effect = RuntimeError("thread limit")
+
+        try:
+            codex_pool._track_worker_process(
+                instance.pk,
+                cast(subprocess.Popen[bytes], proc),
+            )
+
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                self.assertEqual(
+                    codex_pool._TRACKED_WORKER_PROCS[pid],
+                    (instance.pk, proc),
+                )
         finally:
             _forget_worker_pid(pid)
 
@@ -9190,100 +9207,50 @@ class StreamForInstanceTests(TestCase):
     """
 
     def test_idle_stream_emits_initial_heartbeat_and_recycles(self) -> None:
-        # The "no active worker" path keeps the SSE channel open so the
-        # session page's connection indicator can show ``connected, idle``.
-        # Force the cap down so the loop returns promptly without an end
-        # event — EventSource will reconnect transparently.
-        with (
-            patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
-            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-        ):
-            frames = list(streaming.idle_stream("thread-none", baseline_id=None))
-        self.assertEqual(frames[0], b"retry: 2000\n\n")
+        # The no-worker path reports connected-idle, then asks the client to
+        # reconnect without retaining a blocking WSGI request thread.
+        frames = list(streaming.idle_stream())
+
+        self.assertEqual(frames[0], b"retry: 5000\n\n")
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertGreaterEqual(len(heartbeats), 1)
+        self.assertEqual(len(heartbeats), 1)
         self.assertIn(b'"working": false', heartbeats[0])
-        # No worker ever showed up, so the stream closes silently rather
-        # than firing an ``end`` event that would force a page reload.
+        self.assertTrue(frames[-1].startswith(b"event: reconnect"))
+        self.assertIn(b'"afterMs": 5000', frames[-1])
         self.assertFalse(any(f.startswith(b"event: end") for f in frames))
 
-    def test_idle_stream_ends_when_worker_appears(self) -> None:
-        # If a worker is spawned out-of-band (e.g. another tab), the idle
-        # stream should fire ``event: end`` so the client reloads into the
-        # live-streaming UI rather than waiting for the per-stream cap.
-        # The baseline (``None``) reflects what the page saw at render
-        # time; a fresh pk on the first poll proves an out-of-band turn
-        # has landed since then.
-        with (
-            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch(
-                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
-                return_value=42,
-            ),
-        ):
-            frames = list(streaming.idle_stream("thread-active", baseline_id=None))
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"active"', frames[-1])
+    def test_idle_stream_does_not_poll_while_response_is_open(self) -> None:
+        # Baseline validation belongs to each short-lived session_stream
+        # request. The generator itself must not sleep or poll after yielding,
+        # or a dormant tab would still occupy a WSGI thread.
+        with patch("hitch.main.runtime.streaming.time.sleep") as mock_sleep:
+            frames = list(streaming.idle_stream())
 
-    def test_idle_stream_ends_on_fast_completed_out_of_band_turn(self) -> None:
-        # Reload-detection has to fire even for an out-of-band turn that
-        # already finished by the time we look — pk tracking catches it
-        # where a "still active?" check would have missed it. Page saw
-        # baseline=7 at render; one poll later the DB shows pk=9 even
-        # though no row is currently active.
-        with (
-            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch(
-                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
-                return_value=9,
-            ),
-        ):
-            frames = list(
-                streaming.idle_stream("thread-completed-fast", baseline_id=7)
-            )
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"active"', frames[-1])
+        self.assertEqual(len(frames), 3)
+        self.assertTrue(frames[-1].startswith(b"event: reconnect"))
+        mock_sleep.assert_not_called()
 
-    def test_idle_stream_ends_when_demo_status_changes(self) -> None:
-        SessionDemo.objects.create(
-            thread_id="thread-demo",
-            host="127.0.0.1",
-            port=45678,
-            status=SessionDemo.STATUS_REQUESTED,
-        )
-        baseline = streaming.demo_stream_token("thread-demo")
-        SessionDemo.objects.filter(thread_id="thread-demo").update(
-            status=SessionDemo.STATUS_ACTIVE
-        )
-        with (
-            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch(
-                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
-                return_value=None,
-            ),
-        ):
-            frames = list(
-                streaming.idle_stream(
-                    "thread-demo",
-                    baseline_id=None,
-                    demo_baseline=baseline,
-                )
-            )
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"demo"', frames[-1])
+    @patch("hitch.main.runtime.streaming._ACTIVE_STREAM_SLOTS")
+    def test_active_stream_capacity_reconnects_without_consuming_source(
+        self, slots: MagicMock
+    ) -> None:
+        slots.acquire.return_value = False
+        source = MagicMock()
 
-    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
-    def test_idle_stream_resends_heartbeats_at_cadence(self) -> None:
-        # With the heartbeat cadence collapsed to zero we should observe
-        # multiple heartbeat frames before the per-stream cap closes the
-        # stream — confirming the periodic refresh path actually runs.
-        frames = list(streaming.idle_stream("thread-none", baseline_id=None))
-        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertGreater(len(heartbeats), 1)
-        for frame in heartbeats:
-            self.assertIn(b'"working": false', frame)
+        frames = list(streaming.capacity_limited_stream(source))
+
+        self.assertTrue(frames[-1].startswith(b"event: reconnect"))
+        source.__next__.assert_not_called()
+        slots.release.assert_not_called()
+
+    @patch("hitch.main.runtime.streaming._ACTIVE_STREAM_SLOTS")
+    def test_active_stream_capacity_releases_slot(self, slots: MagicMock) -> None:
+        slots.acquire.return_value = True
+
+        frames = list(streaming.capacity_limited_stream(iter([b"frame"])))
+
+        self.assertEqual(frames, [b"frame"])
+        slots.release.assert_called_once_with()
 
     @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)

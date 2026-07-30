@@ -46,6 +46,7 @@ the top level:
 
 - Python 3.13 or newer
 - Django 6 for the web app, ORM, templates, auth, and tests
+- Gunicorn for the installed systemd HTTP service
 - SQLite via Django's built-in database backend
 - `openai-codex` for Codex app-server and thread APIs
 - `markdown-it-py` and Pygments for rendering formatted model output

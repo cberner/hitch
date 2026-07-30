@@ -62,6 +62,10 @@ def _acquire(thread_id: str, *, blocking: bool) -> _Lease | None:
     except BlockingIOError:
         os.close(fd)
         return None
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
     return _Lease(fd)
 
 

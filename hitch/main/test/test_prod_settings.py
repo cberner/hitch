@@ -50,7 +50,7 @@ class ProductionSettingsTests(SimpleTestCase):
         prod = _load_prod_settings(
             {
                 "DJANGO_SECRET_KEY": _STRONG_SECRET,
-                "ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com, .internal.example.com",
+                "ADDITIONAL_ALLOWED_HOSTS": "HITCH.EXAMPLE.COM, .INTERNAL.EXAMPLE.COM",
             }
         )
 
