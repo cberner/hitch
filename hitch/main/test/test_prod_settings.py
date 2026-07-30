@@ -1,11 +1,13 @@
 import os
 import runpy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from django.core.exceptions import ImproperlyConfigured
-from django.test import SimpleTestCase
+from django.http import HttpResponse
+from django.middleware.csrf import CsrfViewMiddleware
+from django.test import RequestFactory, SimpleTestCase, override_settings
 
 _PROD_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "settings" / "prod.py"
 _STRONG_SECRET = "test-production-secret-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -63,6 +65,32 @@ class ProductionSettingsTests(SimpleTestCase):
         )
         self.assertIs(prod["CSRF_COOKIE_SECURE"], True)
         self.assertIs(prod["SESSION_COOKIE_SECURE"], True)
+
+    def test_dotted_host_csrf_origin_trusts_apex_and_subdomains(self) -> None:
+        prod = _load_prod_settings(
+            {
+                "DJANGO_SECRET_KEY": _STRONG_SECRET,
+                "ADDITIONAL_ALLOWED_HOSTS": ".internal.example.com",
+            }
+        )
+
+        with override_settings(
+            ALLOWED_HOSTS=prod["ALLOWED_HOSTS"],
+            CSRF_TRUSTED_ORIGINS=prod["CSRF_TRUSTED_ORIGINS"],
+        ):
+            middleware = CsrfViewMiddleware(lambda _request: HttpResponse())
+            for origin in (
+                "https://internal.example.com",
+                "https://api.internal.example.com",
+            ):
+                with self.subTest(origin=origin):
+                    request = RequestFactory().post(
+                        "/",
+                        secure=True,
+                        HTTP_HOST="app.internal.example.com",
+                        HTTP_ORIGIN=origin,
+                    )
+                    self.assertTrue(cast(Any, middleware)._origin_verified(request))
 
 
 def _load_prod_settings(env_overrides: dict[str, str]) -> dict[str, Any]:
