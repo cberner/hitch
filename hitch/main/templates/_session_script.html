@@ -21,6 +21,14 @@
                 for (const el of root.querySelectorAll("time[data-ts]")) formatTimestampElement(el);
             }
             formatTimestamps(document);
+            document.addEventListener("click", (event) => {
+                if (!(event.target instanceof Element)) return;
+                const command = event.target.closest("[data-expandable-command]");
+                if (!command) return;
+                const expanded = command.getAttribute("aria-expanded") !== "true";
+                command.setAttribute("aria-expanded", expanded ? "true" : "false");
+                command.title = expanded ? "Collapse command" : "Expand command";
+            });
             function timestampElement(seconds, className) {
                 const el = document.createElement("time");
                 if (className) el.className = className;
@@ -1217,8 +1225,17 @@
                 header.appendChild(timestampElement(timestampSeconds, ""));
                 const row = document.createElement("div");
                 row.className = "tool-call";
-                const detail = document.createElement("span");
+                const detail = document.createElement(
+                    item.type === "commandExecution" ? "button" : "span"
+                );
                 detail.className = "detail";
+                if (item.type === "commandExecution") {
+                    detail.type = "button";
+                    detail.classList.add("command-detail");
+                    detail.dataset.expandableCommand = "";
+                    detail.setAttribute("aria-expanded", "false");
+                    detail.title = "Expand command";
+                }
                 detail.textContent = toolDetail(item);
                 row.appendChild(detail);
                 const status = document.createElement("span");

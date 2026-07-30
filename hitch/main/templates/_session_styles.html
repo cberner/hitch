@@ -681,6 +681,23 @@
             flex: 1;
             min-width: 0;
         }
+        .tool-call .command-detail {
+            display: block;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            cursor: pointer;
+            line-height: inherit;
+            text-align: left;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tool-call .command-detail[aria-expanded="true"] {
+            white-space: pre-wrap;
+            overflow: visible;
+            text-overflow: clip;
+        }
         .tool-call .status {
             margin-left: auto;
             text-transform: uppercase;
