@@ -1,104 +1,73 @@
-import json
 import os
-import subprocess
-import sys
+import runpy
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
+from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PROD_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "settings" / "prod.py"
 _STRONG_SECRET = "test-production-secret-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 class ProductionSettingsTests(SimpleTestCase):
     def test_requires_secret_key(self) -> None:
-        result = _run_prod_settings_import(
-            {"ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com"}
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("DJANGO_SECRET_KEY is required", result.stderr)
+        with self.assertRaisesRegex(
+            ImproperlyConfigured, "DJANGO_SECRET_KEY is required"
+        ):
+            _load_prod_settings({"ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com"})
 
     def test_requires_allowed_hosts(self) -> None:
-        result = _run_prod_settings_import({"DJANGO_SECRET_KEY": _STRONG_SECRET})
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ADDITIONAL_ALLOWED_HOSTS must contain", result.stderr)
+        with self.assertRaisesRegex(
+            ImproperlyConfigured, "ADDITIONAL_ALLOWED_HOSTS must contain"
+        ):
+            _load_prod_settings({"DJANGO_SECRET_KEY": _STRONG_SECRET})
 
     def test_rejects_weak_secret_key(self) -> None:
-        result = _run_prod_settings_import(
-            {
-                "DJANGO_SECRET_KEY": "test-secret",
-                "ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com",
-            }
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must be a strong production signing key", result.stderr)
+        with self.assertRaisesRegex(
+            ImproperlyConfigured, "must be a strong production signing key"
+        ):
+            _load_prod_settings(
+                {
+                    "DJANGO_SECRET_KEY": "test-secret",
+                    "ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com",
+                }
+            )
 
     def test_rejects_wildcard_allowed_host(self) -> None:
-        result = _run_prod_settings_import(
-            {
-                "DJANGO_SECRET_KEY": _STRONG_SECRET,
-                "ADDITIONAL_ALLOWED_HOSTS": "*",
-            }
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("cannot contain '*'", result.stderr)
+        with self.assertRaisesRegex(ImproperlyConfigured, "cannot contain '\\*'"):
+            _load_prod_settings(
+                {
+                    "DJANGO_SECRET_KEY": _STRONG_SECRET,
+                    "ADDITIONAL_ALLOWED_HOSTS": "*",
+                }
+            )
 
     def test_uses_production_key_hosts_and_https_csrf_origins(self) -> None:
-        result = _run_prod_settings_import(
+        prod = _load_prod_settings(
             {
                 "DJANGO_SECRET_KEY": _STRONG_SECRET,
                 "ADDITIONAL_ALLOWED_HOSTS": "hitch.example.com, .internal.example.com",
-            },
-            snapshot=True,
+            }
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(prod["SECRET_KEY"], _STRONG_SECRET)
+        self.assertIs(prod["DEBUG"], False)
         self.assertEqual(
-            json.loads(result.stdout),
-            {
-                "secret_key": _STRONG_SECRET,
-                "debug": False,
-                "allowed_hosts": ["hitch.example.com", ".internal.example.com"],
-                "csrf_trusted_origins": [
-                    "https://hitch.example.com",
-                    "https://*.internal.example.com",
-                ],
-                "csrf_cookie_secure": True,
-                "session_cookie_secure": True,
-            },
+            prod["ALLOWED_HOSTS"], ["hitch.example.com", ".internal.example.com"]
         )
+        self.assertEqual(
+            prod["CSRF_TRUSTED_ORIGINS"],
+            ["https://hitch.example.com", "https://*.internal.example.com"],
+        )
+        self.assertIs(prod["CSRF_COOKIE_SECURE"], True)
+        self.assertIs(prod["SESSION_COOKIE_SECURE"], True)
 
 
-def _run_prod_settings_import(
-    env_overrides: dict[str, str], *, snapshot: bool = False
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    env.pop("DJANGO_SECRET_KEY", None)
-    env.pop("ADDITIONAL_ALLOWED_HOSTS", None)
-    env.update(env_overrides)
-    expression = "import hitch.settings.prod"
-    if snapshot:
-        expression = (
-            "import json; import hitch.settings.prod as prod; "
-            "print(json.dumps({"
-            "'secret_key': prod.SECRET_KEY, "
-            "'debug': prod.DEBUG, "
-            "'allowed_hosts': prod.ALLOWED_HOSTS, "
-            "'csrf_trusted_origins': prod.CSRF_TRUSTED_ORIGINS, "
-            "'csrf_cookie_secure': prod.CSRF_COOKIE_SECURE, "
-            "'session_cookie_secure': prod.SESSION_COOKIE_SECURE"
-            "}))"
-        )
-    return subprocess.run(
-        [sys.executable, "-c", expression],
-        cwd=_REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+def _load_prod_settings(env_overrides: dict[str, str]) -> dict[str, Any]:
+    with patch.dict(os.environ):
+        os.environ.pop("DJANGO_SECRET_KEY", None)
+        os.environ.pop("ADDITIONAL_ALLOWED_HOSTS", None)
+        os.environ.update(env_overrides)
+        return runpy.run_path(str(_PROD_SETTINGS_PATH))
