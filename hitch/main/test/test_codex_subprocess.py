@@ -69,6 +69,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
+from hitch.main.workflows import system_agents
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -9385,6 +9386,68 @@ class StreamForInstanceTests(TestCase):
 
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"workflow"', frames[-1])
+
+    def test_system_workflow_stream_ends_when_steering_is_queued(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        stream = streaming.system_workflow_stream(
+            "thread-workflow",
+            baseline_id=None,
+            workflow_id=workflow.pk,
+            steering_revision=0,
+        )
+
+        self.assertEqual(next(stream), b"retry: 2000\n\n")
+        self.assertTrue(next(stream).startswith(b"event: heartbeat"))
+        workflow.state = {
+            system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+
+        frame = next(stream)
+        self.assertTrue(frame.startswith(b"event: end"))
+        self.assertIn(b'"steering"', frame)
+
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.0)
+    def test_active_feedback_stream_ends_when_steering_is_queued(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).touch()
+            instance = _make_streaming_instance(
+                events_path,
+                thread_id="thread-workflow",
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
+            instance.workflow_id = workflow.pk
+            instance.save(update_fields=["purpose", "workflow_id"])
+            stream = streaming.stream_for_instance(
+                instance, steering_revision=0
+            )
+
+            self.assertEqual(next(stream), b"retry: 2000\n\n")
+            self.assertTrue(next(stream).startswith(b"event: heartbeat"))
+            workflow.state = {
+                system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1
+            }
+            workflow.save(update_fields=["state", "updated_at"])
+
+            frame = next(stream)
+
+        self.assertTrue(frame.startswith(b"event: end"))
+        self.assertIn(b'"steering"', frame)
 
     def test_reload_stream_yields_immediate_end(self) -> None:
         # ``session_stream`` returns this when it detects the page is

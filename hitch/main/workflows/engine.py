@@ -86,8 +86,11 @@ SHARED_STATE_KEYS = frozenset(
         "next_user_message_index",
         "archived_from_blocked",
         "error",
+        "deferred_failure_surface",
         "failure_owner",
         "failure_surfaced",
+        "workflow_turn_owner_index",
+        "workflow_turn_owner_step",
         "workflow_turn_death_retries",
     }
 )

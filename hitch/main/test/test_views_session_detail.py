@@ -2443,14 +2443,18 @@ class SessionStreamViewTests(TestCase):
         baseline: str = "",
         active: str = "",
         workflow: str = "",
+        steering: str | None = None,
         demo: str = "",
     ) -> str:
         # Helper that builds the SSE URL with the page-render-time state
         # the view expects on every legitimate request. Tests that want
         # to exercise the stale-reload path pass an empty/wrong value.
+        if steering is None:
+            steering = "0" if workflow else ""
         return (
             reverse("session_stream", kwargs={"session_id": session_id})
-            + f"?baseline={baseline}&active={active}&workflow={workflow}&demo={demo}"
+            + f"?baseline={baseline}&active={active}&workflow={workflow}"
+            + f"&steering={steering}&demo={demo}"
         )
 
     def test_returns_idle_heartbeat_stream_without_active_worker(self) -> None:
@@ -2537,6 +2541,27 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"prWorkflowProgress"', body)
         self.assertIn(b'"label": "CI"', body)
         self.assertIn(b'"statusLabel": "Pending"', body)
+
+    def test_reloads_when_steering_revision_changed_after_render(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1},
+        )
+
+        response = self.client.get(
+            self._stream_url(
+                "thread-workflow",
+                workflow=str(workflow.pk),
+                steering="0",
+            )
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "stale"', body)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)

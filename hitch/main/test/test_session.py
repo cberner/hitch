@@ -25,6 +25,7 @@ from hitch.main.models import (
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
+    WorkflowSteeringMessage,
 )
 from hitch.main.runtime import codex_events
 from hitch.main.sessions import session_entry_display
@@ -3882,11 +3883,83 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, f'action="{stop_url}"')
         self.assertContains(response, 'form="stop-session-form"')
         self.assertContains(response, f'name="instance" value="{instance.id}"')
+        self.assertContains(response, 'aria-label="Stop the running turn"')
         self.assertContains(response, "!commandPrompt && !hasImages()")
         self.assertContains(response, "let stopSubmitting = false")
         self.assertContains(response, 'document.querySelector("[data-stop-form]")')
         self.assertContains(response, 'document.querySelectorAll("[data-composer-stop]")')
         self.assertContains(response, "if (inner.text) parts.push(inner.text)")
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.views.common.Codex")
+    def test_rendered_stop_cancels_workflow_and_queued_steering(
+        self,
+        mock_codex: MagicMock,
+        mock_interrupt: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+        instance = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            prompt="first request",
+            developer_instructions="PR workflow continuation requirements",
+            user_message_index=0,
+            pid=_LIVE_PID,
+        )
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow, prompt="second request"
+        )
+        mock_interrupt.return_value = instance
+
+        rendered = self.client.get(
+            reverse("session", kwargs={"session_id": "thread-1"})
+        )
+        self.assertContains(
+            rendered, f'name="instance" value="{instance.pk}"'
+        )
+        self.assertContains(rendered, "first request")
+        self.assertContains(rendered, 'aria-label="Stop the QA workflow"')
+        self.assertNotContains(rendered, 'aria-label="Stop the running turn"')
+        self.assertNotContains(
+            rendered, "PR workflow continuation requirements"
+        )
+
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "thread-1"}),
+            data={"instance": str(instance.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertFalse(workflow.steering_messages.exists())
+        mock_interrupt.assert_called_once_with(
+            instance.pk, expected_thread_id="thread-1"
+        )
+
+        instance.status = CodexInstance.STATUS_FAILED
+        instance.error = "interrupted by user"
+        instance.save(update_fields=["status", "error"])
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(mock_spawn.call_count, 1)
+        self.assertNotIn(
+            "second request", mock_spawn.call_args.kwargs["prompt"]
+        )
 
     @patch("hitch.main.views.common.Codex")
     def test_inactive_thread_omits_stop_button(
@@ -3913,7 +3986,7 @@ class SessionViewActiveWorkerTests(TestCase):
             main_thread_id="thread-1",
             cwd="/tmp/demo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_QA_RUNNING,
         )
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
             fh.write(
@@ -3950,7 +4023,10 @@ class SessionViewActiveWorkerTests(TestCase):
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
         )
-
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow,
+            prompt="also update the release notes",
+        )
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
 
@@ -3959,14 +4035,142 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'data-workflow-locked="false"')
         self.assertContains(response, "Add instructions")
         self.assertContains(response, ">Steer</button>")
+        self.assertContains(response, "User · Queued")
+        self.assertContains(response, "also update the release notes")
+        self.assertContains(response, "data-queued-workflow-user")
         self.assertContains(response, 'aria-label="Stop the QA workflow"')
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;demo="',
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;steering=0&amp;demo="',
         )
 
+        workflow.steering_messages.all().delete()
+        workflow.step = system_agents.STEP_USER_STEERING_RUNNING
+        workflow.state = {
+            "next_user_message_index": 1,
+            "user_steering_prompt": "also update the release notes",
+            "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
+            "user_steering_message_index": 1,
+        }
+        workflow.save(update_fields=["step", "state", "updated_at"])
+
+        claimed_response = self.client.get(
+            reverse("session", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertContains(claimed_response, "User · Queued")
+        self.assertContains(claimed_response, "also update the release notes")
+        self.assertContains(claimed_response, "data-queued-workflow-user")
+
     @patch("hitch.main.views.common.Codex")
-    def test_workflow_system_feedback_worker_keeps_composer_locked(
+    def test_active_prompt_renders_before_later_queued_steering(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+            state={
+                "next_user_message_index": 1,
+                "user_steering_prompt": "first request",
+                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
+                "user_steering_message_index": 0,
+            },
+        )
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            prompt="first request",
+            user_message_index=0,
+            pid=_LIVE_PID,
+        )
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow,
+            prompt="second request",
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "first request")
+        self.assertContains(response, "second request")
+        self.assertLess(body.index("first request"), body.index("second request"))
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.evaluate(
+                    """
+                    () => {
+                        class MockEventSource {
+                            constructor(url) {
+                                this.url = url;
+                                this.listeners = {};
+                                window.__eventSource = this;
+                            }
+                            addEventListener(type, callback) {
+                                this.listeners[type] = callback;
+                            }
+                            close() {}
+                            emit(type, data) {
+                                this.listeners[type]({ data: JSON.stringify(data) });
+                            }
+                        }
+                        window.EventSource = MockEventSource;
+                    }
+                    """
+                )
+                page.set_content(body, wait_until="load")
+                page.wait_for_function("window.__eventSource !== undefined")
+                user_messages = "[data-thread] > .entry .message.user .body"
+                self.assertEqual(
+                    page.locator(user_messages).all_text_contents(),
+                    ["first request", "second request"],
+                )
+
+                page.evaluate(
+                    """
+                    () => window.__eventSource.emit("message", {
+                        method: "item/started",
+                        recordedAt: 1700000123000000,
+                        eventSeq: 1,
+                        payload: {
+                            item: {
+                                id: "streamed-user",
+                                type: "userMessage",
+                                content: [{ type: "text", text: "first request" }],
+                            },
+                        },
+                    })
+                    """
+                )
+                page.wait_for_selector('[data-item-id="streamed-user"]')
+
+                self.assertEqual(
+                    page.locator(user_messages).all_text_contents(),
+                    ["first request", "second request"],
+                )
+            finally:
+                browser.close()
+
+    @patch("hitch.main.views.common.Codex")
+    def test_workflow_system_feedback_worker_accepts_steering(
         self, mock_codex: MagicMock
     ) -> None:
         _patch_thread(self, mock_codex, _thread([]))
@@ -3990,11 +4194,9 @@ class SessionViewActiveWorkerTests(TestCase):
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-workflow-locked="true"')
-        self.assertContains(response, "QA workflow is running")
-        self.assertContains(response, "disabled")
-        self.assertContains(response, ">Waiting</button>")
-        self.assertNotContains(response, ">Steer</button>")
+        self.assertContains(response, 'data-workflow-locked="false"')
+        self.assertContains(response, "Add instructions")
+        self.assertContains(response, ">Steer</button>")
 
     @patch("hitch.main.views.common.Codex")
     def test_completed_qa_approval_is_shown_in_transcript(
@@ -4435,7 +4637,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "min-width: 100%;")
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow=&amp;demo="',
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow=&amp;steering=&amp;demo="',
         )
 
     @patch("hitch.main.views.common.Codex")
@@ -4582,7 +4784,7 @@ class SessionViewActiveWorkerTests(TestCase):
         stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;demo="',
+            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;steering=&amp;demo="',
         )
 
     @patch("hitch.main.views.common.Codex")
