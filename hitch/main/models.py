@@ -699,6 +699,22 @@ class SystemWorkflow(models.Model):
         return self.status in SystemWorkflow.ACTIVE_STATUSES
 
 
+class WorkflowSteeringMessage(models.Model):
+    """A user message waiting for its workflow's next safe coding handoff."""
+
+    workflow = models.ForeignKey(
+        SystemWorkflow,
+        on_delete=models.CASCADE,
+        related_name="steering_messages",
+    )
+    prompt = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @override
+    def __str__(self) -> str:
+        return f"WorkflowSteeringMessage(workflow={self.workflow_id})"
+
+
 class SystemAgentRun(models.Model):
     """One hidden Hitch system-agent turn inside a workflow."""
 

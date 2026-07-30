@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast, override
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
@@ -36,6 +37,7 @@ from hitch.main.models import (
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
+    WorkflowSteeringMessage,
 )
 from hitch.main.runtime import codex_events, codex_pool, rate_limit
 from hitch.main.runtime.sdk_values import positive_int, string_from_any, truncate_for_prompt
@@ -111,6 +113,19 @@ from hitch.main.workflows.workflow_state import _state_bool, _state_int, _state_
 
 logger = logging.getLogger(__name__)
 
+_USER_STEERING_PROMPT_STATE_KEY = "user_steering_prompt"
+_USER_STEERING_RESUME_STEP_STATE_KEY = "user_steering_resume_step"
+_USER_STEERING_MESSAGE_INDEX_STATE_KEY = "user_steering_message_index"
+_PR_MONITOR_REVISION_STATE_KEY = "pr_monitor_revision"
+_PR_PUBLICATION_INSTANCE_STATE_KEY = (
+    system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY
+)
+
+
+class _PrPublicationSupersededError(RuntimeError):
+    pass
+
+
 def start_pr_qa_workflow(
     *,
     main_thread_id: str,
@@ -176,9 +191,15 @@ def start_pr_qa_workflow(
         return existing_workflow
 
     try:
-        _spawn_pr_qa_run(workflow)
+        _spawn_pr_qa_run(
+            workflow, lifecycle_lock_held=lifecycle_lock_held
+        )
     except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start QA agent: {exc!r}")
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_QA_RUNNING,
+            error=f"failed to start QA agent: {exc!r}",
+        )
     return workflow
 
 
@@ -236,10 +257,13 @@ def start_pr_now_workflow(
             raise
         return existing_workflow
 
-    try:
-        _spawn_pr_prompt(workflow)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
+    _run_pr_step_action_if_owned(
+        workflow,
+        system_agents.STEP_PR_PROMPT_RUNNING,
+        lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
+        failure="failed to start PR prompt",
+        lifecycle_lock_held=lifecycle_lock_held,
+    )
     return workflow
 
 
@@ -302,9 +326,15 @@ def start_pr_monitor_workflow(
         return existing_workflow
 
     try:
-        _spawn_pr_followup_monitor_run(workflow)
+        _spawn_pr_followup_monitor_run(
+            workflow, lifecycle_lock_held=lifecycle_lock_held
+        )
     except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_MONITORING,
+            error=f"failed to start PR follow-up monitor: {exc!r}",
+        )
     return workflow
 
 def _pr_monitor_spawn_needs_recovery(workflow: SystemWorkflow) -> bool:
@@ -316,7 +346,10 @@ def _pr_monitor_spawn_needs_recovery(workflow: SystemWorkflow) -> bool:
     return (
         not isinstance(workflow.state.get(system_agents._PR_MONITOR_BACKOFF_STATE_KEY), dict)
         and bool(_pr_handoff_from_workflow(workflow))
-        and not _pr_monitor_has_unresolved_agent_work(workflow)
+        and not _pr_monitor_has_unresolved_agent_work(
+            workflow,
+            revision=_state_int(workflow, _PR_MONITOR_REVISION_STATE_KEY),
+        )
     )
 
 def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
@@ -327,7 +360,11 @@ def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
     instance is also still live. Either way a re-drive would risk opening a
     second PR, so defer to the terminal-turn reconciler / live worker instead.
     """
-    insert_index = _state_int(workflow, system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY)
+    insert_index = _current_workflow_turn_index(
+        workflow,
+        system_agents.STEP_PR_PROMPT_RUNNING,
+        legacy_key=system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY,
+    )
     if CodexInstance.objects.filter(
         workflow_id=workflow.pk,
         purpose=CodexInstance.PURPOSE_USER,
@@ -370,24 +407,98 @@ def _qa_review_in_flight(workflow: SystemWorkflow) -> bool:
         .exists()
     )
 
-def start_user_steering_turn(
-    workflow: SystemWorkflow, *, prompt: str
-) -> CodexInstance | None:
-    """Pause a running QA review and run a visible user follow-up turn."""
+def enqueue_user_steering(workflow: SystemWorkflow, *, prompt: str) -> bool:
+    """Persist steering immediately and start it when the workflow is safe."""
     prompt = prompt.strip()
     if not prompt:
-        return None
-    if not _claim_user_steering_turn(workflow):
-        return None
-    _interrupt_running_qa_runs_for_user_steer(workflow)
-    try:
-        return system_agents._spawn_workflow_turn(workflow, prompt=prompt)
-    except Exception as exc:
-        system_agents._block_workflow(
-            workflow,
-            f"failed to start coding turn after user steering: {exc!r}",
+        return False
+    claimed_immediately = False
+    with session_lifecycle.hold(workflow.main_thread_id):
+        with transaction.atomic():
+            locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+            if not system_agents.workflow_accepts_steering(locked):
+                return False
+            WorkflowSteeringMessage.objects.create(workflow=locked, prompt=prompt)
+            locked.state = {
+                **locked.state,
+                system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: (
+                    _state_int(
+                        locked,
+                        system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY,
+                    )
+                    + 1
+                ),
+            }
+            locked.save(update_fields=["state", "updated_at"])
+            source_step = locked.step
+            if (
+                source_step
+                in {
+                    system_agents.STEP_QA_RUNNING,
+                    system_agents.STEP_PR_MONITORING,
+                }
+                or (
+                    source_step
+                    in {
+                        system_agents.STEP_FEEDBACK_RUNNING,
+                        system_agents.STEP_PR_FEEDBACK_RUNNING,
+                        system_agents.STEP_PR_PROMPT_RUNNING,
+                    }
+                    and not _current_visible_workflow_turn_exists(locked)
+                )
+            ):
+                claimed_immediately = _claim_queued_user_steering_locked(
+                    locked, source_step=source_step
+                )
+                if not claimed_immediately:
+                    raise RuntimeError("new steering message could not be claimed")
+            workflow.step = locked.step
+            workflow.state = locked.state
+        if claimed_immediately:
+            _interrupt_hidden_runs_for_user_steer(workflow)
+        if (
+            claimed_immediately
+            or (
+                source_step == system_agents.STEP_USER_STEERING_RUNNING
+                and not _user_steering_turn_exists(workflow)
+            )
+        ):
+            _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+        return True
+
+
+def _current_visible_workflow_turn_exists(workflow: SystemWorkflow) -> bool:
+    purpose = (
+        CodexInstance.PURPOSE_SYSTEM_FEEDBACK
+        if workflow.step
+        in {
+            system_agents.STEP_FEEDBACK_RUNNING,
+            system_agents.STEP_PR_FEEDBACK_RUNNING,
+        }
+        else CodexInstance.PURPOSE_USER
+    )
+    instances = CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        purpose=purpose,
+    )
+    owner_index = workflow.state.get(
+        system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY
+    )
+    if (
+        _state_string(
+            workflow, system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY
         )
-        raise
+        == workflow.step
+        and isinstance(owner_index, int)
+        and not isinstance(owner_index, bool)
+    ):
+        return instances.filter(user_message_index=owner_index).exists()
+    return instances.filter(status__in=CodexInstance.ACTIVE_STATUSES).exists()
+
+
+def _steering_inbox_is_empty(workflow: SystemWorkflow) -> bool:
+    return not workflow.steering_messages.select_for_update().exists()
+
 
 # Top-level SystemWorkflow.state keys the PR-QA/monitor machine reads and
 # writes (the engine-shared turn-config/failure keys live in
@@ -409,13 +520,20 @@ _PR_QA_STATE_KEYS = frozenset(
         "pr_gates",
         "pr_handoff",
         "pr_monitor_backoff",
+        _PR_MONITOR_REVISION_STATE_KEY,
         "pr_pending_checks",
         "pr_prompt",
+        _PR_PUBLICATION_INSTANCE_STATE_KEY,
         "pr_stage_refresh",
         "pr_title",
         "qa_approval_insert_index",
         "qa_design_synthesis_gate",
         "qa_review_revision",
+        _USER_STEERING_PROMPT_STATE_KEY,
+        _USER_STEERING_RESUME_STEP_STATE_KEY,
+        _USER_STEERING_MESSAGE_INDEX_STATE_KEY,
+        system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY,
+        system_agents._WORKFLOW_STOP_REQUESTED_STATE_KEY,
     }
 )
 
@@ -482,11 +600,7 @@ class _PrQaHandler(engine.WorkflowHandler):
                 step=system_agents.STEP_PR_PROMPT_RUNNING,
                 stale_timeout=spawn_stale,
                 needs_recovery=lambda w: not _pr_prompt_turn_in_flight(w),
-                recover=lambda w: system_agents._respawn_or_block(
-                    w,
-                    _spawn_pr_prompt,
-                    "failed to restart PR prompt after its spawn handler died: {exc!r}",
-                ),
+                recover=_recover_pr_prompt_turn,
             ),
             engine.SpawnRecoverySpec(
                 kind=self.kind,
@@ -499,15 +613,26 @@ class _PrQaHandler(engine.WorkflowHandler):
                     "failed to restart PR follow-up monitor: {exc!r}",
                 ),
             ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_USER_STEERING_RUNNING,
+                stale_timeout=spawn_stale,
+                needs_recovery=lambda w: (
+                    not _user_steering_turn_exists(w)
+                    and not system_agents._workflow_turn_settling(w)
+                ),
+                recover=_recover_user_steering_turn,
+            ),
             *(
                 engine.SpawnRecoverySpec(
                     kind=self.kind,
                     step=step,
                     stale_timeout=spawn_stale,
                     needs_recovery=lambda w: not system_agents._workflow_turn_settling(w),
-                    recover=system_agents._block_zombie_workflow_turn,
+                    recover=_recover_or_block_zombie_workflow_turn,
                 )
                 for step in system_agents._ZOMBIE_TURN_STEP_MESSAGES
+                if step != system_agents.STEP_USER_STEERING_RUNNING
             ),
         )
 
@@ -532,15 +657,72 @@ class _PrQaHandler(engine.WorkflowHandler):
     ) -> None:
         system_agents._handle_workflow_user_turn_finished(instance)
 
+
+def _recover_or_block_zombie_workflow_turn(workflow: SystemWorkflow) -> None:
+    """Give durable steering precedence over a missing feedback worker."""
+    expected_step = workflow.step
+    with session_lifecycle.hold(workflow.main_thread_id):
+        if _start_queued_user_steering(
+            workflow,
+            expected_step=expected_step,
+            lifecycle_lock_held=True,
+        ):
+            return
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != expected_step
+            or system_agents._workflow_turn_settling(workflow)
+        ):
+            return
+        system_agents._block_zombie_workflow_turn(workflow)
+
+
+def _recover_pr_prompt_turn(workflow: SystemWorkflow) -> None:
+    """Give durable steering precedence over restarting PR preparation."""
+    _run_pr_step_action_if_owned(
+        workflow,
+        system_agents.STEP_PR_PROMPT_RUNNING,
+        lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
+        failure="failed to restart PR prompt after its spawn handler died",
+    )
+
+
 def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     workflow = system_agents._workflow_for_instance(instance)
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+        _start_user_steering_if_ready(workflow)
+        return
+    if (
+        workflow.step
+        in {
+            system_agents.STEP_FEEDBACK_RUNNING,
+            system_agents.STEP_PR_FEEDBACK_RUNNING,
+        }
+        and not _instance_owns_workflow_turn(
+            workflow,
+            instance,
+            step=workflow.step,
+        )
+    ):
+        return
+    if (
+        instance.status != CodexInstance.STATUS_COMPLETED
+        and system_agents._instance_interrupt_requested(instance)
+    ):
+        if workflow.is_active:
+            system_agents._block_workflow(workflow, "QA workflow stopped by user")
+        return
+    if workflow.step in {
+        system_agents.STEP_FEEDBACK_RUNNING,
+        system_agents.STEP_PR_FEEDBACK_RUNNING,
+    } and _start_queued_user_steering(
+        workflow, expected_step=workflow.step
+    ):
+        return
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        if system_agents._instance_interrupt_requested(instance):
-            if workflow.is_active:
-                system_agents._block_workflow(workflow, "QA workflow stopped by user")
-            return
         if _retry_system_feedback_worker(instance, workflow):
             return
         if not workflow.is_active:
@@ -549,9 +731,17 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             # a failure-surface turn) must not revert that state to Blocked.
             return
         if workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING:
-            system_agents._block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
+            _block_pr_step_if_owned(
+                workflow,
+                expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+                error=f"PR feedback worker failed: {instance.error}",
+            )
         else:
-            system_agents._block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
+            _block_pr_step_if_owned(
+                workflow,
+                expected_step=system_agents.STEP_FEEDBACK_RUNNING,
+                error=f"QA feedback worker failed: {instance.error}",
+            )
         return
     if (
         not workflow.is_active
@@ -561,26 +751,30 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             workflow.is_active
             and workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING
         ):
-            _clear_feedback_worker_death_retries(workflow, "pr_feedback")
             _handle_pr_feedback_finished(instance, workflow)
         return
-    workflow.state = system_agents._state_without_workflow_turn_death_retry(
-        workflow.state, "qa_feedback"
+    if not _commit_feedback_result(
+        workflow, expected_step=system_agents.STEP_FEEDBACK_RUNNING
+    ):
+        return
+    _run_pr_step_action_if_owned(
+        workflow,
+        system_agents.STEP_QA_RUNNING,
+        lambda: _spawn_pr_qa_run(workflow, lifecycle_lock_held=True),
+        failure="failed to restart QA agent",
     )
-    system_agents._advance_workflow_step(workflow, system_agents.STEP_QA_RUNNING)
-    try:
-        _spawn_pr_qa_run(workflow)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
 def _retry_system_feedback_worker(
     instance: CodexInstance, workflow: SystemWorkflow
 ) -> bool:
     retry_kind = _feedback_worker_retry_kind(workflow)
-    if not system_agents._claim_workflow_turn_retry(workflow, instance, retry_kind):
+    if not _claim_feedback_turn_retry(workflow, instance, retry_kind):
         return False
-    try:
-        system_agents._spawn_workflow_turn(
+    label = "PR feedback" if retry_kind == "pr_feedback" else "QA feedback"
+    _run_pr_step_action_if_owned(
+        workflow,
+        workflow.step,
+        lambda: system_agents._spawn_workflow_turn(
             workflow,
             prompt=instance.prompt,
             purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
@@ -593,14 +787,37 @@ def _retry_system_feedback_worker(
                 )
             ),
             agent_kind=instance.agent_kind,
-        )
-    except Exception as exc:
-        label = "PR feedback" if retry_kind == "pr_feedback" else "QA feedback"
-        system_agents._block_workflow(
-            workflow,
-            f"failed to retry {label} turn after transient failure: {exc!r}",
-        )
+        ),
+        failure=f"failed to retry {label} turn after transient failure",
+    )
     return True
+
+
+def _claim_feedback_turn_retry(
+    workflow: SystemWorkflow,
+    instance: CodexInstance,
+    retry_kind: str,
+) -> bool:
+    """Claim retry budget only while this feedback turn still owns the step."""
+    expected_step = workflow.step
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            not locked.is_active
+            or locked.step != expected_step
+            or not _steering_inbox_is_empty(locked)
+            or not _instance_owns_workflow_turn(
+                locked, instance, step=expected_step
+            )
+        ):
+            return False
+        claimed = system_agents._claim_workflow_turn_retry(
+            locked, instance, retry_kind
+        )
+        if claimed:
+            workflow.state = locked.state
+        return claimed
+
 
 def _feedback_worker_retry_kind(workflow: SystemWorkflow) -> str:
     if workflow.step == system_agents.STEP_FEEDBACK_RUNNING:
@@ -609,18 +826,87 @@ def _feedback_worker_retry_kind(workflow: SystemWorkflow) -> str:
         return "pr_feedback"
     return ""
 
-def _clear_feedback_worker_death_retries(
-    workflow: SystemWorkflow, retry_kind: str
-) -> None:
-    state = system_agents._state_without_workflow_turn_death_retry(workflow.state, retry_kind)
-    if state == workflow.state:
-        return
-    workflow.state = state
-    workflow.save(update_fields=["state", "updated_at"])
+
+def _commit_feedback_result(
+    workflow: SystemWorkflow,
+    *,
+    expected_step: str,
+    pr_snapshot: dict[str, Any] | None = None,
+) -> bool:
+    """Advance completed feedback only while it owns an empty inbox."""
+    retry_kind = (
+        "pr_feedback"
+        if expected_step == system_agents.STEP_PR_FEEDBACK_RUNNING
+        else "qa_feedback"
+    )
+    next_step = (
+        system_agents.STEP_PR_MONITORING
+        if expected_step == system_agents.STEP_PR_FEEDBACK_RUNNING
+        else system_agents.STEP_QA_RUNNING
+    )
+
+    def _commit(locked: SystemWorkflow) -> bool | None:
+        if not _steering_inbox_is_empty(locked):
+            return None
+        state = dict(locked.state)
+        state.pop(_PR_PUBLICATION_INSTANCE_STATE_KEY, None)
+        locked.state = system_agents._state_without_workflow_turn_death_retry(
+            state, retry_kind
+        )
+        if pr_snapshot is not None:
+            _merge_pr_handoff(locked, pr_snapshot)
+            _mark_hitch_pr_handoff(locked, pr_snapshot)
+        if next_step == system_agents.STEP_PR_MONITORING:
+            _advance_to_pr_monitoring(locked)
+        else:
+            system_agents._advance_workflow_step(locked, next_step)
+        return True
+
+    committed = engine.claim_workflow_transition(
+        workflow,
+        _commit,
+        expect_step=expected_step,
+    )
+    if committed:
+        return True
+    workflow.refresh_from_db()
+    if workflow.step == expected_step:
+        _start_queued_user_steering(workflow, expected_step=expected_step)
+    return False
+
+
+def _advance_to_pr_monitoring(workflow: SystemWorkflow) -> None:
+    workflow.state = {
+        **workflow.state,
+        _PR_MONITOR_REVISION_STATE_KEY: (
+            _state_int(workflow, _PR_MONITOR_REVISION_STATE_KEY) + 1
+        ),
+    }
+    system_agents._advance_workflow_step(
+        workflow, system_agents.STEP_PR_MONITORING
+    )
+
 
 def _handle_pr_qa_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+        system_agents._fail_run(
+            run,
+            "stale QA review superseded by a user steering message",
+            block_workflow=False,
+        )
+        _start_user_steering_if_ready(workflow)
+        return
+    if workflow.step == system_agents.STEP_QA_RUNNING and _start_queued_user_steering(
+        workflow, expected_step=system_agents.STEP_QA_RUNNING
+    ):
+        system_agents._fail_run(
+            run,
+            "stale QA review superseded by a user steering message",
+            block_workflow=False,
+        )
+        return
     if not _run_matches_current_qa_review(workflow, run):
         system_agents._fail_run(
             run,
@@ -633,7 +919,8 @@ def _handle_pr_qa_agent_finished(
             workflow.is_active
             and workflow.step == system_agents.STEP_QA_RUNNING
         ):
-            system_agents._fail_run_and_block_workflow(
+            _fail_qa_run_if_owned(
+                workflow,
                 run,
                 system_agents._LEGACY_QA_PANEL_CANCELLED_ERROR,
             )
@@ -650,7 +937,8 @@ def _handle_pr_qa_agent_finished(
     ):
         return
     if run.agent_kind not in system_agents._QA_VERDICT_AGENT_KINDS:
-        system_agents._fail_run_and_block_workflow(
+        _fail_qa_run_if_owned(
+            workflow,
             run,
             f"unsupported PR QA agent kind {run.agent_kind!r}",
         )
@@ -661,16 +949,43 @@ def _handle_qa_verdict_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        system_agents._fail_run_and_block_workflow(run, f"QA worker failed: {instance.error}")
+        _fail_qa_run_if_owned(
+            workflow, run, f"QA worker failed: {instance.error}"
+        )
         return
 
     raw_output = system_agents._final_agent_text(instance.events_path)
     parsed = _parse_qa_output(raw_output)
     if parsed is None:
-        system_agents._fail_run_and_block_workflow(run, "QA output was not valid JSON", raw_output)
+        _fail_qa_run_if_owned(
+            workflow,
+            run,
+            "QA output was not valid JSON",
+            raw_output,
+        )
         return
 
     _complete_pr_qa_verdict(workflow, run, parsed, raw_output)
+
+
+def _fail_qa_run_if_owned(
+    workflow: SystemWorkflow,
+    run: SystemAgentRun,
+    error: str,
+    raw_output: str = "",
+) -> None:
+    system_agents._fail_run(
+        run,
+        error,
+        raw_output=raw_output,
+        block_workflow=False,
+    )
+    _block_pr_step_if_owned(
+        workflow,
+        expected_step=system_agents.STEP_QA_RUNNING,
+        error=error,
+        run=run,
+    )
 
 def _complete_pr_qa_verdict(
     workflow: SystemWorkflow,
@@ -705,6 +1020,11 @@ def _complete_pr_qa_verdict(
             "stale QA review superseded by a user steering message",
             block_workflow=False,
         )
+        workflow.refresh_from_db()
+        if workflow.step == system_agents.STEP_QA_RUNNING:
+            _start_queued_user_steering(
+                workflow, expected_step=system_agents.STEP_QA_RUNNING
+            )
         return
 
     if action == "merge":
@@ -722,16 +1042,22 @@ def _complete_pr_qa_verdict(
         )
         return
     if action == "pr_prompt":
-        try:
-            _spawn_pr_prompt(workflow)
-        except Exception as exc:
-            system_agents._block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
+        _run_pr_step_action_if_owned(
+            workflow,
+            system_agents.STEP_PR_PROMPT_RUNNING,
+            lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
+            failure="failed to start PR prompt",
+        )
         return
     if action == "feedback":
-        try:
-            _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
-        except Exception as exc:
-            system_agents._block_workflow(workflow, f"failed to start QA feedback turn: {exc!r}")
+        _run_pr_step_action_if_owned(
+            workflow,
+            system_agents.STEP_FEEDBACK_RUNNING,
+            lambda: _spawn_qa_feedback_turn(
+                workflow, feedback, synthesis_gate=synthesis_gate
+            ),
+            failure="failed to start QA feedback turn",
+        )
 
 def _claim_qa_verdict_transition(
     workflow: SystemWorkflow,
@@ -800,7 +1126,10 @@ def _claim_qa_verdict_transition(
         workflow,
         _commit_verdict,
         expect_step=system_agents.STEP_QA_RUNNING,
-        guard=lambda locked: _run_matches_current_qa_review(locked, run),
+        guard=lambda locked: (
+            _run_matches_current_qa_review(locked, run)
+            and _steering_inbox_is_empty(locked)
+        ),
     )
     return action if action is not None else ""
 
@@ -922,96 +1251,296 @@ def _handle_user_steering_finished(
     instance: CodexInstance, workflow: SystemWorkflow
 ) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        system_agents._block_workflow(workflow, f"coding worker failed: {instance.error}")
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_USER_STEERING_RUNNING,
+            error=f"coding worker failed: {instance.error}",
+            instance=instance,
+        )
         return
-    workflow.step = system_agents.STEP_QA_RUNNING
-    workflow.save(update_fields=["step", "updated_at"])
+    next_step = _settle_completed_user_steering(workflow, instance)
+    if next_step is None:
+        return
+    if next_step == system_agents.STEP_USER_STEERING_RUNNING:
+        _start_user_steering_if_ready(workflow)
+        return
+    if next_step == system_agents.STEP_PR_PROMPT_RUNNING:
+        _run_pr_step_action_if_owned(
+            workflow,
+            next_step,
+            lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
+            failure="failed to restart PR preparation",
+        )
+        return
     try:
         _spawn_pr_qa_run(workflow)
     except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=next_step,
+            error=f"failed to restart QA agent: {exc!r}",
+        )
+
+
+def _settle_completed_user_steering(
+    workflow: SystemWorkflow, instance: CodexInstance
+) -> str | None:
+    """Atomically hand a completed steering turn to its successor."""
+
+    def _settle(locked: SystemWorkflow) -> str:
+        message_index = instance.user_message_index
+        next_index = _next_workflow_turn_message_index(locked)
+        if message_index is not None:
+            next_index = max(next_index, message_index + 1)
+        state = {**locked.state, "next_user_message_index": next_index}
+        message = locked.steering_messages.select_for_update().order_by("pk").first()
+        if message is not None:
+            locked.state = _user_steering_turn_state(
+                state,
+                prompt=message.prompt,
+                resume_step=_state_string(
+                    locked, _USER_STEERING_RESUME_STEP_STATE_KEY
+                ),
+                message_index=next_index,
+            )
+            locked.save(update_fields=["state", "updated_at"])
+            message.delete()
+            return system_agents.STEP_USER_STEERING_RUNNING
+        resume_step = (
+            _state_string(locked, _USER_STEERING_RESUME_STEP_STATE_KEY)
+            or system_agents.STEP_QA_RUNNING
+        )
+        if resume_step == system_agents.STEP_PR_PROMPT_RUNNING:
+            state = {
+                **state,
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: next_index,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: resume_step,
+            }
+        locked.state = state
+        locked.state.pop(_USER_STEERING_PROMPT_STATE_KEY, None)
+        locked.state.pop(_USER_STEERING_RESUME_STEP_STATE_KEY, None)
+        locked.state.pop(_USER_STEERING_MESSAGE_INDEX_STATE_KEY, None)
+        system_agents._advance_workflow_step(locked, resume_step)
+        return resume_step
+
+    return engine.claim_workflow_transition(
+        workflow,
+        _settle,
+        expect_step=system_agents.STEP_USER_STEERING_RUNNING,
+        guard=lambda locked: (
+            instance.user_message_index is None
+            or not isinstance(
+                locked.state.get(_USER_STEERING_MESSAGE_INDEX_STATE_KEY), int
+            )
+            or _state_int(locked, _USER_STEERING_MESSAGE_INDEX_STATE_KEY)
+            == instance.user_message_index
+        ),
+    )
 
 def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow) -> None:
+    if not _instance_owns_workflow_turn(
+        workflow,
+        instance,
+        step=system_agents.STEP_PR_PROMPT_RUNNING,
+    ):
+        return
+    if (
+        not system_agents._instance_interrupt_requested(instance)
+        and _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_PROMPT_RUNNING
+        )
+    ):
+        return
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        system_agents._block_workflow(workflow, f"PR prompt worker failed: {instance.error}")
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            error=f"PR prompt worker failed: {instance.error}",
+        )
         return
     worker_snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
+    if not _claim_pr_publication(
+        workflow,
+        instance,
+        expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+    ):
+        _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_PROMPT_RUNNING
+        )
+        return
     snapshot = worker_snapshot
     hitch_handoff_snapshot = False
     if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
         if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
             try:
-                _push_current_branch_for_pr_workflow(workflow)
-            except _GhPrOpenError as exc:
-                system_agents._block_workflow(
+                _push_current_branch_for_pr_workflow(
                     workflow,
-                    (
+                    publication_instance=instance,
+                    expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+                )
+            except _PrPublicationSupersededError:
+                return
+            except _GhPrOpenError as exc:
+                _block_pr_step_if_owned(
+                    workflow,
+                    expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+                    error=(
                         "PR prompt worker completed, but Hitch could not push "
                         f"the branch with git: {exc}"
                     ),
                 )
                 return
-            system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_MONITORING)
-            try:
-                _spawn_pr_followup_monitor_run(workflow)
-            except Exception as exc:
-                system_agents._block_workflow(
-                    workflow, f"failed to start PR follow-up monitor: {exc!r}"
-                )
+            _commit_pr_prompt_result(workflow)
             return
         try:
-            snapshot = _open_or_find_pr_with_gh_cli(workflow)
+            snapshot = _open_or_find_pr_with_gh_cli(
+                workflow,
+                publication_instance=instance,
+                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            )
             hitch_handoff_snapshot = True
+        except _PrPublicationSupersededError:
+            return
         except _PrWorkflowNoCommitsError:
-            _complete_pr_workflow_without_changes(workflow)
+            _commit_pr_prompt_result(workflow, no_changes=True)
             return
         except _GhPrOpenError as exc:
-            system_agents._block_workflow(
+            _block_pr_step_if_owned(
                 workflow,
-                (
+                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+                error=(
                     "PR prompt worker completed, but Hitch could not open the PR "
                     f"with gh: {exc}"
                 ),
             )
             return
     if snapshot is None:
-        system_agents._block_workflow(
+        _block_pr_step_if_owned(
             workflow,
-            (
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            error=(
                 "PR prompt worker completed, but Hitch could not identify the PR "
                 "to monitor."
             ),
         )
         return
+    # Merge enrichment into the final ownership-checked transition. A PR URL
+    # created by Hitch was already persisted with the create mutation.
     _merge_pr_handoff(workflow, snapshot)
     if hitch_handoff_snapshot:
         _mark_hitch_pr_handoff(workflow, snapshot)
-    if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
-        _complete_terminal_pr_workflow(workflow, run_auto_pull=False)
-        return
-    if not hitch_handoff_snapshot:
+    if (
+        not _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow))
+        and not hitch_handoff_snapshot
+    ):
         try:
-            _push_current_branch_for_pr_workflow(workflow)
-        except _GhPrOpenError as exc:
-            system_agents._block_workflow(
+            _push_current_branch_for_pr_workflow(
                 workflow,
-                (
+                publication_instance=instance,
+                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            )
+        except _PrPublicationSupersededError:
+            return
+        except _GhPrOpenError as exc:
+            _block_pr_step_if_owned(
+                workflow,
+                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+                error=(
                     "PR prompt worker completed, but Hitch could not push "
                     f"the branch with git: {exc}"
                 ),
             )
             return
-    system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_MONITORING)
-    try:
-        _spawn_pr_followup_monitor_run(workflow)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+    _commit_pr_prompt_result(
+        workflow,
+        snapshot=snapshot,
+        hitch_handoff_snapshot=hitch_handoff_snapshot,
+    )
 
-def _complete_pr_workflow_without_changes(workflow: SystemWorkflow) -> None:
-    # The PR cleanup turn produced no commits beyond the base branch, so there
-    # is nothing to open a PR for. Treat it as a successful no-op completion.
-    system_agents._complete_workflow(workflow, system_agents.STEP_PR_NO_CHANGES)
-    _surface_pr_workflow_no_changes(workflow)
+
+def _claim_pr_publication(
+    workflow: SystemWorkflow,
+    instance: CodexInstance,
+    *,
+    expected_step: str,
+) -> bool:
+    """Order accepted steering before PR publication starts."""
+
+    def _claim(locked: SystemWorkflow) -> bool:
+        if not _instance_owns_workflow_turn(
+            locked,
+            instance,
+            step=expected_step,
+        ):
+            return False
+        owner = locked.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
+        if isinstance(owner, int) and not isinstance(owner, bool):
+            return owner == instance.pk
+        if not _steering_inbox_is_empty(locked):
+            return False
+        locked.state = {
+            **locked.state,
+            _PR_PUBLICATION_INSTANCE_STATE_KEY: instance.pk,
+        }
+        locked.save(update_fields=["state", "updated_at"])
+        return True
+
+    return bool(
+        engine.claim_workflow_transition(
+            workflow,
+            _claim,
+            expect_step=expected_step,
+        )
+    )
+
+
+def _commit_pr_prompt_result(
+    workflow: SystemWorkflow,
+    *,
+    snapshot: dict[str, Any] | None = None,
+    hitch_handoff_snapshot: bool = False,
+    no_changes: bool = False,
+) -> None:
+    """Finalize PR preparation only while it still owns an empty inbox."""
+
+    def _commit(locked: SystemWorkflow) -> str | None:
+        if not _steering_inbox_is_empty(locked):
+            return None
+        locked.state = dict(locked.state)
+        locked.state.pop(_PR_PUBLICATION_INSTANCE_STATE_KEY, None)
+        if no_changes:
+            system_agents._complete_workflow(
+                locked, system_agents.STEP_PR_NO_CHANGES
+            )
+            return "no_changes"
+        if snapshot is not None:
+            _merge_pr_handoff(locked, snapshot)
+            if hitch_handoff_snapshot:
+                _mark_hitch_pr_handoff(locked, snapshot)
+            if _pr_handoff_is_terminal(_pr_handoff_from_workflow(locked)):
+                _complete_terminal_pr_workflow(locked, run_auto_pull=False)
+                return "terminal"
+        _advance_to_pr_monitoring(locked)
+        return "monitor"
+
+    action = engine.claim_workflow_transition(
+        workflow,
+        _commit,
+        expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+    )
+    if action is None:
+        _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_PROMPT_RUNNING
+        )
+        return
+    if action == "no_changes":
+        _surface_pr_workflow_no_changes(workflow)
+        return
+    if action == "monitor":
+        _start_pr_followup_monitor_if_owned(
+            workflow,
+            failure="failed to start PR follow-up monitor",
+        )
 
 def _complete_terminal_pr_workflow(
     workflow: SystemWorkflow, *, run_auto_pull: bool = True
@@ -1058,8 +1587,17 @@ def _pr_prompt_worker_snapshot_is_authoritative(
     # workflow.
     return snapshot is not None and not _pr_handoff_is_terminal(snapshot)
 
-def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
-    _push_current_branch_for_pr_workflow(workflow)
+def _open_or_find_pr_with_gh_cli(
+    workflow: SystemWorkflow,
+    *,
+    publication_instance: CodexInstance | None = None,
+    expected_step: str = "",
+) -> dict[str, Any]:
+    _push_current_branch_for_pr_workflow(
+        workflow,
+        publication_instance=publication_instance,
+        expected_step=expected_step,
+    )
     existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
     if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
@@ -1070,15 +1608,34 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     create_args = ["pr", "create", "--fill"]
     if pr_title := _state_string(workflow, "pr_title"):
         create_args.extend(["--title", pr_title])
-    created = _run_gh_cli(workflow, create_args)
-    if created.returncode != 0:
-        raise _GhPrOpenError(f"`gh pr create --fill` failed: {_gh_error(created)}")
 
-    url = _github_pr_url_from_text(f"{created.stdout}\n{created.stderr}")
-    if not url:
-        raise _GhPrOpenError("`gh pr create --fill` did not print a PR URL")
+    def _create_and_record() -> dict[str, Any]:
+        created = _run_gh_cli(workflow, create_args)
+        if created.returncode != 0:
+            raise _GhPrOpenError(
+                f"`gh pr create --fill` failed: {_gh_error(created)}"
+            )
+        url = _github_pr_url_from_text(f"{created.stdout}\n{created.stderr}")
+        if not url:
+            raise _GhPrOpenError("`gh pr create --fill` did not print a PR URL")
+        handoff = _pr_handoff_from_github_url(url, source_tool="gh_pr_create")
+        if publication_instance is not None:
+            _merge_pr_handoff(workflow, handoff)
+            _mark_hitch_pr_handoff(workflow, handoff)
+            workflow.save(update_fields=["state", "updated_at"])
+        return handoff
 
-    created_handoff = _pr_handoff_from_github_url(url, source_tool="gh_pr_create")
+    created_handoff = (
+        _run_pr_publication_mutation(
+            workflow,
+            publication_instance=publication_instance,
+            expected_step=expected_step,
+            mutation=_create_and_record,
+        )
+        if publication_instance is not None
+        else _create_and_record()
+    )
+    url = string_from_any(created_handoff.get("url"))
     viewed = _view_created_pr_for_enrichment(workflow, url)
     if viewed is None:
         return created_handoff
@@ -1102,7 +1659,12 @@ def _pr_branch_has_no_new_commits(workflow: SystemWorkflow) -> bool:
         return False
     return status.stdout.strip() == ""
 
-def _push_current_branch_for_pr_workflow(workflow: SystemWorkflow) -> None:
+def _push_current_branch_for_pr_workflow(
+    workflow: SystemWorkflow,
+    *,
+    publication_instance: CodexInstance | None = None,
+    expected_step: str = "",
+) -> None:
     # Workflow pushes must refresh PR state here before the lower-level git push
     # can consider a force-with-lease recovery.
     stored_handoff = _pr_handoff_from_workflow(workflow)
@@ -1111,9 +1673,42 @@ def _push_current_branch_for_pr_workflow(workflow: SystemWorkflow) -> None:
     active_pr_handoff = _fresh_active_pr_handoff_before_push(
         workflow, stored_handoff
     )
-    _push_current_branch_with_git_cli(
-        workflow, active_pr_handoff=active_pr_handoff or None
+
+    def _push() -> None:
+        _push_current_branch_with_git_cli(
+            workflow, active_pr_handoff=active_pr_handoff or None
+        )
+
+    if publication_instance is None:
+        _push()
+        return
+    _run_pr_publication_mutation(
+        workflow,
+        publication_instance=publication_instance,
+        expected_step=expected_step,
+        mutation=_push,
     )
+
+
+def _run_pr_publication_mutation(
+    workflow: SystemWorkflow,
+    *,
+    publication_instance: CodexInstance,
+    expected_step: str,
+    mutation: Callable[[], Any],
+) -> Any:
+    """Run one remote mutation while publication and Stop are mutually exclusive."""
+    with session_lifecycle.hold(workflow.main_thread_id):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != expected_step
+            or workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
+            != publication_instance.pk
+        ):
+            raise _PrPublicationSupersededError()
+        return mutation()
+
 
 def _fresh_active_pr_handoff_before_push(
     workflow: SystemWorkflow, stored_handoff: dict[str, Any]
@@ -1244,13 +1839,42 @@ def _pr_monitor_observation_from_gh(workflow: SystemWorkflow) -> dict[str, Any]:
 def _handle_pr_followup_monitor_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
+    if _pr_monitor_run_revision(run) != _state_int(
+        workflow, _PR_MONITOR_REVISION_STATE_KEY
+    ):
+        system_agents._fail_run(
+            run,
+            "stale PR monitor superseded by a newer monitor generation",
+            block_workflow=False,
+        )
+        if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+            _start_user_steering_if_ready(workflow)
+        return
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+        system_agents._fail_run(
+            run,
+            "stale PR monitor superseded by a user steering message",
+            block_workflow=False,
+        )
+        _start_user_steering_if_ready(workflow)
+        return
+    if workflow.step == system_agents.STEP_PR_MONITORING and _start_queued_user_steering(
+        workflow, expected_step=system_agents.STEP_PR_MONITORING
+    ):
+        system_agents._fail_run(
+            run,
+            "stale PR monitor superseded by a user steering message",
+            block_workflow=False,
+        )
+        return
     if (
         not workflow.is_active
         or workflow.step != system_agents.STEP_PR_MONITORING
     ):
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        system_agents._fail_run_and_block_workflow(
+        _fail_pr_monitor_run_if_owned(
+            workflow,
             run,
             f"PR follow-up monitor failed: {instance.error}",
         )
@@ -1259,7 +1883,8 @@ def _handle_pr_followup_monitor_finished(
     raw_output = system_agents._final_agent_text(instance.events_path)
     parsed = _parse_pr_monitor_output(raw_output)
     if parsed is None:
-        system_agents._fail_run_and_block_workflow(
+        _fail_pr_monitor_run_if_owned(
+            workflow,
             run,
             "PR follow-up monitor output was not valid JSON",
             raw_output,
@@ -1272,12 +1897,46 @@ def _handle_pr_followup_monitor_finished(
         _refresh_pr_monitor_observation(workflow, monitor_observation),
         monitor_observation=monitor_observation,
     )
-    run.status = SystemAgentRun.STATUS_COMPLETED
-    run.output = parsed
-    run.raw_output = raw_output
-    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+    if _commit_pr_monitor_result(
+        workflow,
+        parsed,
+        run=run,
+        raw_output=raw_output,
+    ):
+        return
+    system_agents._fail_run(
+        run,
+        "stale PR monitor superseded by a user steering message",
+        block_workflow=False,
+    )
+    workflow.refresh_from_db()
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+        _start_user_steering_if_ready(workflow)
 
-    _advance_pr_workflow_from_monitor_result(workflow, parsed)
+
+def _pr_monitor_run_revision(run: SystemAgentRun) -> int:
+    value = run.input.get("pr_monitor_revision")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _fail_pr_monitor_run_if_owned(
+    workflow: SystemWorkflow,
+    run: SystemAgentRun,
+    error: str,
+    raw_output: str = "",
+) -> None:
+    system_agents._fail_run(
+        run,
+        error,
+        raw_output=raw_output,
+        block_workflow=False,
+    )
+    _block_pr_step_if_owned(
+        workflow,
+        expected_step=system_agents.STEP_PR_MONITORING,
+        error=error,
+        run=run,
+    )
 
 def _authoritative_pr_monitor_result(
     parsed: dict[str, Any],
@@ -1362,30 +2021,79 @@ def _pr_monitor_result_from_gh_observation(
         "blockers": _string_list(gh_observation.get("blockers")),
     }
 
-def _fail_pr_monitor_max_iterations(workflow: SystemWorkflow, feedback: str) -> None:
-    """Mark a PR-monitor workflow as out of iterations and surface ``feedback``."""
+def _commit_pr_monitor_result(
+    workflow: SystemWorkflow,
+    parsed: dict[str, Any],
+    *,
+    run: SystemAgentRun | None = None,
+    raw_output: str = "",
+    backoff_claim_token: str = "",
+) -> bool:
+    """Commit a monitor result only while that monitor still owns the step."""
+
+    def _commit(locked: SystemWorkflow) -> tuple[str, str] | None:
+        if not _steering_inbox_is_empty(locked):
+            return None
+        if backoff_claim_token and (
+            _pr_monitor_backoff_claim_token(locked) != backoff_claim_token
+        ):
+            return None
+        if run is not None:
+            locked_run = SystemAgentRun.objects.select_for_update().get(pk=run.pk)
+            if locked_run.status not in {
+                SystemAgentRun.STATUS_STARTING,
+                SystemAgentRun.STATUS_RUNNING,
+            } or _pr_monitor_run_revision(locked_run) != _state_int(
+                locked, _PR_MONITOR_REVISION_STATE_KEY
+            ):
+                return None
+            locked_run.status = SystemAgentRun.STATUS_COMPLETED
+            locked_run.output = parsed
+            locked_run.raw_output = raw_output
+            locked_run.save(
+                update_fields=["status", "output", "raw_output", "updated_at"]
+            )
+        return _advance_pr_workflow_from_monitor_result(locked, parsed)
+
+    action = engine.claim_workflow_transition(
+        workflow,
+        _commit,
+        expect_step=system_agents.STEP_PR_MONITORING,
+    )
+    if action is None:
+        _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_MONITORING
+        )
+        return False
+    _perform_pr_monitor_result_action(workflow, *action)
+    return True
+
+
+def _fail_pr_monitor_max_iterations(workflow: SystemWorkflow) -> None:
     workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
     system_agents._complete_workflow(
         workflow,
         system_agents.STEP_MAX_ITERATIONS_REACHED,
         status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
     )
-    system_agents._surface_workflow_failure(workflow, feedback)
 
-def _start_pr_followup_feedback(workflow: SystemWorkflow, feedback: str) -> None:
-    """Advance to a fresh PR follow-up feedback turn, blocking the workflow if the
-    turn cannot be spawned."""
-    workflow.state = {**workflow.state, system_agents._PR_PENDING_CHECKS_STATE_KEY: 0}
+
+def _start_pr_followup_feedback(workflow: SystemWorkflow) -> None:
+    workflow.state = {
+        **workflow.state,
+        system_agents._PR_PENDING_CHECKS_STATE_KEY: 0,
+    }
     workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
-    system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_FEEDBACK_RUNNING, bump_iteration=True)
-    try:
-        _spawn_pr_followup_feedback_turn(workflow, feedback)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to start PR follow-up turn: {exc!r}")
+    system_agents._advance_workflow_step(
+        workflow,
+        system_agents.STEP_PR_FEEDBACK_RUNNING,
+        bump_iteration=True,
+    )
+
 
 def _advance_pr_workflow_from_monitor_result(
     workflow: SystemWorkflow, parsed: dict[str, Any]
-) -> None:
+) -> tuple[str, str]:
     monitor_pr = _compact_pr_handoff(parsed.get("pr"))
     if monitor_pr:
         _merge_pr_handoff(workflow, monitor_pr)
@@ -1393,56 +2101,199 @@ def _advance_pr_workflow_from_monitor_result(
     handoff = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(handoff):
         workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
-        _complete_terminal_pr_workflow(workflow)
-        return
+        _complete_terminal_pr_workflow(workflow, run_auto_pull=False)
+        return "terminal", ""
 
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
     workflow.state = {**workflow.state, system_agents._PR_GATES_STATE_KEY: gates}
     if _pr_gates_all_passed(gates):
         if _pr_monitor_reinterpretation_required(parsed):
-            workflow.state = {**workflow.state, system_agents._PR_PENDING_CHECKS_STATE_KEY: 0}
+            workflow.state = {
+                **workflow.state,
+                system_agents._PR_PENDING_CHECKS_STATE_KEY: 0,
+            }
             workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
             workflow.save(update_fields=["state", "updated_at"])
-            try:
-                _spawn_pr_followup_monitor_run(workflow)
-            except Exception as exc:
-                system_agents._block_workflow(
-                    workflow, f"failed to restart PR follow-up monitor: {exc!r}"
-                )
-            return
+            return "monitor", ""
         feedback = _pr_monitor_actionable_feedback(parsed)
         if feedback:
             if workflow.iteration >= workflow.max_iterations:
-                _fail_pr_monitor_max_iterations(
-                    workflow, system_agents._PR_MONITOR_MAX_ITERATIONS_FEEDBACK
-                )
-                return
-            _start_pr_followup_feedback(workflow, feedback)
-            return
+                feedback = system_agents._PR_MONITOR_MAX_ITERATIONS_FEEDBACK
+                _fail_pr_monitor_max_iterations(workflow)
+                return "maxed", feedback
+            _start_pr_followup_feedback(workflow)
+            return "feedback", feedback
         workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
         system_agents._complete_workflow(workflow, system_agents.STEP_PR_READY)
-        return
+        return "none", ""
 
     actionable_blockers = _pr_gates_have_actionable_blockers(gates)
     if actionable_blockers and workflow.iteration >= workflow.max_iterations:
-        _fail_pr_monitor_max_iterations(workflow, system_agents._PR_MONITOR_MAX_ITERATIONS_FEEDBACK)
-        return
+        feedback = system_agents._PR_MONITOR_MAX_ITERATIONS_FEEDBACK
+        _fail_pr_monitor_max_iterations(workflow)
+        return "maxed", feedback
 
     if actionable_blockers:
-        _start_pr_followup_feedback(workflow, _pr_actionable_feedback(gates, parsed))
-        return
+        feedback = _pr_actionable_feedback(gates, parsed)
+        _start_pr_followup_feedback(workflow)
+        return "feedback", feedback
 
     feedback = _pr_gate_pending_feedback(gates) or _pr_monitor_feedback(parsed)
-    pending_checks = _state_int(workflow, system_agents._PR_PENDING_CHECKS_STATE_KEY) + 1
-    workflow.state = {**workflow.state, system_agents._PR_PENDING_CHECKS_STATE_KEY: pending_checks}
+    pending_checks = (
+        _state_int(workflow, system_agents._PR_PENDING_CHECKS_STATE_KEY) + 1
+    )
+    workflow.state = {
+        **workflow.state,
+        system_agents._PR_PENDING_CHECKS_STATE_KEY: pending_checks,
+    }
     if pending_checks >= workflow.max_iterations:
-        _fail_pr_monitor_max_iterations(workflow, feedback)
-        return
-    _schedule_pr_monitor_backoff(
+        _fail_pr_monitor_max_iterations(workflow)
+        return "maxed", feedback
+    backoff_error = _schedule_pr_monitor_backoff(
         workflow,
         reason="pending_gates",
         pending_checks=pending_checks,
     )
+    if backoff_error:
+        return "blocked", backoff_error
+    return "none", ""
+
+
+def _perform_pr_monitor_result_action(
+    workflow: SystemWorkflow, action: str, feedback: str
+) -> None:
+    if action == "terminal":
+        if _pr_handoff_is_merged(_pr_handoff_from_workflow(workflow)):
+            system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge(workflow)
+        return
+    if action == "maxed":
+        system_agents._surface_workflow_failure(workflow, feedback)
+        return
+    if action == "blocked":
+        system_agents._finish_workflow_block(workflow, feedback)
+        return
+    if action not in {"monitor", "feedback"}:
+        return
+    if action == "monitor":
+        _start_pr_followup_monitor_if_owned(
+            workflow,
+            failure="failed to restart PR follow-up monitor",
+        )
+        return
+
+    _run_pr_step_action_if_owned(
+        workflow,
+        system_agents.STEP_PR_FEEDBACK_RUNNING,
+        lambda: _spawn_pr_followup_feedback_turn(workflow, feedback),
+        failure="failed to start PR follow-up turn",
+    )
+
+
+def _start_pr_followup_monitor_if_owned(
+    workflow: SystemWorkflow, *, failure: str
+) -> bool:
+    """Observe unlocked; the monitor spawner reclaims ownership before launch."""
+    try:
+        return _spawn_pr_followup_monitor_run(workflow) is not None
+    except Exception as exc:
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_MONITORING,
+            error=f"{failure}: {exc!r}",
+        )
+        return False
+
+
+def _run_pr_step_action_if_owned(
+    workflow: SystemWorkflow,
+    expected_step: str,
+    action: Callable[[], object],
+    *,
+    failure: str,
+    lifecycle_lock_held: bool = False,
+) -> bool:
+    """Serialize a post-transition spawn with steering and Stop."""
+    try:
+        with session_lifecycle.hold_for_workflow_start(
+            workflow.main_thread_id,
+            lifecycle_lock_held=lifecycle_lock_held,
+        ):
+            workflow.refresh_from_db()
+            if not workflow.is_active or workflow.step != expected_step:
+                _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+                return False
+            if _start_queued_user_steering(
+                workflow,
+                expected_step=expected_step,
+                lifecycle_lock_held=True,
+            ):
+                return False
+            action()
+    except Exception as exc:
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=expected_step,
+            error=f"{failure}: {exc!r}",
+        )
+        return False
+    return True
+
+
+def _block_pr_step_if_owned(
+    workflow: SystemWorkflow,
+    *,
+    expected_step: str,
+    error: str,
+    run: SystemAgentRun | None = None,
+    instance: CodexInstance | None = None,
+) -> bool:
+    """Block only while the failing action still owns its workflow step."""
+    blocked = system_agents._block_workflow(
+        workflow,
+        error,
+        only_if=lambda locked: (
+            locked.is_active
+            and locked.step == expected_step
+            and _steering_inbox_is_empty(locked)
+            and _run_owns_pr_step(locked, expected_step, run)
+            and (
+                instance is None
+                or _instance_owns_workflow_turn(
+                    locked,
+                    instance,
+                    step=expected_step,
+                )
+            )
+        ),
+    )
+    if blocked:
+        return True
+    workflow.refresh_from_db()
+    if workflow.step == expected_step and _start_queued_user_steering(
+        workflow, expected_step=expected_step
+    ):
+        return False
+    workflow.refresh_from_db()
+    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
+        _start_user_steering_if_ready(workflow)
+    return False
+
+
+def _run_owns_pr_step(
+    workflow: SystemWorkflow,
+    expected_step: str,
+    run: SystemAgentRun | None,
+) -> bool:
+    if run is None:
+        return True
+    if expected_step == system_agents.STEP_QA_RUNNING:
+        return _run_matches_current_qa_review(workflow, run)
+    if expected_step == system_agents.STEP_PR_MONITORING:
+        return _pr_monitor_run_revision(run) == _state_int(
+            workflow, _PR_MONITOR_REVISION_STATE_KEY
+        )
+    return True
+
 
 def _refresh_pr_monitor_observation(
     workflow: SystemWorkflow, fallback: dict[str, Any]
@@ -1603,7 +2454,11 @@ def _advance_claimed_pr_monitor_backoff(
     claimed_workflow = _claimed_pr_monitor_workflow(workflow)
     if claimed_workflow is None:
         return
-    _advance_pr_workflow_from_monitor_result(claimed_workflow, parsed)
+    _commit_pr_monitor_result(
+        claimed_workflow,
+        parsed,
+        backoff_claim_token=_pr_monitor_backoff_claim_token(workflow),
+    )
 
 def _reschedule_claimed_pr_monitor_backoff(
     workflow: SystemWorkflow,
@@ -1612,15 +2467,37 @@ def _reschedule_claimed_pr_monitor_backoff(
     pending_checks: int,
     error: str,
 ) -> None:
-    claimed_workflow = _claimed_pr_monitor_workflow(workflow)
-    if claimed_workflow is None:
+    claim_token = _pr_monitor_backoff_claim_token(workflow)
+    if not claim_token:
         return
-    _schedule_pr_monitor_backoff(
-        claimed_workflow,
-        reason=reason,
-        pending_checks=pending_checks,
-        error=error,
+
+    def _reschedule(locked: SystemWorkflow) -> str | None:
+        if (
+            not _steering_inbox_is_empty(locked)
+            or _pr_monitor_backoff_claim_token(locked) != claim_token
+        ):
+            return None
+        return _schedule_pr_monitor_backoff(
+            locked,
+            reason=reason,
+            pending_checks=pending_checks,
+            error=error,
+        )
+
+    reschedule_error = engine.claim_workflow_transition(
+        workflow,
+        _reschedule,
+        expect_step=system_agents.STEP_PR_MONITORING,
     )
+    if reschedule_error is not None:
+        if reschedule_error:
+            system_agents._finish_workflow_block(workflow, reschedule_error)
+        return
+    workflow.refresh_from_db()
+    if workflow.step == system_agents.STEP_PR_MONITORING:
+        _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_MONITORING
+        )
 
 def _claimed_pr_monitor_workflow(workflow: SystemWorkflow) -> SystemWorkflow | None:
     claim_token = _pr_monitor_backoff_claim_token(workflow)
@@ -1646,13 +2523,16 @@ def _pr_monitor_backoff_claim_token(workflow: SystemWorkflow) -> str:
     token = value.get("claim_token")
     return token if isinstance(token, str) else ""
 
-def _pr_monitor_has_unresolved_agent_work(workflow: SystemWorkflow) -> bool:
-    if workflow.agent_runs.filter(
+def _pr_monitor_has_unresolved_agent_work(
+    workflow: SystemWorkflow, *, revision: int
+) -> bool:
+    runs = workflow.agent_runs.filter(
         agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         status=SystemAgentRun.STATUS_RUNNING,
-    ).exists():
+    )
+    if any(_pr_monitor_run_revision(run) == revision for run in runs):
         return True
-    return CodexInstance.objects.filter(
+    instances = CodexInstance.objects.filter(
         workflow_id=workflow.pk,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
@@ -1667,7 +2547,14 @@ def _pr_monitor_has_unresolved_agent_work(workflow: SystemWorkflow) -> bool:
             SystemAgentRun.STATUS_COMPLETED,
             SystemAgentRun.STATUS_FAILED,
         )
-    ).exists()
+    )
+    if revision == 0:
+        instances = instances.filter(
+            Q(user_message_index=0) | Q(user_message_index__isnull=True)
+        )
+    else:
+        instances = instances.filter(user_message_index=revision)
+    return instances.exists()
 
 def _pr_monitor_has_active_agent_run(workflow: SystemWorkflow) -> bool:
     return workflow.agent_runs.filter(
@@ -1690,20 +2577,18 @@ def _schedule_pr_monitor_backoff(
     reason: str,
     pending_checks: int,
     error: str = "",
-) -> None:
+) -> str:
+    """Persist the next poll or a committed block that still needs surfacing."""
     now = int(timezone.now().timestamp())
     retry_attempts = _next_pr_monitor_retry_attempts(workflow, reason)
     if retry_attempts and retry_attempts >= workflow.max_iterations:
         workflow.state = dict(workflow.state)
         workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.save(update_fields=["state", "updated_at"])
-        system_agents._block_workflow(
-            workflow,
-            _pr_monitor_backoff_exhausted_error(
-                workflow, reason=reason, attempts=retry_attempts, error=error
-            ),
+        exhausted_error = _pr_monitor_backoff_exhausted_error(
+            workflow, reason=reason, attempts=retry_attempts, error=error
         )
-        return
+        system_agents._persist_workflow_block(workflow, exhausted_error)
+        return exhausted_error
     delay_seconds = _pr_monitor_backoff_seconds(max(pending_checks, retry_attempts))
     backoff: dict[str, Any] = {
         "reason": reason,
@@ -1720,6 +2605,7 @@ def _schedule_pr_monitor_backoff(
         system_agents._PR_MONITOR_BACKOFF_STATE_KEY: backoff,
     }
     system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_MONITORING)
+    return ""
 
 def _next_pr_monitor_retry_attempts(workflow: SystemWorkflow, reason: str) -> int:
     if reason not in system_agents._PR_MONITOR_RETRY_LIMIT_REASONS:
@@ -1770,99 +2656,205 @@ def _handle_pr_feedback_finished(
     instance: CodexInstance, workflow: SystemWorkflow
 ) -> None:
     snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
+    if not _claim_pr_publication(
+        workflow,
+        instance,
+        expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+    ):
+        _start_queued_user_steering(
+            workflow, expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING
+        )
+        return
     if snapshot is not None:
         _merge_pr_handoff(workflow, snapshot)
     try:
-        snapshot = _open_or_find_pr_with_gh_cli(workflow)
-    except _GhPrOpenError as exc:
-        system_agents._block_workflow(
+        snapshot = _open_or_find_pr_with_gh_cli(
             workflow,
-            (
+            publication_instance=instance,
+            expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+        )
+    except _PrPublicationSupersededError:
+        return
+    except _GhPrOpenError as exc:
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            error=(
                 "PR follow-up worker completed, but Hitch could not push "
                 f"or open the current branch PR: {exc}"
             ),
         )
         return
-    _merge_pr_handoff(workflow, snapshot)
-    _mark_hitch_pr_handoff(workflow, snapshot)
-    system_agents._advance_workflow_step(workflow, system_agents.STEP_PR_MONITORING)
-    try:
-        _spawn_pr_followup_monitor_run(workflow)
-    except Exception as exc:
-        system_agents._block_workflow(workflow, f"failed to restart PR follow-up monitor: {exc!r}")
-
-def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    diff_text = system_agents._review_diff_text_for_workflow(workflow)
-    prompt = _qa_prompt(workflow.cwd, diff_text)
-    instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
-        prompt=prompt,
-        developer_instructions=_state_string(workflow, "developer_instructions") or None,
-        model=_state_string(workflow, "model") or None,
-        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-        approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
-        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-        enable_memories=_state_bool(workflow, "enable_memories"),
-        web_search_mode=system_agents._workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        workflow_id=workflow.pk,
-        agent_kind=system_agents.PR_QA_AGENT_KIND,
-        display_author=system_agents.QA_DISPLAY_AUTHOR,
-        output_schema=system_agents._QA_OUTPUT_SCHEMA,
-        user_message_index=_qa_review_revision(workflow),
+    if not _commit_feedback_result(
+        workflow,
+        expected_step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+        pr_snapshot=snapshot,
+    ):
+        return
+    _start_pr_followup_monitor_if_owned(
+        workflow,
+        failure="failed to restart PR follow-up monitor",
     )
-    run, _created = SystemAgentRun.objects.get_or_create(
-        instance=instance,
-        defaults={
-            "workflow": workflow,
-            "agent_kind": system_agents.PR_QA_AGENT_KIND,
-            "thread_id": instance.thread_id,
-            "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {
-                "cwd": workflow.cwd,
-                "diff_chars": len(diff_text),
-                "qa_review_revision": _qa_review_revision(workflow),
+
+def _spawn_pr_qa_run(
+    workflow: SystemWorkflow, *, lifecycle_lock_held: bool = False
+) -> SystemAgentRun | None:
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != system_agents.STEP_QA_RUNNING
+        ):
+            _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+            return None
+        diff_text = system_agents._review_diff_text_for_workflow(workflow)
+        prompt = _qa_prompt(workflow.cwd, diff_text)
+        instance = codex_pool.spawn_new_session(
+            cwd=workflow.cwd,
+            prompt=prompt,
+            developer_instructions=_state_string(workflow, "developer_instructions") or None,
+            model=_state_string(workflow, "model") or None,
+            reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+            approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+            sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+            enable_memories=_state_bool(workflow, "enable_memories"),
+            web_search_mode=system_agents._workflow_web_search_mode(workflow),
+            thread_source=ThreadSource.subagent,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            output_schema=system_agents._QA_OUTPUT_SCHEMA,
+            user_message_index=_qa_review_revision(workflow),
+        )
+        run, _created = SystemAgentRun.objects.get_or_create(
+            instance=instance,
+            defaults={
+                "workflow": workflow,
+                "agent_kind": system_agents.PR_QA_AGENT_KIND,
+                "thread_id": instance.thread_id,
+                "status": SystemAgentRun.STATUS_RUNNING,
+                "input": {
+                    "cwd": workflow.cwd,
+                    "diff_chars": len(diff_text),
+                    "qa_review_revision": _qa_review_revision(workflow),
+                },
             },
-        },
-    )
-    return run
+        )
+        return run
 
-def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    handoff = _pr_handoff_from_workflow(workflow)
-    if system_agents._PR_MONITOR_BACKOFF_STATE_KEY in workflow.state:
-        workflow.state = dict(workflow.state)
-        workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+def _spawn_pr_followup_monitor_run(
+    workflow: SystemWorkflow, *, lifecycle_lock_held: bool = False
+) -> SystemAgentRun | None:
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != system_agents.STEP_PR_MONITORING
+        ):
+            _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+            return None
+        if _start_queued_user_steering(
+            workflow,
+            expected_step=system_agents.STEP_PR_MONITORING,
+            lifecycle_lock_held=True,
+        ):
+            return None
+        current_revision = _state_int(
+            workflow, _PR_MONITOR_REVISION_STATE_KEY
+        )
+        if _pr_monitor_has_unresolved_agent_work(
+            workflow, revision=current_revision
+        ):
+            return None
+        monitor_revision = current_revision + 1
+        workflow.state = {
+            **workflow.state,
+            _PR_MONITOR_REVISION_STATE_KEY: monitor_revision,
+        }
         workflow.save(update_fields=["state", "updated_at"])
-    observation = _pr_monitor_observation_from_gh(workflow)
+        handoff = _pr_handoff_from_workflow(workflow)
+    try:
+        observation = _pr_monitor_observation_from_gh(workflow)
+    except Exception:
+        with session_lifecycle.hold_for_workflow_start(
+            workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+        ):
+            workflow.refresh_from_db()
+            if (
+                not workflow.is_active
+                or workflow.step != system_agents.STEP_PR_MONITORING
+                or _state_int(workflow, _PR_MONITOR_REVISION_STATE_KEY)
+                != monitor_revision
+                or _pr_monitor_has_unresolved_agent_work(
+                    workflow, revision=monitor_revision
+                )
+            ):
+                _start_user_steering_if_ready(
+                    workflow, lifecycle_lock_held=True
+                )
+                return None
+        raise
     prompt = _pr_followup_monitor_prompt(workflow, handoff, observation)
-    instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
-        prompt=prompt,
-        approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
-        web_search_mode=system_agents._workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        workflow_id=workflow.pk,
-        agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
-        display_author=system_agents.PR_MONITOR_DISPLAY_AUTHOR,
-        output_schema=system_agents._PR_MONITOR_OUTPUT_SCHEMA,
-    )
-    run, _created = SystemAgentRun.objects.get_or_create(
-        instance=instance,
-        defaults={
-            "workflow": workflow,
-            "agent_kind": system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
-            "thread_id": instance.thread_id,
-            "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {
-                "cwd": workflow.cwd,
-                "pr_handoff": handoff,
-                "gh_observation": observation,
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != system_agents.STEP_PR_MONITORING
+            or _state_int(workflow, _PR_MONITOR_REVISION_STATE_KEY)
+            != monitor_revision
+        ):
+            _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+            return None
+        if _start_queued_user_steering(
+            workflow,
+            expected_step=system_agents.STEP_PR_MONITORING,
+            lifecycle_lock_held=True,
+        ):
+            return None
+        if _pr_monitor_has_unresolved_agent_work(
+            workflow, revision=monitor_revision
+        ):
+            return None
+        if system_agents._PR_MONITOR_BACKOFF_STATE_KEY in workflow.state:
+            workflow.state = dict(workflow.state)
+            workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+            workflow.save(update_fields=["state", "updated_at"])
+        instance = codex_pool.spawn_new_session(
+            cwd=workflow.cwd,
+            prompt=prompt,
+            approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+            web_search_mode=system_agents._workflow_web_search_mode(workflow),
+            thread_source=ThreadSource.subagent,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            display_author=system_agents.PR_MONITOR_DISPLAY_AUTHOR,
+            output_schema=system_agents._PR_MONITOR_OUTPUT_SCHEMA,
+            user_message_index=monitor_revision,
+        )
+        run, _created = SystemAgentRun.objects.get_or_create(
+            instance=instance,
+            defaults={
+                "workflow": workflow,
+                "agent_kind": system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+                "thread_id": instance.thread_id,
+                "status": SystemAgentRun.STATUS_RUNNING,
+                "input": {
+                    "cwd": workflow.cwd,
+                    "pr_handoff": handoff,
+                    "gh_observation": observation,
+                    "pr_monitor_revision": monitor_revision,
+                },
             },
-        },
-    )
-    return run
+        )
+        return run
 
 def _spawn_qa_feedback_turn(
     workflow: SystemWorkflow,
@@ -1892,19 +2884,99 @@ def _spawn_pr_followup_feedback_turn(
         agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
     )
 
-def _spawn_pr_prompt(workflow: SystemWorkflow) -> CodexInstance:
-    workflow.state = {
-        **workflow.state,
-        system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: _state_int(
+def _spawn_pr_prompt(
+    workflow: SystemWorkflow, *, lifecycle_lock_held: bool = False
+) -> CodexInstance | None:
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != system_agents.STEP_PR_PROMPT_RUNNING
+        ):
+            _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
+            return None
+        if _start_queued_user_steering(
             workflow,
-            "next_user_message_index",
-        ),
-    }
-    workflow.save(update_fields=["state", "updated_at"])
-    return system_agents._spawn_workflow_turn(
-        workflow,
-        prompt=_state_string(workflow, "pr_prompt") or system_agents.PR_SLASH_PROMPT,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            lifecycle_lock_held=True,
+        ):
+            return None
+        message_index = _current_workflow_turn_index(
+            workflow,
+            system_agents.STEP_PR_PROMPT_RUNNING,
+            legacy_key="next_user_message_index",
+        )
+        workflow.state = dict(workflow.state)
+        workflow.state.setdefault(
+            system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY,
+            message_index,
+        )
+        workflow.save(update_fields=["state", "updated_at"])
+        return system_agents._spawn_workflow_turn(
+            workflow,
+            prompt=(
+                _state_string(workflow, "pr_prompt")
+                or system_agents.PR_SLASH_PROMPT
+            ),
+            user_message_index=message_index,
+        )
+
+
+def _current_workflow_turn_index(
+    workflow: SystemWorkflow,
+    step: str,
+    *,
+    legacy_key: str,
+    legacy_offset: int = 0,
+) -> int:
+    owner_index = workflow.state.get(
+        system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY
     )
+    if (
+        _state_string(
+            workflow, system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY
+        )
+        == step
+        and isinstance(owner_index, int)
+        and not isinstance(owner_index, bool)
+        and owner_index >= 0
+    ):
+        return owner_index
+    return _state_int(workflow, legacy_key) + legacy_offset
+
+
+def _instance_owns_workflow_turn(
+    workflow: SystemWorkflow,
+    instance: CodexInstance,
+    *,
+    step: str,
+) -> bool:
+    if instance.user_message_index is None:
+        return True
+    owner_index = workflow.state.get(
+        system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY
+    )
+    if (
+        _state_string(
+            workflow, system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY
+        )
+        == step
+        and isinstance(owner_index, int)
+        and not isinstance(owner_index, bool)
+    ):
+        return instance.user_message_index == owner_index
+    if step != system_agents.STEP_PR_PROMPT_RUNNING:
+        next_index = _state_int(workflow, "next_user_message_index")
+        return instance.user_message_index in {next_index - 1, next_index}
+    approval_index = workflow.state.get(
+        system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY
+    )
+    if isinstance(approval_index, int) and not isinstance(approval_index, bool):
+        return instance.user_message_index == approval_index
+    next_index = _state_int(workflow, "next_user_message_index")
+    return instance.user_message_index in {next_index - 1, next_index}
 
 def _pr_followup_monitor_prompt(
     workflow: SystemWorkflow, handoff: dict[str, Any], observation: dict[str, Any]
@@ -1983,38 +3055,264 @@ def _run_matches_current_qa_review(
 ) -> bool:
     return _system_agent_run_qa_review_revision(run) == _qa_review_revision(workflow)
 
-def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
-    def _claim(locked: SystemWorkflow) -> bool:
-        next_revision = _state_int(locked, _QA_REVIEW_REVISION_STATE_KEY) + 1
-        locked.state = {
-            **locked.state,
-            _QA_REVIEW_REVISION_STATE_KEY: next_revision,
-        }
-        locked.step = system_agents.STEP_USER_STEERING_RUNNING
-        locked.save(update_fields=["step", "state", "updated_at"])
+def _start_queued_user_steering(
+    workflow: SystemWorkflow,
+    *,
+    immediate_only: bool = False,
+    expected_step: str | None = None,
+    lifecycle_lock_held: bool = False,
+) -> bool:
+    """Consume one inbox message, waiting for any current coding turn to finish."""
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        source_step = workflow.step
+        if expected_step is not None and source_step != expected_step:
+            return False
+        if immediate_only and source_step not in {
+            system_agents.STEP_QA_RUNNING,
+            system_agents.STEP_PR_MONITORING,
+        }:
+            return False
+        if not _claim_queued_user_steering(workflow, source_step=source_step):
+            return False
+        if source_step in {
+            system_agents.STEP_QA_RUNNING,
+            system_agents.STEP_PR_MONITORING,
+        }:
+            _interrupt_hidden_runs_for_user_steer(workflow)
+        _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
         return True
 
-    return bool(
-        engine.claim_workflow_transition(
-            workflow,
-            _claim,
-            expect_step=system_agents.STEP_QA_RUNNING,
-            guard=lambda locked: locked.kind == SystemWorkflow.KIND_PR_QA,
+
+def _claim_queued_user_steering(
+    workflow: SystemWorkflow, *, source_step: str
+) -> bool:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if not _claim_queued_user_steering_locked(locked, source_step=source_step):
+            return False
+        workflow.step = locked.step
+        workflow.state = locked.state
+    return True
+
+
+def _claim_queued_user_steering_locked(
+    locked: SystemWorkflow, *, source_step: str
+) -> bool:
+    if (
+        locked.step != source_step
+        or not system_agents.workflow_accepts_steering(locked)
+    ):
+        return False
+    message = locked.steering_messages.select_for_update().order_by("pk").first()
+    if message is None:
+        return False
+    next_index = _next_workflow_turn_message_index(locked)
+    resume_step = (
+        _state_string(locked, _USER_STEERING_RESUME_STEP_STATE_KEY)
+        if source_step == system_agents.STEP_USER_STEERING_RUNNING
+        else (
+            system_agents.STEP_QA_RUNNING
+            if source_step
+            in {
+                system_agents.STEP_QA_RUNNING,
+                system_agents.STEP_FEEDBACK_RUNNING,
+            }
+            else system_agents.STEP_PR_PROMPT_RUNNING
         )
     )
+    state = _user_steering_turn_state(
+        {**locked.state, "next_user_message_index": next_index},
+        prompt=message.prompt,
+        resume_step=resume_step,
+        message_index=next_index,
+    )
+    if source_step == system_agents.STEP_FEEDBACK_RUNNING:
+        state = system_agents._state_without_workflow_turn_death_retry(
+            state, "qa_feedback"
+        )
+    elif source_step == system_agents.STEP_PR_FEEDBACK_RUNNING:
+        state = system_agents._state_without_workflow_turn_death_retry(
+            state, "pr_feedback"
+        )
+    if source_step == system_agents.STEP_QA_RUNNING:
+        state[_QA_REVIEW_REVISION_STATE_KEY] = (
+            _state_int(locked, _QA_REVIEW_REVISION_STATE_KEY) + 1
+        )
+    elif source_step == system_agents.STEP_PR_MONITORING:
+        state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+        state[_PR_MONITOR_REVISION_STATE_KEY] = (
+            _state_int(locked, _PR_MONITOR_REVISION_STATE_KEY) + 1
+        )
+    locked.state = state
+    locked.step = system_agents.STEP_USER_STEERING_RUNNING
+    locked.save(update_fields=["step", "state", "updated_at"])
+    message.delete()
+    return True
 
-def _interrupt_running_qa_runs_for_user_steer(workflow: SystemWorkflow) -> None:
+
+def _user_steering_turn_state(
+    state: Mapping[str, Any],
+    *,
+    prompt: str,
+    resume_step: str,
+    message_index: int,
+) -> dict[str, Any]:
+    """Persist the exact turn owner before any steering worker can spawn."""
+    return {
+        **state,
+        _USER_STEERING_PROMPT_STATE_KEY: prompt,
+        _USER_STEERING_RESUME_STEP_STATE_KEY: resume_step,
+        _USER_STEERING_MESSAGE_INDEX_STATE_KEY: message_index,
+        system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: message_index,
+        system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+            system_agents.STEP_USER_STEERING_RUNNING
+        ),
+    }
+
+
+def _next_workflow_turn_message_index(workflow: SystemWorkflow) -> int:
+    """Return an unoccupied visible-turn index, repairing a stale cursor."""
+    highest_index = (
+        CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            purpose__in=(
+                CodexInstance.PURPOSE_USER,
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            ),
+            user_message_index__isnull=False,
+        )
+        .order_by("-user_message_index")
+        .values_list("user_message_index", flat=True)
+        .first()
+    )
+    next_index = _state_int(workflow, "next_user_message_index")
+    return (
+        max(next_index, highest_index + 1)
+        if highest_index is not None
+        else next_index
+    )
+
+
+def _interrupt_hidden_runs_for_user_steer(workflow: SystemWorkflow) -> None:
     runs = list(
         workflow.agent_runs.filter(
-            agent_kind__in=system_agents._QA_INTERRUPTIBLE_AGENT_KINDS,
             status=SystemAgentRun.STATUS_RUNNING,
         )
         .select_related("instance")
         .order_by("created_at", "id")
     )
-    interrupted_runs = system_agents._interrupt_system_agent_runs(runs)
-    system_agents._mark_system_agent_runs_failed(
-        interrupted_runs, "QA workflow paused for user steering"
+    system_agents._interrupt_system_agent_runs(runs)
+    run_instance_ids = {run.instance_id for run in runs}
+    orphaned_instances = (
+        CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+        )
+        .exclude(pk__in=run_instance_ids)
+        .order_by("started_at", "id")
+    )
+    for instance in orphaned_instances:
+        codex_pool.interrupt_instance(
+            instance.pk, expected_thread_id=instance.thread_id
+        )
+
+
+def _start_user_steering_if_ready(
+    workflow: SystemWorkflow, *, lifecycle_lock_held: bool = False
+) -> CodexInstance | None:
+    with session_lifecycle.hold_for_workflow_start(
+        workflow.main_thread_id, lifecycle_lock_held=lifecycle_lock_held
+    ):
+        workflow.refresh_from_db()
+        if (
+            not workflow.is_active
+            or workflow.step != system_agents.STEP_USER_STEERING_RUNNING
+            or not _state_string(workflow, _USER_STEERING_PROMPT_STATE_KEY)
+            or _user_steering_turn_exists(workflow)
+            or CodexInstance.objects.filter(
+                workflow_id=workflow.pk,
+                status__in=CodexInstance.ACTIVE_STATUSES,
+            ).exists()
+        ):
+            return None
+        system_agents._mark_system_agent_runs_failed(
+            list(
+                workflow.agent_runs.filter(
+                    status=SystemAgentRun.STATUS_RUNNING
+                ).order_by("created_at", "id")
+            ),
+            "workflow paused for user steering",
+        )
+        try:
+            return system_agents._spawn_workflow_turn(
+                workflow,
+                prompt=_state_string(
+                    workflow, _USER_STEERING_PROMPT_STATE_KEY
+                ),
+                user_message_index=_state_int(
+                    workflow, _USER_STEERING_MESSAGE_INDEX_STATE_KEY
+                ),
+                additional_developer_instructions=(
+                    _user_steering_developer_instructions(workflow)
+                ),
+            )
+        except Exception as exc:
+            blocked = system_agents._block_workflow(
+                workflow,
+                f"failed to start coding turn after user steering: {exc!r}",
+                only_if=lambda locked: (
+                    locked.step == system_agents.STEP_USER_STEERING_RUNNING
+                ),
+            )
+            if not blocked:
+                raise
+            return None
+
+
+def _recover_user_steering_turn(workflow: SystemWorkflow) -> None:
+    if not _state_string(workflow, _USER_STEERING_PROMPT_STATE_KEY):
+        system_agents._block_zombie_workflow_turn(workflow)
+        return
+    _start_user_steering_if_ready(workflow)
+
+
+def _user_steering_turn_exists(workflow: SystemWorkflow) -> bool:
+    return CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        purpose=CodexInstance.PURPOSE_USER,
+        user_message_index=_state_int(
+            workflow, _USER_STEERING_MESSAGE_INDEX_STATE_KEY
+        ),
+    ).exists()
+
+
+def _user_steering_developer_instructions(workflow: SystemWorkflow) -> str:
+    if (
+        _state_string(workflow, _USER_STEERING_RESUME_STEP_STATE_KEY)
+        != system_agents.STEP_PR_PROMPT_RUNNING
+    ):
+        return ""
+    handoff = _pr_handoff_from_workflow(workflow)
+    branch_instructions = (
+        "Re-check whether the active PR and its head branch still exist before "
+        "editing. If they do not, create a fresh branch from current master."
+        if handoff
+        else (
+            "Hitch has not published a PR for this workflow yet. Keep the current "
+            "branch and preserve its existing reviewed and PR-preparation commits; "
+            "do not create a fresh branch merely because no active PR exists."
+        )
+    )
+    return (
+        f"PR workflow continuation requirements: {branch_instructions} Implement "
+        "the request, run the "
+        "relevant tests, commit all resulting changes with a descriptive message, "
+        "and leave the worktree clean. Do not push or open a pull request; Hitch "
+        "will run its existing PR preparation phase after this turn."
     )
 
 def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:

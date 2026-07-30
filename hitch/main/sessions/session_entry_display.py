@@ -98,6 +98,46 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     return _active_user_message_text(active)
 
 
+def _queued_workflow_user_messages(
+    workflow: SystemWorkflow | None,
+) -> list[dict[str, Any]]:
+    """Return accepted steering that has not reached a visible coding turn."""
+    if (
+        workflow is None
+        or workflow.kind != SystemWorkflow.KIND_PR_QA
+        or not workflow.is_active
+    ):
+        return []
+    messages: list[dict[str, Any]] = []
+    prompt = workflow.state.get("user_steering_prompt")
+    message_index = workflow.state.get("user_steering_message_index")
+    if (
+        workflow.step == system_agents.STEP_USER_STEERING_RUNNING
+        and isinstance(prompt, str)
+        and prompt
+        and is_nonbool_int(message_index)
+        and not CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_USER,
+            user_message_index=message_index,
+        ).exists()
+    ):
+        messages.append(
+            {
+                "prompt": prompt,
+                "timestamp": int(workflow.updated_at.timestamp()),
+            }
+        )
+    messages.extend(
+        {
+            "prompt": message.prompt,
+            "timestamp": int(message.created_at.timestamp()),
+        }
+        for message in workflow.steering_messages.order_by("created_at", "pk")
+    )
+    return messages
+
+
 def _active_user_message_text(active: CodexInstance | None) -> str:
     if active is None:
         return ""
@@ -168,29 +208,8 @@ def _workflow_composer_label(workflow: SystemWorkflow | None) -> str:
     return "Hitch workflow"
 
 
-def _workflow_accepts_qa_pause_steering(workflow: SystemWorkflow | None) -> bool:
-    return (
-        workflow is not None
-        and workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.is_active
-        and workflow.step == system_agents.STEP_QA_RUNNING
-    )
-
-
-def _workflow_accepts_active_turn_steering(
-    workflow: SystemWorkflow | None, active: CodexInstance | None
-) -> bool:
-    return (
-        workflow is not None
-        and active is not None
-        and workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.is_active
-        and workflow.step == system_agents.STEP_USER_STEERING_RUNNING
-        and active.workflow_id == workflow.pk
-        and active.purpose == CodexInstance.PURPOSE_USER
-        and active.thread_id == workflow.main_thread_id
-        and active.is_active
-    )
+def _workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
+    return system_agents.workflow_accepts_steering(workflow)
 
 
 def _active_worker_status_text(active: CodexInstance | None) -> str:

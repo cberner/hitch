@@ -47,8 +47,7 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.session_approval import _parse_instance_id
 from hitch.main.sessions.session_entry_display import (
     _entries_for,
-    _workflow_accepts_active_turn_steering,
-    _workflow_accepts_qa_pause_steering,
+    _workflow_accepts_steering,
 )
 from hitch.main.sessions.session_pr_plan import (
     _auto_merge_to_local_branch_for_session,
@@ -224,11 +223,23 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     plan_mode = intent.plan_mode
     collaboration_mode = submission.collaboration_mode
     has_input_images = submission.has_input_images
-    run_ignoring_database_locks(
-        lambda: reconciliation.reconcile_dead_for_thread(session_id),
-        description="send-message dead-worker reconcile",
+    active_system_workflow = system_agents.active_workflow_snapshot_for_thread(
+        session_id
     )
-    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
+    steering_can_be_claimed_before_reconciliation = (
+        active_system_workflow is not None
+        and not qa_workflow_activation
+        and not has_input_images
+        and _workflow_accepts_steering(active_system_workflow)
+    )
+    if not steering_can_be_claimed_before_reconciliation:
+        run_ignoring_database_locks(
+            lambda: reconciliation.reconcile_dead_for_thread(session_id),
+            description="send-message dead-worker reconcile",
+        )
+        active_system_workflow = (
+            system_agents.active_workflow_snapshot_for_thread(session_id)
+        )
     if qa_workflow_activation and has_input_images:
         return HttpResponseBadRequest(
             "image attachments are not supported for PR workflow requests"
@@ -249,24 +260,21 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             return HttpResponseBadRequest("PR workflow requires an idle session")
     if active_system_workflow is not None and qa_workflow_activation:
         return redirect("session", session_id=session_id)
-    workflow_active_instance = active_instance
-    if active_system_workflow is not None and raw_active and instance_id is not None:
-        workflow_active_instance = CodexInstance.objects.filter(pk=instance_id).first()
     if active_system_workflow is not None:
         if has_input_images:
             return HttpResponseBadRequest(
                 "image attachments are not supported while QA workflow is running"
             )
-        workflow_accepts_active_steering = _workflow_accepts_active_turn_steering(
-            active_system_workflow, workflow_active_instance
-        )
-        workflow_accepts_qa_pause = (
-            active_instance is None
-            and not raw_active
-            and _workflow_accepts_qa_pause_steering(active_system_workflow)
-        )
-        if not (workflow_accepts_active_steering or workflow_accepts_qa_pause):
+        if not _workflow_accepts_steering(active_system_workflow):
             return HttpResponseBadRequest("PR workflow is running for this session")
+        if instance_id is not None and not CodexInstance.objects.filter(
+            pk=instance_id,
+            thread_id=session_id,
+            workflow_id=active_system_workflow.pk,
+        ).exists():
+            return HttpResponseBadRequest(
+                "submitted worker does not belong to the active PR workflow"
+            )
 
     input_image_paths, input_image_error = common._save_posted_input_images(request)
     if input_image_error is not None:
@@ -290,6 +298,26 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         lifecycle_lock_held = True
 
     try:
+        if active_system_workflow is not None:
+            if pr_qa.enqueue_user_steering(active_system_workflow, prompt=prompt):
+                return redirect("session", session_id=session_id)
+            # The workflow may have finished after the steerable-page snapshot.
+            # Preserve the prompt through the ordinary follow-up path only if
+            # no active workflow still owns the session.
+            run_ignoring_database_locks(
+                lambda: reconciliation.reconcile_dead_for_thread(session_id),
+                description="send-message dead-worker reconcile",
+            )
+            active_system_workflow = (
+                system_agents.active_workflow_snapshot_for_thread(session_id)
+            )
+            if active_system_workflow is not None:
+                return HttpResponseBadRequest(
+                    "PR workflow is running for this session"
+                )
+            active_system_workflow = None
+            if not raw_active:
+                active_instance = codex_pool.latest_active_for_thread(session_id)
         steer_instance_id: int | None = None
         if raw_active:
             assert instance_id is not None
@@ -304,24 +332,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         ):
             input_images_owned = True
             return redirect("session", session_id=session_id)
-        if active_system_workflow is not None:
-            if (
-                active_instance is None
-                and not raw_active
-                and _workflow_accepts_qa_pause_steering(active_system_workflow)
-            ):
-                started = pr_qa.start_user_steering_turn(
-                    active_system_workflow,
-                    prompt=prompt,
-                )
-                if started is not None:
-                    return redirect("session", session_id=session_id)
-                raise _TurnRejectedError(
-                    HttpResponseBadRequest("QA workflow could not be paused")
-                )
-            raise _TurnRejectedError(
-                HttpResponseBadRequest("PR workflow is running for this session")
-            )
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
         # ``raw_active`` posts still do not retarget a different active worker.

@@ -85,14 +85,35 @@ _FILE_APPEAR_TIMEOUT = 30.0
 
 
 def stream_for_instance(
-    instance: CodexInstance, *, demo_baseline: str | None = None
+    instance: CodexInstance,
+    *,
+    demo_baseline: str | None = None,
+    steering_revision: int | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames (as bytes) for a single CodexInstance.
 
     Always ends with a named ``end`` event so the client can stop its
     EventSource explicitly rather than relying on the connection close.
     """
+    last_steering_poll = 0.0
+
+    def steering_changed() -> bool:
+        nonlocal last_steering_poll
+        if steering_revision is None or instance.workflow_id is None:
+            return False
+        now = time.monotonic()
+        if now - last_steering_poll < _IDLE_POLL_INTERVAL:
+            return False
+        last_steering_poll = now
+        return (
+            _current_workflow_steering_revision(instance.workflow_id)
+            != steering_revision
+        )
+
     yield b"retry: 2000\n\n"
+    if steering_changed():
+        yield _end_frame("steering")
+        return
     yield _heartbeat_frame(
         working=True,
         status_text=qa_agent_status_text_for_instance(instance),
@@ -103,6 +124,9 @@ def stream_for_instance(
     started = time.monotonic()
     last_heartbeat = time.monotonic()
     while not path.exists():
+        if steering_changed():
+            yield _end_frame("steering")
+            return
         if _demo_changed(instance.thread_id, demo_baseline):
             yield _end_frame("demo")
             return
@@ -134,6 +158,9 @@ def stream_for_instance(
         initial_backlog = True
         deadline = time.monotonic() + _MAX_STREAM_SECONDS
         while True:
+            if steering_changed():
+                yield _end_frame("steering")
+                return
             chunk = fh.read()
             if chunk:
                 buffer += chunk
@@ -209,12 +236,18 @@ def idle_stream() -> Iterator[bytes]:
 
 
 def system_workflow_stream(
-    session_id: str, baseline_id: int | None, workflow_id: int
+    session_id: str,
+    baseline_id: int | None,
+    workflow_id: int,
+    steering_revision: int = 0,
 ) -> Iterator[bytes]:
     """Heartbeat stream while a hidden system workflow owns the main thread."""
     yield b"retry: 2000\n\n"
     _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
     workflow = _running_system_workflow(session_id, workflow_id)
+    if workflow_steering_revision(workflow) != steering_revision:
+        yield _end_frame("steering")
+        return
     yield _heartbeat_frame(
         working=True,
         status_text=system_workflow_status_text(workflow),
@@ -244,6 +277,9 @@ def system_workflow_stream(
         )
         if workflow is None:
             yield _end_frame("workflow")
+            return
+        if workflow_steering_revision(workflow) != steering_revision:
+            yield _end_frame("steering")
             return
         yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
         if time.monotonic() > deadline:
@@ -293,6 +329,26 @@ def demo_stream_token(session_id: str) -> str:
     status, updated_at = row
     timestamp = updated_at.timestamp() if updated_at is not None else 0
     return f"{status}:{timestamp}"
+
+
+def workflow_steering_revision(workflow: SystemWorkflow | None) -> int:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return 0
+    value = workflow.state.get(
+        system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY
+    )
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _current_workflow_steering_revision(workflow_id: int) -> int:
+    try:
+        workflow = SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        return workflow_steering_revision(workflow)
+    finally:
+        close_old_connections()
 
 
 def _demo_changed(session_id: str, demo_baseline: str | None) -> bool:
@@ -621,7 +677,13 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING:
         return "PR follow-up agent is fixing feedback..."
     if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
-        return "Coding agent is working..."
+        if CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_USER,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+        ).exists():
+            return "Coding agent is working..."
+        return "Coding agent is waiting for the current workflow turn..."
     if workflow.step == system_agents.STEP_PR_MONITORING:
         instance = _running_system_agent_instance(workflow.pk)
         if instance is not None and instance.agent_kind == system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND:

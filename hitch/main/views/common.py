@@ -91,11 +91,11 @@ from hitch.main.sessions.session_entry_display import (
     _pending_user_author,
     _pending_user_prompt,
     _pending_user_timestamp,
+    _queued_workflow_user_messages,
     _show_active_worker_transcript,
     _task_plan_context,
     _trim_in_progress_turn,
-    _workflow_accepts_active_turn_steering,
-    _workflow_accepts_qa_pause_steering,
+    _workflow_accepts_steering,
     _workflow_composer_label,
     _workflow_status_text,
 )
@@ -722,11 +722,7 @@ def _render_session_detail(
     latest_user_turn_failure = _latest_user_turn_failure(session_id)
     workflow_status_text = _workflow_status_text(active_system_workflow)
     pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
-    workflow_accepts_steering = _workflow_accepts_qa_pause_steering(
-        active_system_workflow
-    ) or _workflow_accepts_active_turn_steering(
-        active_system_workflow, active_instance
-    )
+    workflow_accepts_steering = _workflow_accepts_steering(active_system_workflow)
     workflow_composer_locked = active_system_workflow is not None and not (
         workflow_accepts_steering
     )
@@ -812,6 +808,9 @@ def _render_session_detail(
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "pending_user_author": _pending_user_author(active_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance),
+            "queued_workflow_user_messages": _queued_workflow_user_messages(
+                active_system_workflow
+            ),
             "token_usage": session_token_usage,
             "session_model": session_model,
             "session_reasoning": session_reasoning,
@@ -1366,12 +1365,14 @@ def _stream_url_for(
     baseline_id = codex_pool.latest_id_for_thread(session_id)
     active_id = active_instance.pk if active_instance is not None else None
     workflow_id = active_workflow.pk if active_workflow is not None else None
+    steering_revision = streaming.workflow_steering_revision(active_workflow)
     demo_token = streaming.demo_stream_token(session_id)
     qs = urlencode(
         {
             "baseline": str(baseline_id) if baseline_id is not None else "",
             "active": str(active_id) if active_id is not None else "",
             "workflow": str(workflow_id) if workflow_id is not None else "",
+            "steering": str(steering_revision) if workflow_id is not None else "",
             "demo": demo_token,
         }
     )
