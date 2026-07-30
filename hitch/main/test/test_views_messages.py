@@ -2934,6 +2934,32 @@ class SendMessageViewTests(TestCase):
                 "invalid plan action",
                 False,
             ),
+            (
+                {"prompt": "hi", "collaboration_mode": "pair"},
+                "/repo",
+                "invalid collaboration mode",
+                "invalid collaboration mode",
+                False,
+            ),
+            (
+                {
+                    "prompt": "hi",
+                    "collaboration_mode": "default",
+                    "plan_mode": "true",
+                    "plan_mode_explicit": "true",
+                },
+                "/repo",
+                "collaboration conflicts with explicit plan mode",
+                "collaboration mode conflicts with plan mode",
+                False,
+            ),
+            (
+                {"prompt": "/pr", "collaboration_mode": "default"},
+                "/repo",
+                "PR workflow conflicts with collaboration",
+                "PR workflow conflicts with collaboration mode",
+                False,
+            ),
             ({"prompt": "hi"}, None, "thread without cwd", "thread has no cwd", True),
             # The session list shows every thread the app-server knows about,
             # so a resumed thread's cwd can point outside the discover_repos()
