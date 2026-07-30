@@ -7,7 +7,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, override
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -381,6 +381,25 @@ class SchedulerHeartbeatTests(TestCase):
         status = handle.status()
         self.assertFalse(status.last_tick_errored)
         self.assertIn("boom", status.last_error)
+
+    @patch("hitch.main.runtime.server_lifecycle.threading.Thread.start")
+    def test_failed_thread_start_leaves_scheduler_retryable(
+        self, mock_start: MagicMock
+    ) -> None:
+        handle = server_lifecycle.SchedulerHandle(
+            thread_name="hitch-test-start", tick_interval_seconds=5
+        )
+        self.addCleanup(lambda: server_lifecycle._HANDLES.remove(handle))
+        mock_start.side_effect = [RuntimeError("thread unavailable"), None]
+
+        with self.assertRaisesRegex(RuntimeError, "thread unavailable"):
+            handle.start(lambda: None)
+
+        failed_status = handle.status()
+        self.assertFalse(failed_status.started)
+        self.assertIsNone(failed_status.started_at)
+        self.assertTrue(handle.start(lambda: None))
+        self.assertTrue(handle.status().started)
 
     def test_scheduler_metric_severities(self) -> None:
         healthy = health._scheduler_metric(self._status())

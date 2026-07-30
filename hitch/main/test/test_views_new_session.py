@@ -22,7 +22,7 @@ from django.test import (
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import caches, views
+from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.models import (
     AutonomousGoal,
@@ -68,6 +68,9 @@ from hitch.main.test.views_helpers import (
     _session,
     _UnreadableUpload,
 )
+from hitch.main.views import common as common_views
+from hitch.main.views import messages as message_views
+from hitch.main.views import new_session as new_session_views
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -576,8 +579,8 @@ class NewSessionViewTests(TestCase):
         response = input_images._limit_input_image_uploads(view)(request)
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(getattr(views.new_session, "csrf_exempt", False))
-        self.assertTrue(getattr(views.send_message, "csrf_exempt", False))
+        self.assertTrue(getattr(new_session_views.new_session, "csrf_exempt", False))
+        self.assertTrue(getattr(message_views.send_message, "csrf_exempt", False))
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -760,7 +763,7 @@ class NewSessionViewTests(TestCase):
 
     def test_image_upload_read_failure_returns_generic_error(self) -> None:
         with self.assertLogs("hitch.main.views", level="ERROR"):
-            _extension, error = views._uploaded_input_image_extension(
+            _extension, error = common_views._uploaded_input_image_extension(
                 _UnreadableUpload("screen.png", _PNG_BYTES, content_type="image/png")
             )
 
@@ -1049,7 +1052,7 @@ class NewSessionViewTests(TestCase):
             project=project,
         )
 
-        views._finish_new_session_proposal_start_claim(proposal, metadata)
+        new_session_views._finish_new_session_proposal_start_claim(proposal, metadata)
 
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
@@ -1079,7 +1082,7 @@ class NewSessionViewTests(TestCase):
             }
         )
 
-        views._reset_new_session_proposal_start_claim(proposal)
+        new_session_views._reset_new_session_proposal_start_claim(proposal)
 
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)

@@ -17,7 +17,7 @@ from django.test import (
 from django.urls import reverse
 from openai_codex.errors import InternalRpcError, InvalidRequestError
 
-from hitch.main import demo, views
+from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     SessionDemo,
@@ -47,6 +47,7 @@ from hitch.main.test.views_helpers import (
     _token_count_line,
     _write_codex_home_rollout,
 )
+from hitch.main.views import common as common_views
 from hitch.main.workflows import system_agents
 
 
@@ -893,7 +894,7 @@ class SessionDetailFastPathTests(TestCase):
             reverse("system_session", kwargs={"session_id": "demo-fragment"}),
             {"run_id": run.pk},
         )
-        demo_context = views._session_intermediate_demo_context(
+        demo_context = common_views._session_intermediate_demo_context(
             "demo-fragment", run.pk
         )
         signed_fragment = self.client.get(fragment_url, {"demo_context": demo_context})

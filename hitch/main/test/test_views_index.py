@@ -27,7 +27,7 @@ from openai_codex.generated.v2_all import (
     ThreadSource,
 )
 
-from hitch.main import demo, views
+from hitch.main import demo
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -76,6 +76,7 @@ from hitch.main.test.views_helpers import (
     _session,
     _token_count_line,
 )
+from hitch.main.views import common as common_views
 from hitch.main.views import session_list
 from hitch.main.workflows import agent_io, gh_cli, pr_stage_refresh_state, system_agents
 
@@ -2455,7 +2456,7 @@ class IndexViewTests(TestCase):
             last_synced_at=now,
             is_complete=True,
         )
-        for index in range(views._SESSION_PAGE_SIZE):
+        for index in range(session_list._SESSION_PAGE_SIZE):
             updated_at = datetime.fromtimestamp(5000 - index, UTC)
             SessionMetadata.objects.create(
                 thread_id=f"ordinary-{index}",
@@ -2960,7 +2961,7 @@ class IndexViewTests(TestCase):
             archived_threads=[archived],
         )
 
-        views._refresh_usage_session_index_best_effort(
+        common_views._refresh_usage_session_index_best_effort(
             enable_memories=False,
             include_active=True,
             include_archived=True,

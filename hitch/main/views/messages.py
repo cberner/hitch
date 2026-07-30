@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Iterable
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from hitch.main.sessions.message_intent import (
     _is_pr_now_activation,
     _is_qa_activation,
     _message_intent,
+    _MessageIntent,
 )
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
@@ -88,12 +90,72 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 
 _DEFAULT_COLLABORATION_MODE = "default"
 
+
+@dataclass(frozen=True)
+class _MessageSubmission:
+    intent: _MessageIntent
+    collaboration_mode: str
+    pr_now_activation: bool
+    fix_pr_activation: bool
+    qa_activation: bool
+    qa_workflow_activation: bool
+    has_input_images: bool
+
+
+def _message_submission(
+    request: HttpRequest,
+) -> tuple[_MessageSubmission | None, str | None]:
+    intent = _message_intent(request)
+    pr_activation = _is_pr_activation(request)
+    pr_now_activation = _is_pr_now_activation(request)
+    fix_pr_activation = _is_fix_pr_activation(request)
+    qa_activation = _is_qa_activation(request)
+    qa_workflow_activation = (
+        pr_activation or pr_now_activation or qa_activation or fix_pr_activation
+    )
+    has_input_images = common._has_input_image_uploads(request)
+    if not intent.prompt and not has_input_images:
+        return None, "prompt is required"
+
+    collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
+    plan_action = request.POST.get("plan_action", "").strip().lower()
+    if plan_action not in _VALID_PLAN_ACTIONS:
+        return None, "invalid plan action"
+    if plan_action == _PLAN_ACTION_APPROVE:
+        collaboration_mode = _DEFAULT_COLLABORATION_MODE
+        intent = intent._replace(plan_mode=False)
+    elif plan_action == _PLAN_ACTION_REVISE:
+        collaboration_mode = ""
+        intent = intent._replace(plan_mode=True)
+    if collaboration_mode and collaboration_mode != _DEFAULT_COLLABORATION_MODE:
+        return None, "invalid collaboration mode"
+    if collaboration_mode and intent.plan_mode and intent.explicit_plan_mode:
+        return None, "collaboration mode conflicts with plan mode"
+    if qa_workflow_activation and collaboration_mode:
+        return None, "PR workflow conflicts with collaboration mode"
+    if collaboration_mode or qa_workflow_activation:
+        intent = intent._replace(plan_mode=False)
+    return (
+        _MessageSubmission(
+            intent=intent,
+            collaboration_mode=collaboration_mode,
+            pr_now_activation=pr_now_activation,
+            fix_pr_activation=fix_pr_activation,
+            qa_activation=qa_activation,
+            qa_workflow_activation=qa_workflow_activation,
+            has_input_images=has_input_images,
+        ),
+        None,
+    )
+
+
 def _metadata_cwd_is_disallowed(metadata: SessionMetadata | None) -> bool:
     return (
         metadata is not None
         and bool(metadata.cwd)
         and not common._is_allowed_session_cwd(metadata.cwd)
     )
+
 
 class _TurnRejectedError(Exception):
     """Reject a send_message turn with this response.
@@ -107,6 +169,7 @@ class _TurnRejectedError(Exception):
         super().__init__()
         self.response = response
 
+
 def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[str, str]:
     """Thread's recorded model/effort, falling back to the request settings."""
     model = string_value(getattr(resumed, "model", None)) or settings.model
@@ -116,42 +179,51 @@ def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[st
     )
     return model, effort
 
+
+def _steer_instance_with_input_images(
+    instance_id: int,
+    *,
+    session_id: str,
+    prompt: str,
+    input_image_paths: list[str],
+) -> bool:
+    """Try to steer one worker while keeping image-copy ownership explicit."""
+    steer_image_paths = _duplicate_saved_input_images(input_image_paths)
+    steer_kwargs: dict[str, Any] = {
+        "expected_thread_id": session_id,
+        "prompt": prompt,
+    }
+    if steer_image_paths:
+        steer_kwargs["input_image_paths"] = steer_image_paths
+    try:
+        steered = codex_pool.steer_instance(instance_id, **steer_kwargs)
+    except Exception:
+        common._cleanup_saved_input_images(steer_image_paths)
+        raise
+    if steered is None:
+        common._cleanup_saved_input_images(steer_image_paths)
+        return False
+    # The duplicated files now belong to the worker's steering request. The
+    # originals were saved for a possible fallback turn and are no longer used.
+    common._cleanup_saved_input_images(input_image_paths)
+    return True
+
+
 @_limit_input_image_uploads
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
-    intent = _message_intent(request)
-    pr_activation = _is_pr_activation(request)
-    pr_now_activation = _is_pr_now_activation(request)
-    fix_pr_activation = _is_fix_pr_activation(request)
-    qa_activation = _is_qa_activation(request)
-    qa_workflow_activation = (
-        pr_activation or pr_now_activation or qa_activation or fix_pr_activation
-    )
+    submission, submission_error = _message_submission(request)
+    if submission is None:
+        return HttpResponseBadRequest(submission_error or "invalid message")
+    intent = submission.intent
+    pr_now_activation = submission.pr_now_activation
+    fix_pr_activation = submission.fix_pr_activation
+    qa_activation = submission.qa_activation
+    qa_workflow_activation = submission.qa_workflow_activation
     prompt = intent.prompt
     plan_mode = intent.plan_mode
-    has_input_images = common._has_input_image_uploads(request)
-    if not prompt and not has_input_images:
-        return HttpResponseBadRequest("prompt is required")
-    collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
-    plan_action = request.POST.get("plan_action", "").strip().lower()
-    if plan_action not in _VALID_PLAN_ACTIONS:
-        return HttpResponseBadRequest("invalid plan action")
-    if plan_action == _PLAN_ACTION_APPROVE:
-        collaboration_mode = _DEFAULT_COLLABORATION_MODE
-        plan_mode = False
-    elif plan_action == _PLAN_ACTION_REVISE:
-        collaboration_mode = ""
-        plan_mode = True
-    if collaboration_mode and collaboration_mode != _DEFAULT_COLLABORATION_MODE:
-        return HttpResponseBadRequest("invalid collaboration mode")
-    if collaboration_mode and plan_mode and intent.explicit_plan_mode:
-        return HttpResponseBadRequest("collaboration mode conflicts with plan mode")
-    if qa_workflow_activation and collaboration_mode:
-        return HttpResponseBadRequest("PR workflow conflicts with collaboration mode")
-    if collaboration_mode:
-        plan_mode = False
-    if qa_workflow_activation:
-        plan_mode = False
+    collaboration_mode = submission.collaboration_mode
+    has_input_images = submission.has_input_images
     run_ignoring_database_locks(
         lambda: reconciliation.reconcile_dead_for_thread(session_id),
         description="send-message dead-worker reconcile",
@@ -201,7 +273,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest(input_image_error)
 
     input_images_owned = False
-    steer_image_paths: list[str] = []
     session_unarchived_for_turn = False
     session_unarchive_recorded = False
     lifecycle_lock_held = False
@@ -219,45 +290,20 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         lifecycle_lock_held = True
 
     try:
+        steer_instance_id: int | None = None
         if raw_active:
             assert instance_id is not None
-            steer_kwargs: dict[str, Any] = {
-                "expected_thread_id": session_id,
-                "prompt": prompt,
-            }
-            if input_image_paths:
-                steer_image_paths = _duplicate_saved_input_images(input_image_paths)
-                steer_kwargs["input_image_paths"] = steer_image_paths
-            steered = codex_pool.steer_instance(
-                instance_id,
-                **steer_kwargs,
-            )
-            if steered is not None:
-                common._cleanup_saved_input_images(input_image_paths)
-                steer_image_paths = []
-                input_images_owned = True
-                return redirect("session", session_id=session_id)
-            common._cleanup_saved_input_images(steer_image_paths)
-            steer_image_paths = []
+            steer_instance_id = instance_id
         elif active_instance is not None:
-            active_steer_kwargs: dict[str, Any] = {
-                "expected_thread_id": session_id,
-                "prompt": prompt,
-            }
-            if input_image_paths:
-                steer_image_paths = _duplicate_saved_input_images(input_image_paths)
-                active_steer_kwargs["input_image_paths"] = steer_image_paths
-            steered = codex_pool.steer_instance(
-                active_instance.pk,
-                **active_steer_kwargs,
-            )
-            if steered is not None:
-                common._cleanup_saved_input_images(input_image_paths)
-                steer_image_paths = []
-                input_images_owned = True
-                return redirect("session", session_id=session_id)
-            common._cleanup_saved_input_images(steer_image_paths)
-            steer_image_paths = []
+            steer_instance_id = active_instance.pk
+        if steer_instance_id is not None and _steer_instance_with_input_images(
+            steer_instance_id,
+            session_id=session_id,
+            prompt=prompt,
+            input_image_paths=input_image_paths,
+        ):
+            input_images_owned = True
+            return redirect("session", session_id=session_id)
         if active_system_workflow is not None:
             if (
                 active_instance is None
@@ -650,12 +696,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return redirect("session", session_id=session_id)
     except _TurnRejectedError as rejected:
         restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(steer_image_paths)
         common._cleanup_saved_input_images(input_image_paths)
         return rejected.response
     except system_agents.WorkflowStartBlockedByArchiveError:
         restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(steer_image_paths)
         common._cleanup_saved_input_images(input_image_paths)
         django_messages.error(
             request,
@@ -664,17 +708,16 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return redirect("session", session_id=session_id)
     except codex_pool.InputAttachmentLimitExceededError as exc:
         restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(steer_image_paths)
         common._cleanup_saved_input_images(input_image_paths)
         return HttpResponseBadRequest(str(exc))
     except Exception:
         restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(steer_image_paths)
         if not input_images_owned:
             common._cleanup_saved_input_images(input_image_paths)
         raise
     finally:
         lifecycle_stack.close()
+
 
 def _duplicate_saved_input_images(paths: Iterable[str]) -> list[str]:
     source_paths = [Path(path) for path in paths if path]
