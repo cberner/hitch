@@ -61,7 +61,11 @@ class ProductionSettingsTests(SimpleTestCase):
         )
         self.assertEqual(
             prod["CSRF_TRUSTED_ORIGINS"],
-            ["https://hitch.example.com", "https://*.internal.example.com"],
+            [
+                "https://hitch.example.com",
+                "https://internal.example.com",
+                "https://*.internal.example.com",
+            ],
         )
         self.assertIs(prod["CSRF_COOKIE_SECURE"], True)
         self.assertIs(prod["SESSION_COOKIE_SECURE"], True)
