@@ -35,13 +35,13 @@ test-pre:
 # Run the suite in Podman with an isolated HOME/HITCH_HOME_DIR/CODEX_HOME so QA
 # cannot touch the deployment database, Codex state, or worker units.
 test: test-pre
-  scripts/test-in-podman test
+  HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman test
 
 test-integration: test-pre
-  scripts/test-in-podman test-integration
+  HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman test-integration
 
 coverage: test-pre
-  scripts/test-in-podman coverage
+  HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman coverage
 
 format:
   uv run ruff format .
@@ -112,8 +112,10 @@ install-systemd:
   # the update best-effort so local edits or a GitHub outage do not prevent the
   # already-checked-out version from serving requests.
   ExecStartPre=-${GIT_BIN} -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
-  ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.dev
-  ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --settings hitch.settings.dev
+  ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.prod
+  # Production settings disable runserver's implicit static handler. Keep the
+  # single-process installer self-contained by enabling that handler explicitly.
+  ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --insecure --settings hitch.settings.prod
   Restart=always
   RestartSec=2
   RestartSteps=5

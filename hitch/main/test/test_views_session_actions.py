@@ -17,7 +17,7 @@ from django.urls import reverse
 from openai_codex import Codex
 from openai_codex.errors import InvalidRequestError
 
-from hitch.main import demo, views
+from hitch.main import demo
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -36,6 +36,7 @@ from hitch.main.test.views_helpers import (
     _run_borrowed_with,
     _session,
 )
+from hitch.main.views import common as common_views
 from hitch.main.workflows import system_agents
 
 
@@ -462,7 +463,7 @@ class SetSessionApprovalModeViewTests(TestCase):
             "hitch.main.views.common.ApprovalRequest.objects.filter",
             side_effect=[PendingQuery(), UpdateQuery()],
         ):
-            resolved_events = views._settle_live_pending_approval_requests(
+            resolved_events = common_views._settle_live_pending_approval_requests(
                 [1],
                 ApprovalRequest.DECISION_ACCEPT,
             )

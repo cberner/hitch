@@ -28,10 +28,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${podman}" build \
-  --file "${repo_dir}/Containerfile.test" \
-  --tag "${image}" \
-  "${repo_dir}"
+if [ "${HITCH_TEST_IMAGE_READY:-0}" != "1" ]; then
+  "${podman}" build \
+    --file "${repo_dir}/Containerfile.test" \
+    --tag "${image}" \
+    "${repo_dir}"
+fi
 
 network="none"
 if [ "${mode}" = "test-integration" ]; then

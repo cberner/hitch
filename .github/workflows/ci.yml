@@ -132,14 +132,13 @@ jobs:
       - name: Install podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      - name: Run tests
-        run: just test
+      - name: Run tests and coverage
+        run: just coverage
 
       - name: Run integration tests
-        run: just test-integration
-
-      - name: Run coverage
-        run: just coverage
+        # Coverage already built and checked this exact checkout. Reuse its
+        # image instead of rebuilding it and rerunning Ruff/mypy a second time.
+        run: HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman test-integration
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

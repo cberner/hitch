@@ -22,8 +22,12 @@ from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings
+from django.contrib.staticfiles.handlers import StaticFilesHandler
+from django.contrib.staticfiles.management.commands.runserver import (
+    Command as StaticRunserverCommand,
+)
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from openai_codex import ApprovalMode
 from openai_codex._message_router import MessageRouter
@@ -1151,18 +1155,33 @@ class SystemdInstallRecipeTests(SimpleTestCase):
                 'ExecStartPre=-${GIT_BIN} -C "${REPO_DIR}" pull --ff-only origin '
                 "${BRANCH}",
                 'ExecStartPre="${UV_BIN}" run ./manage.py migrate '
-                "--settings hitch.settings.dev",
+                "--settings hitch.settings.prod",
             ],
         )
 
-    def test_systemd_deployment_runs_runserver_without_autoreloader(self) -> None:
+    def test_systemd_deployment_serves_static_without_autoreloader(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
 
         self.assertIn(
-            'ExecStart="${UV_BIN}" run ./manage.py runserver --noreload '
-            "--settings hitch.settings.dev",
+            'ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --insecure '
+            "--settings hitch.settings.prod",
             justfile,
         )
+
+    @override_settings(DEBUG=False)
+    def test_insecure_runserver_handler_serves_admin_static_with_debug_off(self) -> None:
+        handler = StaticRunserverCommand().get_handler(
+            use_static_handler=True,
+            insecure_serving=True,
+        )
+
+        self.assertIsInstance(handler, StaticFilesHandler)
+        response = handler.get_response(
+            RequestFactory().get("/static/admin/css/base.css")
+        )
+        self.addCleanup(response.close)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/css")
 
     def test_test_recipes_run_in_podman_with_isolated_state(self) -> None:
         justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
@@ -1171,9 +1190,16 @@ class SystemdInstallRecipeTests(SimpleTestCase):
             Path(settings.BASE_DIR) / "scripts" / "test-in-podman"
         ).read_text()
 
-        self.assertIn("scripts/test-in-podman test", justfile)
-        self.assertIn("scripts/test-in-podman test-integration", justfile)
-        self.assertIn("scripts/test-in-podman coverage", justfile)
+        self.assertIn(
+            "HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman test", justfile
+        )
+        self.assertIn(
+            "HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman test-integration",
+            justfile,
+        )
+        self.assertIn(
+            "HITCH_TEST_IMAGE_READY=1 scripts/test-in-podman coverage", justfile
+        )
         self.assertIn("scripts/test-in-podman pre", justfile)
         self.assertIn(
             "FROM docker.io/library/node:24-trixie-slim AS node", containerfile
@@ -1197,6 +1223,7 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn("--env PYTHONPATH=/workspace", test_wrapper)
         self.assertIn("--env HITCH_HOME_DIR=/home/hitch/.hitch", test_wrapper)
         self.assertIn("--env CODEX_HOME=/home/hitch/.codex", test_wrapper)
+        self.assertIn('${HITCH_TEST_IMAGE_READY:-0}', test_wrapper)
 
     def test_global_worker_isolation_default_stays_auto(self) -> None:
         common_settings = (

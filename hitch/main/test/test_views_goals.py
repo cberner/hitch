@@ -15,7 +15,6 @@ from django.test import (
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import views
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack, autonomous_goal_run_display
 from hitch.main.models import (
     AutonomousGoal,
@@ -38,6 +37,7 @@ from hitch.main.test.views_helpers import (
     _USE_WORKTREES_COOKIE,
     _VISIBLE_SESSION_PROJECTS_COOKIE,
 )
+from hitch.main.views import new_session as new_session_views
 from hitch.main.workflows import autonomous_goals, system_agents
 
 
@@ -3693,7 +3693,7 @@ class AutonomousGoalViewTests(TestCase):
             project=project,
         )
 
-        views._accept_proposed_session_for_session(proposal, started)
+        new_session_views._accept_proposed_session_for_session(proposal, started)
 
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)

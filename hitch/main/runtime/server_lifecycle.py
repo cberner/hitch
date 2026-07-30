@@ -127,13 +127,23 @@ class SchedulerHandle:
         with self._lock:
             if self._started:
                 return False
-            self._started = True
-            self._started_at = timezone.now()
-            threading.Thread(
+            thread = threading.Thread(
                 target=target,
                 name=self._thread_name,
                 daemon=True,
-            ).start()
+            )
+            started_at = timezone.now()
+            try:
+                thread.start()
+            except Exception:
+                # A failed OS thread start must remain retryable. Marking the
+                # handle started here would suppress every later start attempt
+                # while health incorrectly reported a live scheduler.
+                self._started = False
+                self._started_at = None
+                raise
+            self._started = True
+            self._started_at = started_at
             return True
 
     def run_tick(
