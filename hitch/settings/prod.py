@@ -39,9 +39,13 @@ if "*" in ALLOWED_HOSTS:
 
 # The systemd installer is intended to sit behind HTTPS on its public domain.
 # Trust only configured production hosts and only over HTTPS for unsafe requests.
-CSRF_TRUSTED_ORIGINS = [
-    f"https://{'*' + host if host.startswith('.') else host}"
-    for host in ALLOWED_HOSTS
-]
+CSRF_TRUSTED_ORIGINS: list[str] = []
+for host in ALLOWED_HOSTS:
+    if host.startswith("."):
+        CSRF_TRUSTED_ORIGINS.extend(
+            (f"https://{host[1:]}", f"https://*{host}")
+        )
+    else:
+        CSRF_TRUSTED_ORIGINS.append(f"https://{host}")
 CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
