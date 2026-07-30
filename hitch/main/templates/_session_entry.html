@@ -54,7 +54,19 @@ intermediate block, so the per-item layout stays identical in both contexts.
     </div>
     {% if entry.detail or entry.status %}
     <div class="tool-call">
-        {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
+        {% if entry.detail %}
+            {% if entry.type == "commandExecution" %}
+            <button
+                type="button"
+                class="detail command-detail"
+                data-expandable-command
+                aria-expanded="false"
+                title="Expand command"
+            >{{ entry.detail }}</button>
+            {% else %}
+            <span class="detail">{{ entry.detail }}</span>
+            {% endif %}
+        {% endif %}
         {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
     </div>
     {% endif %}

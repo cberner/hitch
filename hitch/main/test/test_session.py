@@ -1271,6 +1271,7 @@ class SessionViewTests(TestCase):
         plan_timestamps: list[str] = []
         header_timestamp_count = 0
         tool_box_timestamp_count = 0
+        expandable_command_count = 0
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)
@@ -1468,6 +1469,9 @@ class SessionViewTests(TestCase):
                 )
                 header_timestamp_count = page.locator(".entry-header time[data-ts]").count()
                 tool_box_timestamp_count = page.locator(".tool-call time[data-ts]").count()
+                expandable_command_count = page.locator(
+                    "[data-expandable-command]"
+                ).count()
                 body = page.locator("body").inner_text()
             finally:
                 browser.close()
@@ -1477,6 +1481,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(plan_timestamps, ["1700000124"])
         self.assertGreaterEqual(header_timestamp_count, 4)
         self.assertEqual(tool_box_timestamp_count, 0)
+        self.assertEqual(expandable_command_count, 2)
         self.assertEqual(sum(row["className"] == "timestamp" for row in timestamp_rows), 0)
         for row in timestamp_rows:
             self.assertTrue(row["dateTime"])
@@ -2057,6 +2062,83 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'timeZoneName: "short"', count=2)
         self.assertContains(response, "formatTimestamps(document);")
         self.assertContains(response, "formatTimestamps(body);")
+
+    @patch("hitch.main.views.common.Codex")
+    def test_command_detail_expands_from_single_line(
+        self, mock_codex: MagicMock
+    ) -> None:
+        long_command = "printf first-line\nprintf second-line " + "argument " * 80
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Run the command"),
+                        _command(long_command),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+        html = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="detail command-detail"')
+        self.assertContains(response, "data-expandable-command")
+        self.assertContains(response, 'aria-expanded="false"')
+        self.assertContains(response, 'title="Expand command"')
+        self.assertIn(long_command, html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 800})
+                page.set_content(html, wait_until="load")
+                page.locator("details.intermediate").evaluate(
+                    "(el) => { el.open = true; }"
+                )
+                command = page.locator("[data-expandable-command]")
+
+                self.assertEqual(command.get_attribute("aria-expanded"), "false")
+                self.assertEqual(
+                    command.evaluate("(el) => getComputedStyle(el).whiteSpace"),
+                    "nowrap",
+                )
+                collapsed_height = command.evaluate(
+                    "(el) => el.getBoundingClientRect().height"
+                )
+                self.assertTrue(
+                    command.evaluate("(el) => el.scrollWidth > el.clientWidth")
+                )
+
+                command.click()
+
+                self.assertEqual(command.get_attribute("aria-expanded"), "true")
+                self.assertEqual(command.get_attribute("title"), "Collapse command")
+                self.assertEqual(
+                    command.evaluate("(el) => getComputedStyle(el).whiteSpace"),
+                    "pre-wrap",
+                )
+                self.assertGreater(
+                    command.evaluate("(el) => el.getBoundingClientRect().height"),
+                    collapsed_height,
+                )
+
+                command.click()
+                self.assertEqual(command.get_attribute("aria-expanded"), "false")
+            finally:
+                browser.close()
 
     @patch("hitch.main.views.common.Codex")
     def test_sdk_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
