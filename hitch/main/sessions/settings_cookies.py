@@ -186,7 +186,7 @@ def _read_signed_cookie_if_present(request: HttpRequest, name: str) -> str | Non
         return None
     try:
         value = request.get_signed_cookie(name)
-    except Exception:
+    except (KeyError, signing.BadSignature):
         return None
     return (value or "").strip()
 
@@ -244,7 +244,7 @@ def _read_cookie(request: HttpRequest, name: str) -> str:
     """
     try:
         value = request.get_signed_cookie(name, default="")
-    except Exception:
+    except signing.BadSignature:
         return ""
     return (value or "").strip()
 

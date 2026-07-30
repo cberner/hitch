@@ -506,8 +506,11 @@ def _thread_metadata_value(value: Any) -> str:
     return raw if isinstance(raw, str) else ""
 
 
-def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
-    reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
+def active_workflow_for_thread(
+    main_thread_id: str, *, reconcile: bool = True
+) -> SystemWorkflow | None:
+    if reconcile:
+        reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
     return (
         SystemWorkflow.objects.filter(
             kind__in=(SystemWorkflow.KIND_PR_QA, SPEC_CRITIC_WORKFLOW_KIND),

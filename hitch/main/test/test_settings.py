@@ -1240,6 +1240,17 @@ class ReconcileSettingsTests(TestCase):
         mock_codex.assert_called_once()
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
 
+    def test_unexpected_signed_cookie_errors_are_not_hidden(self) -> None:
+        request = MagicMock()
+        request.COOKIES = {_MODEL_COOKIE: "signed"}
+        request.get_signed_cookie.side_effect = RuntimeError("cookie backend failed")
+
+        with self.assertRaisesRegex(RuntimeError, "cookie backend failed"):
+            settings_cookies._valid_cookie_setting_updates(request)
+
+        with self.assertRaisesRegex(RuntimeError, "cookie backend failed"):
+            settings_cookies._read_cookie(request, _MODEL_COOKIE)
+
 
 class UpdateSettingsViewTests(TestCase):
     @override

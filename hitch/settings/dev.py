@@ -20,7 +20,7 @@ SECRET_KEY = (
 DEBUG = True
 
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".demo.localhost"]
-ALLOWED_HOSTS += [h.strip() for h in os.environ.get("ADDITIONAL_ALLOWED_HOSTS", "").split(",") if h.strip()]
+ALLOWED_HOSTS += common.additional_allowed_hosts()
 INTERNAL_IPS = ["localhost", "127.0.0.1"]
 
 DEBUG_TOOLBAR_CONFIG = {
@@ -54,9 +54,4 @@ if not common.TESTING and _DEBUG_TOOLBAR_ENABLED:
 # the host list to satisfy Django's Origin check on unsafe methods. Django's
 # leading-dot subdomain pattern (".example.com") maps to CSRF's "*.example.com"
 # form; the bare "*" allow-all has no CSRF equivalent and is dropped.
-CSRF_TRUSTED_ORIGINS = [
-    f"{scheme}://{'*' + host if host.startswith('.') else host}"
-    for host in ALLOWED_HOSTS
-    if host != "*"
-    for scheme in ("http", "https")
-]
+CSRF_TRUSTED_ORIGINS = common.csrf_trusted_origins(ALLOWED_HOSTS)

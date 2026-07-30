@@ -69,6 +69,10 @@ install-systemd:
     echo "A domain name is required." >&2
     exit 1
   fi
+  if [[ ! "${DOMAIN}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+    echo "The domain name contains invalid characters." >&2
+    exit 1
+  fi
   REPO_DIR="$(pwd)"
   UV_BIN="$(command -v uv)"
   GIT_BIN="$(command -v git)"
@@ -92,9 +96,13 @@ install-systemd:
   if ! grep -q '^DJANGO_SECRET_KEY=' "${ENV_PATH}" 2>/dev/null; then
     SECRET="$("${UV_BIN}" run --no-project python -c 'import secrets; print(secrets.token_urlsafe(64))')"
     umask 077
-    printf 'DJANGO_SECRET_KEY=%s\n' "${SECRET}" > "${ENV_PATH}"
-    chmod 600 "${ENV_PATH}"
+    if [ -f "${ENV_PATH}" ]; then
+      printf '\nDJANGO_SECRET_KEY=%s\n' "${SECRET}" >> "${ENV_PATH}"
+    else
+      printf 'DJANGO_SECRET_KEY=%s\n' "${SECRET}" > "${ENV_PATH}"
+    fi
   fi
+  chmod 600 "${ENV_PATH}"
   cat > "${UNIT_PATH}" <<EOF
   [Unit]
   Description=Hitch server (${REPO_DIR})
@@ -105,17 +113,17 @@ install-systemd:
   Type=simple
   WorkingDirectory=${REPO_DIR}
   EnvironmentFile=${ENV_PATH}
+  Environment=DJANGO_SETTINGS_MODULE=hitch.settings.prod
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
-  Environment=HITCH_ENABLE_DEBUG_TOOLBAR=0
   Environment=HITCH_CODEX_WORKER_ISOLATION=systemd
   # Re-sync to the install-time branch when possible. The leading dash makes
   # the update best-effort so local edits or a GitHub outage do not prevent the
   # already-checked-out version from serving requests.
   ExecStartPre=-${GIT_BIN} -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
   ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.prod
-  # Production settings disable runserver's implicit static handler. Keep the
-  # single-process installer self-contained by enabling that handler explicitly.
-  ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --insecure --settings hitch.settings.prod
+  # Hitch's in-process schedulers require one serving process. A larger thread
+  # pool retains ordinary-request capacity while active SSE streams are open.
+  ExecStart="${UV_BIN}" run gunicorn --workers 1 --threads 64 --timeout 300 --bind 127.0.0.1:8000 hitch.static_wsgi:application
   Restart=always
   RestartSec=2
   RestartSteps=5

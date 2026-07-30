@@ -153,9 +153,9 @@ def _rollout_intermediate_entry_for_detail(
 def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpResponse:
     """SSE endpoint that mirrors the active worker's events file to the browser.
 
-    When no worker is active the connection stays open emitting heartbeat
-    frames so the page's connection indicator can show ``connected, idle``,
-    and reloads itself when a worker is later spawned out-of-band.
+    When no worker is active the connection emits one heartbeat and asks the
+    client to reconnect after a short delay. This shows ``connected, idle``
+    without consuming a blocking WSGI thread for the lifetime of every tab.
 
     The page passes its render-time view of the session state on the URL
     (``baseline`` = latest ``CodexInstance.pk``, ``active`` = the active
@@ -169,13 +169,23 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     demo_param = request.GET.get("demo", "")
-    reconciliation.reconcile_dead_for_thread(session_id)
-    reconciliation.reconcile_dead_if_due()
+    active = _active_instance_for(session_id)
+    active_workflow = system_agents.active_workflow_for_thread(
+        session_id,
+        reconcile=False,
+    )
+    # Idle clients reconnect frequently to detect state changes. Keep unchanged
+    # idle probes read-only; active streams still reconcile before routing so a
+    # dead worker or workflow cannot leave the page stuck in working state.
+    if active is not None or active_workflow is not None:
+        reconciliation.reconcile_dead_for_thread(session_id)
+        reconciliation.reconcile_dead_if_due()
+        active = _active_instance_for(session_id)
+        active_workflow = system_agents.active_workflow_for_thread(session_id)
+
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
-    active = _active_instance_for(session_id)
     current_active_str = str(active.pk) if active is not None else ""
-    active_workflow = system_agents.active_workflow_for_thread(session_id)
     current_workflow_str = str(active_workflow.pk) if active_workflow is not None else ""
     current_demo_str = streaming.demo_stream_token(session_id)
 
@@ -190,19 +200,23 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
         )
     elif active is not None:
         response = StreamingHttpResponse(
-            streaming.stream_for_instance(active, demo_baseline=current_demo_str),
+            streaming.capacity_limited_stream(
+                streaming.stream_for_instance(active, demo_baseline=current_demo_str)
+            ),
             content_type="text/event-stream",
         )
     elif active_workflow is not None:
         response = StreamingHttpResponse(
-            streaming.system_workflow_stream(
-                session_id, current_latest, active_workflow.pk
+            streaming.capacity_limited_stream(
+                streaming.system_workflow_stream(
+                    session_id, current_latest, active_workflow.pk
+                )
             ),
             content_type="text/event-stream",
         )
     else:
         response = StreamingHttpResponse(
-            streaming.idle_stream(session_id, current_latest, current_demo_str),
+            streaming.idle_stream(),
             content_type="text/event-stream",
         )
     # Discourage proxies from buffering: SSE depends on every frame reaching

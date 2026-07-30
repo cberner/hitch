@@ -195,6 +195,7 @@ class ProposedSession(models.Model):
     INBOX_KIND_NOTICE = "notice"
     ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY = "accepted_session_start_claimed_at"
     ACCEPTED_SESSION_START_CLAIM_TTL = timedelta(minutes=30)
+    ACCEPTED_SESSION_START_CLAIM_CLOCK_SKEW = timedelta(minutes=1)
 
     OUTCOME_UNSET = ""
     OUTCOME_ACCEPTED = "accepted"
@@ -321,7 +322,12 @@ class ProposedSession(models.Model):
             return False
         if claimed_at.tzinfo is None:
             claimed_at = claimed_at.replace(tzinfo=UTC)
-        return now - claimed_at <= cls.ACCEPTED_SESSION_START_CLAIM_TTL
+        age = now - claimed_at
+        return (
+            -cls.ACCEPTED_SESSION_START_CLAIM_CLOCK_SKEW
+            <= age
+            <= cls.ACCEPTED_SESSION_START_CLAIM_TTL
+        )
 
 
 class AutonomousGoalMemory(models.Model):

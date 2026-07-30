@@ -10,16 +10,17 @@ The generator is driven by a Django ``StreamingHttpResponse`` and intentionally
 blocks on a short sleep when the file has no new bytes — this is a single-user
 dev tool, so holding one request-handler thread per active turn is acceptable.
 
-The session page also subscribes to this stream when no worker is active so
-its connection indicator can show a live ``connected`` state. ``idle_stream``
-serves that case: it stays open emitting ``heartbeat`` events and ends with a
-reload signal as soon as a worker for the session shows up (e.g. spawned from
-another tab).
+The session page also probes this stream when no worker is active so its
+connection indicator can show a live ``connected`` state. ``idle_stream``
+serves that case with a heartbeat followed by a client-directed reconnect.
+Keeping idle connections short prevents dormant tabs from occupying every
+blocking WSGI request thread.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Generator, Iterator
 from pathlib import Path
@@ -62,8 +63,17 @@ _HEARTBEAT_INTERVAL = 3.0
 _MAX_STREAM_SECONDS = 60 * 30
 
 # Idle streams (no active worker) recycle more aggressively so a tab left open
-# for hours doesn't pin a request-handler thread for the full 30-minute cap.
-# EventSource transparently reconnects after the response closes.
+# for hours doesn't pin a request-handler thread. The client handles the named
+# reconnect event without treating the intentional recycle as transport loss.
+_IDLE_RECONNECT_MILLISECONDS = 5000
+
+# The installed service has 64 request threads. Bound long-lived worker and
+# workflow streams below that so ordinary pages retain capacity even when many
+# active sessions are open. Idle streams do not consume these slots.
+_ACTIVE_STREAM_SLOTS = threading.BoundedSemaphore(48)
+
+# System-workflow streams are active status channels and remain open between
+# heartbeats. Recycle them sooner than a direct worker stream.
 _IDLE_MAX_STREAM_SECONDS = 5 * 60
 
 # Upper bound on how long we wait for the events file to appear before giving
@@ -174,50 +184,28 @@ def stream_for_instance(
             time.sleep(_POLL_INTERVAL)
 
 
-def idle_stream(
-    session_id: str,
-    baseline_id: int | None,
-    demo_baseline: str = "",
-) -> Iterator[bytes]:
-    """Long-running stream for a session with no active worker.
+def capacity_limited_stream(stream: Iterator[bytes]) -> Iterator[bytes]:
+    """Yield an active stream while preserving capacity for ordinary requests."""
+    if not _ACTIVE_STREAM_SLOTS.acquire(blocking=False):
+        yield f"retry: {_IDLE_RECONNECT_MILLISECONDS}\n\n".encode()
+        yield _reconnect_frame()
+        return
+    try:
+        yield from stream
+    finally:
+        _ACTIVE_STREAM_SLOTS.release()
 
-    Keeps the SSE channel open so the page's connection indicator can show
-    a healthy ``connected, idle`` state, and watches for a new worker
-    spawned out-of-band (e.g. from another tab) so the page reloads itself
-    into the live-streaming UI as soon as one appears.
 
-    ``baseline_id`` is the highest ``CodexInstance.pk`` the page knew
-    about when it rendered (passed by the view, not resampled here). The
-    caller has already verified that the page-render state matches the
-    current DB state — so any later change to the latest pk is by
-    definition a new out-of-band turn that the page hasn't seen yet.
-    Keying off this baseline rather than "is anything currently active"
-    catches fast turns that start and complete between two polls.
+def idle_stream() -> Iterator[bytes]:
+    """Send one idle heartbeat and direct the client to reconnect shortly.
 
-    Closes without an ``end`` event when the per-stream cap is hit so
-    EventSource transparently reconnects rather than triggering a page
-    reload on every recycle.
+    ``session_stream`` validates the page's worker/demo baselines on every
+    connection. Reconnecting therefore retains out-of-band change detection
+    without holding one blocking WSGI thread per idle browser tab.
     """
-    yield b"retry: 2000\n\n"
+    yield f"retry: {_IDLE_RECONNECT_MILLISECONDS}\n\n".encode()
     yield _heartbeat_frame(working=False)
-    deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
-    last_heartbeat = time.monotonic()
-    while True:
-        if _latest_id_for_thread(session_id) != baseline_id:
-            # A worker showed up after the page rendered (still running,
-            # or already terminal from a fast turn). End the stream so the
-            # client reloads and re-renders with the live UI.
-            yield _end_frame("active")
-            return
-        if demo_stream_token(session_id) != demo_baseline:
-            yield _end_frame("demo")
-            return
-        if time.monotonic() > deadline:
-            return
-        if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
-            yield _heartbeat_frame(working=False)
-            last_heartbeat = time.monotonic()
-        time.sleep(_IDLE_POLL_INTERVAL)
+    yield _reconnect_frame()
 
 
 def system_workflow_stream(
@@ -282,6 +270,13 @@ def reload_stream() -> Iterator[bytes]:
     """
     yield b"retry: 2000\n\n"
     yield _end_frame("stale")
+
+
+def _reconnect_frame() -> bytes:
+    return (
+        "event: reconnect\n"
+        f"data: {{\"afterMs\": {_IDLE_RECONNECT_MILLISECONDS}}}\n\n"
+    ).encode()
 
 
 def demo_stream_token(session_id: str) -> str:

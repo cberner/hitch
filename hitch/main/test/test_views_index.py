@@ -78,6 +78,7 @@ from hitch.main.test.views_helpers import (
 )
 from hitch.main.views import common as common_views
 from hitch.main.views import session_list
+from hitch.main.views import settings as settings_views
 from hitch.main.workflows import agent_io, gh_cli, pr_stage_refresh_state, system_agents
 
 
@@ -7482,6 +7483,21 @@ class ProjectViewTests(TestCase):
         self.assertContains(response, "Create project")
         self.assertContains(response, 'name="repo_path"')
         self.assertContains(response, "/repo")
+
+    @patch("hitch.main.repos.git_common_dir", return_value=None)
+    @patch("hitch.main.views.common.git_common_dir", return_value=None)
+    def test_creatable_project_filter_loads_projects_once(
+        self, _common_dir: MagicMock, _repo_common_dir: MagicMock
+    ) -> None:
+        _make_project(name="One", repo_path="/repo-one")
+        _make_project(name="Two", repo_path="/repo-two")
+
+        with self.assertNumQueries(1):
+            creatable = settings_views._creatable_project_repos(
+                ["/repo-one", "/new-one", "/new-two"]
+            )
+
+        self.assertEqual(creatable, ["/new-one", "/new-two"])
 
     @patch("hitch.main.repos.discover_repos")
     def test_new_project_form_hides_repos_that_already_have_projects(

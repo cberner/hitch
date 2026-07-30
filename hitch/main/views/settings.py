@@ -1,6 +1,7 @@
 """Settings and project management endpoints."""
 import logging
 import math
+from collections.abc import Iterable
 from typing import Any
 
 from django.http import (
@@ -149,8 +150,14 @@ def _associate_existing_sessions_with_project(project: Project, request: HttpReq
             defaults={"cwd": cwd, "project": project, "project_cleared": False},
         )
 
-def _matching_project_exists(repo_path: str, repo_common_dir: str) -> bool:
-    for project in Project.objects.all():
+def _matching_project_exists(
+    repo_path: str,
+    repo_common_dir: str,
+    *,
+    projects: Iterable[Project] | None = None,
+) -> bool:
+    candidates = projects if projects is not None else Project.objects.all()
+    for project in candidates:
         if project.repo_path == repo_path:
             return True
         if repo_common_dir and project.git_common_dir == repo_common_dir:
@@ -161,9 +168,14 @@ def _matching_project_exists(repo_path: str, repo_common_dir: str) -> bool:
 
 def _creatable_project_repos(discovered_repos: list[str]) -> list[str]:
     creatable: list[str] = []
+    projects = tuple(Project.objects.all())
     for repo_path in discovered_repos:
         repo_common_dir = str(common.git_common_dir(repo_path) or "")
-        if _matching_project_exists(repo_path, repo_common_dir):
+        if _matching_project_exists(
+            repo_path,
+            repo_common_dir,
+            projects=projects,
+        ):
             continue
         creatable.append(repo_path)
     return creatable
