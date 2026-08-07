@@ -59,6 +59,7 @@ class _MetadataResume:
     entries: tuple[dict[str, Any], ...]
     model: str = ""
     reasoning_effort: str = ""
+    model_config: rollout.SessionModelConfig | None = None
     rollout_data: rollout.SessionDetailData | None = None
 
 
@@ -217,14 +218,17 @@ def _metadata_resume_for_inactive_session(
     entries = tuple(collapse_flat_entries(list(rollout_data.flat_entries)))
     if not archived and not _entries_include_transcript(entries):
         return None
-    latest_instance = _latest_instance_for_next_message(session_id)
+    model_config = rollout_data.latest_model_config or _stored_model_config_for_session(
+        session_id
+    )
     return _MetadataResume(
         thread=thread,
         entries=entries,
-        model=latest_instance.model if latest_instance is not None else "",
+        model=model_config.model if model_config is not None else "",
         reasoning_effort=(
-            latest_instance.reasoning_effort if latest_instance is not None else ""
+            model_config.reasoning_effort if model_config is not None else ""
         ),
+        model_config=model_config,
         rollout_data=rollout_data,
     )
 
@@ -274,13 +278,22 @@ def _pending_resume_for_active_session(
         archived=False,
         thread_source=metadata.codex_thread_source if metadata is not None else "",
     )
+    model_config = (
+        rollout.SessionModelConfig(
+            model=active_instance.model,
+            reasoning_effort=active_instance.reasoning_effort,
+        )
+        if active_instance is not None
+        else None
+    )
     return _MetadataResume(
         thread=thread,
         entries=(),
-        model=active_instance.model if active_instance is not None else "",
+        model=model_config.model if model_config is not None else "",
         reasoning_effort=(
-            active_instance.reasoning_effort if active_instance is not None else ""
+            model_config.reasoning_effort if model_config is not None else ""
         ),
+        model_config=model_config,
     )
 
 
@@ -319,9 +332,20 @@ def _entries_include_transcript(entries: Iterable[Mapping[str, Any]]) -> bool:
     return any(entry.get("kind") in {"user", "agent"} for entry in entries)
 
 
-def _latest_instance_for_next_message(session_id: str) -> CodexInstance | None:
-    return (
+def _stored_model_config_for_session(
+    session_id: str,
+) -> rollout.SessionModelConfig | None:
+    """Return the latest worker row's atomic model configuration."""
+    row = (
         CodexInstance.objects.filter(thread_id=session_id)
         .order_by("-started_at", "-pk")
+        .values_list("model", "reasoning_effort")
         .first()
+    )
+    if row is None:
+        return None
+    model, reasoning_effort = row
+    return rollout.SessionModelConfig(
+        model=model,
+        reasoning_effort=reasoning_effort,
     )

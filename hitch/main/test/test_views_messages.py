@@ -30,8 +30,10 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, codex_pool
+from hitch.main.runtime import rollout as rollout_module
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_pr_plan
+from hitch.main.sessions.settings_cookies import SettingsValues
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
     _make_model,
@@ -52,10 +54,56 @@ from hitch.main.test.views_helpers import (
     _WEB_SEARCH_COOKIE,
     _WEBP_BYTES,
 )
+from hitch.main.views import messages as message_views
 from hitch.main.workflows import system_agents
 
 
 class SendMessageViewTests(TestCase):
+    def test_stored_model_and_effort_uses_atomic_recorded_or_settings_pair(
+        self,
+    ) -> None:
+        settings = SettingsValues(
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            sandbox_policy="",
+            approval_mode="auto_review",
+            extra_system_prompt="",
+            use_worktrees=False,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+            spec_critic_enabled=False,
+            web_search_mode="",
+            show_archived_sessions=False,
+            last_selected_repo="",
+            selected_project_id=None,
+            visible_session_project_ids=None,
+            show_no_project_sessions=True,
+            enable_memories=False,
+        )
+        resumed = SimpleNamespace(
+            model="gpt-5.6-sol",
+            reasoning_effort="",
+            model_config=rollout_module.SessionModelConfig(
+                model="gpt-5.6-sol",
+                reasoning_effort="",
+            ),
+        )
+
+        self.assertEqual(
+            message_views._stored_model_and_effort(resumed, settings),
+            ("gpt-5.6-sol", ""),
+        )
+
+        resumed.model = ""
+        resumed.model_config = rollout_module.SessionModelConfig(
+            model="",
+            reasoning_effort="",
+        )
+        self.assertEqual(
+            message_views._stored_model_and_effort(resumed, settings),
+            ("gpt-5.5", "xhigh"),
+        )
+
     def _patch_codex(
         self,
         mock_codex: MagicMock,

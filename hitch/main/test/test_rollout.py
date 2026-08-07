@@ -40,6 +40,74 @@ def _write_rollout(lines: list[str]) -> Path:
         return Path(tmp.name)
 
 
+class LatestModelConfigTests(TestCase):
+    def test_reads_latest_turn_settings_across_reverse_read_chunks(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {
+                        "type": "thread_settings_applied",
+                        "thread_settings": {
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "high",
+                        },
+                    },
+                ),
+                _line(
+                    "turn_context",
+                    {"model": "gpt-5.6-sol", "effort": "xhigh"},
+                ),
+                _line("response_item", {"text": "x" * (70 * 1024)}),
+                "incomplete trailing record",
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        expected = rollout.SessionModelConfig(
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(rollout.latest_model_config(path), expected)
+        detail = rollout.session_detail_data(path)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.latest_model_config, expected)
+
+    def test_reads_nested_collaboration_mode_settings(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "turn_context",
+                    {"model": "gpt-5.5", "effort": "xhigh"},
+                ),
+                _line(
+                    "turn_context",
+                    {
+                        "collaborationMode": {
+                            "mode": "plan",
+                            "settings": {
+                                "model": "gpt-5.6-sol",
+                                "reasoning_effort": "medium",
+                            },
+                        }
+                    },
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        expected = rollout.SessionModelConfig(
+            model="gpt-5.6-sol",
+            reasoning_effort="medium",
+        )
+        self.assertEqual(rollout.latest_model_config(path), expected)
+        detail = rollout.session_detail_data(path)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.latest_model_config, expected)
+
+
 class LatestPrUrlTests(TestCase):
     @override
     def tearDown(self) -> None:

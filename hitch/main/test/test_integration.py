@@ -31,6 +31,10 @@ def _fresh_codex_home() -> Iterator[None]:
         tempfile.TemporaryDirectory(prefix="codex-test-") as codex_home,
         patch.dict(os.environ, {"CODEX_HOME": codex_home}),
     ):
+        # Marketplace sync can outlive app-server shutdown and race temp cleanup.
+        Path(codex_home, "config.toml").write_text(
+            "[features]\nplugins = false\n", encoding="utf-8"
+        )
         yield
 
 

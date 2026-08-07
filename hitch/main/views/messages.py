@@ -170,13 +170,18 @@ class _TurnRejectedError(Exception):
 
 
 def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[str, str]:
-    """Thread's recorded model/effort, falling back to the request settings."""
-    model = string_value(getattr(resumed, "model", None)) or settings.model
-    effort = (
-        string_value(getattr(resumed, "reasoning_effort", None))
-        or settings.reasoning_effort
-    )
-    return model, effort
+    """Return one atomic recorded pair, or the request settings pair."""
+    recorded = getattr(resumed, "model_config", None)
+    if recorded is not None:
+        model = string_value(recorded.model)
+        effort = string_value(recorded.reasoning_effort)
+        if model or effort:
+            return model, effort
+    model = string_value(getattr(resumed, "model", None))
+    effort = string_value(getattr(resumed, "reasoning_effort", None))
+    if model or effort:
+        return model, effort
+    return settings.model, settings.reasoning_effort
 
 
 def _steer_instance_with_input_images(
