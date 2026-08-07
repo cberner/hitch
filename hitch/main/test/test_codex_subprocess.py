@@ -8564,12 +8564,11 @@ class ApprovalHandlerTests(TestCase):
 class WorkerCancellationTests(TestCase):
     """The worker's control paths: SIGTERM interrupt and SIGUSR1 steer.
 
-    The stop endpoint signals the worker with SIGTERM; the worker turns
-    that into the SDK's ``turn.interrupt()`` between stream events
-    rather than dying abruptly. Active composer submissions append steer
-    payloads to the worker's control file and nudge it with SIGUSR1; the
-    worker control forwarder drains those payloads and calls
-    ``turn.steer(...)``.
+    The stop endpoint signals the worker with SIGTERM; the worker turns that
+    into the SDK's ``turn.interrupt()`` without waiting for another stream
+    event. Active composer submissions append steer payloads to the worker's
+    control file and nudge it with SIGUSR1; the worker control forwarder drains
+    those payloads and calls ``turn.steer(...)``.
     """
 
     @override
@@ -8577,11 +8576,13 @@ class WorkerCancellationTests(TestCase):
         # Module-level control state persists across tests; reset to a known
         # state so previous tests don't bleed into this one.
         codex_worker_module._cancel_requested = False
+        codex_worker_module._interrupt_wakeup = None
         codex_worker_module._steer_wakeup = None
 
     @override
     def tearDown(self) -> None:
         codex_worker_module._cancel_requested = False
+        codex_worker_module._interrupt_wakeup = None
         codex_worker_module._steer_wakeup = None
 
     def _make_instance(self, raw: str | Path) -> CodexInstance:
@@ -8613,6 +8614,54 @@ class WorkerCancellationTests(TestCase):
 
         self.assertTrue(sent)
         turn.interrupt.assert_called_once_with()
+
+    def test_interrupt_forwarder_fires_while_turn_stream_is_silent(self) -> None:
+        turn = MagicMock()
+        interrupted = threading.Event()
+        turn.interrupt.side_effect = interrupted.set
+        forwarder = codex_worker_module._start_interrupt_forwarder(turn)
+        try:
+            codex_worker_module._on_sigterm(signal.SIGTERM, None)
+            self.assertTrue(interrupted.wait(timeout=1))
+        finally:
+            codex_worker_module._stop_interrupt_forwarder(forwarder)
+
+        turn.interrupt.assert_called_once_with()
+        self.assertIsNone(codex_worker_module._interrupt_wakeup)
+
+    def test_interrupt_is_sent_once_across_stream_and_forwarder(self) -> None:
+        turn = MagicMock()
+        interrupted = threading.Event()
+        turn.interrupt.side_effect = interrupted.set
+        forwarder = codex_worker_module._start_interrupt_forwarder(turn)
+        try:
+            codex_worker_module._on_sigterm(signal.SIGTERM, None)
+            codex_worker_module._forward_interrupt_if_requested(
+                turn,
+                sent=forwarder.sent,
+                send_lock=forwarder.send_lock,
+            )
+            self.assertTrue(interrupted.wait(timeout=1))
+        finally:
+            codex_worker_module._stop_interrupt_forwarder(forwarder)
+
+        turn.interrupt.assert_called_once_with()
+
+    def test_interrupt_is_not_resent_when_competing_caller_claims_send(self) -> None:
+        turn = MagicMock()
+        sent = threading.Event()
+        send_lock = MagicMock()
+        send_lock.__enter__.side_effect = sent.set
+        codex_worker_module._cancel_requested = True
+
+        forwarded = codex_worker_module._forward_interrupt_if_requested(
+            turn,
+            sent=sent,
+            send_lock=send_lock,
+        )
+
+        self.assertFalse(forwarded)
+        turn.interrupt.assert_not_called()
 
     def test_try_steer_calls_sdk_with_text_input_and_reports_sent(self) -> None:
         turn = MagicMock()
@@ -9014,6 +9063,36 @@ class WorkerCancellationTests(TestCase):
 
         self.assertTrue(sent)
         turn.interrupt.assert_called_once_with()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_interrupt_forwarder_stops_when_steer_startup_fails(
+        self, mock_codex: MagicMock
+    ) -> None:
+        turn = MagicMock(id="turn-1")
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            turn=lambda _input: turn
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(raw)
+            with (
+                patch.object(
+                    codex_worker_module,
+                    "_start_steer_control_forwarder",
+                    side_effect=RuntimeError("steer startup failed"),
+                ),
+                patch.object(
+                    codex_worker_module,
+                    "_stop_interrupt_forwarder",
+                    wraps=codex_worker_module._stop_interrupt_forwarder,
+                ) as stop_interrupt,
+                self.assertRaisesRegex(RuntimeError, "steer startup failed"),
+            ):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        stop_interrupt.assert_called_once()
+        self.assertIsNone(codex_worker_module._interrupt_wakeup)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_interrupt_fires_when_flag_set_during_stream(

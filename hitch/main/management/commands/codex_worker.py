@@ -174,12 +174,15 @@ _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 _DEFAULT_COLLABORATION_MODE = "default"
 
-# Set by the SIGTERM handler so the stream loop knows to call
-# ``turn.interrupt()`` between events. Plain module-level bool is fine —
-# CPython makes single-attribute reads/writes atomic, and the signal
-# handler is intentionally minimal (it must avoid blocking JSON-RPC
-# calls that would race the main loop's read on the response pipe).
+# Set by the SIGTERM handler so the turn-control paths know to call
+# ``turn.interrupt()``. Plain module-level bool is fine — CPython makes
+# single-attribute reads/writes atomic, and the signal handler is intentionally
+# minimal (it must not make a blocking JSON-RPC call itself).
 _cancel_requested = False
+
+# Set by the active turn so the SIGTERM handler can wake the interrupt
+# forwarder without making a blocking JSON-RPC call inside the handler.
+_interrupt_wakeup: threading.Event | None = None
 
 # Set by the active turn so the SIGUSR1 handler can wake the control-file
 # forwarder without doing blocking JSON-RPC work from inside the handler.
@@ -217,15 +220,16 @@ def _worker_log_exception(exc: BaseException) -> None:
 def _on_sigterm(_signum: int, _frame: Any) -> None:
     """Mark the active turn for graceful cancellation.
 
-    Defers the actual SDK ``turn.interrupt()`` call to the main loop so
-    we don't issue a blocking JSON-RPC request from inside a signal
-    handler — that would contend with the loop's read on the same
-    response pipe and could deadlock. The Django stop endpoint sends
-    SIGTERM here; a follow-up click escalates to SIGKILL, which has
-    no Python-level handler and tears the worker down immediately.
+    Defers the actual SDK ``turn.interrupt()`` call to normal Python threads so
+    we don't issue a blocking JSON-RPC request from inside a signal handler.
+    The Django stop endpoint sends SIGTERM here; a follow-up click escalates to
+    SIGKILL, which has no Python-level handler and tears the worker down
+    immediately.
     """
     global _cancel_requested
     _cancel_requested = True
+    if _interrupt_wakeup is not None:
+        _interrupt_wakeup.set()
 
 
 def _on_sigusr1(_signum: int, _frame: Any) -> None:
@@ -552,7 +556,7 @@ def _run_turn(
         notification_order(event)
 
     final_turn: Turn | None = None
-    interrupt_sent = False
+    interrupt_forwarder: _InterruptForwarder | None = None
     goal_forwarder: threading.Thread | None = None
     steer_forwarder: _SteerControlForwarder | None = None
     notification_order: NotificationOrdering = _fallback_notification_order
@@ -611,6 +615,7 @@ def _run_turn(
                 plan_mode=plan_mode,
                 output_schema=output_schema,
             )
+            interrupt_forwarder = _start_interrupt_forwarder(turn)
             steer_forwarder = _start_steer_control_forwarder(
                 turn,
                 instance=instance,
@@ -620,8 +625,11 @@ def _run_turn(
                 # A Stop click that landed before the turn handle existed sets the
                 # flag without us being able to call interrupt yet; act on it now
                 # that the handle is ready.
-                if _cancel_requested and not interrupt_sent:
-                    interrupt_sent = _try_interrupt(turn)
+                _forward_interrupt_if_requested(
+                    turn,
+                    sent=interrupt_forwarder.sent,
+                    send_lock=interrupt_forwarder.send_lock,
+                )
                 for event in turn.stream():
                     _write_notification(event)
                     payload = event.payload
@@ -630,21 +638,30 @@ def _run_turn(
                         and payload.turn.id == turn.id
                     ):
                         final_turn = payload.turn
-                    if _cancel_requested and not interrupt_sent:
+                    if _cancel_requested:
                         # SDK-level interrupt is the graceful cancellation path:
                         # the app-server stops the model, emits the remaining
                         # events (including a turn/completed with status=interrupted),
                         # and the worker's normal status-update code at the end
                         # records that as a failed turn. SIGKILL is the next
                         # escalation if the user clicks Stop again.
-                        interrupt_sent = _try_interrupt(turn)
+                        _forward_interrupt_if_requested(
+                            turn,
+                            sent=interrupt_forwarder.sent,
+                            send_lock=interrupt_forwarder.send_lock,
+                        )
             finally:
                 if steer_forwarder is not None:
                     _stop_steer_control_forwarder(steer_forwarder)
                     steer_forwarder = None
+                if interrupt_forwarder is not None:
+                    _stop_interrupt_forwarder(interrupt_forwarder)
+                    interrupt_forwarder = None
     finally:
         if steer_forwarder is not None:
             _stop_steer_control_forwarder(steer_forwarder)
+        if interrupt_forwarder is not None:
+            _stop_interrupt_forwarder(interrupt_forwarder)
         if goal_forwarder is not None:
             goal_forwarder.join(timeout=0.5)
     return final_turn
@@ -659,6 +676,91 @@ def _try_interrupt(turn: TurnHandle) -> bool:
     """
     with contextlib.suppress(Exception):
         turn.interrupt()
+    return True
+
+
+@dataclasses.dataclass(slots=True)
+class _InterruptForwarder:
+    thread: threading.Thread
+    wakeup: threading.Event
+    stop: threading.Event
+    sent: threading.Event
+    send_lock: threading.Lock
+
+
+def _start_interrupt_forwarder(turn: TurnHandle) -> _InterruptForwarder:
+    """Forward SIGTERM cancellation even while the turn stream is silent."""
+    global _interrupt_wakeup
+    wakeup = threading.Event()
+    stop = threading.Event()
+    sent = threading.Event()
+    send_lock = threading.Lock()
+    forwarder = _InterruptForwarder(
+        thread=threading.Thread(
+            target=_forward_interrupt_requests,
+            kwargs={
+                "turn": turn,
+                "wakeup": wakeup,
+                "stop": stop,
+                "sent": sent,
+                "send_lock": send_lock,
+            },
+            daemon=True,
+        ),
+        wakeup=wakeup,
+        stop=stop,
+        sent=sent,
+        send_lock=send_lock,
+    )
+    _interrupt_wakeup = wakeup
+    forwarder.thread.start()
+    return forwarder
+
+
+def _stop_interrupt_forwarder(forwarder: _InterruptForwarder) -> None:
+    global _interrupt_wakeup
+    forwarder.stop.set()
+    forwarder.wakeup.set()
+    forwarder.thread.join(timeout=0.5)
+    if _interrupt_wakeup is forwarder.wakeup:
+        _interrupt_wakeup = None
+
+
+def _forward_interrupt_requests(
+    *,
+    turn: TurnHandle,
+    wakeup: threading.Event,
+    stop: threading.Event,
+    sent: threading.Event,
+    send_lock: threading.Lock,
+) -> None:
+    while not stop.is_set():
+        if _forward_interrupt_if_requested(
+            turn,
+            sent=sent,
+            send_lock=send_lock,
+        ):
+            return
+        wakeup.wait()
+        wakeup.clear()
+
+
+def _forward_interrupt_if_requested(
+    turn: TurnHandle,
+    *,
+    sent: threading.Event,
+    send_lock: threading.Lock,
+) -> bool:
+    """Send at most one interrupt across the stream and watcher threads."""
+    if not _cancel_requested or sent.is_set():
+        return False
+    with send_lock:
+        if sent.is_set():
+            return False
+        # Claim the send before the blocking SDK call. If that call wedges, a
+        # second Stop still escalates to SIGKILL instead of piling up callers.
+        sent.set()
+    _try_interrupt(turn)
     return True
 
 
