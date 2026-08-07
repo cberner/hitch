@@ -519,21 +519,30 @@ def _entries_for(thread: Any) -> Iterator[dict[str, Any]]:
     ``Thread.turns`` so the page is never empty just because the rollout
     layer misbehaved.
     """
-    flat = _entries_from_rollout(thread)
+    entries, _rollout_backed = _entries_for_with_source(thread)
+    yield from entries
+
+
+def _entries_for_with_source(
+    thread: Any, *, fallback_rollout_path: str | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return rendered entries and whether a rollout successfully backed them."""
+    flat = _entries_from_rollout(thread, fallback_rollout_path=fallback_rollout_path)
     if flat is not None:
-        yield from collapse_flat_entries(flat)
-        return
-    yield from render_entries(thread)
+        return list(collapse_flat_entries(flat)), True
+    return list(render_entries(thread)), False
 
 
-def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
+def _entries_from_rollout(
+    thread: Any, *, fallback_rollout_path: str | None = None
+) -> list[dict[str, Any]] | None:
     """Materialise entries from the on-disk rollout, or return None to fall back.
 
     Returning ``None`` (vs. an empty list) is what triggers the SDK fallback;
     an empty list is treated as "the rollout exists and is genuinely empty,"
     matching the behaviour of an empty ``Thread.turns``.
     """
-    path = getattr(thread, "path", None)
+    path = getattr(thread, "path", None) or fallback_rollout_path
     if not isinstance(path, str) or not path:
         return None
     rollout_path = Path(path)

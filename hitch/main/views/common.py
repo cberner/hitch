@@ -38,7 +38,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main import caches, demo
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
-from hitch.main.diffs import build_worktree_diff
+from hitch.main.diffs import DiffView, build_worktree_diff
 from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
 from hitch.main.local_merges import local_branch_names as local_branch_names
 from hitch.main.models import (
@@ -85,7 +85,7 @@ from hitch.main.sessions.session_entry_display import (
     _apply_qa_approval_messages,
     _apply_system_authors,
     _display_title,
-    _entries_for,
+    _entries_for_with_source,
     _filter_demo_agent_entries,
     _latest_user_turn_failure,
     _pending_user_author,
@@ -442,6 +442,7 @@ def _render_session_detail(
     )
     resumed: Any
     thread: Any
+    entries_backed_by_rollout = False
 
     if metadata_resume is not None:
         resumed = metadata_resume
@@ -532,7 +533,12 @@ def _render_session_detail(
         # Capture the rollout mtime before reading entries; see the
         # metadata-resume branch above for why the order matters.
         stage_cache_mtime_ns = _rollout_mtime_ns(_rollout_path_for(thread))
-        raw_entries = list(_entries_for(thread))
+        raw_entries, entries_backed_by_rollout = _entries_for_with_source(
+            thread,
+            fallback_rollout_path=(
+                metadata.codex_path if metadata is not None else None
+            ),
+        )
         rollout_data = None
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(raw_entries, session_id)
@@ -693,10 +699,17 @@ def _render_session_detail(
     _attach_lazy_intermediate_context(
         entries,
         session_id=session_id,
-        enabled=rollout_data is not None,
+        # SDK-fallback details must stay inline: the fragment endpoint cannot
+        # reconstruct entries from the rollout when the same parser failed.
+        enabled=rollout_data is not None
+        or (entries_backed_by_rollout and metadata is not None),
+        cache_entries=rollout_data is not None,
         hide_demo_agent_entries=hide_demo_agent_entries,
         demo_entries_run_id=demo_entries_run_id,
-        rollout_state=_rollout_file_state_from_value(getattr(thread, "path", None)),
+        rollout_state=_rollout_file_state_from_value(
+            getattr(thread, "path", None)
+            or (metadata.codex_path if metadata is not None else None)
+        ),
     )
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     # Scope the plan to the running worker, or to the latest worker on reload
@@ -708,7 +721,14 @@ def _render_session_detail(
         else codex_events.latest_task_plan_for_thread(session_id)
     )
     thread_cwd = _thread_cwd(thread)
-    diff_view = build_worktree_diff(thread_cwd)
+    # A running worker/workflow can change the diff continuously. The stream
+    # reload after completion supplies a stable preview; until then, avoid
+    # parsing and highlighting a large snapshot that the page does not expose.
+    diff_view = (
+        DiffView(files=[])
+        if active_instance is not None or active_system_workflow is not None
+        else build_worktree_diff(thread_cwd)
+    )
     active_session_demo = demo.active_demo_for(session_id)
     session_demo = demo.latest_demo_for(session_id)
     demo_system_session_url = _demo_system_session_url(session_id)
@@ -935,6 +955,7 @@ def _attach_lazy_intermediate_context(
     *,
     session_id: str,
     enabled: bool,
+    cache_entries: bool,
     hide_demo_agent_entries: bool,
     demo_entries_run_id: int | None,
     rollout_state: _RolloutFileState | None,
@@ -950,13 +971,17 @@ def _attach_lazy_intermediate_context(
     for entry_index, entry in enumerate(entries):
         if entry.get("kind") != "intermediate":
             continue
-        _cache_intermediate_detail(
-            session_id=session_id,
-            rollout_state=rollout_state,
-            hide_demo_agent_entries=hide_demo_agent_entries,
-            entry_index=entry_index,
-            entry=entry,
-        )
+        # An active rollout changes throughout the turn. Caching its full
+        # intermediate blocks would retain a new, potentially very large copy
+        # for every observed mtime until the process-wide LRU evicted it.
+        if cache_entries:
+            _cache_intermediate_detail(
+                session_id=session_id,
+                rollout_state=rollout_state,
+                hide_demo_agent_entries=hide_demo_agent_entries,
+                entry_index=entry_index,
+                entry=entry,
+            )
         entry["lazy_url"] = (
             reverse(
                 "session_intermediate",

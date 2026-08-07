@@ -733,7 +733,10 @@ class SessionDetailFastPathTests(TestCase):
                 side_effect=ValueError("unexpected rollout shape"),
             ),
             patch("hitch.main.views.common._models_for_plan_mode_fallback", return_value=[]),
-            patch("hitch.main.views.common._entries_for", return_value=sdk_entries),
+            patch(
+                "hitch.main.views.common._entries_for_with_source",
+                return_value=(sdk_entries, False),
+            ),
         ):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "schema-drift"})
@@ -802,7 +805,9 @@ class SessionDetailFastPathTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "1 tool call")
-        self.assertContains(response, "data-lazy-intermediate")
+        self.assertContains(
+            response, '<details class="intermediate" data-lazy-intermediate', html=False
+        )
         self.assertContains(
             response,
             reverse(
@@ -815,6 +820,149 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(fragment, "printf lazy-loaded-command")
         self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_active_session_detail_lazy_loads_completed_intermediate_body(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Run a command"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf active-lazy-command"}),
+                        "call_id": "call-active-lazy",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="active-lazy-intermediate",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-lazy-intermediate",
+            cwd="/repo",
+            prompt="Follow up",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("active-lazy-intermediate")
+        )
+        with patch(
+            "hitch.main.runtime.codex_pool.worker_is_alive", return_value=True
+        ):
+            response = self.client.get(
+                reverse(
+                    "session", kwargs={"session_id": "active-lazy-intermediate"}
+                )
+            )
+            fragment = self.client.get(
+                reverse(
+                    "session_intermediate",
+                    kwargs={
+                        "session_id": "active-lazy-intermediate",
+                        "entry_index": 1,
+                    },
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, '<details class="intermediate" data-lazy-intermediate', html=False
+        )
+        self.assertContains(response, "1 tool call")
+        self.assertNotContains(response, "printf active-lazy-command")
+        self.assertEqual(fragment.status_code, 200)
+        self.assertContains(fragment, "printf active-lazy-command")
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_active_session_keeps_sdk_fallback_intermediate_body_inline(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [_rollout_line("event_msg", {"type": "unsupported_rollout_shape"})],
+        )
+        SessionMetadata.objects.create(
+            thread_id="active-sdk-fallback",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-sdk-fallback",
+            cwd="/repo",
+            prompt="Follow up",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("active-sdk-fallback")
+        )
+        sdk_entries = [
+            {"kind": "user", "text": "Run a command"},
+            {
+                "kind": "intermediate",
+                "thinking_count": 0,
+                "tool_call_count": 1,
+                "items": [
+                    {
+                        "kind": "tool_call",
+                        "label": "Command",
+                        "detail": "printf sdk-fallback-command",
+                    }
+                ],
+            },
+            {"kind": "agent", "text": "Done."},
+        ]
+
+        with (
+            patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True),
+            patch(
+                "hitch.main.sessions.session_entry_display.rollout.iter_entries",
+                side_effect=ValueError("unexpected rollout shape"),
+            ),
+            patch(
+                "hitch.main.sessions.session_entry_display.render_entries",
+                return_value=iter(sdk_entries),
+            ),
+        ):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active-sdk-fallback"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "printf sdk-fallback-command")
+        self.assertNotContains(
+            response, '<details class="intermediate" data-lazy-intermediate', html=False
+        )
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")

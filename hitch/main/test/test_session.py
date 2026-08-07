@@ -3352,7 +3352,7 @@ class SessionViewActiveWorkerTests(TestCase):
 
     @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
-    def test_active_worker_renders_status_pill_working(
+    def test_active_worker_renders_status_without_volatile_diff_preview(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
         # With an active worker the pill renders in its "working" state
@@ -3374,9 +3374,11 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Codex is working")
         self.assertContains(response, 'class="jump-latest" data-jump-latest')
         self.assertContains(response, 'aria-label="Jump to latest message"')
-        self.assertContains(response, '<dialog class="diff-modal"', html=False)
+        self.assertContains(response, "data-diff-open disabled")
+        self.assertNotContains(response, '<dialog class="diff-modal"', html=False)
         self.assertNotContains(response, 'class="diff-fab"')
         self.assertNotContains(response, 'aria-label="Settings for the next message"')
+        mock_diff.assert_not_called()
 
     @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
