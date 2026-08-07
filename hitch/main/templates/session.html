@@ -21,7 +21,7 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
-                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
+                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes or active_worker or active_system_workflow %}disabled{% endif %}>View diff</button>
                     {% endif %}
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
                     {% if not read_only %}
@@ -341,7 +341,8 @@
     </dialog>
     {% endif %}
 
-    {% if diff_view.has_changes %}
+    {# A running turn can change the diff continuously; render it after the stream reloads the completed session. #}
+    {% if diff_view.has_changes and not active_worker and not active_system_workflow %}
     <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
         <div class="diff-shell">
             <header class="diff-modal-header">
