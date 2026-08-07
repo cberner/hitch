@@ -1008,7 +1008,7 @@ class SettingsPageRenderTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         """Non-Codex exceptions (pydantic ValidationError on a malformed
-        wire payload, transport hiccups not wrapped as AppServerError) must
+        wire payload, transport hiccups not wrapped as CodexError) must
         also be swallowed so usage can show an empty state."""
         _clear_rate_limits_cache()
         self.addCleanup(_clear_rate_limits_cache)

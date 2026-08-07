@@ -1,12 +1,11 @@
 """End-to-end coverage against a real `codex app-server` subprocess.
 
-Requires the `codex` binary on PATH plus a local ollama instance with
-`qwen2.5-coder:0.5b` pulled; CI installs both. Tests run with a fresh
-CODEX_HOME so the listing and rollout state are deterministic.
+Requires a local ollama instance with `qwen2.5-coder:0.5b` pulled; the SDK
+supplies its matching Codex runtime. Tests run with a fresh CODEX_HOME so the
+listing and rollout state are deterministic.
 """
 
 import os
-import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -16,7 +15,7 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings, tag
 from django.urls import reverse
-from openai_codex import AppServerConfig, Codex
+from openai_codex import Codex, CodexConfig
 
 from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_pool
@@ -36,7 +35,7 @@ def _fresh_codex_home() -> Iterator[None]:
 
 
 def _start_codex() -> Codex:
-    return Codex(config=AppServerConfig(codex_bin=shutil.which("codex")))
+    return Codex(config=CodexConfig())
 
 
 @tag("integration")

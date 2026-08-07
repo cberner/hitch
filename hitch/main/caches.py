@@ -17,7 +17,7 @@ from typing import Any
 
 from django.db import close_old_connections, transaction
 from django.utils import timezone
-from openai_codex import AppServerError, Codex
+from openai_codex import Codex, CodexError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     RateLimitSnapshot,
@@ -313,7 +313,7 @@ def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
             None,
             response_model=GetAccountRateLimitsResponse,
         )
-    except AppServerError:
+    except CodexError:
         return None
     except Exception:
         logger.exception("failed to fetch account rate limits; showing usage empty state")

@@ -330,12 +330,11 @@ def _matched_app_server_pids(
 ) -> dict[int, Path]:
     """Map every matching ``codex app-server`` pid to its ``/proc`` entry.
 
-    Includes both halves of each logical app-server: the ``codex`` CLI is a node
-    wrapper that re-execs a native child, and both inherit the SDK app-server
-    argv and our ``HITCH_CODEX_DEPLOYMENT`` marker, so each logical app-server
-    matches twice. Callers decide how to treat the pair -- the nuke sweep
-    signals every entry, while the health count collapses each wrapper/child
-    pair to one. Linux-only; without ``/proc`` the map is empty.
+    The bundled SDK runtime is a native process. Older PATH-based npm installs
+    may also leave a wrapper/native pair, both of which inherit the app-server
+    argv and our ``HITCH_CODEX_DEPLOYMENT`` marker. Callers therefore tolerate
+    either one process or a pair. Linux-only; without ``/proc`` the map is
+    empty.
     """
     matched: dict[int, Path] = {}
     if _host_proc_scan_disabled_for_test_run(proc_root=proc_root, manage_py=None):
@@ -365,13 +364,11 @@ def _iter_codex_app_server_pids(
     deployment is handled by ``_proc_is_our_app_server``. Linux-only; on a host
     without ``/proc`` it yields nothing.
 
-    Both halves of each logical app-server (the node wrapper and its native
-    re-exec child) are yielded, deliberately not deduped: the nuke sweep that
-    drives this must SIGKILL each one. SIGKILL is not delivered to a process's
-    children, and the native child -- not the wrapper -- is what actually runs
-    the app-server and holds the CODEX_HOME state-DB connection, so killing only
-    the wrapper would orphan the lock-holder. ``count_running_codex_app_servers``
-    is the surface that collapses the pair to one logical app-server.
+    If a legacy wrapper/native pair is present, both halves are yielded,
+    deliberately not deduped: the nuke sweep must SIGKILL each one because
+    SIGKILL is not delivered to a process's children. The bundled native
+    runtime appears once. ``count_running_codex_app_servers`` is the surface
+    that collapses any pair to one logical app-server.
     """
     if deployment_id is None:
         deployment_id = _app_server_deployment_id()
@@ -393,12 +390,10 @@ def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
     Each app-server is signaled individually with ``os.kill`` rather than
     ``killpg``: the SDK spawns it sharing its parent's process group (the
     detached worker, or the Django process itself for synchronous opens), so a
-    group kill could take down the parent. Both halves of each logical
-    app-server -- the node wrapper and its native child -- are signaled directly
-    for the same reason SIGKILL cannot be left to cascade: it is not delivered
-    to children, and the native child is the lock-holder, so it must be killed
-    in its own right. Returns the number of processes signaled (roughly twice
-    the logical app-server count when wrapper/child pairs are present).
+    group kill could take down the parent. Both halves of a legacy
+    wrapper/native pair are signaled directly because SIGKILL does not cascade
+    to children; a bundled native runtime is signaled once. Returns the number
+    of processes signaled.
     """
     deployment_id = _app_server_deployment_id()
     killed = 0
@@ -441,12 +436,12 @@ def reap_orphaned_app_servers(*, proc_root: Path = Path("/proc")) -> int:
     the ownerless ones and runs automatically when the maintenance scheduler
     starts.
 
-    A matched server is kept when walking its parent chain (through the node
-    wrapper half of the wrapper/native pair) reaches a live owner: a verified
-    ACTIVE worker pid, this process, or any live process whose working
-    directory is this checkout (a sibling web process of whatever server
-    flavor). Pid identity is re-verified immediately before signaling, the
-    same discipline as the nuke.
+    A matched server is kept when walking its parent chain (including any
+    legacy wrapper/native chain) reaches a live owner: a verified ACTIVE
+    worker pid, this process, or any live process whose working directory is
+    this checkout (a sibling web process of whatever server flavor). Pid
+    identity is re-verified immediately before signaling, the same discipline
+    as the nuke.
     """
     deployment_id = _app_server_deployment_id()
     matched = _matched_app_server_pids(
@@ -494,10 +489,10 @@ def _app_server_has_live_owner(
 ) -> bool:
     """Whether ``pid``'s parent chain reaches a live owner of this deployment.
 
-    The chain is walked through other matched app-server processes (the node
-    wrapper parents its native child) and ends at the first non-matched
-    parent, which must be an owner. A vanished parent entry means the chain
-    was cut by an exited process -- exactly the orphan case.
+    The chain is walked through other matched app-server processes (a legacy
+    wrapper may parent its native child) and ends at the first non-matched
+    parent, which must be an owner. A vanished parent entry means the chain was
+    cut by an exited process -- exactly the orphan case.
     """
     current = pid
     for _ in range(4):
@@ -534,12 +529,12 @@ def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
 
     Read-only counterpart to ``nuke_codex_app_servers``: a health surface for
     spotting leaked app-servers (each holds a CODEX_HOME state-DB connection)
-    without killing anything. The ``codex`` CLI is a node wrapper that re-execs a
-    native child, so each logical app-server matches the /proc scan twice; drop
-    any matched pid whose parent is itself matched (the native child) so the
-    figure reflects logical app-servers, not doubled pids. A pid whose parent is
-    unknown or unmatched -- including a native child orphaned by a dead wrapper
-    -- counts, so a leaked app-server is never undercounted.
+    without killing anything. The bundled runtime has one native process, while
+    a legacy npm CLI may have a wrapper/native pair. Drop any matched pid whose
+    parent is itself matched so the figure reflects logical app-servers, not
+    doubled pids. A pid whose parent is unknown or unmatched -- including a
+    native child orphaned by a dead wrapper -- counts, so a leaked app-server is
+    never undercounted.
     """
     matched = _matched_app_server_pids(
         proc_root=proc_root, deployment_id=_app_server_deployment_id()

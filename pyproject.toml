@@ -13,22 +13,9 @@ dependencies = [
     "Django>=6.0,<7.0",
     "gunicorn>=26.0,<27.0",
     "markdown-it-py>=4.0,<5.0",
-    "openai-codex",
+    "openai-codex==0.144.4",
     "Pygments==2.20.0",
 ]
-
-[tool.uv.sources]
-openai-codex = { git = "https://github.com/openai/codex.git", subdirectory = "sdk/python", tag = "rust-v0.131.0-alpha.18" }
-
-# The Codex SDK pins `openai-codex-cli-bin`, which only ships musllinux/macos/win
-# wheels and cannot install on manylinux (e.g. our Ubuntu CI). The runtime
-# binary is only loaded when launching the app-server subprocess, so override
-# the transitive dep to drop it; callers must point AppServerConfig.codex_bin
-# at a local `codex` binary to actually start a session.
-[[tool.uv.dependency-metadata]]
-name = "openai-codex"
-version = "0.131.0a4"
-requires-dist = ["pydantic>=2.12"]
 
 [dependency-groups]
 dev = [

@@ -19,7 +19,8 @@ from django.test import (
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
-from openai_codex.errors import AppServerError, InvalidRequestError
+from openai_codex.errors import CodexError as CodexError
+from openai_codex.errors import InvalidRequestError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     SortDirection,
@@ -125,7 +126,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -159,7 +160,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -237,7 +238,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/94"
@@ -315,7 +316,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/94"
@@ -414,7 +415,7 @@ class IndexViewTests(TestCase):
         mock_observe: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/60"
@@ -492,7 +493,7 @@ class IndexViewTests(TestCase):
         # cached fast path only rechecks PR stages, so a stale Done badge would
         # otherwise stick without ever scheduling another refresh.
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -578,7 +579,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/94"
@@ -697,7 +698,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -782,7 +783,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -834,7 +835,7 @@ class IndexViewTests(TestCase):
         _worker_is_alive: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -926,7 +927,7 @@ class IndexViewTests(TestCase):
         _worker_is_alive: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -989,7 +990,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -1078,7 +1079,7 @@ class IndexViewTests(TestCase):
         # rollout (interrupted/aborted/no-op turn), the index must recompute the
         # real terminal stage rather than resurrect the stale active badge.
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -1182,7 +1183,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -1224,7 +1225,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -1272,7 +1273,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/98"
@@ -1367,7 +1368,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/98"
@@ -1452,7 +1453,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/98"
@@ -1535,7 +1536,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/98"
@@ -1625,7 +1626,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/344"
@@ -1721,7 +1722,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -1843,7 +1844,7 @@ class IndexViewTests(TestCase):
         mock_logger: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/344"
@@ -1916,7 +1917,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -2010,7 +2011,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/94"
@@ -2100,7 +2101,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         rollout_path = _make_rollout(
@@ -2169,7 +2170,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         pr_url = "https://github.com/cberner/hitch/pull/100"
@@ -2248,7 +2249,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2295,7 +2296,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2370,7 +2371,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2449,7 +2450,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2527,7 +2528,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2570,7 +2571,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2644,7 +2645,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         same_second = datetime.fromtimestamp(1000, UTC)
@@ -2762,7 +2763,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -2811,7 +2812,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         now = datetime.now(UTC)
         SessionIndexSyncState.objects.create(
@@ -3002,7 +3003,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
@@ -3024,7 +3025,7 @@ class IndexViewTests(TestCase):
         now = datetime.now(UTC)
         cached = _session("cached", name="Cached session", updated_at=2000)
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         mock_discover.return_value = []
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
@@ -3094,7 +3095,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         now = datetime.now(UTC)
-        mock_codex.side_effect = AppServerError("codex unavailable")
+        mock_codex.side_effect = CodexError("codex unavailable")
         mock_discover.return_value = []
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
@@ -3497,7 +3498,7 @@ class IndexViewTests(TestCase):
         self.assertTrue(SessionIndexSyncState.objects.get(source="active").is_complete)
 
         client.thread_list.reset_mock(side_effect=True)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
 
         response = self.client.get(reverse("index"))
 
@@ -3829,9 +3830,9 @@ class IndexViewTests(TestCase):
     ) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("app server down")
+        client._client.thread_resume.side_effect = CodexError("app server down")
 
-        with self.assertRaises(AppServerError):
+        with self.assertRaises(CodexError):
             self.client.get(
                 reverse("system_session", kwargs={"session_id": session_id})
             )
@@ -6670,7 +6671,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         _seed_usage_metadata("indexed")
         _cache_token_usage(
             "indexed",
@@ -6695,7 +6696,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
 
         with (
             patch(
@@ -6772,7 +6773,7 @@ class IndexViewTests(TestCase):
     ) -> None:
         _seed_usage_metadata("missing-path")
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", "")]
@@ -6842,7 +6843,7 @@ class IndexViewTests(TestCase):
         self.assertTrue(cache_state.refresh_pending)
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
@@ -6876,7 +6877,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
@@ -6936,7 +6937,7 @@ class IndexViewTests(TestCase):
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
@@ -6975,7 +6976,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
@@ -7008,7 +7009,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("stale-cache", missing_path)]
@@ -7068,7 +7069,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = AppServerError("resume failed")
+        client._client.thread_resume.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing", "/nonexistent/rollout.jsonl")]
@@ -7824,7 +7825,7 @@ class ArchiveUndoToastTests(TestCase):
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         self._seed_two_sessions()
 
         response = self.client.get(reverse("index"))
@@ -7912,7 +7913,7 @@ class ArchiveUndoToastTests(TestCase):
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        client.thread_list.side_effect = CodexError("thread list unavailable")
         self._seed_two_sessions()
 
         response = self.client.get(reverse("index"))

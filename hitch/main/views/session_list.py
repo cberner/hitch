@@ -14,7 +14,7 @@ from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
-from openai_codex import AppServerError
+from openai_codex import CodexError
 from openai_codex.generated.v2_all import (
     SortDirection,
     ThreadSortKey,
@@ -274,7 +274,7 @@ def _session_list_page(
                 return _session_list_page_from_codex(
                     codex, request, query, current_settings=current_settings
                 )
-            except AppServerError:
+            except CodexError:
                 common.logger.warning(
                     "failed to fetch live session page after capped refresh; "
                     "rendering cached sessions"
@@ -1188,7 +1188,7 @@ def _session_list_page_from_codex_or_warm_index(
                 project_visibility=project_visibility,
                 system_only=system_only,
             )
-    except AppServerError:
+    except CodexError:
         fallback = _session_list_page_from_warm_index(
             request,
             current_settings=current_settings,
