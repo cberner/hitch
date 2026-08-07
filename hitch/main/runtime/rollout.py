@@ -107,10 +107,17 @@ _COLLABORATION_MODE_DEFAULT = "default"
 
 
 @dataclass(frozen=True)
+class SessionModelConfig:
+    model: str
+    reasoning_effort: str
+
+
+@dataclass(frozen=True)
 class SessionDetailData:
     flat_entries: tuple[dict[str, Any], ...]
     latest_token_usage: dict[str, int] | None
     latest_collaboration_mode: str | None
+    latest_model_config: SessionModelConfig | None
     latest_pr_url: str | None
     pr_observation: codex_events.PrObservationResult
 
@@ -130,6 +137,7 @@ def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
         flat_entries=tuple(_entries_from_lines(lines)),
         latest_token_usage=_latest_token_usage_from_lines(lines),
         latest_collaboration_mode=_latest_collaboration_mode_from_lines(lines),
+        latest_model_config=_latest_model_config_from_lines(lines),
         latest_pr_url=_latest_pr_url_from_lines(lines),
         pr_observation=_latest_pr_observation_result_from_lines(lines),
     )
@@ -325,6 +333,104 @@ def latest_collaboration_mode(rollout_path: Path) -> str | None:
     if lines is None:
         return None
     return _latest_collaboration_mode_from_lines(lines)
+
+
+def latest_model_config(rollout_path: Path) -> SessionModelConfig | None:
+    """Return the model settings from the latest configured rollout turn."""
+    try:
+        entries = _iter_rollout_entries_reverse(rollout_path)
+        return next(
+            (
+                config
+                for entry in entries
+                if (config := _model_config_from_entry(entry)) is not None
+            ),
+            None,
+        )
+    except OSError as exc:
+        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+        return None
+
+
+def _latest_model_config_from_lines(
+    lines: list[dict[str, Any]],
+) -> SessionModelConfig | None:
+    return next(
+        (
+            config
+            for entry in reversed(lines)
+            if (config := _model_config_from_entry(entry)) is not None
+        ),
+        None,
+    )
+
+
+def _model_config_from_entry(entry: dict[str, Any]) -> SessionModelConfig | None:
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    config: dict[str, Any] | None = None
+    effort_key = "effort"
+    if entry.get("type") == "turn_context":
+        mode_data = payload.get("collaboration_mode") or payload.get(
+            "collaborationMode"
+        )
+        mode_settings = (
+            mode_data.get("settings") if isinstance(mode_data, dict) else None
+        )
+        if isinstance(mode_settings, dict):
+            config = mode_settings
+            effort_key = "reasoning_effort"
+        else:
+            config = payload
+    elif entry.get("type") == "event_msg" and payload.get("type") == (
+        "thread_settings_applied"
+    ):
+        raw_config = payload.get("thread_settings")
+        if isinstance(raw_config, dict):
+            config = raw_config
+            effort_key = "reasoning_effort"
+    if config is None:
+        return None
+    model = config.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    effort = config.get(effort_key)
+    return SessionModelConfig(
+        model=model.strip(),
+        reasoning_effort=effort.strip() if isinstance(effort, str) else "",
+    )
+
+
+def _iter_rollout_entries_reverse(rollout_path: Path) -> Iterator[dict[str, Any]]:
+    """Read JSONL records newest-first without loading a large rollout twice."""
+    chunk_size = 64 * 1024
+    with rollout_path.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        remainder = b""
+        while position:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            parts = (handle.read(read_size) + remainder).split(b"\n")
+            remainder = parts[0]
+            for raw in reversed(parts[1:]):
+                if entry := _rollout_entry_from_raw_line(raw):
+                    yield entry
+        if entry := _rollout_entry_from_raw_line(remainder):
+            yield entry
+
+
+def _rollout_entry_from_raw_line(raw: bytes) -> dict[str, Any] | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        entry = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return entry if isinstance(entry, dict) else None
 
 
 def _latest_collaboration_mode_from_lines(lines: list[dict[str, Any]]) -> str | None:

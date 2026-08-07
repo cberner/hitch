@@ -51,7 +51,14 @@ from hitch.main.models import (
 )
 from hitch.main.repos import git_common_dir as git_common_dir
 from hitch.main.repos import same_repo_or_worktree
-from hitch.main.runtime import app_server_pool, codex_events, codex_pool, reconciliation, streaming
+from hitch.main.runtime import (
+    app_server_pool,
+    codex_events,
+    codex_pool,
+    reconciliation,
+    rollout,
+    streaming,
+)
 from hitch.main.runtime.input_images import (
     _INPUT_IMAGE_ACCEPT,
     _INPUT_IMAGE_FIELD,
@@ -113,6 +120,7 @@ from hitch.main.sessions.session_resume import (
     _metadata_resume_for_inactive_session,
     _pending_resume_for_active_session,
     _session_detail_metadata,
+    _stored_model_config_for_session,
 )
 from hitch.main.sessions.session_settings import (
     _QA_SLASH_PROMPT,
@@ -782,8 +790,47 @@ def _render_session_detail(
     approval_mode = _effective_approval_mode_for_session(
         settings, session_id, metadata
     )
+    rollout_model_config = (
+        rollout_data.latest_model_config if rollout_data is not None else None
+    )
+    resumed_model = string_value(getattr(resumed, "model", None))
+    resumed_reasoning = string_value(getattr(resumed, "reasoning_effort", None))
+    active_model = string_value(getattr(active_instance, "model", None))
+    active_reasoning = string_value(
+        getattr(active_instance, "reasoning_effort", None)
+    )
+    active_config_present = active_instance is not None and bool(
+        active_model
+        or active_reasoning
+        or getattr(active_instance, "plan_mode", False)
+    )
+    resumed_config_present = bool(resumed_model or resumed_reasoning)
+    needs_recorded_model_config = not (
+        active_config_present or resumed_config_present
+    )
+    active_default_model_unresolved = bool(
+        active_instance is not None
+        and active_reasoning
+        and not active_model
+        and not resumed_model
+        and not getattr(active_instance, "plan_mode", False)
+    )
+    if rollout_model_config is None and (
+        needs_recorded_model_config or active_default_model_unresolved
+    ):
+        rollout_path = _rollout_path_for(thread)
+        if rollout_path is None and metadata is not None:
+            rollout_path = _rollout_path_from_value(metadata.codex_path)
+        if rollout_path is not None:
+            rollout_model_config = rollout.latest_model_config(rollout_path)
+    stored_model_config = None
+    if rollout_model_config is None and needs_recorded_model_config:
+        stored_model_config = _stored_model_config_for_session(session_id)
     session_model, session_reasoning = _session_model_and_reasoning(
-        resumed, fallback=active_instance
+        resumed,
+        active_instance=active_instance,
+        rollout_config=rollout_model_config,
+        stored_config=stored_model_config,
     )
     response = render(
         request,
@@ -861,7 +908,8 @@ def _render_session_detail(
             "session_reasoning": session_reasoning,
             "next_message_config": _next_message_config(
                 settings,
-                resumed,
+                session_model,
+                session_reasoning,
                 plan_model,
                 cwd=thread_cwd or "",
                 approval_mode=approval_mode,
@@ -1192,14 +1240,14 @@ def _refresh_usage_session_index_best_effort(
 
 def _next_message_config(
     settings: SettingsValues,
-    resumed: Any,
+    model: str,
+    reasoning: str,
     plan_model: str | None,
     *,
     cwd: str,
     approval_mode: str | None = None,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
-    model, reasoning = _session_model_and_reasoning(resumed)
     plan_model_value = plan_model or "Unknown"
     sandbox_value = _option_label(
         _SANDBOX_POLICY_OPTIONS,
@@ -1236,20 +1284,45 @@ def _next_message_config(
 
 
 def _session_model_and_reasoning(
-    resumed: Any, *, fallback: Any | None = None
+    resumed: Any,
+    *,
+    active_instance: Any | None = None,
+    rollout_config: rollout.SessionModelConfig | None = None,
+    stored_config: rollout.SessionModelConfig | None = None,
 ) -> tuple[str, str]:
-    """Return the resumed model configuration, filling gaps from persisted state."""
-    model = (
-        string_value(getattr(resumed, "model", None))
-        or string_value(getattr(fallback, "model", None))
-        or "Unknown"
+    """Return the effective session model configuration from known state."""
+    resumed_model = string_value(getattr(resumed, "model", None))
+    resumed_reasoning = string_value(getattr(resumed, "reasoning_effort", None))
+    active_model = string_value(getattr(active_instance, "model", None))
+    active_reasoning = string_value(
+        getattr(active_instance, "reasoning_effort", None)
     )
-    reasoning = (
-        string_value(getattr(resumed, "reasoning_effort", None))
-        or string_value(getattr(fallback, "reasoning_effort", None))
-        or "Model default"
-    )
-    return model, reasoning
+    if active_instance is not None and getattr(active_instance, "plan_mode", False):
+        return active_model or "Unknown", _PLAN_MODE_REASONING_EFFORT
+    if active_model or active_reasoning:
+        # A blank active model means Codex resolves its default for this turn.
+        if active_reasoning and not active_model:
+            active_model = resumed_model or string_value(
+                getattr(rollout_config, "model", None)
+            )
+        return (
+            active_model or "Unknown",
+            active_reasoning or "Model default",
+        )
+
+    if resumed_model or resumed_reasoning:
+        return resumed_model or "Unknown", resumed_reasoning or "Model default"
+    if rollout_config is not None:
+        return (
+            rollout_config.model or "Unknown",
+            rollout_config.reasoning_effort or "Model default",
+        )
+    if stored_config is not None:
+        return (
+            stored_config.model or "Unknown",
+            stored_config.reasoning_effort or "Model default",
+        )
+    return "Unknown", "Model default"
 
 @dataclass(frozen=True)
 class _ApprovalResolvedEvent:

@@ -145,6 +145,10 @@ class SessionDetailFastPathTests(TestCase):
             self,
             [
                 _rollout_line(
+                    "turn_context",
+                    {"model": "gpt-5.4", "effort": "high"},
+                ),
+                _rollout_line(
                     "event_msg",
                     {"type": "user_message", "message": "Read from rollout"},
                 ),
@@ -208,6 +212,14 @@ class SessionDetailFastPathTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
             model="gpt-5.4",
             reasoning_effort="high",
+        )
+        CodexInstance.objects.create(
+            pid=2,
+            thread_id="indexed",
+            cwd="/repo",
+            prompt="later turn",
+            events_path="/tmp/later-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
         )
 
         response = self.client.get(reverse("session", kwargs={"session_id": "indexed"}))
@@ -1237,6 +1249,35 @@ class SessionDetailFastPathTests(TestCase):
             response, '<span class="stage-badge" data-tone="active">PR</span>'
         )
         mock_codex.assert_not_called()
+
+    def test_stored_model_config_keeps_latest_partial_row_atomic(self) -> None:
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="partial-config",
+            cwd="/repo",
+            prompt="older turn",
+            events_path="/tmp/older-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+        )
+        CodexInstance.objects.create(
+            pid=2,
+            thread_id="partial-config",
+            cwd="/repo",
+            prompt="newer turn",
+            events_path="/tmp/newer-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            model="gpt-5.6-sol",
+        )
+
+        self.assertEqual(
+            session_resume._stored_model_config_for_session("partial-config"),
+            rollout_module.SessionModelConfig(
+                model="gpt-5.6-sol",
+                reasoning_effort="",
+            ),
+        )
 
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
@@ -2305,9 +2346,13 @@ class SessionDetailFastPathTests(TestCase):
             self,
             [
                 _rollout_line(
+                    "turn_context",
+                    {"model": "gpt-5.6-sol", "effort": "xhigh"},
+                ),
+                _rollout_line(
                     "event_msg",
                     {"type": "user_message", "message": "Indexed active"},
-                )
+                ),
             ],
         )
         SessionMetadata.objects.create(
@@ -2317,20 +2362,28 @@ class SessionDetailFastPathTests(TestCase):
             codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
         )
         CodexInstance.objects.create(
+            pid=1,
+            thread_id="active",
+            cwd="/repo",
+            prompt="previous turn",
+            events_path="/tmp/previous-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            model="gpt-5.5",
+            reasoning_effort="high",
+        )
+        active_instance = CodexInstance.objects.create(
             pid=os.getpid(),
             thread_id="active",
             cwd="/repo",
             prompt="still running",
             events_path="/tmp/events.jsonl",
             status=CodexInstance.STATUS_RUNNING,
-            model="gpt-5.6-sol",
-            reasoning_effort="xhigh",
         )
         client = _setup_codex(mock_codex)
         client._client.thread_resume.return_value = SimpleNamespace(
-            model="gpt-5.6-sol",
+            model=None,
             reasoning_effort=None,
-            thread=_session("active", name="Active session")
+            thread=_session("active", name="Active session"),
         )
 
         with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
@@ -2339,7 +2392,79 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
         self.assertEqual(response.context["session_reasoning"], "xhigh")
-        client._client.thread_resume.assert_called_once_with("active")
+
+        active_instance.reasoning_effort = "high"
+        active_instance.save(update_fields=["reasoning_effort"])
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active"})
+            )
+
+        self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
+        self.assertEqual(response.context["session_reasoning"], "high")
+
+        client._client.thread_resume.return_value.model = "gpt-5.7"
+        client._client.thread_resume.return_value.reasoning_effort = "xhigh"
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active"})
+            )
+
+        next_message = {
+            item["label"]: item["value"]
+            for item in response.context["next_message_config"]
+        }
+        self.assertEqual(response.context["session_model"], "gpt-5.7")
+        self.assertEqual(response.context["session_reasoning"], "high")
+        self.assertEqual(next_message["model"], "gpt-5.7")
+        self.assertEqual(next_message["reasoning"], "high")
+        self.assertEqual(client._client.thread_resume.call_count, 3)
+
+    @patch("hitch.main.views.common.Codex")
+    def test_active_plan_config_does_not_inherit_older_rollout_effort(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "turn_context",
+                    {"model": "gpt-5.5", "effort": "xhigh"},
+                ),
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="active-plan",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-plan",
+            cwd="/repo",
+            prompt="plan this",
+            events_path="/tmp/active-plan-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            model="gpt-5.6-sol",
+            plan_mode=True,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            model=None,
+            reasoning_effort=None,
+            thread=_session("active-plan", name="Active plan"),
+        )
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active-plan"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
+        self.assertEqual(response.context["session_reasoning"], "medium")
+        client._client.thread_resume.assert_called_once_with("active-plan")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
