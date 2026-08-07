@@ -85,6 +85,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-decision-options`: User prompts support accept, decline, and cancel when available.
 - `PERM-timeout-decline`: Unanswered interactive approvals resolve with an offered non-accepting decision or fail closed.
 - `PERM-stop-decline`: Stopping a session blocked on approval resolves the request with an offered non-accepting decision or fails closed.
+- `PERM-stop-quiet-turn`: Stopping an active session requests Codex cancellation without waiting for another stream event, including while a command is running silently; a later Stop may force-kill a turn that does not cancel.
 - `PERM-decision-race-safe`: Concurrent decisions for one request resolve exactly once; later attempts receive already-resolved results.
 
 ### 4.5 System Sessions
@@ -124,6 +125,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-accept-prompt-flow`: Interactive escalations show sufficient context, survive refresh from durable state, and apply the user's decision.
 - `PERM-accept-approve-all-no-amendment`: Approve all uses only plain, non-persistent accept decisions offered by Codex; otherwise it fails closed instead of prompting or amending policy.
 - `PERM-accept-user-decision-validated`: User and automatic decisions must be offered by Codex; unavailable, timed-out, stopped, or racing decisions fail safe.
+- `PERM-accept-stop-quiet-turn`: A user can stop a turn that is blocked in a silent command without waiting for that command to emit output.
 - `PERM-accept-proposal-permissions-reset`: Accepted Proposals re-resolve sandbox and approval as user sessions.
 - `PERM-accept-automatic-approval-audit`: Non-interactive approvals, denials, and fail-closed outcomes are visible on the session detail page; hidden system-session outcomes can be reached from workflow state or Inbox.
 - `PERM-accept-system-read-only`: System sessions are least-privileged: read-only when possible, isolated when write-capable, and never broader than allowed by user state or workflow policy.
