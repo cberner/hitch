@@ -74,9 +74,10 @@ Prerequisites:
   test-integration`, and `just coverage`
 - [`ollama`](https://ollama.com) on PATH (the recipe will start `ollama serve`
   in the background if nothing is listening on `:11434`)
-- a `codex` binary on PATH; the version must match the `openai-codex` SDK
-  pinned in `pyproject.toml` (see `.github/workflows/ci.yml` for the exact
-  npm version CI installs)
+
+Codex and Node/npm do not need to be installed separately. `uv sync` installs
+the runtime bundled with the pinned `openai-codex` package, keeping the Python
+SDK and Codex executable on the same version.
 
 What the recipe does:
 

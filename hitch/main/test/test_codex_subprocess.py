@@ -19,22 +19,20 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 from django.conf import settings
 from django.contrib.staticfiles.handlers import StaticFilesHandler
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from openai_codex import ApprovalMode
+from openai_codex import ApprovalMode, Sandbox, Thread
 from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
     CodexErrorInfo,
-    DangerFullAccessSandboxPolicy,
     ReasoningEffort,
-    SandboxPolicy,
     ThreadGoal,
     ThreadGoalClearedNotification,
     ThreadGoalStatus,
@@ -45,7 +43,6 @@ from openai_codex.generated.v2_all import (
     TurnError,
     TurnStartParams,
     TurnStatus,
-    WorkspaceWriteSandboxPolicy,
 )
 from openai_codex.models import Notification
 from pydantic import BaseModel
@@ -165,6 +162,11 @@ def _forget_worker_pid(pid: int) -> None:
 
 
 class SpawnNewSessionTests(TestCase):
+    def test_app_server_config_uses_sdk_bundled_runtime(self) -> None:
+        config = codex_pool.app_server_config()
+
+        self.assertIsNone(config.codex_bin)
+
     def test_memories_are_explicitly_disabled_by_default(self) -> None:
         config = codex_pool.app_server_config()
 
@@ -1197,18 +1199,11 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         )
         self.assertIn("scripts/test-in-podman pre", justfile)
         self.assertIn(
-            "FROM docker.io/library/node:24-trixie-slim AS node", containerfile
-        )
-        self.assertIn(
             "FROM docker.io/library/python:3.13-slim-trixie", containerfile
         )
         self.assertIn("ca-certificates git libatomic1", containerfile)
-        self.assertIn("COPY --from=node /usr/local/bin/node", containerfile)
-        self.assertIn(
-            "ln -s ../lib/node_modules/npm/bin/npm-cli.js", containerfile
-        )
-        self.assertNotIn("COPY --from=node /usr/local/bin/npm", containerfile)
-        self.assertNotIn("nodejs npm", containerfile)
+        self.assertNotIn("library/node", containerfile)
+        self.assertNotIn("npm", containerfile)
         self.assertIn("--read-only", test_wrapper)
         self.assertIn('--network "${network}"', test_wrapper)
         self.assertIn('network="none"', test_wrapper)
@@ -4506,17 +4501,16 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
 
         self.assertEqual(found, [100])
 
-    def test_yields_both_node_wrapper_and_native_child(self) -> None:
-        # The codex CLI is a node wrapper that re-execs a native child; both
-        # carry the SDK app-server argv and our marker. The iterator drives the
-        # nuke sweep, so it must yield *both* halves -- SIGKILL is not delivered
-        # to children, and the native child is the lock-holder. Deduping to one
-        # logical app-server is the job of count_running_codex_app_servers.
+    def test_yields_legacy_wrapper_and_native_child(self) -> None:
+        # A legacy PATH-based CLI may have a wrapper/native pair. Both carry
+        # the SDK app-server argv and our marker, and the nuke sweep must signal
+        # each process directly. Deduping to one logical app-server is the job
+        # of count_running_codex_app_servers.
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             # Worker (parent of the wrapper) -- not itself an app-server.
             self._write_proc(proc_root, 50, [b"python", b"manage.py"], ppid=1)
-            # node wrapper (parent is the worker) + native re-exec child.
+            # Legacy wrapper (parent is the worker) + native child.
             self._write_proc(
                 proc_root, 100, self._APP_SERVER_ARGV, [self._MARKER], ppid=50
             )
@@ -4623,13 +4617,11 @@ class NukeCodexAppServersTests(SimpleTestCase):
         mock_kill.assert_any_call(222, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_signals_both_wrapper_and_native_child(
+    def test_signals_legacy_wrapper_and_native_child(
         self, mock_kill: MagicMock
     ) -> None:
-        # A logical app-server is a node wrapper plus a native re-exec child.
-        # SIGKILL is not delivered to children, and the native child holds the
-        # CODEX_HOME state-DB lock, so the sweep must signal both directly --
-        # killing only the wrapper would orphan the lock-holder.
+        # Legacy installs may have a wrapper/native pair. SIGKILL is not
+        # delivered to children, so the sweep must signal both directly.
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             self._write_app_server(proc_root, 111, ppid=50)
@@ -4716,7 +4708,7 @@ class ReapOrphanedAppServersTests(TestCase):
         (pid_dir / "cwd").symlink_to(cwd)
 
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_kills_orphaned_wrapper_and_native_pair(
+    def test_kills_orphaned_legacy_wrapper_and_native_pair(
         self, mock_kill: MagicMock
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4843,9 +4835,9 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
         if ppid is not None:
             (pid_dir / "stat").write_text(f"{pid} (codex app) S {ppid} 0 0\n")
 
-    def test_counts_one_per_wrapper_child_pair(self) -> None:
-        # Two logical app-servers, each a node wrapper plus its native child, so
-        # four matched pids must collapse to a count of two.
+    def test_counts_one_per_legacy_wrapper_child_pair(self) -> None:
+        # Two legacy logical app-servers, each represented by a wrapper/native
+        # pair, must collapse from four matched pids to a count of two.
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             self._write_app_server(proc_root, 100, ppid=50)  # wrapper A
@@ -7435,13 +7427,11 @@ class CodexWorkerCommandTests(TestCase):
 
             return _assert
 
-        def _assert_sandbox_variant(
-            expected_variant: type[object],
+        def _assert_sandbox_preset(
+            expected: Sandbox,
         ) -> Callable[[dict[str, object]], None]:
             def _assert(capture: dict[str, object]) -> None:
-                policy = capture.get("sandbox_policy")
-                assert isinstance(policy, SandboxPolicy)
-                self.assertIsInstance(policy.root, expected_variant)
+                self.assertEqual(capture.get("sandbox"), expected)
 
             return _assert
 
@@ -7453,21 +7443,28 @@ class CodexWorkerCommandTests(TestCase):
             )
 
         codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+        thread = create_autospec(Thread, instance=True)
+        thread.turn.side_effect = _capture_turn
+        codex_ctx.thread_resume.return_value = thread
 
         cases: list[tuple[str, str, Callable[[dict[str, object]], None]]] = [
             ("--reasoning-effort", "high", _assert_value("effort", ReasoningEffort.high)),
             (
                 "--sandbox-policy",
+                "readOnly",
+                _assert_sandbox_preset(Sandbox.read_only),
+            ),
+            (
+                "--sandbox-policy",
                 "workspaceWrite",
-                _assert_sandbox_variant(WorkspaceWriteSandboxPolicy),
+                _assert_sandbox_preset(Sandbox.workspace_write),
             ),
             (
                 "--sandbox-policy",
                 "dangerFullAccess",
-                _assert_sandbox_variant(DangerFullAccessSandboxPolicy),
+                _assert_sandbox_preset(Sandbox.full_access),
             ),
-            ("--sandbox-policy", "phantomPolicy", _assert_absent("sandbox_policy")),
+            ("--sandbox-policy", "phantomPolicy", _assert_absent("sandbox")),
             ("--approval-mode", "deny_all", _assert_value("approval_mode", ApprovalMode.deny_all)),
             (
                 "--approval-mode",
@@ -7491,26 +7488,14 @@ class CodexWorkerCommandTests(TestCase):
                 assert_capture(captured)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_sdk_unknown_reasoning_effort_posts_raw_turn_params(
+    def test_sdk_unknown_reasoning_effort_uses_typed_turn(
         self, mock_codex: MagicMock
     ) -> None:
-        captured_params: dict[str, object] = {}
+        unknown_effort = "ultra"
+        self.assertNotIn(unknown_effort, {item.value for item in ReasoningEffort})
         codex_ctx = mock_codex.return_value.__enter__.return_value
-
-        def _capture_turn_start(
-            _thread_id: str, _input: object, *, params: object
-        ) -> object:
-            captured_params["input"] = _input
-            captured_params["params"] = params
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
-
-        codex_ctx._client.turn_start.side_effect = _capture_turn_start
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
-            "turn-1", TurnStatus.completed
-        )
-        codex_ctx.thread_resume.return_value = SimpleNamespace(
-            id="thread-1", turn=MagicMock()
-        )
+        turn = codex_ctx.thread_resume.return_value.turn.return_value
+        turn.stream.return_value = [_completed_event("turn-1", TurnStatus.completed)]
 
         with tempfile.TemporaryDirectory() as raw:
             instance = self._make_instance(Path(raw))
@@ -7521,21 +7506,13 @@ class CodexWorkerCommandTests(TestCase):
                 "--model",
                 "gpt-5.6-sol",
                 "--reasoning-effort",
-                "max",
+                unknown_effort,
             )
 
-        codex_ctx.thread_resume.return_value.turn.assert_not_called()
-        params = captured_params["params"]
-        assert isinstance(params, dict)
-        self.assertEqual(params["model"], "gpt-5.6-sol")
-        self.assertEqual(params["effort"], "max")
-        self.assertEqual(params["threadId"], "thread-1")
-        wire_input = captured_params["input"]
-        assert isinstance(wire_input, list)
-        first_input = wire_input[0]
-        assert isinstance(first_input, dict)
-        self.assertEqual(first_input["type"], "text")
-        self.assertEqual(first_input["text"], "hi")
+        typed_turn = codex_ctx.thread_resume.return_value.turn
+        typed_turn.assert_called_once()
+        self.assertEqual(typed_turn.call_args.kwargs["model"], "gpt-5.6-sol")
+        self.assertEqual(typed_turn.call_args.kwargs["effort"].value, unknown_effort)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_user_reviewer_modes_bypass_thread_turn(
@@ -7829,7 +7806,7 @@ class CodexWorkerCommandTests(TestCase):
 
 class ApprovalHandlerTests(TestCase):
     """``_make_approval_handler`` produces the closure the worker installs on
-    ``AppServerClient._approval_handler``. The closure is called from the
+    ``CodexClient._approval_handler``. The closure is called from the
     SDK's reader thread when codex escalates a command/file action.
 
     These tests exercise the closure directly rather than running a full

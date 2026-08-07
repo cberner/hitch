@@ -21,10 +21,8 @@ from typing import Any, override
 
 from django.db import IntegrityError, close_old_connections, transaction
 from django.utils import timezone
-from openai_codex import ApprovalMode, Codex, TextInput
+from openai_codex import ApprovalMode, Codex, Sandbox, TextInput
 from openai_codex.generated.v2_all import (
-    ReadOnlySandboxPolicy,
-    SandboxPolicy,
     ThreadSource,
     Turn,
     TurnCompletedNotification,
@@ -116,9 +114,7 @@ def _classify_spec_critic_prompt_with_codex(
                 TextInput(_spec_critic_classifier_prompt(prompt)),
                 model=model,
                 approval_mode=ApprovalMode.deny_all,
-                sandbox_policy=SandboxPolicy(
-                    root=ReadOnlySandboxPolicy(type="readOnly")
-                ),
+                sandbox=Sandbox.read_only,
                 output_schema=_SPEC_CRITIC_CLASSIFIER_OUTPUT_SCHEMA,
             )
             final_turn: Turn | None = None

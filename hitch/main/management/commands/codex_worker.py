@@ -41,7 +41,7 @@ import traceback
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO, Any, Protocol, cast, override
+from typing import IO, Any, Protocol, TypedDict, cast, override
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandParser
@@ -51,6 +51,7 @@ from openai_codex import (
     Codex,
     Input,
     LocalImageInput,
+    Sandbox,
     TextInput,
     Thread,
     TurnHandle,
@@ -512,11 +513,8 @@ def _run_turn(
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
     )
-    raw_effort = reasoning_effort.strip() if reasoning_effort else None
-    effort: ReasoningEffort | None = None
-    if raw_effort:
-        with contextlib.suppress(ValueError):
-            effort = ReasoningEffort(raw_effort)
+    normalized_effort = reasoning_effort.strip() if reasoning_effort else None
+    effort = ReasoningEffort(normalized_effort) if normalized_effort else None
     policy = _build_sandbox_policy(sandbox_policy)
     # Serialise writes between the SDK reader thread (which calls the
     # approval handler) and the main thread (which appends streamed turn
@@ -574,7 +572,7 @@ def _run_turn(
         # closes.
         nonlocal notification_order, goal_forwarder
         notification_order = _install_notification_sequencer(codex)
-        # The Codex top-level class instantiates its own AppServerClient
+        # The Codex top-level class instantiates its own CodexClient
         # without an ``approval_handler`` argument, so the only way to wire
         # an interactive callback is to swap the bound method on the client
         # after construction. The SDK's default handler unconditionally
@@ -608,7 +606,6 @@ def _run_turn(
                 input_image_paths=_instance_input_image_paths(instance),
                 model=model,
                 effort=effort,
-                raw_effort=raw_effort,
                 sandbox_policy=policy,
                 approval_mode=approval_mode,
                 collaboration_mode=collaboration_mode,
@@ -954,6 +951,25 @@ def _try_steer(
         return True
 
 
+def _sandbox_preset(sandbox_policy: SandboxPolicy) -> Sandbox:
+    """Translate Hitch's wire policy to the SDK's public turn preset."""
+    if isinstance(sandbox_policy.root, ReadOnlySandboxPolicy):
+        return Sandbox.read_only
+    if isinstance(sandbox_policy.root, WorkspaceWriteSandboxPolicy):
+        return Sandbox.workspace_write
+    if isinstance(sandbox_policy.root, DangerFullAccessSandboxPolicy):
+        return Sandbox.full_access
+    raise ValueError(f"unsupported sandbox policy: {sandbox_policy.root!r}")
+
+
+class _ThreadTurnKwargs(TypedDict, total=False):
+    approval_mode: ApprovalMode
+    effort: ReasoningEffort
+    model: str
+    output_schema: dict[str, Any]
+    sandbox: Sandbox
+
+
 def _start_turn(
     codex: Codex,
     thread: Thread,
@@ -962,7 +978,6 @@ def _start_turn(
     input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
-    raw_effort: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     collaboration_mode: str | None,
@@ -1000,26 +1015,12 @@ def _start_turn(
             input_image_paths=input_image_paths,
             model=model,
             effort=effort,
-            raw_effort=raw_effort,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
             output_schema=output_schema,
         )
     if collaboration_mode:
         raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
-
-    if raw_effort and effort is None:
-        return _start_raw_turn(
-            codex,
-            thread,
-            prompt=prompt,
-            input_image_paths=input_image_paths,
-            model=model,
-            effort=raw_effort,
-            sandbox_policy=sandbox_policy,
-            approval_mode=approval_mode,
-            output_schema=output_schema,
-        )
 
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         typed_input = _typed_turn_input(prompt, input_image_paths)
@@ -1040,58 +1041,19 @@ def _start_turn(
         response = codex._client.turn_start(thread.id, wire_input, params=params)
         return TurnHandle(codex._client, thread.id, response.turn.id)
 
-    turn_kwargs: dict[str, Any] = {}
+    turn_kwargs = _ThreadTurnKwargs()
+    mode = _build_approval_mode(approval_mode)
+    if mode is not None:
+        turn_kwargs["approval_mode"] = mode
     if effort is not None:
         turn_kwargs["effort"] = effort
     if model is not None:
         turn_kwargs["model"] = model
-    if sandbox_policy is not None:
-        turn_kwargs["sandbox_policy"] = sandbox_policy
     if output_schema is not None:
         turn_kwargs["output_schema"] = output_schema
-    mode = _build_approval_mode(approval_mode)
-    if mode is not None:
-        turn_kwargs["approval_mode"] = mode
-    return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
-
-
-def _start_raw_turn(
-    codex: Codex,
-    thread: Thread,
-    *,
-    prompt: str,
-    input_image_paths: list[str] | None,
-    model: str | None,
-    effort: str,
-    sandbox_policy: SandboxPolicy | None,
-    approval_mode: str | None,
-    output_schema: dict[str, Any] | None,
-) -> TurnHandle:
-    typed_input = _typed_turn_input(prompt, input_image_paths)
-    wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
-    params: dict[str, Any] = {
-        "threadId": thread.id,
-        "input": wire_input,
-        "effort": effort,
-    }
-    if model is not None:
-        params["model"] = model
     if sandbox_policy is not None:
-        params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
-    if output_schema is not None:
-        params["outputSchema"] = output_schema
-    if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
-        params["approvalPolicy"] = AskForApprovalValue.on_request.value
-        params["approvalsReviewer"] = ApprovalsReviewer.user.value
-    else:
-        mode = _build_approval_mode(approval_mode)
-        if mode is not None:
-            approval_policy, approvals_reviewer = _approval_mode_params(mode)
-            params["approvalPolicy"] = approval_policy
-            if approvals_reviewer is not None:
-                params["approvalsReviewer"] = approvals_reviewer
-    response = codex._client.turn_start(thread.id, wire_input, params=params)
-    return TurnHandle(codex._client, thread.id, response.turn.id)
+        turn_kwargs["sandbox"] = _sandbox_preset(sandbox_policy)
+    return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
 
 
 def _start_plan_turn(
@@ -1135,14 +1097,13 @@ def _start_default_collaboration_turn(
     input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
-    raw_effort: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("default collaboration mode requires a model")
-    effort_value = raw_effort or (effort.value if effort is not None else None)
+    effort_value = effort.value if effort is not None else None
     collaboration_mode = {
         "mode": ModeKind.default.value,
         "settings": {

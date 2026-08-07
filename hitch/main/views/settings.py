@@ -12,7 +12,7 @@ from django.http import (
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
-from openai_codex import AppServerError
+from openai_codex import CodexError
 
 from hitch.main import caches
 from hitch.main import repos as repos_module
@@ -125,9 +125,9 @@ def _associate_existing_sessions_with_project(project: Project, request: HttpReq
             threads = common._all_threads(codex)
             try:
                 threads.extend(common._all_threads(codex, archived=True))
-            except AppServerError:
+            except CodexError:
                 common.logger.warning("failed to list archived sessions while creating project")
-    except AppServerError:
+    except CodexError:
         common.logger.warning("failed to list sessions while creating project")
         return
     hidden_thread_ids = system_agents.hidden_thread_ids()

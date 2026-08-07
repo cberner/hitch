@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from django.test import TestCase
 from django.utils import timezone
-from openai_codex import AppServerError, Codex
+from openai_codex import Codex, CodexError
 
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
 from hitch.main.sessions import session_index
@@ -214,7 +214,7 @@ class SessionIndexRefreshTests(TestCase):
     def test_active_window_failure_keeps_cursor_and_reports_failed(self) -> None:
         # A failed window must not advance: it reports failed and hands back the
         # start cursor so the scheduler retries the same spot next tick.
-        thread_list = MagicMock(side_effect=AppServerError("thread list down"))
+        thread_list = MagicMock(side_effect=CodexError("thread list down"))
         codex = cast(Codex, SimpleNamespace(thread_list=thread_list))
 
         result = session_index.refresh_active_window(

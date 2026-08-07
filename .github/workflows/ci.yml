@@ -67,19 +67,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Install codex
-        # Match the `openai-codex` Python SDK in pyproject.toml: the
-        # app-server protocol is versioned, so SDK and CLI must come from the
-        # same release. Use the version declared in `sdk/python/pyproject.toml`
-        # at the pinned git tag (PEP 440 `X.Y.ZaN` ↔ npm `X.Y.Z-alpha.N`);
-        # this can lag the Rust crate tag name the SDK pin is taken from.
-        run: npm install -g @openai/codex@0.131.0-alpha.4
-
       - name: Cache ollama models
         uses: actions/cache@v4
         with:

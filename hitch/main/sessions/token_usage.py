@@ -20,7 +20,7 @@ from typing import Any, NamedTuple
 
 from django.db import close_old_connections, transaction
 from django.utils import timezone
-from openai_codex import AppServerError, Codex
+from openai_codex import Codex, CodexError
 from openai_codex.errors import InvalidRequestError
 
 from hitch.main import formatting
@@ -750,7 +750,7 @@ def _refresh_missing_usage_metadata_path(
     observed_at = timezone.now()
     try:
         resumed = codex._client.thread_resume(thread_id)
-    except (AppServerError, InvalidRequestError):
+    except (CodexError, InvalidRequestError):
         logger.warning("failed to refresh usage metadata for %s", thread_id)
         return None
     except Exception:

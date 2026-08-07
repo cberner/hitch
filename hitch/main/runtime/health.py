@@ -59,8 +59,8 @@ _SEVERITY_LABEL = {
 
 # A running/starting turn legitimately owns ~1 app-server, plus a warm pool
 # bounded by app_server_pool._SHARED_POOL_MAX, so only flag a surplus beyond that
-# healthy ceiling as a likely leak. (The app-server count is now per logical
-# app-server, not the doubled node-wrapper + native-child pid pair.)
+# healthy ceiling as a likely leak. (The app-server count is per logical
+# app-server, including when a legacy wrapper/native pair is present.)
 _APP_SERVER_LEAK_WARN = app_server_pool._SHARED_POOL_MAX + 2
 _APP_SERVER_LEAK_DANGER = app_server_pool._SHARED_POOL_MAX + 5
 # A turn still "running" after this long is almost certainly a leaked row whose

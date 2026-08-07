@@ -15,7 +15,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from django.utils import timezone
 from openai_codex import Codex
-from openai_codex.errors import AppServerError
+from openai_codex.errors import CodexError
 
 from hitch.main import caches, demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
@@ -1911,7 +1911,7 @@ class SessionViewTests(TestCase):
         thread = _thread([_turn([_user_message("hi")])])
         _patch_thread(self, mock_codex, thread)
         client = mock_codex.return_value.__enter__.return_value
-        client.thread_list.side_effect = AppServerError("archived list unavailable")
+        client.thread_list.side_effect = CodexError("archived list unavailable")
 
         response = _get_session(self.client)
 

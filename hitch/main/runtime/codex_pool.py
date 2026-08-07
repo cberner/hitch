@@ -36,7 +36,7 @@ from typing import Any, BinaryIO, TypeVar, cast
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from openai_codex import AppServerConfig, Codex
+from openai_codex import Codex, CodexConfig
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
@@ -777,14 +777,13 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
     """Stop one worker, escalating SIGTERM → SIGKILL on a second click.
 
     The first Stop request sends SIGTERM to the worker (not its group).
-    The worker's signal handler defers to a flag the stream loop checks
-    between events; on observing it, the loop calls the SDK's
-    ``turn.interrupt()`` — a graceful cancellation that lets the
-    app-server emit remaining events (notably a ``turn/completed`` with
-    status ``interrupted``) before the worker writes its own terminal
-    row status. The row's ``interrupt_requested_at`` is set so we can
-    tell, on a subsequent click, that polite cancellation was already
-    attempted.
+    The worker's signal handler wakes a dedicated control thread, which calls
+    the SDK's ``turn.interrupt()`` independently of the event stream. That is a
+    graceful cancellation that lets the app-server emit remaining events
+    (notably a ``turn/completed`` with status ``interrupted``) before the
+    worker writes its own terminal row status. The row's
+    ``interrupt_requested_at`` is set so we can tell, on a subsequent click,
+    that polite cancellation was already attempted.
 
     A second click on the still-active row escalates: we send SIGKILL
     to the process group, taking down both the worker and its codex
@@ -1277,19 +1276,9 @@ def _prune_empty_attachment_dirs(path: Path, root: Path) -> None:
         path = path.parent
 
 
-def _codex_bin() -> str | None:
-    """Resolve the ``codex`` binary path for AppServerConfig.
-
-    Returning None lets AppServerConfig fall back to the pinned runtime
-    package; we prefer an explicit PATH lookup so dev environments with a
-    locally-built codex pick that up.
-    """
-    return shutil.which("codex")
-
-
 # Codex's native env var for relocating its SQLite databases away from
 # ``$CODEX_HOME`` (state/src/lib.rs SQLITE_HOME_ENV). The SDK merges
-# ``AppServerConfig.env`` onto the inherited environment, so setting it here is
+# ``CodexConfig.env`` onto the inherited environment, so setting it here is
 # authoritative for the app-server we spawn.
 _CODEX_SQLITE_HOME_ENV = "CODEX_SQLITE_HOME"
 
@@ -1411,7 +1400,7 @@ def app_server_config(
     enable_memories: bool = False,
     web_search_mode: str | None = None,
     sqlite_home: str | os.PathLike[str] | None = None,
-) -> AppServerConfig:
+) -> CodexConfig:
     memory_value = "true" if enable_memories else "false"
     overrides = [f"features.memories={memory_value}"]
     web_search_mode = _normalized_web_search_mode(web_search_mode)
@@ -1426,8 +1415,7 @@ def app_server_config(
     resolved_home = sqlite_home if sqlite_home is not None else _default_sqlite_home()
     if resolved_home is not None:
         env[_CODEX_SQLITE_HOME_ENV] = os.fspath(resolved_home)
-    return AppServerConfig(
-        codex_bin=_codex_bin(),
+    return CodexConfig(
         config_overrides=tuple(overrides),
         env=env,
     )

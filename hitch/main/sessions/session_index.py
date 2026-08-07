@@ -10,7 +10,7 @@ from typing import Any, NamedTuple
 
 from django.db.models import Q, QuerySet
 from django.utils import timezone
-from openai_codex import AppServerError, Codex
+from openai_codex import Codex, CodexError
 from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
 
 from hitch.main.models import Project, SessionIndexSyncState, SessionMetadata
@@ -146,7 +146,7 @@ def refresh_from_codex(
                 archived_next_cursor = source_result.next_cursor
             else:
                 active_next_cursor = source_result.next_cursor
-        except AppServerError:
+        except CodexError:
             failed = True
             logger.warning("failed to refresh %s session index", "archived" if archived else "active")
     return RefreshResult(
@@ -189,7 +189,7 @@ def refresh_active_window(
             max_pages=max_pages,
             start_cursor=start_cursor or None,
         )
-    except AppServerError:
+    except CodexError:
         logger.warning("failed to refresh active session index window")
         return ActiveWindowResult(
             synced=0, next_cursor=start_cursor, complete=False, failed=True

@@ -22,7 +22,7 @@ from typing import Any, cast, override
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from openai_codex import AppServerError, Codex
+from openai_codex import Codex, CodexError
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
 from hitch.main.goals.autonomous_goal_prompts import (
@@ -327,7 +327,7 @@ def _auto_proposals_paused_by_usage_quota() -> bool:
                 None,
                 response_model=GetAccountRateLimitsResponse,
             )
-    except AppServerError:
+    except CodexError:
         return False
     except Exception:
         system_agents.logger.exception(
