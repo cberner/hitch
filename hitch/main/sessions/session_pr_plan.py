@@ -14,6 +14,8 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from django.db.models import Q
+
 from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
 from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_for
@@ -129,6 +131,7 @@ def _workflow_after_main_lifecycle(
     pr_observation: codex_events.PrObservationResult,
     *,
     main_updated_at: Any = None,
+    newer_main_activity_owned: bool,
 ) -> SystemWorkflow | None:
     """Keep completed PR workflows only when main work has not superseded them."""
     if workflow is None or workflow.is_active:
@@ -137,6 +140,7 @@ def _workflow_after_main_lifecycle(
         if _workflow_pr_handoff_survives_lifecycle(
             workflow,
             main_updated_at=main_updated_at,
+            newer_main_activity_owned=newer_main_activity_owned,
         ):
             return workflow
         return None
@@ -147,6 +151,8 @@ def _workflow_after_main_lifecycle(
         and workflow_updated_seconds is not None
         and main_updated_seconds > workflow_updated_seconds
     )
+    if main_is_newer and newer_main_activity_owned:
+        return workflow
     if main_is_newer and _pr_snapshot_identity(pr_observation.snapshot) is not None:
         return None
     if pr_observation.snapshot is None and main_is_newer:
@@ -158,13 +164,9 @@ def _workflow_pr_handoff_survives_lifecycle(
     workflow: SystemWorkflow,
     *,
     main_updated_at: Any,
+    newer_main_activity_owned: bool,
 ) -> bool:
-    handoff = pr_qa.pr_handoff_for_workflow(workflow)
-    handoff_identity = _pr_snapshot_identity(handoff)
-    if handoff_identity is None:
-        return False
-    hitch_handoff = pr_stage_refresh_state.hitch_pr_handoff_for_workflow(workflow)
-    if _pr_snapshot_identity(hitch_handoff) != handoff_identity:
+    if not _workflow_has_durable_pr_handoff(workflow):
         return False
     main_updated_seconds = updated_at_seconds(main_updated_at)
     workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
@@ -172,7 +174,92 @@ def _workflow_pr_handoff_survives_lifecycle(
         main_updated_seconds is None
         or workflow_updated_seconds is None
         or workflow_updated_seconds >= main_updated_seconds
+        or newer_main_activity_owned
     )
+
+
+def _workflow_has_durable_pr_handoff(workflow: SystemWorkflow) -> bool:
+    handoff = pr_qa.pr_handoff_for_workflow(workflow)
+    handoff_identity = _pr_snapshot_identity(handoff)
+    if handoff_identity is None:
+        return False
+    hitch_handoff = pr_stage_refresh_state.hitch_pr_handoff_for_workflow(workflow)
+    return _pr_snapshot_identity(hitch_handoff) == handoff_identity
+
+
+def _workflow_activity_ownership_by_id(
+    workflow_main_updates: Iterable[tuple[SystemWorkflow | None, Any]],
+) -> dict[int, bool]:
+    """Batch ownership checks for workflow-newer session recency.
+
+    Session recency tracks every worker lifecycle. A failure-surfacing worker
+    can therefore end just after its workflow becomes terminal, even though no
+    later user turn superseded the workflow's durable PR handoff. Collect every
+    ambiguous workflow into one query so session-list and detail rendering do
+    not perform this lookup once per workflow.
+    """
+    candidates: dict[int, tuple[SystemWorkflow, float, float]] = {}
+    for workflow, main_updated_at in workflow_main_updates:
+        if workflow is None or workflow.pk is None or workflow.is_active:
+            continue
+        main_updated_seconds = updated_at_seconds(main_updated_at)
+        workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
+        if (
+            main_updated_seconds is None
+            or workflow_updated_seconds is None
+            or main_updated_seconds <= workflow_updated_seconds
+            or not _workflow_has_durable_pr_handoff(workflow)
+        ):
+            continue
+        previous = candidates.get(workflow.pk)
+        if previous is None or main_updated_seconds > previous[1]:
+            candidates[workflow.pk] = (
+                workflow,
+                main_updated_seconds,
+                workflow_updated_seconds,
+            )
+    if not candidates:
+        return {}
+
+    candidates_by_thread: dict[str, list[tuple[SystemWorkflow, float, float]]] = {}
+    for candidate in candidates.values():
+        workflow = candidate[0]
+        candidates_by_thread.setdefault(workflow.main_thread_id, []).append(candidate)
+
+    earliest_workflow_updated_at = min(
+        workflow.updated_at for workflow, _, _ in candidates.values()
+    )
+    instances = CodexInstance.objects.filter(
+        Q(started_at__gt=earliest_workflow_updated_at)
+        | Q(ended_at__gt=earliest_workflow_updated_at),
+        thread_id__in=candidates_by_thread.keys(),
+    ).only(
+        "thread_id", "workflow_id", "started_at", "ended_at"
+    )
+    owned_activity_reaches_main_update: set[int] = set()
+    unrelated_activity_after_workflow: set[int] = set()
+    for instance in instances:
+        activity_seconds = max(
+            updated_at_seconds(instance.started_at) or 0,
+            updated_at_seconds(instance.ended_at) or 0,
+        )
+        for workflow, main_updated_seconds, workflow_updated_seconds in (
+            candidates_by_thread.get(instance.thread_id, [])
+        ):
+            assert workflow.pk is not None
+            if activity_seconds <= workflow_updated_seconds:
+                continue
+            if instance.workflow_id != workflow.pk:
+                unrelated_activity_after_workflow.add(workflow.pk)
+            elif activity_seconds >= main_updated_seconds:
+                owned_activity_reaches_main_update.add(workflow.pk)
+    return {
+        workflow_id: (
+            workflow_id in owned_activity_reaches_main_update
+            and workflow_id not in unrelated_activity_after_workflow
+        )
+        for workflow_id in candidates
+    }
 
 
 def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
@@ -295,10 +382,20 @@ def _current_pr_url_for_thread(
 
 def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
     pr_observation = _pr_observation_result_for_thread(thread)
+    main_updated_at = getattr(thread, "updated_at", None)
+    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
+    activity_ownership = _workflow_activity_ownership_by_id(
+        [(latest_pr_workflow, main_updated_at)]
+    )
     stage_pr_workflow = _workflow_after_main_lifecycle(
-        pr_stage._latest_pr_workflow_for_thread(session_id),
+        latest_pr_workflow,
         pr_observation,
-        main_updated_at=getattr(thread, "updated_at", None),
+        main_updated_at=main_updated_at,
+        newer_main_activity_owned=bool(
+            latest_pr_workflow is not None
+            and latest_pr_workflow.pk is not None
+            and activity_ownership.get(latest_pr_workflow.pk)
+        ),
     )
     return _current_pr_url_for_thread(
         thread,

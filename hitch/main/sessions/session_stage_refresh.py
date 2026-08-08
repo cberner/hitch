@@ -39,6 +39,7 @@ from hitch.main.sessions import session_stage
 from hitch.main.sessions.session_pr_plan import (
     _pr_observation_result_for_rollout_path,
     _pr_snapshot_identity,
+    _workflow_activity_ownership_by_id,
     _workflow_after_main_lifecycle,
 )
 from hitch.main.workflows import pr_qa, pr_stage
@@ -112,10 +113,19 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     rollout_path = rollout_state.path if rollout_state is not None else None
     pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
     main_updated_at = metadata.codex_updated_at if metadata is not None else None
+    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
+    activity_ownership = _workflow_activity_ownership_by_id(
+        [(latest_pr_workflow, main_updated_at)]
+    )
     stage_pr_workflow = _workflow_after_main_lifecycle(
-        pr_stage._latest_pr_workflow_for_thread(session_id),
+        latest_pr_workflow,
         pr_observation,
         main_updated_at=main_updated_at,
+        newer_main_activity_owned=bool(
+            latest_pr_workflow is not None
+            and latest_pr_workflow.pk is not None
+            and activity_ownership.get(latest_pr_workflow.pk)
+        ),
     )
     if (
         stage_pr_workflow is not None
@@ -150,6 +160,14 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         session["id"] for session in sessions if isinstance(session.get("id"), str)
     ]
     workflows_by_thread_id = pr_stage._latest_stage_workflows_by_thread_id(thread_ids)
+    activity_ownership = _workflow_activity_ownership_by_id(
+        (
+            workflows_by_thread_id.get(session["id"]),
+            session.get("stage_main_updated_at"),
+        )
+        for session in sessions
+        if isinstance(session.get("id"), str)
+    )
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
     waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
@@ -190,6 +208,11 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             workflow,
             pr_observation,
             main_updated_at=session.get("stage_main_updated_at"),
+            newer_main_activity_owned=bool(
+                workflow is not None
+                and workflow.pk is not None
+                and activity_ownership.get(workflow.pk)
+            ),
         )
         if (
             active_instance is None

@@ -29,8 +29,9 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_pool
+from hitch.main.runtime import codex_events, codex_pool
 from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions import session_pr_plan
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
     _make_model,
@@ -2571,6 +2572,187 @@ class SendMessageViewTests(TestCase):
             initial_user_message_index=1,
             lifecycle_lock_held=True,
         )
+
+    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_fix_pr_slash_keeps_handoff_after_workflow_owned_failure_activity(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_monitor: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/594"
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Ready."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        workflow_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+        failure_ended_at = workflow_updated_at + timedelta(milliseconds=25)
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_created_at=workflow_updated_at - timedelta(minutes=10),
+            codex_updated_at=failure_ended_at,
+        )
+        handoff = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 594,
+            "state": "open",
+        }
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=workflow_updated_at
+        )
+        failure = CodexInstance.objects.create(
+            pid=0,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Hitch PR workflow could not complete.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_FAILED,
+            ended_at=failure_ended_at,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+        CodexInstance.objects.filter(pk=failure.pk).update(
+            started_at=workflow_updated_at + timedelta(milliseconds=1)
+        )
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_start_monitor.call_args.kwargs["pr_url"], pr_url)
+        mock_codex.assert_not_called()
+
+    def test_workflow_activity_ownership_uses_bounded_batch_query(
+        self,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/594"
+        workflow_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+        main_updated_at = workflow_updated_at + timedelta(seconds=1)
+        handoff = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 594,
+        }
+        owned_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="owned",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
+        )
+        unrelated_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="unrelated",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
+        )
+        extra_workflows = SystemWorkflow.objects.bulk_create(
+            [
+                SystemWorkflow(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id=f"extra-{index}",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_BLOCKED,
+                    step=system_agents.STEP_BLOCKED,
+                    state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
+                )
+                for index in range(1_000)
+            ]
+        )
+        assert owned_workflow.pk is not None
+        assert unrelated_workflow.pk is not None
+        assert extra_workflows[-1].pk is not None
+        workflows = [owned_workflow, unrelated_workflow, *extra_workflows]
+        SystemWorkflow.objects.all().update(
+            updated_at=workflow_updated_at,
+        )
+        for workflow in workflows:
+            workflow.updated_at = workflow_updated_at
+        owned_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="owned",
+            cwd="/repo",
+            prompt="Hitch PR workflow could not complete.",
+            events_path="/tmp/owned-events.jsonl",
+            status=CodexInstance.STATUS_FAILED,
+            ended_at=main_updated_at,
+            workflow_id=owned_workflow.pk,
+        )
+        unrelated_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="unrelated",
+            cwd="/repo",
+            prompt="Do unrelated work",
+            events_path="/tmp/unrelated-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            ended_at=main_updated_at,
+        )
+        CodexInstance.objects.filter(
+            pk__in=[owned_instance.pk, unrelated_instance.pk]
+        ).update(
+            started_at=workflow_updated_at + timedelta(milliseconds=1)
+        )
+
+        with self.assertNumQueries(1):
+            activity_ownership = session_pr_plan._workflow_activity_ownership_by_id(
+                [(workflow, main_updated_at) for workflow in workflows]
+            )
+
+        self.assertTrue(activity_ownership[owned_workflow.pk])
+        self.assertFalse(activity_ownership[unrelated_workflow.pk])
+        self.assertFalse(activity_ownership[extra_workflows[-1].pk])
+        owned_current = session_pr_plan._workflow_after_main_lifecycle(
+            owned_workflow,
+            codex_events.PrObservationResult(snapshot=handoff),
+            main_updated_at=main_updated_at,
+            newer_main_activity_owned=activity_ownership[owned_workflow.pk],
+        )
+        current = session_pr_plan._workflow_after_main_lifecycle(
+            unrelated_workflow,
+            codex_events.PrObservationResult(
+                snapshot=None,
+                superseded_by_lifecycle=True,
+            ),
+            main_updated_at=main_updated_at,
+            newer_main_activity_owned=activity_ownership[unrelated_workflow.pk],
+        )
+
+        self.assertEqual(owned_current, owned_workflow)
+        self.assertIsNone(current)
 
     @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
