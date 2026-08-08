@@ -106,6 +106,7 @@ from hitch.main.sessions.session_pr_plan import (
     _mark_pending_plan_actions,
     _pr_observation_result_for_thread,
     _thread_plan_mode_state,
+    _workflow_activity_ownership_by_id,
     _workflow_after_main_lifecycle,
 )
 from hitch.main.sessions.session_resume import (
@@ -566,11 +567,31 @@ def _render_session_detail(
         else latest_pr_workflow
     )
     main_updated_at = getattr(thread, "updated_at", None)
+    activity_ownership = _workflow_activity_ownership_by_id(
+        [
+            (stage_workflow, main_updated_at),
+            (stage_pr_workflow, main_updated_at),
+        ]
+    )
     stage_workflow = _workflow_after_main_lifecycle(
-        stage_workflow, pr_observation, main_updated_at=main_updated_at
+        stage_workflow,
+        pr_observation,
+        main_updated_at=main_updated_at,
+        newer_main_activity_owned=bool(
+            stage_workflow is not None
+            and stage_workflow.pk is not None
+            and activity_ownership.get(stage_workflow.pk)
+        ),
     )
     stage_pr_workflow = _workflow_after_main_lifecycle(
-        stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
+        stage_pr_workflow,
+        pr_observation,
+        main_updated_at=main_updated_at,
+        newer_main_activity_owned=bool(
+            stage_pr_workflow is not None
+            and stage_pr_workflow.pk is not None
+            and activity_ownership.get(stage_pr_workflow.pk)
+        ),
     )
     pr_url = _current_pr_url_for_thread(
         thread,
