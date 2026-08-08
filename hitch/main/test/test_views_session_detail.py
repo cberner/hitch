@@ -2343,13 +2343,56 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
-    def test_active_session_detail_renders_pending_when_rollout_resume_not_ready(
+    def test_active_session_detail_renders_pending_when_resume_unavailable(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                *_basic_session_rollout_lines("Previous prompt", "Previous answer"),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _token_count_line(
+                    input_tokens=100,
+                    cached_input_tokens=20,
+                    output_tokens=30,
+                    total_tokens=130,
+                ),
+            ],
+        )
         SessionMetadata.objects.create(
             thread_id="pending-rollout",
             cwd="/repo",
-            codex_path="/root/.codex/sessions/rollout-pending-rollout.jsonl",
+            codex_path=str(rollout_path),
             codex_preview="First prompt",
             codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
         )
@@ -2378,6 +2421,11 @@ class SessionDetailFastPathTests(TestCase):
                 "no rollout found for thread id pending-rollout",
                 None,
             ),
+            InvalidRequestError(
+                -32600,
+                "thread pending-rollout already has an active writer",
+                None,
+            ),
         )
 
         with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
@@ -2390,8 +2438,37 @@ class SessionDetailFastPathTests(TestCase):
 
                     self.assertEqual(response.status_code, 200)
                     self.assertContains(response, "First prompt")
+                    self.assertContains(response, "Previous prompt")
+                    self.assertContains(response, "Previous answer")
+                    self.assertContains(response, f'href="{pr_url}"')
+                    self.assertContains(
+                        response,
+                        '<span class="usage-label">in</span>'
+                        '<span class="usage-value">80</span>',
+                    )
+                    self.assertContains(
+                        response,
+                        '<span class="usage-label">out</span>'
+                        '<span class="usage-value">30</span>',
+                    )
                     self.assertContains(response, "data-live-root")
         self.assertEqual(client._client.thread_resume.call_count, len(errors))
+
+    @patch("hitch.main.views.common.Codex")
+    def test_inactive_session_detail_propagates_active_writer_error(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = InvalidRequestError(
+            -32600,
+            "thread inactive already has an active writer",
+            None,
+        )
+
+        with self.assertRaises(InvalidRequestError):
+            self.client.get(reverse("session", kwargs={"session_id": "inactive"}))
+
+        client._client.thread_resume.assert_called_once_with("inactive")
 
 
 class PendingSessionResumeTests(SimpleTestCase):
@@ -2447,7 +2524,11 @@ class PendingSessionResumeTests(SimpleTestCase):
 
     def test_uses_active_instance_fallback_metadata(self) -> None:
         started_at = datetime(2025, 1, 5, tzinfo=UTC)
-        metadata = SessionMetadata(thread_id="pending-rollout", cwd="/metadata")
+        metadata = SessionMetadata(
+            thread_id="pending-rollout",
+            cwd="/metadata",
+            codex_path="/metadata/rollout.jsonl",
+        )
         active_instance = CodexInstance(
             pid=1,
             thread_id="pending-rollout",
@@ -2469,6 +2550,7 @@ class PendingSessionResumeTests(SimpleTestCase):
         self.assertIsNotNone(resumed)
         assert resumed is not None
         self.assertEqual(resumed.thread.cwd, "/metadata")
+        self.assertEqual(resumed.thread.path, "/metadata/rollout.jsonl")
         self.assertEqual(resumed.thread.preview, "First prompt")
         self.assertEqual(resumed.thread.updated_at, started_at.timestamp())
         self.assertEqual(resumed.model, "gpt-5.5")

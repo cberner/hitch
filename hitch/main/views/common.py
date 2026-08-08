@@ -469,7 +469,10 @@ def _render_session_detail(
             try:
                 resumed = codex._client.thread_resume(session_id)
             except (InternalRpcError, InvalidRequestError) as exc:
-                if not require_system_agent_thread and _thread_resume_rollout_pending(exc):
+                if (
+                    not require_system_agent_thread
+                    and _thread_resume_temporarily_unavailable(exc)
+                ):
                     pending_resume = _pending_resume_for_active_session(
                         session_id,
                         metadata,
@@ -478,7 +481,8 @@ def _render_session_detail(
                     )
                     if pending_resume is not None:
                         logger.warning(
-                            "rendering pending session detail while rollout is not readable: %s",
+                            "rendering pending session detail while resume is temporarily "
+                            "unavailable: %s",
                             session_id,
                         )
                         models_data = caches._cached_models_for_session_detail(
@@ -902,12 +906,13 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
         )
     )
 
-def _thread_resume_rollout_pending(
+def _thread_resume_temporarily_unavailable(
     exc: InternalRpcError | InvalidRequestError,
 ) -> bool:
     message = exc.message.lower()
     return (
         "no rollout found for thread id" in message
+        or "already has an active writer" in message
         or (
             "failed to read thread" in message
             and "rollout at " in message
