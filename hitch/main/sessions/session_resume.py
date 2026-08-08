@@ -262,7 +262,7 @@ def _pending_resume_for_active_session(
     thread = _MetadataThread(
         id=session_id,
         cwd=cwd,
-        path="",
+        path=metadata.codex_path if metadata is not None else "",
         name=metadata.codex_name if metadata is not None else "",
         preview=preview,
         created_at=(
