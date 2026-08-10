@@ -143,6 +143,28 @@ class ReviewOutputTests(TestCase):
             expected,
         )
 
+    def test_ignores_unreadable_and_unrelated_review_output(self) -> None:
+        missing_path = _write_rollout([])
+        missing_path.unlink()
+        self.assertIsNone(
+            rollout.review_output_for_turn(missing_path, turn_id="review-turn-1")
+        )
+
+        path = _write_rollout(
+            [
+                _line("response_item", {}),
+                _line("event_msg", {"type": "other"}),
+                _line(
+                    "event_msg",
+                    {"type": "exited_review_mode", "turn_id": "other-turn"},
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+        self.assertIsNone(
+            rollout.review_output_for_turn(path, turn_id="review-turn-1")
+        )
+
 
 class LatestPrUrlTests(TestCase):
     @override

@@ -7045,6 +7045,28 @@ class CodexWorkerCommandTests(TestCase):
             ("parent-thread", "review-turn-1"),
         )
 
+    def test_native_review_output_fails_closed_without_thread_path(self) -> None:
+        client = MagicMock()
+        client.thread_read.return_value = SimpleNamespace(
+            thread=SimpleNamespace(path="")
+        )
+        codex = cast(Codex, SimpleNamespace(_client=client))
+
+        self.assertIsNone(
+            codex_worker_module._native_review_output(
+                codex, thread_id="parent-thread", turn_id="review-turn-1"
+            )
+        )
+
+        client.thread_read.side_effect = RuntimeError("thread unavailable")
+        with patch.object(codex_worker_module.logger, "exception") as log_exception:
+            self.assertIsNone(
+                codex_worker_module._native_review_output(
+                    codex, thread_id="parent-thread", turn_id="review-turn-1"
+                )
+            )
+        log_exception.assert_called_once()
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_qa_feedback_worker_uses_ordinary_coding_turn(
         self, mock_codex: MagicMock
