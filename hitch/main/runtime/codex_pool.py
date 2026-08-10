@@ -2202,6 +2202,10 @@ def _systemd_scope_argv(
         argv.append(f"--property=StandardError=append:{stderr_log_path}")
     else:
         argv.append("--property=StandardError=null")
+    # A command may legitimately hit the worker's cgroup limit (native builds
+    # are a common example). Keep Codex alive after the kernel kills the
+    # offending child so it can observe the failed command and recover.
+    argv.append("--property=OOMPolicy=continue")
     argv.extend(
         f"--property={property_value}"
         for property_value in systemd_isolation._memory_cgroup_properties(

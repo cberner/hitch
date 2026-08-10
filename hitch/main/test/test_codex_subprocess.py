@@ -1317,6 +1317,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         self.assertIn(
             f"--property=StandardError=append:{Path(raw) / '7.log'}", argv
         )
+        # A child command crossing MemoryMax should fail without systemd
+        # tearing down Codex and losing the entire turn.
+        self.assertIn("--property=OOMPolicy=continue", argv)
         # MemoryHigh/MemoryMax are silently ignored on hosts that do not
         # default to memory accounting, so the service must opt in explicitly —
         # otherwise the per-worker cap would not actually bound the worker.
