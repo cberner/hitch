@@ -25,7 +25,7 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import disk_cleanup
 from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
-from hitch.main.sessions.session_pr_plan import _PR_SLASH_PROMPT
+from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.settings_cookies import (
     _DEFAULT_APPROVAL_MODE,
     _EFFORT_COOKIE,
@@ -123,7 +123,7 @@ def _new_session_form_context(
             current_settings.web_search_mode
         ),
         "input_image_accept": _INPUT_IMAGE_ACCEPT,
-        "pr_slash_prompt": _PR_SLASH_PROMPT,
+        "pr_slash_prompt": PR_SLASH_DISPLAY_PROMPT,
         "qa_slash_prompt": _QA_SLASH_PROMPT,
     }
 

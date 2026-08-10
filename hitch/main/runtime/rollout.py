@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from hitch.main.runtime import codex_events
+from hitch.main.sessions.pr_prompts import is_pr_creation_prompt, is_pr_workflow_notice
 
 logger = logging.getLogger(__name__)
 
@@ -47,59 +48,6 @@ _GITHUB_PR_TOOL_RE = re.compile(
 )
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
-)
-_PR_PROMPT_ALIASES = frozenset(
-    {
-        "/pr",
-        "Rebase on the default branch, clean it up, and then open a PR",
-        "Rebase on the repository's default branch, clean it up, and then open a PR",
-        "Rebase on master, clean it up, and then open a PR",
-        "Polish it, get it ready, and open or update the PR.",
-        (
-            "Rebase on the default branch, polish it, get it ready, "
-            "and commit the final changes. Do not push the branch or open a PR; "
-            "Hitch will push and open it after this turn completes."
-        ),
-        (
-            "Rebase on the repository's default branch, polish it, get it ready, "
-            "and commit the final changes. Do not push the branch or open a PR; "
-            "Hitch will push and open it after this turn completes."
-        ),
-        (
-            "Rebase on master, polish it, get it ready, and commit the final changes. "
-            "Do not push the branch or open a PR; Hitch will push and open it "
-            "after this turn completes."
-        ),
-        (
-            "Polish it, get it ready, and commit the final changes. "
-            "Do not push the branch or open a PR; Hitch will push and open it "
-            "after this turn completes."
-        ),
-        (
-            "Polish it, get it ready, commit the final changes, and push the branch. "
-            "Do not open a PR; Hitch will open it after this turn completes."
-        ),
-        (
-            "Do a thorough review of the diff. Rebase on master, clean it up, "
-            "and then open a PR"
-        ),
-        (
-            "Do a thorough review of the diff. Rebase on master, clean it up, "
-            "and then open a PR. After opening it, poll the PR every 2 minutes "
-            "until you have CI status and at least one review signal: code review "
-            "comments, a thumbs up emoji on the PR, or an explicit review approval. "
-            "On each poll, check whether the PR has merge conflicts. Address CI "
-            "failures, review comments, merge conflicts, and any other blocking issues; "
-            "push fixes and keep looping until CI, review, and mergeability are all clean. "
-            "Stop and report back if any single polling iteration has no results after "
-            "30 minutes."
-        ),
-    }
-)
-_PR_WORKFLOW_PROMPT_PREFIXES = (
-    "Hitch QA agent could not complete the PR workflow.",
-    "Hitch PR workflow could not complete.",
-    "Hitch PR monitor found follow-up work on the active PR.",
 )
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _COLLABORATION_MODE_PLAN = "plan"
@@ -854,15 +802,6 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
     return payload.get("type") == "user_message"
 
 
-def _is_pr_creation_prompt(text: str) -> bool:
-    return text.strip() in _PR_PROMPT_ALIASES
-
-
-def _is_pr_workflow_prompt(text: str) -> bool:
-    text = text.strip()
-    return any(text.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES)
-
-
 def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     calls: dict[str, dict[str, Any]] = {}
     for entry in lines:
@@ -882,7 +821,7 @@ def _turn_is_pr_creation_prompt(turn_lines: list[dict[str, Any]]) -> bool:
         if not _is_user_message_line(entry):
             continue
         payload = entry.get("payload") or {}
-        return _is_pr_creation_prompt(_user_message_text(payload))
+        return is_pr_creation_prompt(_user_message_text(payload))
     return False
 
 
@@ -891,7 +830,7 @@ def _turn_is_pr_workflow_notice(turn_lines: list[dict[str, Any]]) -> bool:
         if not _is_user_message_line(entry):
             continue
         payload = entry.get("payload") or {}
-        return _is_pr_workflow_prompt(_user_message_text(payload))
+        return is_pr_workflow_notice(_user_message_text(payload))
     return False
 
 

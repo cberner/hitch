@@ -39,6 +39,7 @@ from hitch.main.sessions.message_intent import (
     _is_qa_activation,
     _message_intent,
 )
+from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
@@ -46,7 +47,6 @@ from hitch.main.sessions.session_entry_display import (
     _entries_for,
 )
 from hitch.main.sessions.session_pr_plan import (
-    _PR_SLASH_PROMPT,
     _count_user_entries,
 )
 from hitch.main.sessions.session_settings import (
@@ -956,7 +956,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             thread_name = proposed_session.title
         else:
             thread_name = (
-                _PR_SLASH_PROMPT
+                PR_SLASH_DISPLAY_PROMPT
                 if pr_activation or pr_now_activation
                 else _QA_SLASH_PROMPT
             )
