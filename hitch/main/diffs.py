@@ -19,6 +19,8 @@ DiffLineKind = Literal["add", "remove", "context", "hunk", "meta"]
 
 _GIT_TIMEOUT_SECONDS = 3
 _MAX_DIFF_CHARS = 500_000
+# Highlighting and table markup can expand raw diff lines several-fold.
+_MAX_DIFF_PREVIEW_LINES = 1_000
 _MAX_UNTRACKED_FILES = 25
 _MAX_UNTRACKED_FILE_BYTES = 200_000
 _HUNK_RE = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
@@ -94,6 +96,11 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     truncated = len(text) > _MAX_DIFF_CHARS
     if truncated:
         text = text[:_MAX_DIFF_CHARS]
+    lines = _split_diff_lines(text)
+    if len(lines) > _MAX_DIFF_PREVIEW_LINES:
+        lines = lines[:_MAX_DIFF_PREVIEW_LINES]
+        truncated = True
+    text = "\n".join(lines)
     return _parse_unified_diff(text, truncated=truncated)
 
 
