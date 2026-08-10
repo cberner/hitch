@@ -37,7 +37,13 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from openai_codex import Codex, CodexConfig
-from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
+from openai_codex.generated.v2_all import (
+    ApprovalsReviewer,
+    AskForApprovalValue,
+    SandboxMode,
+    ThreadSource,
+    WebSearchMode,
+)
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
@@ -54,6 +60,18 @@ _TRACKED_WORKER_PROCS_LOCK = threading.Lock()
 # ``_ensure_systemd_worker_slice``.
 _swap_hierarchy_warned = False
 _VALID_WEB_SEARCH_MODES = frozenset(mode.value for mode in WebSearchMode)
+_THREAD_START_SANDBOX_MODES = {
+    "readOnly": SandboxMode.read_only.value,
+    "workspaceWrite": SandboxMode.workspace_write.value,
+    "dangerFullAccess": SandboxMode.danger_full_access.value,
+}
+_THREAD_START_APPROVAL_SETTINGS = {
+    "auto_review": (
+        AskForApprovalValue.on_request.value,
+        ApprovalsReviewer.auto_review.value,
+    ),
+    "deny_all": (AskForApprovalValue.never.value, None),
+}
 _MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE = 16
 _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
 # How long a freshly spawned row may sit with pid=0 before reconcile_dead
@@ -143,6 +161,14 @@ def spawn_new_session(
         "developerInstructions": developer_instructions,
         "model": model,
     }
+    if reasoning_effort:
+        start_kwargs["config"] = {"model_reasoning_effort": reasoning_effort}
+    if sandbox := _THREAD_START_SANDBOX_MODES.get(sandbox_policy or ""):
+        start_kwargs["sandbox"] = sandbox
+    if approval := _THREAD_START_APPROVAL_SETTINGS.get(approval_mode or ""):
+        start_kwargs["approvalPolicy"] = approval[0]
+        if approval[1] is not None:
+            start_kwargs["approvalsReviewer"] = approval[1]
     if thread_source is not None:
         start_kwargs["threadSource"] = thread_source.value
     if purpose == CodexInstance.PURPOSE_USER:

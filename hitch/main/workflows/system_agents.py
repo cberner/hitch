@@ -38,7 +38,7 @@ from hitch.main.repos import (
     repo_root,
     same_repo_or_worktree,
 )
-from hitch.main.runtime import codex_pool, rollout
+from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.runtime.sdk_values import (
     is_nonbool_int,
     string_from_any,
@@ -318,17 +318,6 @@ _PR_HANDOFF_OUTPUT_SCHEMA: dict[str, Any] = {
         for field in _PR_HANDOFF_FIELDS
     },
 }
-
-_QA_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["feedback", "lgtm"],
-    "properties": {
-        "feedback": {"type": "string"},
-        "lgtm": {"type": "boolean"},
-    },
-}
-
 
 _SPEC_REQUIREMENTS_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1897,6 +1886,38 @@ def _final_agent_text(events_path: str) -> str:
             ):
                 latest = item["text"]
     return latest
+
+
+def _codex_review_result(events_path: str) -> dict[str, Any] | None:
+    """Return native Codex review presentation text and structured output."""
+    path = Path(events_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    latest_text = None
+    latest_output = None
+    for raw in lines:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        payload = event.get("payload") or {}
+        if event.get("method") == "item/completed":
+            item = payload.get("item") or {}
+            review = item.get("review")
+            if item.get("type") == "exitedReviewMode" and isinstance(review, str):
+                latest_text = review
+        elif event.get("method") == codex_events.NATIVE_REVIEW_COMPLETED_METHOD:
+            review_output = payload.get("reviewOutput")
+            if isinstance(review_output, dict):
+                latest_output = review_output
+    if latest_text is None and latest_output is None:
+        return None
+    if latest_text is None and latest_output is not None:
+        explanation = latest_output.get("overall_explanation")
+        latest_text = explanation if isinstance(explanation, str) else ""
+    return {"feedback": latest_text or "", "review_output": latest_output}
 
 
 def _fail_run_and_block_workflow(

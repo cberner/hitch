@@ -1,10 +1,11 @@
-"""QA review prompt builders, design-synthesis gate, and feedback helpers.
+"""QA review request builders, design-synthesis gate, and feedback helpers.
 
 The PR-QA workflow runs a review agent and, when feedback recurs, a design
 synthesis gate. This module owns the dependency-free pieces of that cluster:
-the QA review prompt, the recurring-feedback signal/match heuristics and their
-regexes, the synthesis-gate builder and its feedback prompt, and the readers
-that pull QA feedback out of a workflow's persisted state and prior runs.
+the native Codex review request, the recurring-feedback signal/match heuristics
+and their regexes, the synthesis-gate builder and its feedback prompt, and the
+readers that pull QA feedback out of a workflow's persisted state and prior
+runs.
 """
 
 from __future__ import annotations
@@ -82,51 +83,18 @@ _QA_DESIGN_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "ui",
     ),
 }
-_CODEX_REVIEW_GUIDANCE = (
-    "Apply the same review standards as Codex /review:\n"
-    "- Flag only bugs or risks that meaningfully affect correctness, performance, "
-    "security, or maintainability.\n"
-    "- Each finding must be discrete, actionable, introduced by this diff, and "
-    "something the author would likely fix.\n"
-    "- Do not rely on unstated assumptions, speculative downstream breakage, or "
-    "intentional behavior changes.\n"
-    "- Ignore trivial style unless it obscures meaning or violates documented "
-    "standards.\n"
-    "- Do not stop at the first issue; keep reviewing until every qualifying "
-    "finding is listed.\n"
-    "- Prioritize findings as [P0], [P1], [P2], or [P3], using P0 only for "
-    "universal release-blocking issues.\n"
-    "- For each finding, include the shortest useful file/line reference that "
-    "overlaps the diff and a one-paragraph explanation of why the issue matters.\n"
-    "- If there are no qualifying findings, say that clearly rather than "
-    "inventing nits.\n"
-)
 
 
 def _qa_prompt(cwd: str, diff_text: str) -> str:
     diff = diff_text or "(No current worktree diff was detected.)"
     return (
-        "You are Hitch's QA agent for a PR workflow.\n\n"
-        "Thoroughly review the current code diff before the PR agent runs its final "
-        "cleanup/commit pass.\n\n"
-        f"{_CODEX_REVIEW_GUIDANCE}\n"
-        "Also do your own manual QA: if there is an interactive interface related "
-        "to the diff, manually test it out and include concrete failures or gaps in "
-        "your feedback. For browser QA, run `just qa-browser-setup` if Playwright "
-        "or Chromium is missing, then use Playwright/Chromium to exercise the "
-        "affected UI. If browser setup still fails, include that concrete setup "
-        "failure in your feedback.\n\n"
-        "Set lgtm to false when there are substantive findings, missing tests, or "
-        "manual-QA failures the work agent should fix. Set lgtm to true only when "
-        "the diff is ready for the PR agent to continue.\n\n"
+        "Review the following current code changes and provide prioritized, "
+        "actionable findings.\n\n"
         f"Repository cwd: {cwd}\n\n"
-        "Current diff:\n"
+        "Proposed diff:\n"
         "```diff\n"
         f"{diff}\n"
-        "```\n\n"
-        "Return only JSON matching this shape: "
-        '{"feedback": string, "lgtm": boolean}. Put the prioritized review '
-        "findings, manual-QA results, or a clear no-findings statement in feedback."
+        "```"
     )
 
 

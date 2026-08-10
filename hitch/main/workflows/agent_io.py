@@ -416,6 +416,26 @@ def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     return {"feedback": feedback, "lgtm": lgtm}
 
 
+def _parse_codex_review_output(
+    raw_output: str, review_output: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Translate Codex's structured native review into Hitch's QA verdict."""
+    feedback = raw_output.strip()
+    if not feedback or review_output is None:
+        return None
+    findings = review_output.get("findings")
+    correctness = review_output.get("overall_correctness")
+    if not isinstance(findings, list) or not all(
+        isinstance(finding, dict) for finding in findings
+    ):
+        return None
+    if findings:
+        return {"feedback": feedback, "lgtm": False}
+    if correctness == "patch is correct":
+        return {"feedback": feedback, "lgtm": True}
+    return None
+
+
 def _parse_autonomous_goal_candidate_output(raw_output: str) -> dict[str, Any] | None:
     parsed = _parse_json_object(raw_output)
     if parsed is None:

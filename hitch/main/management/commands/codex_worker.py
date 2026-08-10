@@ -66,6 +66,7 @@ from openai_codex.generated.v2_all import (
     ModeKind,
     ReadOnlySandboxPolicy,
     ReasoningEffort,
+    ReviewStartResponse,
     SandboxPolicy,
     TextUserInput,
     Turn,
@@ -83,9 +84,9 @@ from openai_codex.models import Notification
 from pydantic import BaseModel
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
-from hitch.main.runtime import disk_cleanup
+from hitch.main.runtime import disk_cleanup, rollout
 from hitch.main.runtime.app_server_pool import open_codex_resumed
-from hitch.main.runtime.codex_events import GOAL_METHODS
+from hitch.main.runtime.codex_events import GOAL_METHODS, NATIVE_REVIEW_COMPLETED_METHOD
 from hitch.main.runtime.codex_pool import (
     WorkerSqliteHome,
     _record_session_activity,
@@ -106,6 +107,8 @@ from hitch.main.runtime.codex_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+_NATIVE_REVIEW_AGENT_KIND = "pr_qa"
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
 # auto-reviewer escalates an action. Custom user-reviewer worker modes also
@@ -184,6 +187,20 @@ _cancel_requested = False
 # Set by the active turn so the SIGTERM handler can wake the interrupt
 # forwarder without making a blocking JSON-RPC call inside the handler.
 _interrupt_wakeup: threading.Event | None = None
+
+
+def _is_native_review_verdict_worker(instance: CodexInstance) -> bool:
+    """Return whether this worker owns a hidden QA verdict review.
+
+    ``agent_kind`` identifies the workflow family and is intentionally shared
+    by verdict, fix-up, and notice workers. ``purpose`` is the lifecycle role
+    that also controls their completion routing, so both fields are required.
+    """
+    return (
+        instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+        and instance.agent_kind == _NATIVE_REVIEW_AGENT_KIND
+    )
+
 
 # Set by the active turn so the SIGUSR1 handler can wake the control-file
 # forwarder without doing blocking JSON-RPC work from inside the handler.
@@ -516,6 +533,7 @@ def _run_turn(
     normalized_effort = reasoning_effort.strip() if reasoning_effort else None
     effort = ReasoningEffort(normalized_effort) if normalized_effort else None
     policy = _build_sandbox_policy(sandbox_policy)
+    native_review = _is_native_review_verdict_worker(instance)
     # Serialise writes between the SDK reader thread (which calls the
     # approval handler) and the main thread (which appends streamed turn
     # events). Without this lock both threads can interleave partial JSON
@@ -562,6 +580,16 @@ def _run_turn(
     resume_kwargs: dict[str, Any] = {}
     if instance.developer_instructions:
         resume_kwargs["developer_instructions"] = instance.developer_instructions
+    if native_review:
+        mode = _build_approval_mode(approval_mode)
+        if mode is not None:
+            resume_kwargs["approval_mode"] = mode
+        if model is not None:
+            resume_kwargs["model"] = model
+        if effort is not None:
+            resume_kwargs["config"] = {"model_reasoning_effort": effort.value}
+        if policy is not None:
+            resume_kwargs["sandbox"] = _sandbox_preset(policy)
 
     def _configure(codex: Codex) -> None:
         # Runs once per app-server open attempt (``open_codex_resumed`` retries
@@ -611,6 +639,7 @@ def _run_turn(
                 collaboration_mode=collaboration_mode,
                 plan_mode=plan_mode,
                 output_schema=output_schema,
+                native_review=native_review,
             )
             interrupt_forwarder = _start_interrupt_forwarder(turn)
             steer_forwarder = _start_steer_control_forwarder(
@@ -646,6 +675,21 @@ def _run_turn(
                             turn,
                             sent=interrupt_forwarder.sent,
                             send_lock=interrupt_forwarder.send_lock,
+                        )
+                if native_review:
+                    review_output = _native_review_output(
+                        codex,
+                        thread_id=thread.id,
+                        turn_id=turn.id,
+                    )
+                    if review_output is not None:
+                        _write_event(
+                            NATIVE_REVIEW_COMPLETED_METHOD,
+                            {
+                                "threadId": thread.id,
+                                "turnId": turn.id,
+                                "reviewOutput": review_output,
+                            },
                         )
             finally:
                 if steer_forwarder is not None:
@@ -983,6 +1027,7 @@ def _start_turn(
     collaboration_mode: str | None,
     plan_mode: bool,
     output_schema: dict[str, Any] | None,
+    native_review: bool = False,
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
 
@@ -996,6 +1041,8 @@ def _start_turn(
     decide without involving the browser. Known SDK values (``auto_review``,
     ``deny_all``) and the unset case go through the typed ``Thread.turn`` API.
     """
+    if native_review:
+        return _start_native_review_turn(codex, thread, prompt=prompt)
     if plan_mode:
         return _start_plan_turn(
             codex,
@@ -1054,6 +1101,42 @@ def _start_turn(
     if sandbox_policy is not None:
         turn_kwargs["sandbox"] = _sandbox_preset(sandbox_policy)
     return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
+
+
+def _start_native_review_turn(
+    codex: Codex, thread: Thread, *, prompt: str
+) -> TurnHandle:
+    """Start Codex's built-in reviewer so its compiled rubric stays authoritative."""
+    client = codex._client
+    response = client.request(
+        "review/start",
+        {
+            "threadId": thread.id,
+            "delivery": "inline",
+            "target": {"type": "custom", "instructions": prompt},
+        },
+        response_model=ReviewStartResponse,
+    )
+    # The router drops an unregistered turn/completed notification, so claim
+    # the queue before returning control to worker setup. TurnHandle.stream()
+    # registers again idempotently before consuming it.
+    client.register_turn_notifications(response.turn.id)
+    return TurnHandle(client, thread.id, response.turn.id)
+
+
+def _native_review_output(
+    codex: Codex, *, thread_id: str, turn_id: str
+) -> dict[str, Any] | None:
+    """Read the structured result that app-server v2 flattens for display."""
+    try:
+        response = codex._client.thread_read(thread_id)
+        path = response.thread.path
+        if not isinstance(path, str) or not path:
+            return None
+        return rollout.review_output_for_turn(Path(path), turn_id=turn_id)
+    except Exception:
+        logger.exception("failed to read structured review output for turn %s", turn_id)
+        return None
 
 
 def _start_plan_turn(
