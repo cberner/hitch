@@ -1231,6 +1231,25 @@ class SystemdInstallRecipeTests(SimpleTestCase):
         self.assertIn(default_line, common_settings)
         self.assertNotIn("_CODEX_WORKER_ISOLATION_DEFAULT", common_settings)
 
+    def test_default_memory_limits_allow_native_builds(self) -> None:
+        common_settings = (
+            Path(settings.BASE_DIR) / "hitch" / "settings" / "common.py"
+        ).read_text()
+
+        self.assertIn(
+            '"HITCH_CODEX_WORKER_SLICE_MEMORY_HIGH", ""', common_settings
+        )
+        self.assertIn(
+            'os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "")', common_settings
+        )
+        self.assertIn(
+            '"HITCH_CODEX_WORKER_SLICE_MEMORY_MAX", "65%"', common_settings
+        )
+        self.assertIn(
+            'os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "40%")',
+            common_settings,
+        )
+
 
 class LaunchWorkerProcessSystemdTests(TestCase):
     def test_scope_unit_name_is_stable_and_deployment_scoped(self) -> None:
@@ -1382,6 +1401,28 @@ class LaunchWorkerProcessSystemdTests(TestCase):
 
     @override_settings(
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="",
+        CODEX_WORKER_SLICE_MEMORY_MAX="65%",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+        CODEX_PARENT_SLICE="",
+    )
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
+    def test_worker_slice_disables_soft_throttle_but_keeps_hard_cap(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+        codex_pool._ensure_systemd_worker_slice()
+
+        argv = mock_run.call_args.args[0]
+        self.assertIn("MemoryAccounting=yes", argv)
+        self.assertIn("MemoryHigh=infinity", argv)
+        self.assertIn("MemoryMax=65%", argv)
+        self.assertIn("MemorySwapMax=0", argv)
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
         CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
         CODEX_WORKER_SLICE_MEMORY_MAX="",
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="",
@@ -1429,6 +1470,24 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         self.assertIn("--property=MemoryAccounting=yes", argv)
         self.assertIn("--property=MemoryHigh=2G", argv)
         self.assertIn("--property=MemoryMax=4G", argv)
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="",
+        CODEX_WORKER_MEMORY_MAX="40%",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_worker_omits_soft_throttle_but_keeps_hard_cap(self) -> None:
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.service",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemoryAccounting=yes", argv)
+        self.assertNotIn("--property=MemoryHigh=", argv)
+        self.assertIn("--property=MemoryMax=40%", argv)
+        self.assertIn("--property=MemorySwapMax=0", argv)
 
     def test_systemd_service_env_args_copy_valid_names_without_values(self) -> None:
         argv = codex_pool._systemd_scope_argv(

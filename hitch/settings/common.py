@@ -238,14 +238,19 @@ CODEX_PARENT_SLICE = os.environ.get("HITCH_CODEX_PARENT_SLICE", "hitch.slice")
 CODEX_PARENT_SLICE_CPU_WEIGHT = os.environ.get(
     "HITCH_CODEX_PARENT_SLICE_CPU_WEIGHT", "20"
 )
+# ``MemoryHigh`` is opt-in. With swap disabled, sustained native builds above a
+# soft threshold can leave every process in the cgroup blocked in kernel reclaim
+# for hours even though the host has free RAM. Percentage-based hard caps still
+# bound runaway workers while scaling to legitimate native builds and reserving
+# at least 35% of host RAM for Hitch and other services.
 CODEX_WORKER_SLICE_MEMORY_HIGH = os.environ.get(
-    "HITCH_CODEX_WORKER_SLICE_MEMORY_HIGH", "8G"
+    "HITCH_CODEX_WORKER_SLICE_MEMORY_HIGH", ""
 )
 CODEX_WORKER_SLICE_MEMORY_MAX = os.environ.get(
-    "HITCH_CODEX_WORKER_SLICE_MEMORY_MAX", "10G"
+    "HITCH_CODEX_WORKER_SLICE_MEMORY_MAX", "65%"
 )
-CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "2G")
-CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "4G")
+CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "")
+CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "40%")
 # Swap caps make MemoryMax a true ceiling: cgroup v2 only counts RAM toward
 # MemoryMax, so without a swap cap a runaway worker is pushed to swap rather
 # than OOM-killed and thrashes the host indefinitely instead of failing the
