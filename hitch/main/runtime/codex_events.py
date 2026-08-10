@@ -20,6 +20,7 @@ GOAL_UPDATED_METHOD = "thread/goal/updated"
 GOAL_METHODS = frozenset({GOAL_CLEARED_METHOD, GOAL_UPDATED_METHOD})
 TASK_PLAN_UPDATED_METHOD = "turn/plan/updated"
 ITEM_COMPLETED_METHOD = "item/completed"
+NATIVE_REVIEW_COMPLETED_METHOD = "hitch/nativeReview/completed"
 
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"

@@ -26,7 +26,7 @@ from django.contrib.staticfiles.handlers import StaticFilesHandler
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from openai_codex import ApprovalMode, Sandbox, Thread
+from openai_codex import ApprovalMode, Codex, Sandbox, Thread
 from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
@@ -428,9 +428,9 @@ class SpawnNewSessionTests(TestCase):
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         """The settings dialog's model selector flows into
-        ``thread_start(model=...)`` and the worker turn; effort, sandbox
-        policy and approval mode flow into the worker as CLI args. Pin every
-        wiring so a refactor can't quietly drop one of them.
+        ``thread_start`` alongside effort and sandbox; all settings also flow
+        into the worker as CLI args. Pin every wiring so a refactor can't
+        quietly drop one of them.
         """
         codex = _stub_codex_thread_start(mock_codex)
         mock_launch.return_value = SimpleNamespace(pid=1)
@@ -446,7 +446,7 @@ class SpawnNewSessionTests(TestCase):
                 model="gpt-5.6-sol",
                 reasoning_effort="max",
                 sandbox_policy="workspaceWrite",
-                approval_mode="deny_all",
+                approval_mode="auto_review",
             )
 
         payload = _thread_start_payload(codex)
@@ -455,13 +455,17 @@ class SpawnNewSessionTests(TestCase):
             payload["developerInstructions"], "Prefer small, typed changes."
         )
         self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertEqual(payload["config"], {"model_reasoning_effort": "max"})
+        self.assertEqual(payload["sandbox"], "workspace-write")
+        self.assertEqual(payload["approvalPolicy"], "on-request")
+        self.assertEqual(payload["approvalsReviewer"], "auto_review")
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             model="gpt-5.6-sol",
             reasoning_effort="max",
             sandbox_policy="workspaceWrite",
-            approval_mode="deny_all",
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
@@ -6863,6 +6867,148 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_qa_worker_uses_native_codex_review(self, mock_codex: MagicMock) -> None:
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+        codex_ctx._client.request.return_value = SimpleNamespace(
+            review_thread_id="thread-1",
+            turn=SimpleNamespace(id="review-turn-1"),
+        )
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "review-turn-1", TurnStatus.completed
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            rollout_path = Path(raw) / "rollout-thread-1.jsonl"
+            review_output = {
+                "findings": [],
+                "overall_correctness": "patch is correct",
+                "overall_explanation": (
+                    "No actionable correctness issues were found in the diff."
+                ),
+                "overall_confidence_score": 0.97,
+            }
+            rollout_path.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "exited_review_mode",
+                            "turn_id": "review-turn-1",
+                            "review_output": review_output,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            codex_ctx._client.thread_read.return_value = SimpleNamespace(
+                thread=SimpleNamespace(path=str(rollout_path))
+            )
+            instance = self._make_instance(Path(raw), prompt="Review this diff")
+            instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
+            instance.agent_kind = system_agents.PR_QA_AGENT_KIND
+            instance.save(update_fields=["purpose", "agent_kind"])
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--model",
+                "gpt-5.4",
+                "--reasoning-effort",
+                "high",
+                "--sandbox-policy",
+                "readOnly",
+                "--approval-mode",
+                "auto_review",
+            )
+            with open(instance.events_path, encoding="utf-8") as fh:
+                worker_events = [json.loads(line) for line in fh]
+
+        codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        codex_ctx.thread_resume.assert_called_once_with(
+            "thread-1",
+            approval_mode=ApprovalMode.auto_review,
+            model="gpt-5.4",
+            config={"model_reasoning_effort": "high"},
+            sandbox=Sandbox.read_only,
+        )
+        codex_ctx._client.request.assert_called_once()
+        method, params = codex_ctx._client.request.call_args.args
+        self.assertEqual(method, "review/start")
+        self.assertEqual(
+            params,
+            {
+                "threadId": "thread-1",
+                "delivery": "inline",
+                "target": {
+                    "type": "custom",
+                    "instructions": "Review this diff",
+                },
+            },
+        )
+        response_model = codex_ctx._client.request.call_args.kwargs["response_model"]
+        self.assertEqual(response_model.__name__, "ReviewStartResponse")
+        structured_event = next(
+            event
+            for event in worker_events
+            if event["method"] == codex_events.NATIVE_REVIEW_COMPLETED_METHOD
+        )
+        self.assertEqual(structured_event["payload"]["reviewOutput"], review_output)
+
+    def test_native_review_handle_claims_notifications_and_parent_thread(self) -> None:
+        client = MagicMock()
+        client.request.return_value = SimpleNamespace(
+            review_thread_id="review-presentation-thread",
+            turn=SimpleNamespace(id="review-turn-1"),
+        )
+        codex = cast(Codex, SimpleNamespace(_client=client))
+        thread = cast(Thread, SimpleNamespace(id="parent-thread"))
+
+        handle = codex_worker_module._start_native_review_turn(
+            codex, thread, prompt="Review this diff"
+        )
+
+        self.assertEqual(handle.thread_id, "parent-thread")
+        self.assertEqual(handle.id, "review-turn-1")
+        client.register_turn_notifications.assert_called_once_with("review-turn-1")
+        handle.interrupt()
+        handle.steer("Include the latest changes")
+        client.turn_interrupt.assert_called_once_with(
+            "parent-thread", "review-turn-1"
+        )
+        self.assertEqual(
+            client.turn_steer.call_args.args[:2],
+            ("parent-thread", "review-turn-1"),
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_qa_feedback_worker_uses_ordinary_coding_turn(
+        self, mock_codex: MagicMock
+    ) -> None:
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        thread = MagicMock()
+        thread.turn.return_value = SimpleNamespace(
+            id="turn-1",
+            stream=lambda: iter(
+                [_completed_event("turn-1", TurnStatus.completed)]
+            ),
+        )
+        codex_ctx.thread_resume.return_value = thread
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw), prompt="Apply the QA fix")
+            instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
+            instance.agent_kind = system_agents.PR_QA_AGENT_KIND
+            instance.save(update_fields=["purpose", "agent_kind"])
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        thread.turn.assert_called_once()
+        codex_ctx._client.request.assert_not_called()
 
     @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
     @patch("hitch.main.management.commands.codex_worker._run_turn")

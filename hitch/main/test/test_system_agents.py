@@ -37,6 +37,7 @@ from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
 )
+from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.models import (
     AutonomousGoal,
     AutonomousGoalMemory,
@@ -465,12 +466,11 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["workflow_id"], workflow.pk)
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertIn("output_schema", kwargs)
-        self.assertIn("Apply the same review standards as Codex /review", kwargs["prompt"])
-        self.assertIn("Do not stop at the first issue", kwargs["prompt"])
-        self.assertIn("shortest useful file/line reference", kwargs["prompt"])
-        self.assertIn("just qa-browser-setup", kwargs["prompt"])
-        self.assertIn("Playwright/Chromium", kwargs["prompt"])
+        self.assertNotIn("output_schema", kwargs)
+        self.assertIn("provide prioritized, actionable findings", kwargs["prompt"])
+        self.assertNotIn("Apply the same review standards as Codex", kwargs["prompt"])
+        self.assertNotIn("manual QA", kwargs["prompt"])
+        self.assertNotIn("No qualifying findings.", kwargs["prompt"])
         self.assertIn("diff --git", kwargs["prompt"])
 
         run = SystemAgentRun.objects.get(workflow=workflow)
@@ -3786,6 +3786,121 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, "feedback_running")
         self.assertEqual(workflow.iteration, 1)
         self.assertEqual(workflow.state["next_user_message_index"], 3)
+
+    @patch(
+        "hitch.main.workflows.system_agents._review_diff_text_for_workflow",
+        return_value="diff --git a/app.py b/app.py",
+    )
+    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_qa_feedback_loop_uses_coding_worker_before_next_verdict(
+        self,
+        mock_spawn_turn: MagicMock,
+        mock_spawn_review: MagicMock,
+        _mock_diff: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+        review = (
+            "The patch has one correctness issue.\n\n"
+            "Review comment:\n\n"
+            "- [P1] Preserve the value — /repo/app.py:1-1\n"
+            "  This branch drops the value."
+        )
+        review_events = _raw_events_file(
+            self,
+            [
+                {
+                    "method": "item/completed",
+                    "payload": {
+                        "item": {
+                            "id": "review-1",
+                            "type": "exitedReviewMode",
+                            "review": review,
+                        }
+                    },
+                },
+                {
+                    "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
+                    "payload": {
+                        "threadId": "qa-thread-1",
+                        "turnId": "review-turn-1",
+                        "reviewOutput": {
+                            "findings": [{"title": "[P1] Preserve the value"}],
+                            "overall_correctness": "patch is incorrect",
+                            "overall_explanation": (
+                                "The patch has one correctness issue."
+                            ),
+                            "overall_confidence_score": 0.99,
+                        },
+                    },
+                },
+            ],
+        )
+        first_review = _instance(
+            thread_id="qa-thread-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=review_events,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id=first_review.thread_id,
+            instance=first_review,
+        )
+
+        def _spawn_feedback(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=kwargs["thread_id"],
+                purpose=kwargs["purpose"],
+                workflow_id=kwargs["workflow_id"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+                display_author=kwargs["display_author"],
+                user_message_index=kwargs["user_message_index"],
+            )
+
+        mock_spawn_turn.side_effect = _spawn_feedback
+        mock_spawn_review.side_effect = lambda **kwargs: _instance(
+            thread_id="qa-thread-2",
+            purpose=kwargs["purpose"],
+            workflow_id=kwargs["workflow_id"],
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=kwargs["agent_kind"],
+            display_author=kwargs["display_author"],
+            user_message_index=kwargs["user_message_index"],
+        )
+
+        self.assertTrue(system_agents.on_codex_instance_finished(first_review))
+
+        feedback_worker = CodexInstance.objects.get(
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+        self.assertEqual(feedback_worker.agent_kind, system_agents.PR_QA_AGENT_KIND)
+        self.assertFalse(
+            codex_worker_module._is_native_review_verdict_worker(feedback_worker)
+        )
+
+        feedback_worker.status = CodexInstance.STATUS_COMPLETED
+        feedback_worker.save(update_fields=["status"])
+        self.assertTrue(system_agents.on_codex_instance_finished(feedback_worker))
+
+        next_review = CodexInstance.objects.get(thread_id="qa-thread-2")
+        self.assertTrue(
+            codex_worker_module._is_native_review_verdict_worker(next_review)
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
+        self.assertEqual(workflow.iteration, 1)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_design_synthesis_gate_cases(self, mock_spawn: MagicMock) -> None:
@@ -9142,7 +9257,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_invalid_qa_output_blocks_workflow_and_surfaces_failure(
+    def test_unstructured_native_review_blocks_workflow_and_surfaces_failure(
         self, mock_spawn: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -9161,8 +9276,8 @@ class SpecCriticWorkflowTests(TestCase):
                         "payload": {
                             "item": {
                                 "id": "a1",
-                                "type": "agentMessage",
-                                "text": "not json",
+                                "type": "exitedReviewMode",
+                                "review": "The patch has a release-blocking defect.",
                             }
                         },
                     }
@@ -9176,6 +9291,7 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             events_path=events_path,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
         )
         run = SystemAgentRun.objects.create(
             workflow=workflow,
@@ -9197,7 +9313,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertEqual(kwargs["user_message_index"], 1)
-        self.assertIn("QA output was not valid JSON", kwargs["prompt"])
+        self.assertIn("QA output was not a valid Codex review", kwargs["prompt"])
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
@@ -12308,6 +12424,88 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             system_agents._final_agent_text(events_path),
             '{"feedback": "Done", "lgtm": true}',
+        )
+
+    def test_native_codex_review_output_maps_findings_to_qa_verdict(self) -> None:
+        review = (
+            "The patch has one correctness issue.\n\n"
+            "Review comment:\n\n"
+            "- [P1] Preserve the value — /repo/app.py:4-4\n"
+            "  This branch drops the value."
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "review-1",
+                                "type": "exitedReviewMode",
+                                "review": review,
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+
+        structured_finding = {
+            "findings": [{"title": "[P1] Preserve the value"}],
+            "overall_correctness": "patch is incorrect",
+            "overall_explanation": "The patch has one correctness issue.",
+            "overall_confidence_score": 0.99,
+        }
+        with Path(events_path).open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
+                        "payload": {"reviewOutput": structured_finding},
+                    }
+                )
+                + "\n"
+            )
+        self.assertEqual(
+            system_agents._codex_review_result(events_path),
+            {"feedback": review, "review_output": structured_finding},
+        )
+        self.assertEqual(
+            agent_io._parse_codex_review_output(review, structured_finding),
+            {"feedback": review, "lgtm": False},
+        )
+        clean_explanation = "No actionable correctness issues were found in the diff."
+        self.assertEqual(
+            agent_io._parse_codex_review_output(
+                clean_explanation,
+                {
+                    "findings": [],
+                    "overall_correctness": "patch is correct",
+                    "overall_explanation": clean_explanation,
+                    "overall_confidence_score": 0.96,
+                },
+            ),
+            {"feedback": clean_explanation, "lgtm": True},
+        )
+        self.assertIsNone(
+            agent_io._parse_codex_review_output(
+                "The patch has a release-blocking defect.",
+                {
+                    "findings": [],
+                    "overall_correctness": "",
+                    "overall_explanation": (
+                        "The patch has a release-blocking defect."
+                    ),
+                    "overall_confidence_score": 0.0,
+                },
+            )
+        )
+        self.assertIsNone(
+            agent_io._parse_codex_review_output(
+                "Reviewer failed to output a response.", None
+            )
         )
 
     def test_fenced_json_with_unicode_separators_still_parses(self) -> None:

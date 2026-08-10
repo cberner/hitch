@@ -108,6 +108,42 @@ class LatestModelConfigTests(TestCase):
         self.assertEqual(detail.latest_model_config, expected)
 
 
+class ReviewOutputTests(TestCase):
+    def test_reads_structured_output_for_the_requested_review_turn(self) -> None:
+        expected = {
+            "findings": [],
+            "overall_correctness": "patch is correct",
+            "overall_explanation": "No actionable correctness issues were found.",
+            "overall_confidence_score": 0.98,
+        }
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {
+                        "type": "exited_review_mode",
+                        "turn_id": "review-turn-1",
+                        "review_output": expected,
+                    },
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "exited_review_mode",
+                        "turn_id": "review-turn-2",
+                        "review_output": {"findings": [{"title": "Later review"}]},
+                    },
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        self.assertEqual(
+            rollout.review_output_for_turn(path, turn_id="review-turn-1"),
+            expected,
+        )
+
+
 class LatestPrUrlTests(TestCase):
     @override
     def tearDown(self) -> None:

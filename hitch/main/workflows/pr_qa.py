@@ -43,7 +43,12 @@ from hitch.main.runtime import codex_events, codex_pool, rate_limit
 from hitch.main.runtime.sdk_values import positive_int, string_from_any, truncate_for_prompt
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.workflows import engine, system_agents
-from hitch.main.workflows.agent_io import _parse_pr_monitor_output, _parse_qa_output, _string_list
+from hitch.main.workflows.agent_io import (
+    _parse_codex_review_output,
+    _parse_pr_monitor_output,
+    _parse_qa_output,
+    _string_list,
+)
 from hitch.main.workflows.gh_cli import (
     _GH_PR_CREATE_TIMEOUT_SECONDS,
     _GH_PR_MONITOR_TIMEOUT_SECONDS,
@@ -954,13 +959,20 @@ def _handle_qa_verdict_finished(
         )
         return
 
-    raw_output = system_agents._final_agent_text(instance.events_path)
-    parsed = _parse_qa_output(raw_output)
+    native_review = system_agents._codex_review_result(instance.events_path)
+    if native_review is None:
+        raw_output = system_agents._final_agent_text(instance.events_path)
+        parsed = _parse_qa_output(raw_output)
+    else:
+        raw_output = native_review["feedback"]
+        parsed = _parse_codex_review_output(
+            raw_output, native_review["review_output"]
+        )
     if parsed is None:
         _fail_qa_run_if_owned(
             workflow,
             run,
-            "QA output was not valid JSON",
+            "QA output was not a valid Codex review",
             raw_output,
         )
         return
@@ -2726,7 +2738,6 @@ def _spawn_pr_qa_run(
             workflow_id=workflow.pk,
             agent_kind=system_agents.PR_QA_AGENT_KIND,
             display_author=system_agents.QA_DISPLAY_AUTHOR,
-            output_schema=system_agents._QA_OUTPUT_SCHEMA,
             user_message_index=_qa_review_revision(workflow),
         )
         run, _created = SystemAgentRun.objects.get_or_create(

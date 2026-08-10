@@ -542,6 +542,26 @@ def _latest_pr_observation_result_from_lines(
     return codex_events.pr_observation_result_from_turns(turns)
 
 
+def review_output_for_turn(
+    rollout_path: Path, *, turn_id: str
+) -> dict[str, Any] | None:
+    """Return Codex's structured native-review result for ``turn_id``."""
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None
+    for entry in reversed(lines):
+        if entry.get("type") != "event_msg":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "exited_review_mode":
+            continue
+        if payload.get("turn_id") != turn_id:
+            continue
+        review_output = payload.get("review_output")
+        return review_output if isinstance(review_output, dict) else None
+    return None
+
+
 def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
     try:
         text = rollout_path.read_text()
