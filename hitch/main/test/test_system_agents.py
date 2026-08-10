@@ -12507,6 +12507,45 @@ class SpecCriticWorkflowTests(TestCase):
                 "Reviewer failed to output a response.", None
             )
         )
+        self.assertIsNone(
+            agent_io._parse_codex_review_output(
+                "Malformed finding payload.", {"findings": ["not an object"]}
+            )
+        )
+
+    def test_native_codex_review_output_tolerates_missing_and_malformed_events(
+        self,
+    ) -> None:
+        with tempfile.NamedTemporaryFile() as missing:
+            missing_path = missing.name
+        self.assertIsNone(system_agents._codex_review_result(missing_path))
+
+        expected = {
+            "findings": [],
+            "overall_correctness": "patch is correct",
+            "overall_explanation": "No correctness issues were found.",
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+            fh.write("not json\n")
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
+                        "payload": {"reviewOutput": expected},
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+
+        self.assertEqual(
+            system_agents._codex_review_result(events_path),
+            {
+                "feedback": "No correctness issues were found.",
+                "review_output": expected,
+            },
+        )
 
     def test_fenced_json_with_unicode_separators_still_parses(self) -> None:
         # A fenced JSON verdict whose string content legitimately contains a
