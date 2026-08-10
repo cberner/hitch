@@ -28,74 +28,11 @@ from hitch.main.runtime.sdk_values import (
     value_for,
 )
 from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
-from hitch.main.workflows import pr_qa, pr_stage, pr_stage_refresh_state, system_agents
+from hitch.main.sessions.pr_prompts import is_pr_creation_prompt, is_pr_workflow_notice
+from hitch.main.workflows import pr_qa, pr_stage, pr_stage_refresh_state
 
 logger = logging.getLogger(__name__)
 
-_PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
-_PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
-_PREVIOUS_DEFAULT_BRANCH_PR_SLASH_DISPLAY_PROMPT = (
-    "Rebase on the repository's default branch, clean it up, and then open a PR"
-)
-_PREVIOUS_DEFAULT_BRANCH_PR_SLASH_FINAL_PROMPT = (
-    "Rebase on the repository's default branch, polish it, get it ready, "
-    "and commit the final changes. Do not push the branch or open a PR; "
-    "Hitch will push and open it after this turn completes."
-)
-_PREVIOUS_PR_SLASH_DISPLAY_PROMPT = (
-    "Rebase on master, clean it up, and then open a PR"
-)
-_PREVIOUS_REBASE_MASTER_PR_SLASH_FINAL_PROMPT = (
-    "Rebase on master, polish it, get it ready, and commit the final changes. "
-    "Do not push the branch or open a PR; Hitch will push and open it "
-    "after this turn completes."
-)
-_PREVIOUS_HITCH_OWNED_PR_SLASH_FINAL_PROMPT = (
-    "Polish it, get it ready, and commit the final changes. "
-    "Do not push the branch or open a PR; Hitch will push and open it "
-    "after this turn completes."
-)
-_PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT = (
-    "Polish it, get it ready, commit the final changes, and push the branch. "
-    "Do not open a PR; Hitch will open it after this turn completes."
-)
-_PREVIOUS_PR_SLASH_FINAL_PROMPT = (
-    "Polish it, get it ready, and open or update the PR."
-)
-_LEGACY_PR_SLASH_PROMPT = (
-    "Do a thorough review of the diff. Rebase on master, clean it up, "
-    "and then open a PR"
-)
-_LEGACY_PR_SLASH_FINAL_PROMPT = (
-    f"{_LEGACY_PR_SLASH_PROMPT}. After opening it, poll the PR every 2 minutes "
-    "until you have CI status and at least one review signal: code review "
-    "comments, a thumbs up emoji on the PR, or an explicit review approval. "
-    "On each poll, check whether the PR has merge conflicts. Address CI "
-    "failures, review comments, merge conflicts, and any other blocking issues; "
-    "push fixes and keep looping until CI, review, and mergeability are all clean. "
-    "Stop and report back if any single polling iteration has no results after "
-    "30 minutes."
-)
-_PR_PROMPT_ALIASES = frozenset(
-    {
-        _PR_SLASH_PROMPT,
-        _PR_SLASH_FINAL_PROMPT,
-        _PREVIOUS_DEFAULT_BRANCH_PR_SLASH_DISPLAY_PROMPT,
-        _PREVIOUS_DEFAULT_BRANCH_PR_SLASH_FINAL_PROMPT,
-        _PREVIOUS_PR_SLASH_DISPLAY_PROMPT,
-        _PREVIOUS_REBASE_MASTER_PR_SLASH_FINAL_PROMPT,
-        _PREVIOUS_HITCH_OWNED_PR_SLASH_FINAL_PROMPT,
-        _PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT,
-        _PREVIOUS_PR_SLASH_FINAL_PROMPT,
-        _LEGACY_PR_SLASH_PROMPT,
-        _LEGACY_PR_SLASH_FINAL_PROMPT,
-    }
-)
-_PR_WORKFLOW_PROMPT_PREFIXES = (
-    "Hitch QA agent could not complete the PR workflow.",
-    "Hitch PR workflow could not complete.",
-    "Hitch PR monitor found follow-up work on the active PR.",
-)
 _GITHUB_PR_TOOL_RE = re.compile(
     r"(?i)(?:^|[/:\s._-])(?:github|mcp__codex_apps__github)(?:$|[/:\s._-]).*"
     r"(?:_?create[_\s-]?(?:pr|pull[_\s-]?request)|open[_\s-]?(?:pr|pull[_\s-]?request))"
@@ -461,7 +398,7 @@ def _is_pr_creation_prompt_turn(items: list[Any]) -> bool:
     for item in items:
         if value_for(item, "type") != "userMessage":
             continue
-        if _is_pr_creation_prompt(user_message_text(item)):
+        if is_pr_creation_prompt(user_message_text(item)):
             return True
     return False
 
@@ -470,7 +407,7 @@ def _is_pr_workflow_notice_turn(items: list[Any]) -> bool:
     for item in items:
         if value_for(item, "type") != "userMessage":
             continue
-        if _is_pr_workflow_notice(user_message_text(item)):
+        if is_pr_workflow_notice(user_message_text(item)):
             return True
     return False
 
@@ -483,17 +420,6 @@ def _turn_starts_pr_observation_epoch(
     if not _is_pr_workflow_notice_turn(items):
         return False
     return codex_events.pr_snapshot_from_completed_mcp_items(mcp_items) is not None
-
-
-def _is_pr_creation_prompt(text: str) -> bool:
-    return text.strip() in _PR_PROMPT_ALIASES
-
-
-def _is_pr_workflow_notice(text: str) -> bool:
-    text = text.strip()
-    return any(
-        text.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES
-    )
 
 
 def _turn_has_lifecycle_activity(items: list[Any]) -> bool:

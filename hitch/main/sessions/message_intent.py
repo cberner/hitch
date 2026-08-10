@@ -6,7 +6,10 @@ from typing import NamedTuple
 
 from django.http import HttpRequest
 
-from hitch.main.sessions.session_pr_plan import _PR_PROMPT_ALIASES, _PR_SLASH_PROMPT
+from hitch.main.sessions.pr_prompts import (
+    PR_SLASH_DISPLAY_PROMPT,
+    is_pr_creation_prompt,
+)
 from hitch.main.sessions.session_settings import _QA_SLASH_PROMPT
 
 _PLAN_SLASH_COMMAND = "/plan"
@@ -52,14 +55,14 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
             True,
         )
     if command == _PR_SLASH_COMMAND:
-        return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+        return _MessageIntent(PR_SLASH_DISPLAY_PROMPT, False, False, False)
     if command == _PR_NOW_SLASH_COMMAND:
-        return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+        return _MessageIntent(PR_SLASH_DISPLAY_PROMPT, False, False, False)
     if command == _FIX_PR_SLASH_COMMAND:
         return _MessageIntent(_FIX_PR_SLASH_COMMAND, False, False, False)
     if command == _QA_SLASH_COMMAND:
         return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
-    if not plan_mode and prompt in _PR_PROMPT_ALIASES:
+    if not plan_mode and is_pr_creation_prompt(prompt):
         return _MessageIntent(prompt, False, False, False)
     if not plan_mode and prompt == _QA_SLASH_PROMPT:
         return _MessageIntent(prompt, False, False, False)
@@ -71,7 +74,7 @@ def _is_pr_activation(request: HttpRequest) -> bool:
     parts = prompt.split(maxsplit=1)
     return (
         bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
-        or prompt in _PR_PROMPT_ALIASES
+        or is_pr_creation_prompt(prompt)
     )
 
 

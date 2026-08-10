@@ -45,6 +45,10 @@ from hitch.main.runtime.sdk_values import (
 )
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
+from hitch.main.sessions.pr_prompts import (
+    PR_SLASH_DISPLAY_PROMPT as PR_SLASH_DISPLAY_PROMPT,
+)
+from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT as PR_SLASH_PROMPT
 from hitch.main.workflows import engine
 from hitch.main.workflows.agent_io import (
     SPEC_SYNTHESIZER_AGENT_KIND,
@@ -95,17 +99,8 @@ WorkflowStartBlockedByArchiveError = session_lifecycle.WorkflowStartBlockedError
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
-PR_SLASH_DISPLAY_PROMPT = (
-    "Rebase on the default branch, clean it up, and then open a PR"
-)
 QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
-)
-PR_SLASH_PROMPT = (
-    "Rebase on the default branch, polish it, get it ready, "
-    "and commit the final changes. "
-    "Do not push the branch or open a PR; Hitch will push and open it "
-    "after this turn completes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit

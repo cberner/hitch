@@ -80,6 +80,7 @@ from hitch.main.sessions import session_index, session_stage, token_usage
 from hitch.main.sessions.message_intent import (
     _FIX_PR_SLASH_COMMAND,
 )
+from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.project_visibility import (
     _filter_proposed_sessions_by_project_visibility,
 )
@@ -107,7 +108,6 @@ from hitch.main.sessions.session_entry_display import (
     _workflow_status_text,
 )
 from hitch.main.sessions.session_pr_plan import (
-    _PR_SLASH_PROMPT,
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
     _current_pr_url_for_thread,
     _mark_pending_plan_actions,
@@ -915,7 +915,7 @@ def _render_session_detail(
                 approval_mode=approval_mode,
             ),
             "input_image_accept": _INPUT_IMAGE_ACCEPT,
-            "pr_slash_prompt": _PR_SLASH_PROMPT,
+            "pr_slash_prompt": PR_SLASH_DISPLAY_PROMPT,
             "fix_pr_slash_command": _FIX_PR_SLASH_COMMAND,
             "qa_slash_prompt": _QA_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
