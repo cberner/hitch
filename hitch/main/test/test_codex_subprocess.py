@@ -1317,8 +1317,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         self.assertIn(
             f"--property=StandardError=append:{Path(raw) / '7.log'}", argv
         )
-        # A child command crossing MemoryMax should fail without systemd
-        # tearing down Codex and losing the entire turn.
+        # An OOM-killed child should fail without systemd tearing down a
+        # surviving Codex process and losing the entire turn.
         self.assertIn("--property=OOMPolicy=continue", argv)
         # MemoryHigh/MemoryMax are silently ignored on hosts that do not
         # default to memory accounting, so the service must opt in explicitly —
@@ -1569,6 +1569,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
 
         self.assertNotIn("--property=MemoryAccounting=yes", argv)
         self.assertFalse([arg for arg in argv if arg.startswith("--property=Memory")])
+        # OOMPolicy also protects a surviving worker during a host-level OOM;
+        # it is independent of Hitch's optional cgroup memory limits.
+        self.assertIn("--property=OOMPolicy=continue", argv)
 
     @override_settings(
         CODEX_WORKER_MEMORY_HIGH="2G",
