@@ -6353,70 +6353,32 @@ class PidIsOurWorkerTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool.Path")
     @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_falls_back_to_getsid_when_proc_missing(
+    def test_cmdline_read_failures(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
-        # macOS dev: /proc doesn't exist. Cmdline layer is unavailable;
-        # trust the session-leader check rather than refuse to stop.
-        mock_getsid.return_value = 4321
-        mock_path.return_value.exists.return_value = False
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
-            FileNotFoundError
+        cases = (
+            ("host_without_proc", False, FileNotFoundError, True, True),
+            ("scoped_host_without_proc", False, FileNotFoundError, False, False),
+            ("pid_vanished", True, FileNotFoundError, True, False),
+            ("permission_denied", True, PermissionError, True, False),
         )
+        proc_pid = mock_path.return_value.__truediv__.return_value
+        cmdline = proc_pid.__truediv__.return_value
 
-        self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
+        for name, proc_exists, error, require_leader, expected in cases:
+            with self.subTest(name=name):
+                mock_getsid.reset_mock()
+                mock_getsid.return_value = 4321
+                mock_path.return_value.exists.return_value = proc_exists
+                cmdline.read_bytes.side_effect = error
 
-    @patch("hitch.main.runtime.codex_pool.Path")
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_scoped_worker_rejects_when_proc_missing(
-        self, mock_getsid: MagicMock, mock_path: MagicMock
-    ) -> None:
-        mock_path.return_value.exists.return_value = False
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
-            FileNotFoundError
-        )
-
-        self.assertFalse(
-            codex_pool._pid_is_our_worker(
-                4321, 42, require_session_leader=False
-            )
-        )
-        mock_getsid.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.Path")
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_rejects_when_pid_vanishes_between_getsid_and_cmdline(
-        self, mock_getsid: MagicMock, mock_path: MagicMock
-    ) -> None:
-        # Linux TOCTOU: getsid says the pid is a session leader, but
-        # ``/proc/<pid>/cmdline`` is gone moments later because the
-        # worker exited. The pid is now at risk of being recycled to an
-        # unrelated process; falling back to the session-leader check
-        # could let us signal a stranger's group. ``/proc`` itself
-        # still exists, so we must refuse rather than trust the cheap
-        # check that's no longer authoritative.
-        mock_getsid.return_value = 4321
-        mock_path.return_value.exists.return_value = True
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
-            FileNotFoundError
-        )
-
-        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
-
-    @patch("hitch.main.runtime.codex_pool.Path")
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_rejects_on_other_cmdline_read_error(
-        self, mock_getsid: MagicMock, mock_path: MagicMock
-    ) -> None:
-        # Permission error or any other non-ENOENT failure: be
-        # conservative — refuse rather than signaling something we
-        # could not identify.
-        mock_getsid.return_value = 4321
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
-            PermissionError
-        )
-
-        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+                self.assertEqual(
+                    codex_pool._pid_is_our_worker(
+                        4321, 42, require_session_leader=require_leader
+                    ),
+                    expected,
+                )
+                self.assertEqual(mock_getsid.called, require_leader)
 
 
 class EventsDirTests(TestCase):
