@@ -13,6 +13,33 @@ from hitch.main.test.support import _git
 
 
 class WorktreeDiffTests(SimpleTestCase):
+    def test_session_preview_bounds_rendered_diff_lines(self) -> None:
+        changed_line_count = diffs_module._MAX_DIFF_PREVIEW_LINES + 50
+        changed_lines = "\n".join(
+            f"+changed line {index}" for index in range(changed_line_count)
+        )
+        raw_diff = (
+            "diff --git a/large.txt b/large.txt\n"
+            "--- a/large.txt\n"
+            "+++ b/large.txt\n"
+            f"@@ -0,0 +1,{changed_line_count} @@\n"
+            f"{changed_lines}\n"
+        )
+
+        with patch("hitch.main.diffs._worktree_diff_text", return_value=raw_diff):
+            diff = build_worktree_diff("/repo")
+
+        self.assertTrue(diff.truncated)
+        self.assertLessEqual(
+            sum(len(file.lines) for file in diff.files),
+            diffs_module._MAX_DIFF_PREVIEW_LINES - 1,
+        )
+        rendered = "\n".join(
+            line.html for file in diff.files for line in file.lines
+        )
+        self.assertIn("changed line 0", rendered)
+        self.assertNotIn(f"changed line {changed_line_count - 1}", rendered)
+
     def test_highlight_reuses_cached_lexer_class_for_repeated_filename(self) -> None:
         diffs_module._lexer_class_for_filename.cache_clear()
         try:
