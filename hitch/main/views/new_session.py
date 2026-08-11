@@ -33,10 +33,6 @@ from hitch.main.runtime.input_images import (
 )
 from hitch.main.sessions import session_index
 from hitch.main.sessions.message_intent import (
-    _is_fix_pr_activation,
-    _is_pr_activation,
-    _is_pr_now_activation,
-    _is_qa_activation,
     _message_intent,
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
@@ -819,10 +815,10 @@ def _remember_repo_and_redirect(
 
 def _post_new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
-    pr_activation = _is_pr_activation(request)
-    pr_now_activation = _is_pr_now_activation(request)
-    fix_pr_activation = _is_fix_pr_activation(request)
-    qa_activation = _is_qa_activation(request)
+    pr_activation = intent.pr_activation
+    pr_now_activation = intent.pr_now_activation
+    fix_pr_activation = intent.fix_pr_activation
+    qa_activation = intent.qa_activation
     qa_workflow_activation = (
         pr_activation or pr_now_activation or qa_activation or fix_pr_activation
     )
