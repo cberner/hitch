@@ -175,7 +175,7 @@ def _worktree_diff(cwd: str | None) -> _DiffText:
     tracked = _tracked_diff(repo)
     untracked = _untracked_diff(repo)
     incomplete_reason = tracked.incomplete_reason or _tracked_diff_incomplete_reason(
-        tracked.text
+        repo, tracked.text
     )
     return _DiffText(
         text="\n".join(part for part in (tracked.text, untracked.text) if part),
@@ -183,18 +183,49 @@ def _worktree_diff(cwd: str | None) -> _DiffText:
     )
 
 
-def _tracked_diff_incomplete_reason(text: str) -> str:
+def _tracked_diff_incomplete_reason(repo: Path, text: str) -> str:
     if "\0" in text:
         return "tracked diff contains NUL bytes that QA cannot review as text"
+    current_path = ""
     for line in _split_diff_lines(text):
+        if line.startswith("diff --git "):
+            current_path = _path_from_diff_git(line)
+            continue
         if line.startswith("Binary files ") and line.endswith(" differ"):
             return "worktree diff contains a binary change that QA cannot review"
         if line.startswith("+Subproject commit ") and line.endswith("-dirty"):
-            return (
-                "worktree diff contains dirty submodule changes that QA cannot "
-                "review from the parent patch"
-            )
+            is_gitlink = _tracked_path_is_gitlink(repo, current_path)
+            if is_gitlink is None:
+                return (
+                    f"git could not verify whether {current_path!r} is a dirty "
+                    "submodule"
+                )
+            if is_gitlink:
+                return (
+                    "worktree diff contains dirty submodule changes that QA cannot "
+                    "review from the parent patch"
+                )
     return ""
+
+
+def _tracked_path_is_gitlink(repo: Path, relpath: str) -> bool | None:
+    try:
+        result = run_git(
+            repo,
+            ["ls-files", "--stage", "--", relpath],
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except GitCommandError:
+        return None
+    if result.returncode != 0:
+        return None
+    modes: list[bytes] = []
+    for line in result.stdout.splitlines():
+        mode, separator, _rest = line.partition(b" ")
+        if not separator or len(mode) != 6 or not mode.isdigit():
+            return None
+        modes.append(mode)
+    return any(mode == b"160000" for mode in modes)
 
 
 def _tracked_diff(repo: Path) -> _DiffText:

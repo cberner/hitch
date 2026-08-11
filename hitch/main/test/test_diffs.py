@@ -297,6 +297,20 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("Subproject commit", diff_text)
 
+    def test_system_agent_diff_allows_submodule_marker_in_text_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            notes = repo / "notes.txt"
+            notes.write_text("Notes\n")
+            _git(repo, "add", "notes.txt")
+            _git(repo, "commit", "-m", "initial")
+            notes.write_text("Notes\nSubproject commit abc-dirty\n")
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn("+Subproject commit abc-dirty", diff_text)
+
     def test_system_agent_diff_rejects_dirty_submodule(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
