@@ -724,11 +724,14 @@ def _latest_effective_reviews_by_author(reviews: list[Any]) -> list[Any]:
             anonymous.append(review)
             continue
         author = review.get("author")
-        login = (
-            string_from_any(author.get("login"))
-            if isinstance(author, dict)
-            else string_from_any(review.get("author_login"))
-        )
+        login = ""
+        if isinstance(author, dict):
+            login = string_from_any(author.get("login"))
+        user = review.get("user")
+        if not login and isinstance(user, dict):
+            login = string_from_any(user.get("login"))
+        if not login:
+            login = string_from_any(review.get("author_login"))
         if login:
             key = login.casefold()
             current = latest_by_author.get(key)
