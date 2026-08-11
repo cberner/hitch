@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,55 +13,67 @@ from hitch.main.goals import auto_proposals
 from hitch.main.models import SessionMetadata
 from hitch.main.workflows import workflow_maintenance
 
+_SchedulerEnablementCase = tuple[str, bool, dict[str, str], list[str], bool]
+_COMMON_SCHEDULER_ENABLEMENT_CASES: tuple[_SchedulerEnablementCase, ...] = (
+    ("tests", True, {}, ["manage.py", "runserver", "--noreload"], False),
+    (
+        "runserver child",
+        False,
+        {"RUN_MAIN": "true"},
+        ["manage.py", "runserver"],
+        True,
+    ),
+    (
+        "runserver noreload",
+        False,
+        {},
+        ["manage.py", "runserver", "--noreload"],
+        True,
+    ),
+    ("autoreloader parent", False, {}, ["manage.py", "runserver"], False),
+    ("management command", False, {}, ["manage.py", "migrate"], False),
+    ("wsgi server", False, {}, ["gunicorn", "hitch.wsgi:application"], True),
+)
+_AUTO_PROPOSAL_SCHEDULER_OVERRIDE_CASES: tuple[_SchedulerEnablementCase, ...] = (
+    (
+        "override cannot enable migration",
+        False,
+        {"HITCH_AUTO_PROPOSAL_SCHEDULER": "1"},
+        ["manage.py", "migrate"],
+        False,
+    ),
+    (
+        "override disables server",
+        False,
+        {"HITCH_AUTO_PROPOSAL_SCHEDULER": "0"},
+        ["gunicorn", "hitch.wsgi:application"],
+        False,
+    ),
+)
+
+
+def _assert_scheduler_enablement_cases(
+    test_case: SimpleTestCase,
+    scheduler_enabled: Callable[[], bool],
+    cases: tuple[_SchedulerEnablementCase, ...],
+) -> None:
+    for name, testing, environ, argv, expected in cases:
+        with (
+            test_case.subTest(name=name),
+            override_settings(TESTING=testing),
+            patch.dict(os.environ, environ, clear=True),
+            patch.object(sys, "argv", argv),
+        ):
+            test_case.assertEqual(scheduler_enabled(), expected)
+
 
 class AutoProposalSchedulerTests(SimpleTestCase):
-    @override_settings(TESTING=True)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
-    def test_scheduler_disabled_during_tests_by_default(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver"])
-    def test_scheduler_enabled_in_runserver_child(self) -> None:
-        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
-    def test_scheduler_enabled_in_runserver_noreload_process(self) -> None:
-        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver"])
-    def test_scheduler_disabled_in_runserver_autoreloader_parent(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "migrate"])
-    def test_scheduler_disabled_for_management_commands(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {"HITCH_AUTO_PROPOSAL_SCHEDULER": "1"}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "migrate"])
-    def test_scheduler_env_override_cannot_enable_during_migration(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
-    def test_scheduler_enabled_for_wsgi_server_process(self) -> None:
-        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {"HITCH_AUTO_PROPOSAL_SCHEDULER": "0"}, clear=True)
-    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
-    def test_scheduler_env_override_can_disable_server_owner(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
+    def test_scheduler_enablement_cases(self) -> None:
+        _assert_scheduler_enablement_cases(
+            self,
+            auto_proposals._auto_proposal_scheduler_enabled,
+            _COMMON_SCHEDULER_ENABLEMENT_CASES + _AUTO_PROPOSAL_SCHEDULER_OVERRIDE_CASES,
+        )
 
     @patch(
         "hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows",
@@ -131,52 +144,11 @@ class AutoProposalSchedulerTests(SimpleTestCase):
 
 
 class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
-    @override_settings(TESTING=True)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
-    def test_scheduler_disabled_during_tests_by_default(self) -> None:
-        self.assertFalse(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver"])
-    def test_scheduler_enabled_in_runserver_child(self) -> None:
-        self.assertTrue(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
-    def test_scheduler_enabled_in_runserver_noreload_process(self) -> None:
-        self.assertTrue(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "runserver"])
-    def test_scheduler_disabled_in_runserver_autoreloader_parent(self) -> None:
-        self.assertFalse(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["manage.py", "migrate"])
-    def test_scheduler_disabled_for_management_commands(self) -> None:
-        self.assertFalse(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
-    @override_settings(TESTING=False)
-    @patch.dict(os.environ, {}, clear=True)
-    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
-    def test_scheduler_enabled_for_wsgi_server_process(self) -> None:
-        self.assertTrue(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+    def test_scheduler_enablement_cases(self) -> None:
+        _assert_scheduler_enablement_cases(
+            self,
+            workflow_maintenance._workflow_maintenance_scheduler_enabled,
+            _COMMON_SCHEDULER_ENABLEMENT_CASES,
         )
 
     @patch(
