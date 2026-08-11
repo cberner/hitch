@@ -346,6 +346,10 @@ class HealthReportCacheTests(TestCase):
                 "probe_worker_scopes",
                 return_value=WorkerScopeProbe(active_count=0, leaked=[]),
             ),
+            patch.object(host_probes, "cpu_count", return_value=4),
+            patch.object(host_probes, "load_average", return_value=(0.1, 0.1, 0.1)),
+            patch.object(host_probes, "runserver_fd_count", return_value=50),
+            patch.object(host_probes, "runserver_close_wait_count", return_value=0),
             patch.object(
                 disk_cleanup,
                 "cached_hitch_home_disk_usage",
