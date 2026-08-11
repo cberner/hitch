@@ -187,9 +187,17 @@ def _tracked_diff_incomplete_reason(repo: Path, text: str) -> str:
     if "\0" in text:
         return "tracked diff contains NUL bytes that QA cannot review as text"
     current_path = ""
+    before_first_hunk = False
     for line in _split_diff_lines(text):
         if line.startswith("diff --git "):
             current_path = _path_from_diff_git(line)
+            before_first_hunk = True
+            continue
+        if line.startswith("@@"):
+            before_first_hunk = False
+            continue
+        if before_first_hunk and line.startswith("+++ "):
+            current_path = _clean_diff_path(line[4:]) or current_path
             continue
         if line.startswith("Binary files ") and line.endswith(" differ"):
             return "worktree diff contains a binary change that QA cannot review"
@@ -225,6 +233,8 @@ def _tracked_path_is_gitlink(repo: Path, relpath: str) -> bool | None:
         if not separator or len(mode) != 6 or not mode.isdigit():
             return None
         modes.append(mode)
+    if not modes:
+        return None
     return any(mode == b"160000" for mode in modes)
 
 
@@ -357,6 +367,11 @@ def _branch_diff_base(repo: Path) -> _BranchBaseObservation:
             incomplete_reason = incomplete_reason or (
                 "git could not determine whether the repository is shallow; "
                 "QA cannot verify the selected branch baseline"
+            )
+        elif shallow:
+            incomplete_reason = incomplete_reason or (
+                "shallow repository has no available merge base; QA cannot "
+                "verify the complete branch change"
             )
         elif not shallow:
             empty_tree = _empty_tree_hash(repo)

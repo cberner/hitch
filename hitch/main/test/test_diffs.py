@@ -311,6 +311,42 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("+Subproject commit abc-dirty", diff_text)
 
+    def test_dirty_marker_uses_new_file_header_path(self) -> None:
+        repo = Path("/repo")
+        diff_text = (
+            "diff --git a/foo b/bar b/foo b/baz\n"
+            "--- a/foo b/bar\n"
+            "+++ b/foo b/baz\n"
+            "@@ -1 +1 @@\n"
+            "-Subproject commit abc\n"
+            "+Subproject commit abc-dirty\n"
+        )
+
+        with patch(
+            "hitch.main.diffs._tracked_path_is_gitlink", return_value=True
+        ) as mock_gitlink:
+            reason = diffs_module._tracked_diff_incomplete_reason(repo, diff_text)
+
+        self.assertIn("dirty submodule", reason)
+        mock_gitlink.assert_called_once_with(repo, "foo b/baz")
+
+    def test_dirty_marker_without_index_entry_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            diff_text = (
+                "diff --git a/missing b/missing\n"
+                "--- a/missing\n"
+                "+++ b/missing\n"
+                "@@ -1 +1 @@\n"
+                "-Subproject commit abc\n"
+                "+Subproject commit abc-dirty\n"
+            )
+
+            reason = diffs_module._tracked_diff_incomplete_reason(repo, diff_text)
+
+        self.assertIn("could not verify", reason)
+
     def test_system_agent_diff_rejects_dirty_submodule(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -632,9 +668,9 @@ class WorktreeDiffTests(SimpleTestCase):
 
     def test_shallow_clone_diffs_against_base_ref_not_empty_tree(self) -> None:
         # A shallow clone can omit the shared ancestor, so merge-base reports no
-        # common ancestor even though HEAD and origin/main are related. The diff
-        # must use the base ref directly (showing only the real change), not the
-        # empty tree (which would render every file as an addition).
+        # common ancestor even though HEAD and origin/main are related. The
+        # preview must use the base ref directly rather than the empty tree,
+        # while strict QA blocks because that fallback is not a reliable patch.
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             origin = root / "origin"
@@ -664,6 +700,9 @@ class WorktreeDiffTests(SimpleTestCase):
             )
 
             diff = build_worktree_diff(str(clone))
+
+            with self.assertRaisesRegex(IncompleteDiffError, "shallow repository"):
+                build_worktree_diff_text(str(clone))
 
         paths = {file.path for file in diff.files}
         self.assertIn("base.py", paths)
