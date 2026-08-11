@@ -37,9 +37,7 @@ _PR_INFO_TOOLS = frozenset(
 _PR_COMMENT_TOOLS = frozenset({"fetch_pr_comments"})
 _PR_THREAD_TOOLS = frozenset({"list_pull_request_review_threads"})
 _PR_REVIEW_TOOLS = frozenset({"list_pull_request_reviews"})
-_PR_DECISIVE_REVIEW_STATES = frozenset(
-    {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
-)
+_PR_DECISIVE_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _PR_REACTION_TOOLS = frozenset({"get_pr_reactions"})
 _CI_STATUS_TOOLS = frozenset(
     {
