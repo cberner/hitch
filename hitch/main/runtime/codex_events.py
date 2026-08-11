@@ -751,16 +751,22 @@ def _review_supersedes(
 ) -> bool:
     state = string_from_any(review.get("state")).upper()
     current_state = string_from_any(current.get("state")).upper()
-    if (
-        state in _PR_DECISIVE_REVIEW_STATES
-        and current_state not in _PR_DECISIVE_REVIEW_STATES
-    ):
-        return True
-    if (
-        state not in _PR_DECISIVE_REVIEW_STATES
-        and current_state in _PR_DECISIVE_REVIEW_STATES
-    ):
-        return False
+    # Dismissals clear change requests but do not erase approvals.
+    changes_request_dismissal_pair = {state, current_state} == {
+        "CHANGES_REQUESTED",
+        "DISMISSED",
+    }
+    if not changes_request_dismissal_pair:
+        if (
+            state in _PR_DECISIVE_REVIEW_STATES
+            and current_state not in _PR_DECISIVE_REVIEW_STATES
+        ):
+            return True
+        if (
+            state not in _PR_DECISIVE_REVIEW_STATES
+            and current_state in _PR_DECISIVE_REVIEW_STATES
+        ):
+            return False
     submitted_at = string_from_any(
         review.get("submitted_at") or review.get("submittedAt")
     )
