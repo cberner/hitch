@@ -242,9 +242,10 @@ def _refresh_disk_usage_snapshot(generation: int, invalidation_token: str) -> No
         close_old_connections()
     current_invalidation_token = _disk_usage_invalidation_token()
     with _disk_usage_snapshot_lock:
-        if (
-            snapshot is not None
-            and generation == _disk_usage_generation
+        if snapshot is None:
+            _disk_usage_snapshot = None
+        elif (
+            generation == _disk_usage_generation
             and invalidation_token == current_invalidation_token
         ):
             _disk_usage_snapshot = _DiskUsageSnapshot(

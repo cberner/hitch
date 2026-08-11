@@ -1105,18 +1105,29 @@ class DiskUsageSnapshotTests(SimpleTestCase):
         self.assertEqual(second.limit_bytes, 400)
 
     def test_failed_refresh_can_be_retried(self) -> None:
+        now = timezone.now()
+        stale_usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
+        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
+            captured_at=now - disk_cleanup._DISK_USAGE_SNAPSHOT_TTL,
+            invalidation_token="token",
+            usage=stale_usage,
+        )
         with (
             patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
+            patch("hitch.main.runtime.disk_cleanup.timezone.now", return_value=now),
             patch.object(
                 disk_cleanup,
                 "hitch_home_disk_usage",
                 side_effect=RuntimeError("scan failed"),
             ),
             patch.object(disk_cleanup, "_disk_usage_invalidation_token", return_value="token"),
+            patch.object(disk_cleanup, "_max_allowed_percent", return_value=20.0),
             patch("hitch.main.runtime.disk_cleanup.close_old_connections") as mock_close,
             patch.object(disk_cleanup.logger, "exception") as mock_log,
         ):
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
+            self.assertEqual(
+                disk_cleanup.cached_hitch_home_disk_usage(), stale_usage
+            )
             self._run_scheduled_refresh(mock_thread)
             self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
 
