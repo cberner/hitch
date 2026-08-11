@@ -245,13 +245,14 @@ def _app_server_metric() -> HealthMetric:
 
 def _hitch_disk_metric() -> HealthMetric:
     def collect() -> HealthMetric:
-        usage = disk_cleanup.hitch_home_disk_usage()
+        usage = disk_cleanup.cached_hitch_home_disk_usage()
         if usage is None:
             return HealthMetric(
                 key="hitch_disk",
                 label="~/.hitch disk usage",
                 value="unavailable",
                 severity=SEVERITY_UNKNOWN,
+                detail="Disk usage is being calculated in the background; refresh shortly.",
             )
         severity = SEVERITY_DANGER if usage.over_limit else SEVERITY_OK
         value = f"{_human_bytes(usage.used_bytes)} ({usage.percent_of_disk:.1f}% of disk)"
@@ -747,11 +748,11 @@ def _build_health_report() -> HealthReport:
 def collect_health_report() -> HealthReport:
     """Build the dashboard report, cached for a short window.
 
-    A single build scans ``/proc`` twice and walks ``~/.hitch`` for its disk
-    figure, so repeated or concurrent dashboard loads must not each repeat that
-    work. The lock is held across the build so concurrent requests collapse onto
-    one computation rather than piling up parallel walks; the result is reused
-    for ``_REPORT_CACHE_TTL``. Bypassed under tests so each sees fresh DB state.
+    A single build scans ``/proc`` twice and reads several database aggregates,
+    so repeated or concurrent dashboard loads share the result for
+    ``_REPORT_CACHE_TTL``. The slower ``~/.hitch`` tree walk has its own
+    asynchronous single-flight snapshot. Bypassed under tests so each sees
+    fresh database state.
     """
     if getattr(settings, "TESTING", False):
         return _build_health_report()
