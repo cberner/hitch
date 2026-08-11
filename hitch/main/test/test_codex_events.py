@@ -1347,6 +1347,27 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(target["review_count"], 1)
         self.assertEqual(target["review_signal"], "changes_requested")
 
+    def test_sparse_reviews_use_decisions_and_input_order(self) -> None:
+        target: dict[str, Any] = {}
+
+        codex_events._copy_review_fields(
+            target,
+            {
+                "reviews": [
+                    "malformed",
+                    {"author": {"login": "reviewer"}, "state": "COMMENTED"},
+                    {"author": {"login": "reviewer"}, "state": "APPROVED"},
+                    {
+                        "author": {"login": "reviewer"},
+                        "state": "CHANGES_REQUESTED",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(target["review_count"], 2)
+        self.assertEqual(target["review_signal"], "changes_requested")
+
     def test_dismissed_review_does_not_supersede_reviewers_approval(self) -> None:
         target: dict[str, Any] = {}
 
