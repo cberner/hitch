@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, override_settings
@@ -30,6 +30,14 @@ def _init_unborn_repo(repo: Path) -> None:
 
 
 class ManagedWorktreeTests(SimpleTestCase):
+    @override
+    def setUp(self) -> None:
+        invalidation_patcher = patch(
+            "hitch.main.runtime.disk_cleanup.invalidate_hitch_home_disk_usage"
+        )
+        self.mock_invalidate_disk_usage = invalidation_patcher.start()
+        self.addCleanup(invalidation_patcher.stop)
+
     def test_snapshot_worktree_to_commit_includes_dirty_and_untracked_files(
         self,
     ) -> None:
@@ -283,6 +291,7 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
+            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_cleanup_managed_worktree_path_removes_worktree_and_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -300,6 +309,7 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
+            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_cleanup_managed_worktree_path_preserves_checked_out_user_branch(
         self,
@@ -335,6 +345,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             self.assertFalse(cleaned)
             self.assertTrue(unmanaged.exists())
+            self.mock_invalidate_disk_usage.assert_not_called()
 
     def test_cleanup_is_idempotent_after_worktree_already_removed(self) -> None:
         # A failed ``git worktree remove`` (here: the path is already gone)
@@ -354,6 +365,31 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
+            self.mock_invalidate_disk_usage.assert_called_once_with()
+
+    def test_cleanup_does_not_invalidate_when_directory_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            worktree_path = root / "managed" / "repo" / "worktree"
+            worktree_path.mkdir(parents=True)
+            managed_worktree = worktrees.ManagedWorktree(
+                path=worktree_path,
+                branch="hitch/repo/worktree",
+                source_repo=root / "source",
+            )
+            with (
+                patch.object(
+                    worktrees,
+                    "_git",
+                    side_effect=[worktrees.WorktreeCleanupError("remove failed"), None],
+                ),
+                patch("hitch.main.worktrees.shutil.rmtree"),
+                patch.object(worktrees, "_branch_exists", return_value=False),
+            ):
+                cleanup_worktree(managed_worktree)
+
+            self.assertTrue(worktree_path.exists())
+            self.mock_invalidate_disk_usage.assert_not_called()
 
     def test_cleanup_managed_worktree_path_reaps_directory_without_gitlink(
         self,
@@ -375,6 +411,7 @@ class ManagedWorktreeTests(SimpleTestCase):
                     cleanup_managed_worktree_path(str(managed_worktree.path))
                 )
             self.assertFalse(managed_worktree.path.exists())
+            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_cleanup_managed_worktree_path_reaps_when_source_repo_gone(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -391,6 +428,7 @@ class ManagedWorktreeTests(SimpleTestCase):
                     cleanup_managed_worktree_path(str(managed_worktree.path))
                 )
             self.assertFalse(managed_worktree.path.exists())
+            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_cleanup_managed_worktree_path_never_reaps_non_leaf_directories(
         self,
@@ -411,6 +449,7 @@ class ManagedWorktreeTests(SimpleTestCase):
                 self.assertFalse(cleanup_managed_worktree_path(str(managed)))
                 self.assertFalse(cleanup_managed_worktree_path(str(slug_dir)))
             self.assertTrue(managed_worktree.path.is_dir())
+            self.mock_invalidate_disk_usage.assert_not_called()
 
     def test_create_worktree_cleans_up_after_add_failure(self) -> None:
         # ``worktree add -b`` creates the branch and admin entry before the
