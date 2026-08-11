@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import override
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -1053,6 +1053,24 @@ class DiskUsageSnapshotTests(SimpleTestCase):
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once_with()
 
+    def test_refresh_thread_start_failure_allows_retry(self) -> None:
+        with (
+            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
+            patch.object(disk_cleanup.logger, "exception") as mock_log,
+        ):
+            mock_thread.return_value.start.side_effect = [
+                RuntimeError("cannot start thread"),
+                None,
+            ]
+
+            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
+            self.assertFalse(disk_cleanup._disk_usage_refreshing)
+            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
+
+        self.assertEqual(mock_thread.call_count, 2)
+        self.assertTrue(disk_cleanup._disk_usage_refreshing)
+        mock_log.assert_called_once_with("failed to start Hitch disk usage refresh")
+
     def test_fresh_snapshot_is_reused_and_stale_snapshot_refreshes(self) -> None:
         now = timezone.now()
         usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
@@ -1189,3 +1207,39 @@ class DiskUsageSnapshotTests(SimpleTestCase):
 
         self.assertIsNone(disk_cleanup._disk_usage_snapshot)
         mock_thread.assert_called_once()
+
+    def test_shared_token_read_failure_is_nonfatal(self) -> None:
+        token_path = MagicMock(spec=Path)
+        token_path.read_text.side_effect = OSError("token unreadable")
+        with (
+            patch.object(
+                disk_cleanup,
+                "_disk_usage_invalidation_path",
+                return_value=token_path,
+            ),
+            patch.object(disk_cleanup.logger, "exception") as mock_log,
+        ):
+            self.assertEqual(disk_cleanup._disk_usage_invalidation_token(), "")
+
+        token_path.read_text.assert_called_once_with(encoding="utf-8")
+        mock_log.assert_called_once_with(
+            "failed to read Hitch disk usage invalidation token"
+        )
+
+    def test_shared_token_publish_failures_are_nonfatal(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(HITCH_HOME_DIR=Path(raw)),
+            patch.object(Path, "write_text", side_effect=OSError("write failed")),
+            patch.object(Path, "unlink", side_effect=OSError("unlink failed")),
+            patch.object(disk_cleanup.logger, "exception") as mock_log,
+        ):
+            disk_cleanup._publish_disk_usage_invalidation()
+
+        self.assertEqual(
+            mock_log.call_args_list,
+            [
+                call("failed to publish Hitch disk usage invalidation"),
+                call("failed to remove disk usage invalidation temporary file"),
+            ],
+        )
