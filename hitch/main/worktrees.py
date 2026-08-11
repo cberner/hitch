@@ -119,25 +119,29 @@ def create_worktree_for_session(
 
 def cleanup_worktree(worktree: ManagedWorktree) -> None:
     """Remove a just-created managed worktree and its branch."""
+    path_existed = worktree.path.exists()
     try:
-        _git(
-            worktree.source_repo,
-            ["worktree", "remove", "--force", str(worktree.path)],
-            error_cls=WorktreeCleanupError,
-            timeout=_GIT_CHECKOUT_TIMEOUT_SECONDS,
-        )
-    except WorktreeCleanupError:
-        # git refuses (locked / already-partial worktree) or the repo cannot
-        # express the removal; reap the directory directly and prune the stale
-        # .git/worktrees/<name> admin entry so retries don't accumulate state.
-        shutil.rmtree(worktree.path, ignore_errors=True)
-        _git(worktree.source_repo, ["worktree", "prune"], raise_on_error=False)
-    if _branch_exists(worktree.source_repo, worktree.branch):
-        _git(
-            worktree.source_repo,
-            ["branch", "-D", worktree.branch],
-            error_cls=WorktreeCleanupError,
-        )
+        try:
+            _git(
+                worktree.source_repo,
+                ["worktree", "remove", "--force", str(worktree.path)],
+                error_cls=WorktreeCleanupError,
+                timeout=_GIT_CHECKOUT_TIMEOUT_SECONDS,
+            )
+        except WorktreeCleanupError:
+            # git refuses (locked / already-partial worktree) or the repo cannot
+            # express the removal; reap the directory directly and prune the stale
+            # .git/worktrees/<name> admin entry so retries don't accumulate state.
+            shutil.rmtree(worktree.path, ignore_errors=True)
+            _git(worktree.source_repo, ["worktree", "prune"], raise_on_error=False)
+        if _branch_exists(worktree.source_repo, worktree.branch):
+            _git(
+                worktree.source_repo,
+                ["branch", "-D", worktree.branch],
+                error_cls=WorktreeCleanupError,
+            )
+    finally:
+        _invalidate_disk_usage_if_removed(worktree.path, path_existed=path_existed)
 
 
 def cleanup_managed_worktree_path(cwd: str) -> bool:
@@ -154,7 +158,9 @@ def cleanup_managed_worktree_path(cwd: str) -> bool:
         # sibling worktrees that live beneath it.
         if not path.is_dir() or not _is_managed_worktree_leaf(path):
             return False
+        path_existed = path.exists()
         shutil.rmtree(path, ignore_errors=True)
+        _invalidate_disk_usage_if_removed(path, path_existed=path_existed)
         return True
     branch = _managed_branch_for_path(path)
     common_dir = (
@@ -170,11 +176,22 @@ def cleanup_managed_worktree_path(cwd: str) -> bool:
     if not common_dir:
         # The source repository is gone or unreadable; its branch and admin
         # entry died with it, so reclaiming the directory is all that's left.
+        path_existed = path.exists()
         shutil.rmtree(path, ignore_errors=True)
+        _invalidate_disk_usage_if_removed(path, path_existed=path_existed)
         return True
     source_repo = _source_repo_from_common_dir(Path(common_dir))
     cleanup_worktree(ManagedWorktree(path=path, branch=branch, source_repo=source_repo))
     return True
+
+
+def _invalidate_disk_usage_if_removed(path: Path, *, path_existed: bool) -> None:
+    if not path_existed or path.exists():
+        return
+    # disk_cleanup imports these worktree helpers, so keep this dependency lazy.
+    from hitch.main.runtime.disk_cleanup import invalidate_hitch_home_disk_usage
+
+    invalidate_hitch_home_disk_usage()
 
 
 def discover_managed_worktrees() -> list[Path]:

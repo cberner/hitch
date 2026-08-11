@@ -127,8 +127,6 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
             continue
         cleaned += 1
         successful_bytes += usage_bytes
-    if cleaned:
-        invalidate_hitch_home_disk_usage()
     return cleaned
 
 

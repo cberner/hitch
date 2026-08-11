@@ -127,9 +127,6 @@ class DiskCleanupTests(TestCase):
                 "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
-            patch(
-                "hitch.main.runtime.disk_cleanup.invalidate_hitch_home_disk_usage"
-            ) as mock_invalidate,
         ):
             root = Path(raw)
             system_path = self._managed_path(root, "system")
@@ -165,7 +162,6 @@ class DiskCleanupTests(TestCase):
             [call.args[0] for call in mock_cleanup.call_args_list],
             [system_path, pr_path],
         )
-        mock_invalidate.assert_called_once_with()
 
     def test_pending_proposal_candidate_worktree_is_preserved(self) -> None:
         with (
