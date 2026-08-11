@@ -1204,6 +1204,23 @@ class DiskUsageSnapshotTests(SimpleTestCase):
         self.assertIsNone(disk_cleanup._disk_usage_snapshot)
         mock_thread.assert_called_once()
 
+    def test_invalidate_clears_snapshot_and_advances_generation(self) -> None:
+        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
+            captured_at=timezone.now(),
+            invalidation_token="token",
+            usage=disk_cleanup.HitchDiskUsage(100, 200, 1000),
+        )
+        disk_cleanup._disk_usage_generation = 7
+
+        with patch.object(
+            disk_cleanup, "_publish_disk_usage_invalidation"
+        ) as mock_publish:
+            disk_cleanup.invalidate_hitch_home_disk_usage()
+
+        mock_publish.assert_called_once_with()
+        self.assertIsNone(disk_cleanup._disk_usage_snapshot)
+        self.assertEqual(disk_cleanup._disk_usage_generation, 8)
+
     def test_shared_token_read_failure_is_nonfatal(self) -> None:
         token_path = MagicMock(spec=Path)
         token_path.read_text.side_effect = OSError("token unreadable")

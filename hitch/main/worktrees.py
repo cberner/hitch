@@ -114,6 +114,7 @@ def create_worktree_for_session(
         )
     else:
         raise WorktreeCreationError(f"base ref {base_ref!r} does not exist")
+    _invalidate_disk_usage()
     return ManagedWorktree(path=path, branch=branch, source_repo=repo)
 
 
@@ -188,6 +189,10 @@ def cleanup_managed_worktree_path(cwd: str) -> bool:
 def _invalidate_disk_usage_if_removed(path: Path, *, path_existed: bool) -> None:
     if not path_existed or path.exists():
         return
+    _invalidate_disk_usage()
+
+
+def _invalidate_disk_usage() -> None:
     # disk_cleanup imports these worktree helpers, so keep this dependency lazy.
     from hitch.main.runtime.disk_cleanup import invalidate_hitch_home_disk_usage
 
