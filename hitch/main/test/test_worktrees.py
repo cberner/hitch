@@ -155,6 +155,7 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertEqual(branch, managed_worktree.branch)
             self.assertRegex(branch, r"^hitch/source-repo/\d{14}-[0-9a-f]{8}$")
             self.assertEqual((worktree / "README.md").read_text(), "hello\n")
+            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_creates_worktree_from_base_ref_with_hooks_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -285,6 +286,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 cleanup_worktree(managed_worktree)
 
             self.assertFalse(managed_worktree.path.exists())
@@ -302,6 +304,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 cleaned = cleanup_managed_worktree_path(str(managed_worktree.path))
 
             self.assertTrue(cleaned)
@@ -359,6 +362,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 cleanup_worktree(managed_worktree)
                 cleanup_worktree(managed_worktree)
             self.assertFalse(managed_worktree.path.exists())
@@ -405,6 +409,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 (managed_worktree.path / ".git").unlink()
 
                 self.assertTrue(
@@ -422,6 +427,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 shutil.rmtree(repo)
 
                 self.assertTrue(
@@ -444,6 +450,7 @@ class ManagedWorktreeTests(SimpleTestCase):
 
             with override_settings(HITCH_WORKTREES_DIR=managed):
                 managed_worktree = create_worktree_for_session(str(repo))
+                self.mock_invalidate_disk_usage.reset_mock()
                 slug_dir = managed_worktree.path.parent
 
                 self.assertFalse(cleanup_managed_worktree_path(str(managed)))
@@ -485,6 +492,7 @@ class ManagedWorktreeTests(SimpleTestCase):
                 for child in repo_dir.iterdir()
             ]
             self.assertEqual(leftovers, [])
+            self.mock_invalidate_disk_usage.assert_not_called()
 
     def test_git_wrapper_reports_spawn_failure(self) -> None:
         with (
