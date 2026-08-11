@@ -1,6 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from django.test import SimpleTestCase
 
@@ -1220,8 +1221,14 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "result": {
                                         "structuredContent": {
                                             "reviews": [
-                                                {"state": "APPROVED"},
-                                                {"state": "CHANGES_REQUESTED"},
+                                                {
+                                                    "author": {"login": "approver"},
+                                                    "state": "APPROVED",
+                                                },
+                                                {
+                                                    "author": {"login": "blocker"},
+                                                    "state": "CHANGES_REQUESTED",
+                                                },
                                             ]
                                         }
                                     },
@@ -1266,6 +1273,79 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["review_count"], 2)
         self.assertEqual(snapshot["reaction_count"], 1)
         self.assertEqual(snapshot["review_signal"], "changes_requested")
+
+    def test_review_signal_uses_each_reviewers_latest_review(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_list_pull_request_reviews",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "pr_number": 169,
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "reviews": [
+                                        {
+                                            "author": {"login": "reviewer"},
+                                            "state": "APPROVED",
+                                            "submitted_at": "2026-08-11T12:05:00Z",
+                                        },
+                                        {
+                                            "author": {"login": "reviewer"},
+                                            "state": "CHANGES_REQUESTED",
+                                            "submitted_at": "2026-08-11T12:00:00Z",
+                                        },
+                                    ]
+                                }
+                            },
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path], thread_id="thread-1"
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_count"], 1)
+        self.assertEqual(snapshot["review_signal"], "approved")
+
+    def test_comment_does_not_supersede_reviewers_change_request(self) -> None:
+        target: dict[str, Any] = {}
+
+        codex_events._copy_review_fields(
+            target,
+            {
+                "reviews": [
+                    {
+                        "author": {"login": "reviewer"},
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": "2026-08-11T12:00:00Z",
+                    },
+                    {
+                        "author": {"login": "reviewer"},
+                        "state": "COMMENTED",
+                        "submitted_at": "2026-08-11T12:05:00Z",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(target["review_count"], 1)
+        self.assertEqual(target["review_signal"], "changes_requested")
 
     def test_ci_status_reports_failure_when_some_workflow_runs_still_pending(
         self,
