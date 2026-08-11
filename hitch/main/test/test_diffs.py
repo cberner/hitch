@@ -14,10 +14,24 @@ from hitch.main.diffs import (
     build_worktree_diff,
     build_worktree_diff_text,
 )
+from hitch.main.git_support import GitCommandError
 from hitch.main.test.support import _git
 
 
+def _git_result(
+    returncode: int = 0, stdout: bytes = b""
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        ["git"], returncode, stdout=stdout, stderr=b""
+    )
+
+
 class WorktreeDiffTests(SimpleTestCase):
+    def test_system_agent_diff_rejects_missing_checkout_argument(self) -> None:
+        self.assertEqual(diffs_module._worktree_diff_text(None), "")
+        with self.assertRaisesRegex(IncompleteDiffError, "path is missing"):
+            build_worktree_diff_text(None)
+
     def test_system_agent_diff_rejects_failed_branch_diff(self) -> None:
         fallback = "diff --git a/fallback.txt b/fallback.txt\n"
 
@@ -121,6 +135,27 @@ class WorktreeDiffTests(SimpleTestCase):
             self.assertEqual(diffs_module._worktree_diff_text(str(missing)), "")
             with self.assertRaisesRegex(IncompleteDiffError, "does not exist"):
                 build_worktree_diff_text(str(missing))
+
+    def test_repository_discovery_preserves_git_failures(self) -> None:
+        with patch(
+            "hitch.main.diffs.run_git",
+            side_effect=GitCommandError("timeout"),
+        ):
+            observation = diffs_module._repo_root_observation(Path("/"))
+        self.assertIsNone(observation.root)
+        self.assertIn("discovery failed", observation.incomplete_reason)
+
+        for stdout, expected in (
+            (b"\xff", "non-UTF-8"),
+            (b"", "root is empty"),
+        ):
+            with self.subTest(expected=expected), patch(
+                "hitch.main.diffs.run_git",
+                return_value=_git_result(stdout=stdout),
+            ):
+                observation = diffs_module._repo_root_observation(Path("/"))
+            self.assertIsNone(observation.root)
+            self.assertIn(expected, observation.incomplete_reason)
 
     def test_system_agent_diff_rejects_failed_branch_ref_lookup(self) -> None:
         with patch(
@@ -346,6 +381,96 @@ class WorktreeDiffTests(SimpleTestCase):
             reason = diffs_module._tracked_diff_incomplete_reason(repo, diff_text)
 
         self.assertIn("could not verify", reason)
+
+    def test_gitlink_lookup_fails_closed_on_unverifiable_index(self) -> None:
+        with patch(
+            "hitch.main.diffs.run_git",
+            side_effect=GitCommandError("timeout"),
+        ):
+            self.assertIsNone(
+                diffs_module._tracked_path_is_gitlink(Path("/repo"), "module")
+            )
+
+        for result in (
+            _git_result(returncode=2),
+            _git_result(stdout=b"not-an-index-entry\n"),
+        ):
+            with self.subTest(result=result), patch(
+                "hitch.main.diffs.run_git", return_value=result
+            ):
+                self.assertIsNone(
+                    diffs_module._tracked_path_is_gitlink(Path("/repo"), "module")
+                )
+
+    def test_git_diff_output_preserves_command_failures(self) -> None:
+        with patch(
+            "hitch.main.diffs.run_git",
+            side_effect=GitCommandError("timeout"),
+        ):
+            self.assertIsNone(
+                diffs_module._git_diff_output(Path("/repo"), ["diff"]).text
+            )
+
+        with patch(
+            "hitch.main.diffs.run_git", return_value=_git_result(returncode=2)
+        ):
+            self.assertIsNone(
+                diffs_module._git_diff_output(Path("/repo"), ["diff"]).text
+            )
+
+    def test_core_file_mode_fails_closed_on_ambiguous_results(self) -> None:
+        with patch(
+            "hitch.main.diffs.run_git",
+            side_effect=GitCommandError("timeout"),
+        ):
+            self.assertIsNone(diffs_module._core_file_mode(Path("/repo")))
+
+        for result, expected in (
+            (_git_result(returncode=1), True),
+            (_git_result(returncode=2), None),
+            (_git_result(stdout=b"unknown\n"), None),
+        ):
+            with self.subTest(result=result), patch(
+                "hitch.main.diffs.run_git", return_value=result
+            ):
+                self.assertEqual(
+                    diffs_module._core_file_mode(Path("/repo")), expected
+                )
+
+    def test_branch_base_preserves_unverifiable_repository_state(self) -> None:
+        with patch(
+            "hitch.main.diffs._ref_state", return_value=True
+        ), patch(
+            "hitch.main.diffs._git_output", return_value=""
+        ), patch(
+            "hitch.main.diffs._is_shallow_repo", return_value=None
+        ):
+            observation = diffs_module._branch_diff_base(Path("/repo"))
+        self.assertEqual(observation.ref, diffs_module._BRANCH_DIFF_DEFAULT_REF)
+        self.assertIn("whether the repository is shallow", observation.incomplete_reason)
+
+        with patch(
+            "hitch.main.diffs._ref_state", return_value=True
+        ), patch(
+            "hitch.main.diffs._git_output", return_value=""
+        ), patch(
+            "hitch.main.diffs._is_shallow_repo", return_value=False
+        ), patch(
+            "hitch.main.diffs._empty_tree_hash", return_value=None
+        ):
+            observation = diffs_module._branch_diff_base(Path("/repo"))
+        self.assertEqual(observation.ref, diffs_module._BRANCH_DIFF_DEFAULT_REF)
+        self.assertIn("empty-tree branch baseline", observation.incomplete_reason)
+
+    def test_untracked_listing_preserves_command_failure(self) -> None:
+        with patch(
+            "hitch.main.diffs.run_git",
+            side_effect=GitCommandError("timeout"),
+        ):
+            observation = diffs_module._untracked_paths(Path("/repo"))
+
+        self.assertEqual(observation.paths, ())
+        self.assertIn("ls-files failed", observation.incomplete_reason)
 
     def test_system_agent_diff_rejects_dirty_submodule(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
