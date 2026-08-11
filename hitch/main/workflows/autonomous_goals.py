@@ -1641,7 +1641,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             return _AutonomousGoalPostCommitAction(
                 cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
             )
-        _create_autonomous_goal_skipped_notice(
+        _create_autonomous_goal_notice(
             workflow,
             autonomous_goal,
             title=_below_threshold_notice_title(candidate, autonomous_goal),
@@ -2888,49 +2888,37 @@ def _block_autonomous_goal_workflow(
     # The finish handler may have recorded budget tokens on this locked instance.
     # Persist them before _block_workflow re-reads the row.
     workflow.save(update_fields=["state", "updated_at"])
-    _create_autonomous_goal_failure_notice(workflow, autonomous_goal, error)
-    system_agents._block_workflow(workflow, error, surface_to_thread=False)
-
-def _create_autonomous_goal_failure_notice(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, error: str
-) -> None:
-    if ProposedSession.objects.filter(
-        source_workflow=workflow,
-        outcome_status=ProposedSession.OUTCOME_UNSET,
-    ).exists():
-        return
-    ProposedSession.objects.create(
-        project=autonomous_goal.project,
-        autonomous_goal=autonomous_goal,
-        source_workflow=workflow,
+    _create_autonomous_goal_notice(
+        workflow,
+        autonomous_goal,
         title=f"Autonomous goal failed: {autonomous_goal.title}"[
             :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
         ],
-        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
         summary=f"Hitch could not finish this autonomous goal run: {error}",
-        candidate_session=_session_metadata_from_state(workflow, "candidate_session_id"),
-        judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
-        outcome_metadata={
+        metadata={
             "autonomous_goal_autonomy": autonomous_goal.autonomy,
             "automation_status": "failed",
             "automation_error": error,
-            **_autonomous_goal_proposal_budget_metadata(workflow),
         },
+        block_on_any_pending_item=True,
     )
+    system_agents._block_workflow(workflow, error, surface_to_thread=False)
 
-def _create_autonomous_goal_skipped_notice(
+def _create_autonomous_goal_notice(
     workflow: SystemWorkflow,
     autonomous_goal: AutonomousGoal,
     *,
     title: str,
     summary: str,
     metadata: dict[str, object] | None = None,
+    block_on_any_pending_item: bool = False,
 ) -> None:
-    if ProposedSession.objects.filter(
-        source_workflow=workflow,
-        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
-        outcome_status=ProposedSession.OUTCOME_UNSET,
-    ).exists():
+    pending = ProposedSession.objects.filter(
+        source_workflow=workflow, outcome_status=ProposedSession.OUTCOME_UNSET
+    )
+    if not block_on_any_pending_item:
+        pending = pending.filter(inbox_kind=ProposedSession.INBOX_KIND_NOTICE)
+    if pending.exists():
         return
     ProposedSession.objects.create(
         project=autonomous_goal.project,
