@@ -644,26 +644,56 @@ class SettingsPageRenderTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_saved_extra_system_prompt_renders_on_settings_page(
+    def test_saved_cookie_settings_render_on_settings_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _seed_cookies(
-            self.client,
-            **{
-                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
-                    "Prefer small diffs."
-                )
-            },
-        )
         _configure_codex(
             mock_codex,
             models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("update_settings"))
+        cases = {
+            "extra system prompt": (
+                _EXTRA_SYSTEM_PROMPT_COOKIE,
+                _encode_extra_system_prompt("Prefer small diffs."),
+                "Prefer small diffs.",
+            ),
+            "worktrees": (
+                _USE_WORKTREES_COOKIE,
+                "true",
+                'name="use_worktrees" value="true" checked',
+            ),
+            "auto PR": (
+                _AUTO_PR_COOKIE,
+                "true",
+                'name="auto_pr" value="true" checked',
+            ),
+            "auto QA": (
+                _AUTO_QA_COOKIE,
+                "true",
+                'name="auto_qa" value="true" checked',
+            ),
+            "spec critic": (
+                _SPEC_CRITIC_COOKIE,
+                "true",
+                'name="spec_critic" value="true" checked',
+            ),
+            "web search": (
+                _WEB_SEARCH_COOKIE,
+                "live",
+                'value="live" selected',
+            ),
+        }
 
-        self.assertContains(response, "Prefer small diffs.")
+        for name, (cookie, value, expected) in cases.items():
+            with self.subTest(name=name):
+                self.client.cookies.clear()
+                _seed_cookies(self.client, **{cookie: value})
+
+                response = self.client.get(reverse("update_settings"))
+
+                self.assertContains(response, expected)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -687,54 +717,6 @@ class SettingsPageRenderTests(TestCase):
             body.index("Show archived"),
             body.index("No sessions found."),
         )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_saved_worktree_setting_renders_checked(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'name="use_worktrees" value="true" checked')
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_saved_auto_pr_setting_renders_checked(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'name="auto_pr" value="true" checked')
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_saved_auto_qa_setting_renders_checked(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_AUTO_QA_COOKIE: "true"})
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'name="auto_qa" value="true" checked')
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -783,39 +765,6 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertIn("checked", auto_pr_input)
         self.assertNotIn("checked", auto_qa_input)
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_saved_spec_critic_setting_renders_checked(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
-
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'name="spec_critic" value="true" checked')
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_saved_web_search_setting_renders_selected(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "live"})
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'value="live" selected')
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
