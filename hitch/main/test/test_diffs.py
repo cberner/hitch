@@ -297,6 +297,36 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("Subproject commit", diff_text)
 
+    def test_system_agent_diff_rejects_dirty_submodule(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            child = root / "child"
+            repo = root / "repo"
+            subprocess.run(["git", "init", str(child)], check=True, capture_output=True)
+            (child / "value.txt").write_text("old\n")
+            _git(child, "add", "value.txt")
+            _git(child, "commit", "-m", "initial")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            _git(
+                repo,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                str(child),
+                "modules/child",
+            )
+            _git(repo, "commit", "-am", "add submodule")
+            (repo / "modules" / "child" / "value.txt").write_text("dirty\n")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "dirty submodule"):
+                build_worktree_diff_text(str(repo))
+
+            preview = diffs_module._worktree_diff_text(str(repo))
+
+        self.assertIn("Subproject commit", preview)
+        self.assertIn("-dirty", preview)
+
     def test_system_agent_diff_rejects_non_utf8_untracked_path_alias(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)

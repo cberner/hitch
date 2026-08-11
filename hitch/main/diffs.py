@@ -37,6 +37,7 @@ _DIFF_ARGS = [
     "--no-ext-diff",
     "--no-textconv",
     "--ignore-submodules=none",
+    "--submodule=short",
     "--find-renames",
     "--src-prefix=a/",
     "--dst-prefix=b/",
@@ -185,11 +186,14 @@ def _worktree_diff(cwd: str | None) -> _DiffText:
 def _tracked_diff_incomplete_reason(text: str) -> str:
     if "\0" in text:
         return "tracked diff contains NUL bytes that QA cannot review as text"
-    if any(
-        line.startswith("Binary files ") and line.endswith(" differ")
-        for line in _split_diff_lines(text)
-    ):
-        return "worktree diff contains a binary change that QA cannot review"
+    for line in _split_diff_lines(text):
+        if line.startswith("Binary files ") and line.endswith(" differ"):
+            return "worktree diff contains a binary change that QA cannot review"
+        if line.startswith("+Subproject commit ") and line.endswith("-dirty"):
+            return (
+                "worktree diff contains dirty submodule changes that QA cannot "
+                "review from the parent patch"
+            )
     return ""
 
 
