@@ -287,63 +287,46 @@ def _normalize_ci_status(value: Any) -> str:
     return ""
 
 
-def _review_threads_page(payload: Any) -> dict[str, Any]:
+def _pull_request_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        return {"nodes": [], "has_next_page": False, "end_cursor": ""}
+        return {}
     data = payload.get("data")
     repository = data.get("repository") if isinstance(data, dict) else None
     pull_request = (
         repository.get("pullRequest") if isinstance(repository, dict) else None
     )
-    threads = (
-        pull_request.get("reviewThreads")
-        if isinstance(pull_request, dict)
-        else None
-    )
-    if not isinstance(threads, dict):
+    return pull_request if isinstance(pull_request, dict) else {}
+
+
+def _connection_page(connection: Any) -> dict[str, Any]:
+    if not isinstance(connection, dict):
         return {"nodes": [], "has_next_page": False, "end_cursor": ""}
-    nodes = threads.get("nodes")
-    page_info = threads.get("pageInfo")
-    if not isinstance(nodes, list):
-        nodes = []
-    if not isinstance(page_info, dict):
-        page_info = {}
+    nodes = connection.get("nodes")
+    page_info = connection.get("pageInfo")
     return {
-        "nodes": [node for node in nodes if isinstance(node, dict)],
-        "has_next_page": page_info.get("hasNextPage") is True,
-        "end_cursor": string_from_any(page_info.get("endCursor")),
+        "nodes": [node for node in nodes if isinstance(node, dict)]
+        if isinstance(nodes, list)
+        else [],
+        "has_next_page": isinstance(page_info, dict)
+        and page_info.get("hasNextPage") is True,
+        "end_cursor": string_from_any(
+            page_info.get("endCursor") if isinstance(page_info, dict) else None
+        ),
     }
+
+
+def _review_threads_page(payload: Any) -> dict[str, Any]:
+    return _connection_page(_pull_request_payload(payload).get("reviewThreads"))
 
 
 def _status_checks_page(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        return {"nodes": [], "has_next_page": False, "end_cursor": ""}
-    data = payload.get("data")
-    repository = data.get("repository") if isinstance(data, dict) else None
-    pull_request = (
-        repository.get("pullRequest") if isinstance(repository, dict) else None
-    )
-    rollup = (
-        pull_request.get("statusCheckRollup")
-        if isinstance(pull_request, dict)
-        else None
-    )
+        return _connection_page(None)
+    rollup = _pull_request_payload(payload).get("statusCheckRollup")
     if rollup is None:
         return {"nodes": None, "has_next_page": False, "end_cursor": ""}
     contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
-    if not isinstance(contexts, dict):
-        return {"nodes": [], "has_next_page": False, "end_cursor": ""}
-    nodes = contexts.get("nodes")
-    page_info = contexts.get("pageInfo")
-    if not isinstance(nodes, list):
-        nodes = []
-    if not isinstance(page_info, dict):
-        page_info = {}
-    return {
-        "nodes": [node for node in nodes if isinstance(node, dict)],
-        "has_next_page": page_info.get("hasNextPage") is True,
-        "end_cursor": string_from_any(page_info.get("endCursor")),
-    }
+    return _connection_page(contexts)
 
 
 def _copy_gh_review_thread_fields(
