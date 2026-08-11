@@ -63,7 +63,7 @@ class CollectHealthReportTests(TestCase):
             self.addCleanup(patcher.stop)
         disk_patcher = patch.object(
             disk_cleanup,
-            "hitch_home_disk_usage",
+            "cached_hitch_home_disk_usage",
             return_value=HitchDiskUsage(used_bytes=1024, limit_bytes=1_000_000, disk_total_bytes=10_000_000),
         )
         disk_patcher.start()
@@ -154,7 +154,7 @@ class CollectHealthReportTests(TestCase):
     def test_disk_over_limit_is_danger(self) -> None:
         with patch.object(
             disk_cleanup,
-            "hitch_home_disk_usage",
+            "cached_hitch_home_disk_usage",
             return_value=HitchDiskUsage(used_bytes=2_000_000, limit_bytes=1_000_000, disk_total_bytes=10_000_000),
         ):
             report = health.collect_health_report()
@@ -170,7 +170,7 @@ class CollectHealthReportTests(TestCase):
     def test_headline_metric_surfaces_worst_severity_row(self) -> None:
         with patch.object(
             disk_cleanup,
-            "hitch_home_disk_usage",
+            "cached_hitch_home_disk_usage",
             return_value=HitchDiskUsage(used_bytes=2_000_000, limit_bytes=1_000_000, disk_total_bytes=10_000_000),
         ):
             report = health.collect_health_report()
@@ -303,7 +303,7 @@ class HealthReportCacheTests(TestCase):
                 "probe_worker_scopes",
                 return_value=WorkerScopeProbe(active_count=0, leaked=[]),
             ) as probe,
-            patch.object(disk_cleanup, "hitch_home_disk_usage", return_value=None),
+            patch.object(disk_cleanup, "cached_hitch_home_disk_usage", return_value=None),
             patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
         ):
             first = health.collect_health_report()

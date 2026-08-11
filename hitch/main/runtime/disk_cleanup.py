@@ -6,13 +6,15 @@ import logging
 import os
 import shutil
 import stat
+import threading
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from django.conf import settings
-from django.db import models
+from django.db import close_old_connections, models
 from django.utils import timezone
 
 from hitch.main import demo
@@ -44,6 +46,8 @@ _PROPOSAL_SESSION_ID_FIELDS = (
     "accepted_session_id",
 )
 _ACTIVE_WORKFLOW_CWD_STATE_KEYS = ("session_cwd", "stacked_diff_fork_from_cwd")
+_DISK_USAGE_SNAPSHOT_TTL = timedelta(minutes=5)
+_DISK_USAGE_INVALIDATION_FILE = ".disk-usage-cache-token"
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,8 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
             continue
         cleaned += 1
         successful_bytes += usage_bytes
+    if cleaned:
+        invalidate_hitch_home_disk_usage()
     return cleaned
 
 
@@ -143,6 +149,19 @@ class HitchDiskUsage:
         if self.disk_total_bytes <= 0:
             return 0.0
         return self.used_bytes / self.disk_total_bytes * 100.0
+
+
+@dataclass(frozen=True)
+class _DiskUsageSnapshot:
+    captured_at: datetime
+    invalidation_token: str
+    usage: HitchDiskUsage
+
+
+_disk_usage_snapshot_lock = threading.Lock()
+_disk_usage_snapshot: _DiskUsageSnapshot | None = None
+_disk_usage_refreshing = False
+_disk_usage_generation = 0
 
 
 def hitch_home_disk_usage() -> HitchDiskUsage | None:
@@ -166,6 +185,123 @@ def hitch_home_disk_usage() -> HitchDiskUsage | None:
         limit_bytes=limit_bytes,
         disk_total_bytes=disk_total,
     )
+
+
+def cached_hitch_home_disk_usage() -> HitchDiskUsage | None:
+    """Return the latest snapshot and refresh the expensive tree walk off-request."""
+    global _disk_usage_generation, _disk_usage_refreshing, _disk_usage_snapshot
+    now = timezone.now()
+    invalidation_token = _disk_usage_invalidation_token()
+    snapshot: HitchDiskUsage | None
+    with _disk_usage_snapshot_lock:
+        cached = _disk_usage_snapshot
+        if (
+            cached is not None
+            and cached.invalidation_token == invalidation_token
+            and now - cached.captured_at < _DISK_USAGE_SNAPSHOT_TTL
+        ):
+            snapshot = cached.usage
+            needs_refresh = False
+        else:
+            needs_refresh = True
+            snapshot = (
+                cached.usage
+                if cached is not None
+                and cached.invalidation_token == invalidation_token
+                else None
+            )
+            if cached is not None and snapshot is None:
+                _disk_usage_snapshot = None
+                _disk_usage_generation += 1
+        if needs_refresh and not _disk_usage_refreshing:
+            _disk_usage_refreshing = True
+            generation = _disk_usage_generation
+            refresh_thread = threading.Thread(
+                target=_refresh_disk_usage_snapshot,
+                args=(generation, invalidation_token),
+                name="hitch-disk-usage",
+                daemon=True,
+            )
+            try:
+                refresh_thread.start()
+            except RuntimeError:
+                _disk_usage_refreshing = False
+                logger.exception("failed to start Hitch disk usage refresh")
+    return _disk_usage_with_current_limit(snapshot) if snapshot is not None else None
+
+
+def _refresh_disk_usage_snapshot(generation: int, invalidation_token: str) -> None:
+    global _disk_usage_refreshing, _disk_usage_snapshot
+    close_old_connections()
+    try:
+        snapshot = hitch_home_disk_usage()
+    except Exception:
+        logger.exception("failed to refresh Hitch disk usage snapshot")
+        snapshot = None
+    finally:
+        close_old_connections()
+    current_invalidation_token = _disk_usage_invalidation_token()
+    with _disk_usage_snapshot_lock:
+        if (
+            snapshot is not None
+            and generation == _disk_usage_generation
+            and invalidation_token == current_invalidation_token
+        ):
+            _disk_usage_snapshot = _DiskUsageSnapshot(
+                captured_at=timezone.now(),
+                invalidation_token=current_invalidation_token,
+                usage=snapshot,
+            )
+        _disk_usage_refreshing = False
+
+
+def invalidate_hitch_home_disk_usage() -> None:
+    """Invalidate this process and notify other Hitch processes."""
+    global _disk_usage_generation, _disk_usage_snapshot
+    _publish_disk_usage_invalidation()
+    with _disk_usage_snapshot_lock:
+        _disk_usage_snapshot = None
+        _disk_usage_generation += 1
+
+
+def _disk_usage_with_current_limit(snapshot: HitchDiskUsage) -> HitchDiskUsage:
+    return HitchDiskUsage(
+        used_bytes=snapshot.used_bytes,
+        limit_bytes=int(snapshot.disk_total_bytes * (_max_allowed_percent() / 100.0)),
+        disk_total_bytes=snapshot.disk_total_bytes,
+    )
+
+
+def _disk_usage_invalidation_path() -> Path:
+    return _hitch_home_dir() / _DISK_USAGE_INVALIDATION_FILE
+
+
+def _disk_usage_invalidation_token() -> str:
+    try:
+        return _disk_usage_invalidation_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeError):
+        logger.exception("failed to read Hitch disk usage invalidation token")
+        return ""
+
+
+def _publish_disk_usage_invalidation() -> None:
+    path = _disk_usage_invalidation_path()
+    thread_id = threading.get_ident()
+    temporary_path = path.with_name(f"{path.name}.{os.getpid()}.{thread_id}.tmp")
+    token = f"{time.time_ns()}:{os.getpid()}:{thread_id}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path.write_text(token, encoding="utf-8")
+        os.replace(temporary_path, path)
+    except OSError:
+        logger.exception("failed to publish Hitch disk usage invalidation")
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("failed to remove disk usage invalidation temporary file")
 
 
 def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
