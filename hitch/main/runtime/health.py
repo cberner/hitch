@@ -67,10 +67,14 @@ _APP_SERVER_LEAK_DANGER = app_server_pool._SHARED_POOL_MAX + 5
 # worker process is gone.
 _STUCK_TURN_AGE = timedelta(hours=6)
 _RECENT_FAILURE_AGE = timedelta(hours=24)
-# Bound how often the (proc-scanning, disk-walking) report is rebuilt under load.
+# Bound how often the proc-scanning, database-reading report is rebuilt under load.
 _REPORT_CACHE_TTL = timedelta(seconds=15)
 _report_cache_lock = threading.Lock()
-_report_cache: tuple[datetime, HealthReport] | None = None
+_report_cache: tuple[
+    datetime,
+    HealthReport,
+    disk_cleanup.HitchDiskUsage | None,
+] | None = None
 # Runserver fd / CLOSE_WAIT alarm floors. Both are trend signals (healthy idle is
 # ~80 fds, 0 CLOSE_WAIT); these floors only catch a runaway snapshot.
 _RUNSERVER_FD_WARN = 800
@@ -243,8 +247,14 @@ def _app_server_metric() -> HealthMetric:
     return _safe_metric("app_servers", "Codex app-servers running", collect)
 
 
-def _hitch_disk_metric() -> HealthMetric:
+def _hitch_disk_metric_and_usage() -> tuple[
+    HealthMetric,
+    disk_cleanup.HitchDiskUsage | None,
+]:
+    usage: disk_cleanup.HitchDiskUsage | None = None
+
     def collect() -> HealthMetric:
+        nonlocal usage
         usage = disk_cleanup.cached_hitch_home_disk_usage()
         if usage is None:
             return HealthMetric(
@@ -269,7 +279,13 @@ def _hitch_disk_metric() -> HealthMetric:
             detail=detail,
         )
 
-    return _safe_metric("hitch_disk", "~/.hitch disk usage", collect)
+    metric = _safe_metric("hitch_disk", "~/.hitch disk usage", collect)
+    return metric, usage
+
+
+def _hitch_disk_metric() -> HealthMetric:
+    metric, _usage = _hitch_disk_metric_and_usage()
+    return metric
 
 
 def _worktree_metric() -> HealthMetric:
@@ -303,7 +319,8 @@ def _stale_blocked_count() -> int:
     return len(system_agents.archive_stale_blocked_workflows(older_than=cutoff, apply=False))
 
 
-def _leak_section() -> HealthSection:
+def _leak_section(*, hitch_disk_metric: HealthMetric | None = None) -> HealthSection:
+    disk_metric = hitch_disk_metric if hitch_disk_metric is not None else _hitch_disk_metric()
     return HealthSection(
         title="Leaks",
         metrics=[
@@ -322,7 +339,7 @@ def _leak_section() -> HealthSection:
                 detail="Running rows older than 6h — likely a dead worker that never reached a terminal state.",
             ),
             _worktree_metric(),
-            _hitch_disk_metric(),
+            disk_metric,
         ],
     )
 
@@ -722,12 +739,12 @@ def _recent_failure_section() -> HealthSection:
     )
 
 
-def _build_health_report() -> HealthReport:
+def _build_health_report(*, hitch_disk_metric: HealthMetric | None = None) -> HealthReport:
     sections = [
         _worker_scope_section(),
         _schedulers_section(),
         _host_section(),
-        _leak_section(),
+        _leak_section(hitch_disk_metric=hitch_disk_metric),
         _blocked_bucket_section(),
         _backlog_section(),
         _recent_failure_section(),
@@ -751,16 +768,22 @@ def collect_health_report() -> HealthReport:
     A single build scans ``/proc`` twice and reads several database aggregates,
     so repeated or concurrent dashboard loads share the result for
     ``_REPORT_CACHE_TTL``. The slower ``~/.hitch`` tree walk has its own
-    asynchronous single-flight snapshot. Bypassed under tests so each sees
-    fresh database state.
+    asynchronous single-flight snapshot. The exact safely collected disk value
+    is part of the report cache key, so snapshot changes appear immediately.
+    Bypassed under tests so each sees fresh database state.
     """
     if getattr(settings, "TESTING", False):
         return _build_health_report()
     global _report_cache
     with _report_cache_lock:
+        disk_metric, disk_usage = _hitch_disk_metric_and_usage()
         cached = _report_cache
-        if cached is not None and timezone.now() - cached[0] < _REPORT_CACHE_TTL:
+        if (
+            cached is not None
+            and timezone.now() - cached[0] < _REPORT_CACHE_TTL
+            and cached[2] == disk_usage
+        ):
             return cached[1]
-        report = _build_health_report()
-        _report_cache = (timezone.now(), report)
+        report = _build_health_report(hitch_disk_metric=disk_metric)
+        _report_cache = (timezone.now(), report, disk_usage)
         return report

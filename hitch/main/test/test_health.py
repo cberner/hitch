@@ -314,6 +314,53 @@ class HealthReportCacheTests(TestCase):
         self.assertIs(first, second)
         self.assertEqual(probe.call_count, 1)
 
+    @override_settings(TESTING=False)
+    def test_completed_disk_snapshot_refreshes_cached_unavailable_report(self) -> None:
+        usage = HitchDiskUsage(used_bytes=1024, limit_bytes=2048, disk_total_bytes=4096)
+        with (
+            patch.object(
+                host_probes,
+                "probe_worker_scopes",
+                return_value=WorkerScopeProbe(active_count=0, leaked=[]),
+            ) as probe,
+            patch.object(
+                disk_cleanup,
+                "cached_hitch_home_disk_usage",
+                side_effect=[None, usage],
+            ) as disk_usage,
+            patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
+        ):
+            first = health.collect_health_report()
+            second = health.collect_health_report()
+
+        self.assertEqual(_find(first, "hitch_disk").value, "unavailable")
+        self.assertEqual(_find(second, "hitch_disk").value, "1.0 KiB (25.0% of disk)")
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(disk_usage.call_count, 2)
+
+    @override_settings(TESTING=False)
+    def test_disk_snapshot_failure_degrades_only_disk_metric(self) -> None:
+        with (
+            patch.object(
+                host_probes,
+                "probe_worker_scopes",
+                return_value=WorkerScopeProbe(active_count=0, leaked=[]),
+            ),
+            patch.object(
+                disk_cleanup,
+                "cached_hitch_home_disk_usage",
+                side_effect=RuntimeError("boom"),
+            ) as disk_usage,
+            patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
+        ):
+            report = health.collect_health_report()
+
+        metric = _find(report, "hitch_disk")
+        self.assertEqual(metric.value, "unavailable")
+        self.assertEqual(metric.severity, health.SEVERITY_UNKNOWN)
+        self.assertEqual(report.overall_severity, health.SEVERITY_UNKNOWN)
+        disk_usage.assert_called_once_with()
+
     @override_settings(TESTING=True)
     def test_testing_bypasses_cache(self) -> None:
         with patch.object(
