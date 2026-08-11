@@ -34,10 +34,6 @@ from hitch.main.runtime.sdk_values import (
 )
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions.message_intent import (
-    _is_fix_pr_activation,
-    _is_pr_activation,
-    _is_pr_now_activation,
-    _is_qa_activation,
     _message_intent,
     _MessageIntent,
 )
@@ -105,10 +101,10 @@ def _message_submission(
     request: HttpRequest,
 ) -> tuple[_MessageSubmission | None, str | None]:
     intent = _message_intent(request)
-    pr_activation = _is_pr_activation(request)
-    pr_now_activation = _is_pr_now_activation(request)
-    fix_pr_activation = _is_fix_pr_activation(request)
-    qa_activation = _is_qa_activation(request)
+    pr_activation = intent.pr_activation
+    pr_now_activation = intent.pr_now_activation
+    fix_pr_activation = intent.fix_pr_activation
+    qa_activation = intent.qa_activation
     qa_workflow_activation = (
         pr_activation or pr_now_activation or qa_activation or fix_pr_activation
     )

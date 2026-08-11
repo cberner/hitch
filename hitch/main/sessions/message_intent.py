@@ -24,6 +24,10 @@ class _MessageIntent(NamedTuple):
     plan_mode: bool
     allow_pending_plan_default: bool
     explicit_plan_mode: bool
+    pr_activation: bool = False
+    pr_now_activation: bool = False
+    fix_pr_activation: bool = False
+    qa_activation: bool = False
 
 
 def _message_intent(request: HttpRequest) -> _MessageIntent:
@@ -55,45 +59,30 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
             True,
         )
     if command == _PR_SLASH_COMMAND:
-        return _MessageIntent(PR_SLASH_DISPLAY_PROMPT, False, False, False)
+        return _MessageIntent(
+            PR_SLASH_DISPLAY_PROMPT, False, False, False, pr_activation=True
+        )
     if command == _PR_NOW_SLASH_COMMAND:
-        return _MessageIntent(PR_SLASH_DISPLAY_PROMPT, False, False, False)
+        return _MessageIntent(
+            PR_SLASH_DISPLAY_PROMPT, False, False, False, pr_now_activation=True
+        )
     if command == _FIX_PR_SLASH_COMMAND:
-        return _MessageIntent(_FIX_PR_SLASH_COMMAND, False, False, False)
+        return _MessageIntent(
+            _FIX_PR_SLASH_COMMAND, False, False, False, fix_pr_activation=True
+        )
     if command == _QA_SLASH_COMMAND:
-        return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
+        return _MessageIntent(
+            _QA_SLASH_PROMPT, False, False, False, qa_activation=True
+        )
     if not plan_mode and is_pr_creation_prompt(prompt):
-        return _MessageIntent(prompt, False, False, False)
+        return _MessageIntent(prompt, False, False, False, pr_activation=True)
     if not plan_mode and prompt == _QA_SLASH_PROMPT:
-        return _MessageIntent(prompt, False, False, False)
-    return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
-
-
-def _is_pr_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return (
-        bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
-        or is_pr_creation_prompt(prompt)
-    )
-
-
-def _is_pr_now_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return bool(parts and parts[0].lower() == _PR_NOW_SLASH_COMMAND)
-
-
-def _is_fix_pr_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return bool(parts and parts[0].lower() == _FIX_PR_SLASH_COMMAND)
-
-
-def _is_qa_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return (
-        bool(parts and parts[0].lower() == _QA_SLASH_COMMAND)
-        or prompt == _QA_SLASH_PROMPT
+        return _MessageIntent(prompt, False, False, False, qa_activation=True)
+    return _MessageIntent(
+        prompt,
+        plan_mode,
+        True,
+        explicit_plan_mode,
+        pr_activation=is_pr_creation_prompt(prompt),
+        qa_activation=prompt == _QA_SLASH_PROMPT,
     )
