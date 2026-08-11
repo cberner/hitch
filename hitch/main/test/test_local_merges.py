@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
@@ -632,7 +631,14 @@ class LocalMergeTests(SimpleTestCase):
             _init_repo(repo)
             _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
             (session / "asset.bin").write_bytes(b"\0not reviewable")
-            reviewed_patch = build_worktree_diff_text(str(session))
+            reviewed_patch = (
+                "diff --git a/asset.bin b/asset.bin\n"
+                "new file mode 100644\n"
+                "--- /dev/null\n"
+                "+++ b/asset.bin\n"
+                "@@ -0,0 +1 @@\n"
+                "+Binary file not shown"
+            )
 
             with self.assertRaisesRegex(
                 LocalBranchMergeError, "reviewed diff is incomplete"

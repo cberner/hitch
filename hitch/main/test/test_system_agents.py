@@ -31,6 +31,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import demo
+from hitch.main.diffs import DiffTooLargeError
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
@@ -2779,6 +2780,27 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             workflow.max_iterations, system_agents.QA_WORKFLOW_MAX_ITERATIONS
         )
+
+    @patch(
+        "hitch.main.workflows.system_agents.build_worktree_diff_text",
+        side_effect=DiffTooLargeError("worktree diff exceeds the QA review limit"),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_qa_workflow_blocks_when_review_diff_is_truncated(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        workflow = pr_qa.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            open_pr_on_lgtm=False,
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertIn("exceeds the QA review limit", workflow.state["error"])
+        mock_spawn.assert_not_called()
 
     @patch(
         "hitch.main.workflows.system_agents.build_auto_merge_review_patch",

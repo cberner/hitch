@@ -8,11 +8,318 @@ from django.test import SimpleTestCase
 from pygments.lexers import PythonLexer
 
 from hitch.main import diffs as diffs_module
-from hitch.main.diffs import build_worktree_diff, build_worktree_diff_text
+from hitch.main.diffs import (
+    DiffTooLargeError,
+    IncompleteDiffError,
+    build_worktree_diff,
+    build_worktree_diff_text,
+)
 from hitch.main.test.support import _git
 
 
 class WorktreeDiffTests(SimpleTestCase):
+    def test_system_agent_diff_rejects_failed_branch_diff(self) -> None:
+        fallback = "diff --git a/fallback.txt b/fallback.txt\n"
+
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._branch_diff_base",
+            return_value=diffs_module._BranchBaseObservation("branch-base"),
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            side_effect=[
+                diffs_module._GitDiffOutput(None),
+                diffs_module._GitDiffOutput(fallback),
+            ],
+        ), patch(
+            "hitch.main.diffs._git_output", return_value=""
+        ), self.assertRaisesRegex(IncompleteDiffError, "branch base"):
+            build_worktree_diff_text("/repo")
+
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._branch_diff_base",
+            return_value=diffs_module._BranchBaseObservation("branch-base"),
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            side_effect=[
+                diffs_module._GitDiffOutput(None),
+                diffs_module._GitDiffOutput(fallback),
+            ],
+        ), patch(
+            "hitch.main.diffs._git_output", return_value=""
+        ):
+            self.assertEqual(diffs_module._worktree_diff_text("/repo"), fallback)
+
+    def test_system_agent_diff_rejects_failed_untracked_listing(self) -> None:
+        tracked = "diff --git a/tracked.txt b/tracked.txt\n"
+
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._branch_diff_base",
+            return_value=diffs_module._BranchBaseObservation(None),
+        ), patch(
+            "hitch.main.diffs._ref_state", return_value=True
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            return_value=diffs_module._GitDiffOutput(tracked),
+        ), patch(
+            "hitch.main.diffs._untracked_paths",
+            return_value=diffs_module._UntrackedPathsObservation(
+                (), "git ls-files failed; QA cannot verify all untracked files"
+            ),
+        ), self.assertRaisesRegex(IncompleteDiffError, "ls-files failed"):
+            build_worktree_diff_text("/repo")
+
+    def test_system_agent_diff_rejects_failed_head_lookup(self) -> None:
+        fallback = "diff --git a/fallback.txt b/fallback.txt\n"
+
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._branch_diff_base",
+            return_value=diffs_module._BranchBaseObservation(None),
+        ), patch(
+            "hitch.main.diffs._ref_state", return_value=None
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            return_value=diffs_module._GitDiffOutput(fallback),
+        ), patch(
+            "hitch.main.diffs._untracked_paths",
+            return_value=diffs_module._UntrackedPathsObservation(()),
+        ), self.assertRaisesRegex(IncompleteDiffError, "whether HEAD exists"):
+            build_worktree_diff_text("/repo")
+
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._branch_diff_base",
+            return_value=diffs_module._BranchBaseObservation(None),
+        ), patch(
+            "hitch.main.diffs._ref_state", return_value=None
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            return_value=diffs_module._GitDiffOutput(fallback),
+        ), patch(
+            "hitch.main.diffs._untracked_paths",
+            return_value=diffs_module._UntrackedPathsObservation(()),
+        ):
+            self.assertEqual(diffs_module._worktree_diff_text("/repo"), fallback)
+
+    def test_system_agent_diff_rejects_missing_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            missing = Path(raw) / "removed-worktree"
+
+            self.assertEqual(diffs_module._worktree_diff_text(str(missing)), "")
+            with self.assertRaisesRegex(IncompleteDiffError, "does not exist"):
+                build_worktree_diff_text(str(missing))
+
+    def test_system_agent_diff_rejects_failed_branch_ref_lookup(self) -> None:
+        with patch(
+            "hitch.main.diffs._repo_root_observation",
+            return_value=diffs_module._RepositoryObservation(Path("/repo")),
+        ), patch(
+            "hitch.main.diffs._ref_state",
+            side_effect=[None, False, False, True],
+        ), patch(
+            "hitch.main.diffs._git_diff_output",
+            return_value=diffs_module._GitDiffOutput(""),
+        ), patch(
+            "hitch.main.diffs._git_output", return_value=""
+        ), self.assertRaisesRegex(IncompleteDiffError, "candidate branch-base"):
+            build_worktree_diff_text("/repo")
+
+    def test_system_agent_diff_rejects_truncated_patch(self) -> None:
+        raw_diff = "x" * (diffs_module._MAX_DIFF_CHARS + 1)
+
+        with patch(
+            "hitch.main.diffs._worktree_diff",
+            return_value=diffs_module._DiffText(raw_diff),
+        ), self.assertRaisesRegex(DiffTooLargeError, "split the change"):
+            build_worktree_diff_text("/repo")
+
+    def test_system_agent_diff_rejects_omitted_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "first.txt").write_text("first\n")
+            (repo / "second.txt").write_text("second\n")
+
+            with patch(
+                "hitch.main.diffs._MAX_UNTRACKED_FILES", 1
+            ), self.assertRaisesRegex(IncompleteDiffError, "omits 1"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_rejects_truncated_untracked_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "large.txt").write_text("too much content\n")
+
+            with patch(
+                "hitch.main.diffs._MAX_UNTRACKED_FILE_BYTES", 5
+            ), self.assertRaisesRegex(IncompleteDiffError, "truncates"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_rejects_binary_change(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "asset.bin").write_bytes(b"\0not reviewable")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "binary untracked"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_preserves_untracked_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            script = repo / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n")
+            script.chmod(0o755)
+            _git(repo, "config", "core.fileMode", "true")
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn("new file mode 100755", diff_text)
+
+    def test_system_agent_diff_honors_disabled_core_file_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            script = repo / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n")
+            script.chmod(0o755)
+            _git(repo, "config", "core.fileMode", "false")
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn("new file mode 100644", diff_text)
+        self.assertNotIn("new file mode 100755", diff_text)
+
+    def test_system_agent_diff_preserves_untracked_crlf(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "run.sh").write_bytes(b"#!/bin/sh\r\nexit 0\r\n")
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn("+#!/bin/sh\r\n+exit 0\r", diff_text)
+        self.assertNotIn("+#!/bin/sh\n+exit 0", diff_text)
+
+    def test_system_agent_diff_rejects_non_utf8_untracked_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "latin1.txt").write_bytes(b"caf\xe9\n")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "non-UTF-8"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_rejects_non_utf8_tracked_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            tracked = repo / "latin1.txt"
+            tracked.write_bytes(b"\xff\n")
+            _git(repo, "add", "latin1.txt")
+            _git(repo, "commit", "-m", "initial")
+            tracked.write_bytes(b"\\xff\n")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "non-UTF-8"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_disables_textconv(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / ".gitattributes").write_text("*.bin diff=hide\n")
+            binary = repo / "asset.bin"
+            binary.write_bytes(b"\0old")
+            _git(repo, "add", ".gitattributes", "asset.bin")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "config", "diff.hide.textconv", "cat /dev/null")
+            binary.write_bytes(b"\0new")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "binary change"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_rejects_forced_text_nul_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / ".gitattributes").write_text("*.bin diff\n")
+            binary = repo / "asset.bin"
+            binary.write_bytes(b"\0old")
+            _git(repo, "add", ".gitattributes", "asset.bin")
+            _git(repo, "commit", "-m", "initial")
+            binary.write_bytes(b"\0new")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "NUL bytes"):
+                build_worktree_diff_text(str(repo))
+
+    def test_system_agent_diff_includes_ignored_submodule_change(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            child = root / "child"
+            repo = root / "repo"
+            subprocess.run(["git", "init", str(child)], check=True, capture_output=True)
+            (child / "value.txt").write_text("old\n")
+            _git(child, "add", "value.txt")
+            _git(child, "commit", "-m", "initial")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            _git(
+                repo,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                str(child),
+                "modules/child",
+            )
+            _git(repo, "commit", "-am", "add submodule")
+            checked_out_child = repo / "modules" / "child"
+            (checked_out_child / "value.txt").write_text("new\n")
+            _git(checked_out_child, "commit", "-am", "advance submodule")
+            _git(repo, "config", "diff.ignoreSubmodules", "all")
+            _git(repo, "config", "submodule.modules/child.ignore", "all")
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn("Subproject commit", diff_text)
+
+    def test_system_agent_diff_rejects_non_utf8_untracked_path_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            decoy = repo / "bad-\ufffd.txt"
+            decoy.write_text("tracked decoy\n")
+            _git(repo, "add", decoy.name)
+            _git(repo, "commit", "-m", "initial")
+            bad_path = os.path.join(os.fsencode(repo), b"bad-\xff.txt")
+            fd = os.open(bad_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, b"real untracked contents\n")
+            finally:
+                os.close(fd)
+
+            with self.assertRaisesRegex(IncompleteDiffError, "filename"):
+                build_worktree_diff_text(str(repo))
+
+            preview = diffs_module._worktree_diff_text(str(repo))
+
+        self.assertNotIn("tracked decoy", preview)
+        self.assertNotIn("real untracked contents", preview)
+
     def test_session_preview_bounds_rendered_diff_lines(self) -> None:
         changed_line_count = diffs_module._MAX_DIFF_PREVIEW_LINES + 50
         changed_lines = "\n".join(
@@ -345,7 +652,11 @@ class WorktreeDiffTests(SimpleTestCase):
             ) -> str | None:
                 if args[:1] == ["merge-base"]:
                     return None  # simulate a timeout / lock, not a clean status 1
-                return real_git_output(repo_arg, args, allow_statuses=allow_statuses)
+                return real_git_output(
+                    repo_arg,
+                    args,
+                    allow_statuses=allow_statuses,
+                )
 
             with patch.object(
                 diffs_module, "_git_output", side_effect=fake_git_output
