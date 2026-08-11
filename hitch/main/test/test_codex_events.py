@@ -1392,6 +1392,31 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(target["review_count"], 1)
         self.assertEqual(target["review_signal"], "approved")
 
+    def test_dismissed_review_clears_reviewers_change_request(self) -> None:
+        reviews = [
+            {
+                "author": {"login": "reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-08-11T12:00:00Z",
+            },
+            {
+                "author": {"login": "reviewer"},
+                "state": "DISMISSED",
+                "submitted_at": "2026-08-11T12:05:00Z",
+            },
+        ]
+
+        for ordered_reviews in (reviews, list(reversed(reviews))):
+            with self.subTest(ordered_reviews=ordered_reviews):
+                target: dict[str, Any] = {}
+                codex_events._copy_review_fields(
+                    target,
+                    {"reviews": ordered_reviews},
+                )
+
+                self.assertEqual(target["review_count"], 1)
+                self.assertEqual(target["review_signal"], "commented")
+
     def test_review_signal_groups_rest_reviews_by_user_login(self) -> None:
         target: dict[str, Any] = {}
 
