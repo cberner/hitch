@@ -6748,6 +6748,11 @@ class SpecCriticWorkflowTests(TestCase):
             feedback,
         )
 
+    def test_gh_page_parsers_ignore_malformed_payload(self) -> None:
+        empty_page = {"nodes": [], "has_next_page": False, "end_cursor": ""}
+        self.assertEqual(gh_observations._review_threads_page(None), empty_page)
+        self.assertEqual(gh_observations._status_checks_page(None), empty_page)
+
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     def test_pr_monitor_observation_fetches_github_state_with_gh(
         self, mock_run: MagicMock
