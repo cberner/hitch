@@ -835,6 +835,81 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
+    def test_intermediate_cache_uses_pre_read_rollout_state(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg", {"type": "user_message", "message": "Run it"}
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf first-command"}),
+                        "call_id": "call-race",
+                    },
+                ),
+            ],
+        )
+        pre_read_mtime_ns = rollout_path.stat().st_mtime_ns
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="intermediate-mtime-race",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=now,
+        )
+        real_reader = session_resume._session_detail_data_for_metadata_resume
+
+        def _append_during_read(path: Path) -> rollout_module.SessionDetailData | None:
+            parsed = real_reader(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "\n"
+                    + _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "arguments": json.dumps(
+                                {"cmd": "printf appended-command"}
+                            ),
+                            "call_id": "call-appended",
+                        },
+                    )
+                )
+            post_read_mtime_ns = pre_read_mtime_ns + 1_000_000_000
+            os.utime(path, ns=(post_read_mtime_ns, post_read_mtime_ns))
+            return parsed
+
+        with patch(
+            "hitch.main.sessions.session_resume._session_detail_data_for_metadata_resume",
+            side_effect=_append_during_read,
+        ):
+            response = self.client.get(
+                reverse(
+                    "session", kwargs={"session_id": "intermediate-mtime-race"}
+                )
+            )
+
+        fragment = self.client.get(
+            reverse(
+                "session_intermediate",
+                kwargs={"session_id": "intermediate-mtime-race", "entry_index": 1},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(fragment, "first-command")
+        self.assertContains(fragment, "appended-command")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
     def test_active_session_detail_lazy_loads_completed_intermediate_body(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:

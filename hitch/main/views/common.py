@@ -67,7 +67,6 @@ from hitch.main.runtime.input_images import (
 )
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
-    _rollout_mtime_ns,
     _rollout_path_for,
     _rollout_path_from_value,
     _RolloutFileState,
@@ -435,12 +434,15 @@ def _render_session_detail(
     # Capture the rollout mtime *before* any entries are read (the resume helper
     # below reads them off disk), so a concurrent append surfaces as a cache
     # miss on the next read rather than being masked behind a post-read stat.
-    # See the matching rule in ``token_usage_snapshot`` and
-    # ``_attach_session_stage_context``.
-    stage_cache_mtime_ns = (
-        _rollout_mtime_ns(_rollout_path_from_value(metadata.codex_path))
+    # See the matching rule in ``token_usage_snapshot``, the stage cache, and
+    # the lazy intermediate-detail cache.
+    detail_rollout_state = (
+        _rollout_file_state_from_value(metadata.codex_path)
         if metadata is not None
-        else 0
+        else None
+    )
+    stage_cache_mtime_ns = (
+        detail_rollout_state.mtime_ns if detail_rollout_state is not None else 0
     )
     metadata_resume = _metadata_resume_for_inactive_session(
         session_id,
@@ -545,7 +547,13 @@ def _render_session_detail(
         cookie_updates = resolved_settings.cookie_updates
         # Capture the rollout mtime before reading entries; see the
         # metadata-resume branch above for why the order matters.
-        stage_cache_mtime_ns = _rollout_mtime_ns(_rollout_path_for(thread))
+        detail_rollout_state = _rollout_file_state_from_value(
+            getattr(thread, "path", None)
+            or (metadata.codex_path if metadata is not None else None)
+        )
+        stage_cache_mtime_ns = (
+            detail_rollout_state.mtime_ns if detail_rollout_state is not None else 0
+        )
         raw_entries, entries_backed_by_rollout = _entries_for_with_source(
             thread,
             fallback_rollout_path=(
@@ -739,10 +747,7 @@ def _render_session_detail(
         cache_entries=rollout_data is not None,
         hide_demo_agent_entries=hide_demo_agent_entries,
         demo_entries_run_id=demo_entries_run_id,
-        rollout_state=_rollout_file_state_from_value(
-            getattr(thread, "path", None)
-            or (metadata.codex_path if metadata is not None else None)
-        ),
+        rollout_state=detail_rollout_state,
     )
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     # Scope the plan to the running worker, or to the latest worker on reload
