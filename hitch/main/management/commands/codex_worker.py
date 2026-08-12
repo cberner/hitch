@@ -105,6 +105,7 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     is_dynamic_tool_call,
 )
+from hitch.main.sessions.session_settings import _PLAN_MODE_REASONING_EFFORT
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,6 @@ _PROMPT_USER = "prompt_user"
 _APPROVE_ALL = "approve_all"
 _DENY_ALL = "deny_all"
 _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
-_PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 _DEFAULT_COLLABORATION_MODE = "default"
 
 # Set by the SIGTERM handler so the turn-control paths know to call

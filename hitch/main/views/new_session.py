@@ -26,6 +26,7 @@ from hitch.main.models import (
     Project,
     ProposedSession,
     SessionMetadata,
+    UserSettings,
 )
 from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
@@ -47,6 +48,7 @@ from hitch.main.sessions.session_pr_plan import (
 )
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
+    _PLAN_MODE_REASONING_EFFORT,
     _QA_SLASH_PROMPT,
     _authenticated_user,
     _cached_models_and_settings,
@@ -55,13 +57,18 @@ from hitch.main.sessions.session_settings import (
     _effective_sandbox_policy_for_cwd,
     _new_session_form_context,
     _project_for_proposed_session,
+    _reasoning_effort_values,
     _resolved_settings,
     _save_user_settings,
     _selected_project_for_settings,
     _stored_settings,
+    _validate_model_and_effort_against_models,
 )
 from hitch.main.sessions.settings_cookies import (
+    _EFFORT_COOKIE,
     _LAST_SELECTED_REPO_COOKIE,
+    _MODEL_MAX_LEN,
+    _REASONING_EFFORT_MAX_LEN,
     _VALID_WEB_SEARCH_MODES,
     ResolvedSettings,
     SettingsValues,
@@ -83,7 +90,9 @@ class _NewSessionTarget(NamedTuple):
     project_cleared: bool
     requires_discovered_repo: bool
 
-def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
+def _new_session_post_models_and_settings(
+    request: HttpRequest,
+) -> tuple[list[Any], ResolvedSettings]:
     stored_settings = _stored_settings(request)
     enable_memories = stored_settings.enable_memories
     if caches._models_cache_has_value(
@@ -91,12 +100,12 @@ def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
     ) and not caches._models_refresh_needed(enable_memories=enable_memories):
         models_data = caches._cached_models_data(enable_memories=enable_memories)
         if models_data:
-            return _resolved_settings(request, models_data)
+            return models_data, _resolved_settings(request, models_data)
 
     models_data = caches._fetch_models_data(
         enable_memories=enable_memories, codex_cls=common.Codex
     )
-    return _resolved_settings(request, models_data)
+    return models_data, _resolved_settings(request, models_data)
 
 def _posted_new_session_target(
     request: HttpRequest, projects: list[Project]
@@ -384,6 +393,73 @@ def _posted_web_search_override(
         return value, None
     return "", "invalid web search setting"
 
+
+def _posted_model_settings_override(
+    request: HttpRequest,
+    *,
+    default: SettingsValues,
+    models_data: list[Any],
+    plan_mode: bool,
+) -> tuple[SettingsValues, str | None]:
+    raw_model = request.POST.get("model")
+    raw_effort = request.POST.get("reasoning_effort")
+    if raw_model is None and raw_effort is None and not plan_mode:
+        return default, None
+
+    posted_model = None if raw_model is None else raw_model.strip()
+    posted_effort = None if raw_effort is None else raw_effort.strip()
+    rendered_model = request.POST.get("rendered_model")
+    rendered_effort = request.POST.get("rendered_reasoning_effort")
+    rendered_model_value = None if rendered_model is None else rendered_model.strip()
+    rendered_effort_value = None if rendered_effort is None else rendered_effort.strip()
+    has_rendered_snapshot = (
+        rendered_model_value is not None and rendered_effort_value is not None
+    )
+    model_changed = posted_model is not None and (
+        rendered_model_value is None or posted_model != rendered_model_value
+    )
+    effort_changed = posted_effort is not None and (
+        rendered_effort_value is None or posted_effort != rendered_effort_value
+    )
+    if (
+        has_rendered_snapshot
+        and not model_changed
+        and not effort_changed
+        and not plan_mode
+    ):
+        return default, None
+
+    model = (
+        posted_model
+        if model_changed and posted_model is not None
+        else default.model
+    )
+    # Outside Plan mode, a changed model makes its accompanying effort an
+    # explicit pair, even when it matches the rendered snapshot or is blank.
+    effort_is_explicit = effort_changed or (model_changed and posted_effort is not None)
+    effort = default.reasoning_effort
+    if not plan_mode and effort_is_explicit and posted_effort is not None:
+        effort = posted_effort
+    effective_effort = _PLAN_MODE_REASONING_EFFORT.value if plan_mode else effort
+    if len(model) > _MODEL_MAX_LEN:
+        return default, "model id is too long"
+    if len(effective_effort) > _REASONING_EFFORT_MAX_LEN:
+        return default, "invalid reasoning effort"
+    valid_efforts = set(
+        _reasoning_effort_values(
+            models_data,
+            current_effort=default.reasoning_effort,
+        )
+    )
+    if effective_effort and effective_effort not in valid_efforts:
+        return default, "invalid reasoning effort"
+    compatibility_error = _validate_model_and_effort_against_models(
+        model, effective_effort, models_data
+    )
+    if compatibility_error is not None:
+        return default, compatibility_error
+    return default._replace(model=model, reasoning_effort=effort), None
+
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
@@ -456,7 +532,7 @@ def _finish_candidate_proposal_start(
     )
     candidate_session.refresh_from_db()
     return _remember_repo_and_redirect(
-        request, settings, cookie_updates, cwd=cwd, thread_id=candidate_session.thread_id
+        request, cookie_updates, cwd=cwd, thread_id=candidate_session.thread_id
     )
 
 def _start_candidate_proposal_session(
@@ -729,6 +805,24 @@ def _prefill_bare_repo_cwd_for_new_session_page(
         raise Http404("repository not found")
     return cwd
 
+
+def _new_session_rendered_settings(
+    request: HttpRequest,
+    settings: SettingsValues,
+    models_data: list[Any],
+) -> SettingsValues:
+    """Materialize the first-use effort that POST reconciliation will prefer."""
+    if (
+        not models_data
+        and not settings.reasoning_effort
+        and _authenticated_user(request) is None
+        and _EFFORT_COOKIE not in request.COOKIES
+    ):
+        return settings._replace(
+            reasoning_effort=UserSettings.DEFAULT_REASONING_EFFORT
+        )
+    return settings
+
 def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     reconciliation.reconcile_dead_if_due()
     repos = [str(p) for p in repos_module.discover_repos()]
@@ -738,6 +832,11 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     )
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
+    rendered_settings = _new_session_rendered_settings(
+        request,
+        current_settings,
+        models_data,
+    )
     cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -754,7 +853,7 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
             )
             if prefill_bare_repo_cwd:
                 current_project = None
-    settings_context = common._settings_context(current_settings, models_data)
+    settings_context = common._settings_context(rendered_settings, models_data)
     new_session_context = _new_session_form_context(
         current_settings,
         current_project,
@@ -774,6 +873,7 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
         {
             "login_url": reverse("login"),
             "register_url": reverse("register"),
+            "plan_mode_reasoning_effort": _PLAN_MODE_REASONING_EFFORT.value,
             **settings_context,
             **new_session_context,
         },
@@ -793,7 +893,6 @@ def _cleanup_worktree_quietly(managed_worktree: ManagedWorktree | None) -> None:
 
 def _remember_repo_and_redirect(
     request: HttpRequest,
-    settings: SettingsValues,
     cookie_updates: dict[str, str],
     *,
     cwd: str,
@@ -802,9 +901,11 @@ def _remember_repo_and_redirect(
     """Persist the chosen repo as the last-selected one and redirect to the
     new session. Authenticated users get it saved on their settings row;
     anonymous users get the signed cookie."""
-    remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:
+        # Re-read the persisted defaults so one-off new-session choices do not
+        # become account-wide while remembering the repository.
+        remembered_values = _stored_settings(request)._replace(last_selected_repo=cwd)
         _save_user_settings(user, remembered_values)
         cookie_updates = _settings_cookie_updates(remembered_values)
     else:
@@ -854,8 +955,25 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # render would have snapped away from; without this, a stale value
     # would ride straight into ``thread_start(model=...)`` and 500 the
     # new-session click.
-    resolved_settings = _new_session_post_settings(request)
-    settings = resolved_settings.values
+    models_data, resolved_settings = _new_session_post_models_and_settings(request)
+    default_settings = resolved_settings.values
+    if (
+        request.POST.get("rendered_model") is not None
+        and request.POST.get("rendered_reasoning_effort") is not None
+    ):
+        default_settings = _new_session_rendered_settings(
+            request,
+            default_settings,
+            models_data,
+        )
+    settings, model_settings_error = _posted_model_settings_override(
+        request,
+        default=default_settings,
+        models_data=models_data,
+        plan_mode=plan_mode,
+    )
+    if model_settings_error is not None:
+        return HttpResponseBadRequest(model_settings_error)
     use_worktrees, use_worktrees_error = _posted_bool_override(
         request.POST.get("use_worktrees"),
         default=settings.use_worktrees,
@@ -1038,7 +1156,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         )
         _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
         return _remember_repo_and_redirect(
-            request, settings, cookie_updates, cwd=cwd, thread_id=thread_id
+            request, cookie_updates, cwd=cwd, thread_id=thread_id
         )
 
     managed_worktree = None
@@ -1164,7 +1282,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
         return _remember_repo_and_redirect(
-            request, settings, cookie_updates, cwd=cwd, thread_id=thread_id
+            request, cookie_updates, cwd=cwd, thread_id=thread_id
         )
     input_images_owned = False
     proposal_claimed = False
@@ -1204,7 +1322,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
     return _remember_repo_and_redirect(
-        request, settings, cookie_updates, cwd=cwd, thread_id=instance.thread_id
+        request, cookie_updates, cwd=cwd, thread_id=instance.thread_id
     )
 
 @_limit_input_image_uploads

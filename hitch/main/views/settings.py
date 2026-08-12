@@ -36,7 +36,7 @@ from hitch.main.sessions.session_settings import (
     _resolved_settings,
     _save_user_settings,
     _stored_settings,
-    _supported_effort_values,
+    _validate_model_and_effort_against_models,
 )
 from hitch.main.sessions.settings_cookies import (
     _DEFAULT_APPROVAL_MODE,
@@ -298,7 +298,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         valid_efforts = set(_reasoning_effort_values(models_data))
         if effort and effort not in valid_efforts:
             return HttpResponseBadRequest("invalid reasoning effort")
-        compat_error = _validate_settings_against_models(model, effort, models_data)
+        compat_error = _validate_model_and_effort_against_models(
+            model, effort, models_data
+        )
         if compat_error:
             return HttpResponseBadRequest(compat_error)
     stored = _stored_settings(request)
@@ -472,36 +474,3 @@ def edit_project(request: HttpRequest) -> HttpResponse:
     if updates:
         project.save(update_fields=[*updates, "updated_at"])
     return redirect(common._safe_next_url(request) or "index")
-
-def _validate_settings_against_models(
-    model: str, effort: str, models_data: list[Any]
-) -> str | None:
-    """Return an error message for an invalid (model, effort) pair, or None.
-
-    Empty ``models_data`` (transport hiccup, pre-provider state, mock in
-    tests) means we can't validate; trust the caller in that case so a
-    temporary Codex outage doesn't block the user from saving.
-
-    When ``model`` is blank the effort is checked against the provider's
-    default model — the one Codex will fall back to inside ``new_session``
-    — so an empty model can't quietly bypass the supported-effort check.
-    """
-    if not models_data:
-        return None
-    valid_ids = {m.id for m in models_data}
-    if model and model not in valid_ids:
-        return f"model {model!r} is not available"
-    if effort:
-        effective = (
-            next((m for m in models_data if m.id == model), None)
-            if model
-            else next((m for m in models_data if m.is_default), models_data[0])
-        )
-        if effective is not None:
-            supported = _supported_effort_values(effective)
-            if supported and effort not in supported:
-                return (
-                    f"reasoning effort {effort!r} is not supported by "
-                    f"model {effective.id!r}"
-                )
-    return None

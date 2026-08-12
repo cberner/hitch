@@ -161,6 +161,16 @@
         .new-session-form [hidden] {
             display: none !important;
         }
+        .new-session-model-fields {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+        }
+        .new-session-plan-effort-help {
+            margin: -0.5rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+        }
         .new-session-prompt-row {
             display: grid;
             grid-template-columns: 2.6rem minmax(0, 1fr);
@@ -261,6 +271,9 @@
             .new-session-form {
                 padding: 1rem;
             }
+            .new-session-model-fields {
+                grid-template-columns: 1fr;
+            }
             .actions {
                 flex-direction: column-reverse;
             }
@@ -298,6 +311,8 @@
                 {% csrf_token %}
                 <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
                 <input type="hidden" name="proposed_session" value="{{ initial_proposed_session_id }}">
+                <input type="hidden" name="rendered_model" value="{{ current_model }}">
+                <input type="hidden" name="rendered_reasoning_effort" value="{{ current_effort }}">
                 <div class="new-session-field">
                     <label for="new-session-prompt">Prompt</label>
                     <div class="new-session-prompt-row">
@@ -333,6 +348,10 @@
                         >&lt;bare repo&gt;</option>
                     </select>
                 </label>
+                <div class="new-session-model-fields">
+                    {% include "_model_effort_fields.html" %}
+                </div>
+                <p class="new-session-plan-effort-help" data-new-session-plan-effort-help hidden>Plan mode uses {{ plan_mode_reasoning_effort }} reasoning.</p>
                 <label>
                     Web search
                     <select name="web_search_mode">
@@ -379,10 +398,13 @@
     </main>
     <script>
         (function () {
+            {% include "_settings_effort_script.html" %}
             const newSessionForm = document.querySelector("[data-new-session-form]");
             const newSessionSubmit = newSessionForm && newSessionForm.querySelector("[data-new-session-submit]");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
             const newSessionPlanModeInput = newSessionForm && newSessionForm.querySelector("[data-plan-mode-input]");
+            const newSessionEffortSelect = newSessionForm && newSessionForm.querySelector("[data-settings-effort-select]");
+            const newSessionPlanEffortHelp = newSessionForm && newSessionForm.querySelector("[data-new-session-plan-effort-help]");
             const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
             const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
             const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
@@ -427,6 +449,8 @@
                 if (!newSessionForm) return;
                 newSessionForm.dataset.planMode = enabled ? "true" : "false";
                 if (newSessionPlanModeInput) newSessionPlanModeInput.value = enabled ? "true" : "";
+                if (newSessionEffortSelect) newSessionEffortSelect.disabled = enabled;
+                if (newSessionPlanEffortHelp) newSessionPlanEffortHelp.hidden = !enabled;
                 if (newSessionSlashTrigger) newSessionSlashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
                 if (newSessionSlashPlan) newSessionSlashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
             }

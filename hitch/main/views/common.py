@@ -30,7 +30,6 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from openai_codex import Codex as Codex
 from openai_codex.errors import InternalRpcError, InvalidRequestError
 from openai_codex.generated.v2_all import (
-    ReasoningEffort,
     SortDirection,
     ThreadSortKey,
 )
@@ -122,6 +121,7 @@ from hitch.main.sessions.session_resume import (
     _stored_model_config_for_session,
 )
 from hitch.main.sessions.session_settings import (
+    _PLAN_MODE_REASONING_EFFORT,
     _QA_SLASH_PROMPT,
     _allowed_session_cwds,
     _current_disk_usage_max_percent,
@@ -212,8 +212,6 @@ _PLAN_APPROVAL_PROMPT = "Implement the plan."
 
 _PLAN_REVISION_PROMPT = "Revise the plan."
 
-_PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
-
 _SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT = "hitch.session-intermediate.demo-context"
 
 _INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
@@ -238,7 +236,7 @@ def _settings_context(
     # user can pick an effort the model rejects and ``update_settings`` bounces
     # the save with a raw 400. An empty supported set means the model didn't
     # advertise any constraint, so every effort is allowed (matching
-    # ``_validate_settings_against_models``).
+    # ``_validate_model_and_effort_against_models``).
     supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
     current_supported = supported_by_model.get(current_settings.model, set())
     return {
@@ -1268,7 +1266,7 @@ def _next_message_config(
         {
             "label": "reasoning",
             "value": reasoning,
-            "plan_value": _PLAN_MODE_REASONING_EFFORT,
+            "plan_value": _PLAN_MODE_REASONING_EFFORT.value,
         },
         {
             "label": "sandbox",
@@ -1303,7 +1301,7 @@ def _session_model_and_reasoning(
         getattr(active_instance, "reasoning_effort", None)
     )
     if active_instance is not None and getattr(active_instance, "plan_mode", False):
-        return active_model or "Unknown", _PLAN_MODE_REASONING_EFFORT
+        return active_model or "Unknown", _PLAN_MODE_REASONING_EFFORT.value
     if active_model or active_reasoning:
         # A blank active model means Codex resolves its default for this turn.
         if active_reasoning and not active_model:

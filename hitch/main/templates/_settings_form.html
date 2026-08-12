@@ -1,27 +1,7 @@
 <form class="settings-form" method="post" action="{{ settings_url }}">
     {% csrf_token %}
     <input type="hidden" name="next" value="{{ settings_next_url }}">
-    <label>
-        Model
-        {% if model_options %}
-        <select name="model" data-settings-model-select>
-            {% for option in model_options %}
-            <option value="{{ option.id }}" {% if option.id == current_model %}selected{% endif %} data-supported-efforts="{{ option.supported_efforts }}">{{ option.display_name }}</option>
-            {% endfor %}
-        </select>
-        {% else %}
-        <input type="text" name="model" value="{{ current_model }}" placeholder="Codex returned no models" autocomplete="off">
-        {% endif %}
-    </label>
-    <label>
-        Reasoning effort
-        <select name="reasoning_effort" data-settings-effort-select>
-            <option value="" {% if not current_effort %}selected{% endif %}>Model default</option>
-            {% for option in effort_options %}
-            <option value="{{ option.value }}" {% if option.value == current_effort %}selected{% endif %} data-effort-option {% if not option.supported %}hidden disabled{% endif %}>{{ option.value }}</option>
-            {% endfor %}
-        </select>
-    </label>
+    {% include "_model_effort_fields.html" %}
     <label>
         Sandbox policy
         <select name="sandbox_policy">

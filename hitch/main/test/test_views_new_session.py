@@ -163,11 +163,24 @@ class NewSessionViewTests(TestCase):
             enable_memories=False,
             models_data=[_make_model("gpt-5.4", is_default=True)],
         )
-        _seed_cookies(self.client, **{_MODEL_COOKIE: "stale-model"})
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "stale-model",
+                "hitch_reasoning_effort": "high",
+            },
+        )
 
         response = self.client.post(
             reverse("new_session"),
-            data={"prompt": "Refactor the login flow", "cwd": self.REPO},
+            data={
+                "prompt": "Refactor the login flow",
+                "cwd": self.REPO,
+                "model": "stale-model",
+                "reasoning_effort": "high",
+                "rendered_model": "stale-model",
+                "rendered_reasoning_effort": "high",
+            },
         )
 
         self.assertEqual(response.status_code, 302)
@@ -179,6 +192,76 @@ class NewSessionViewTests(TestCase):
             reasoning_effort="medium",
         )
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_cold_cache_form_keeps_reconciled_model(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-cold-form")
+        caches._store_models_cache(enable_memories=False, models_data=[])
+        _setup_codex(
+            mock_codex,
+            models=[_make_model("gpt-5.4", is_default=True)],
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Make a plan",
+                "cwd": self.REPO,
+                "model": "",
+                "reasoning_effort": "high",
+                "rendered_model": "",
+                "rendered_reasoning_effort": "high",
+                "plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="Make a plan",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_cold_empty_catalog_keeps_rendered_preferred_effort(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-cold-empty")
+        caches._store_models_cache(enable_memories=False, models_data=[])
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "model": "",
+                "reasoning_effort": "high",
+                "rendered_model": "",
+                "rendered_reasoning_effort": "high",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            reasoning_effort="high",
+        )
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -300,6 +383,347 @@ class NewSessionViewTests(TestCase):
             reasoning_effort="medium",
         )
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_model_override_is_scoped_to_started_session(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        user = get_user_model().objects.create_user(username="model-picker")
+        UserSettings.objects.create(
+            user=user,
+            model="gpt-default",
+            reasoning_effort="medium",
+        )
+        self.client.force_login(user)
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-model-override")
+        _setup_codex(
+            mock_codex,
+            models=[
+                _make_model("gpt-default", is_default=True),
+                _make_model("gpt-fast"),
+            ],
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "model": "gpt-fast",
+                "reasoning_effort": "low",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            model="gpt-fast",
+            reasoning_effort="low",
+        )
+        saved = UserSettings.objects.get(user=user)
+        self.assertEqual(saved.model, "gpt-default")
+        self.assertEqual(saved.reasoning_effort, "medium")
+        self.assertEqual(saved.last_selected_repo, self.REPO)
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_changed_model_preserves_rendered_effort_choice(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        caches._store_models_cache(
+            enable_memories=False,
+            models_data=[
+                _make_model("gpt-current", is_default=True),
+                _make_model("gpt-selected"),
+            ],
+        )
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "removed-model",
+                "hitch_reasoning_effort": "high",
+            },
+        )
+
+        for index, (label, posted_effort, expected_effort) in enumerate(
+            (
+                ("rendered effort", "high", "high"),
+                ("model default", "", None),
+            )
+        ):
+            with self.subTest(label=label):
+                mock_spawn.return_value = SimpleNamespace(
+                    thread_id=f"thread-stale-model-{index}"
+                )
+                mock_spawn.reset_mock()
+
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "do thing",
+                        "cwd": self.REPO,
+                        "model": "gpt-selected",
+                        "reasoning_effort": posted_effort,
+                        "rendered_model": "removed-model",
+                        "rendered_reasoning_effort": "high",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(
+                    mock_spawn,
+                    model="gpt-selected",
+                    reasoning_effort=expected_effort,
+                )
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_plan_mode_changed_model_validates_medium_effort(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-plan-model")
+        selected_model = _make_model("gpt-plan")
+        selected_model.supported_reasoning_efforts = (
+            selected_model.supported_reasoning_efforts[:2]
+        )
+        caches._store_models_cache(
+            enable_memories=False,
+            models_data=[
+                _make_model("gpt-current", is_default=True),
+                selected_model,
+            ],
+        )
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "gpt-current",
+                "hitch_reasoning_effort": "high",
+            },
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "make a plan",
+                "cwd": self.REPO,
+                "model": "gpt-plan",
+                "rendered_model": "gpt-current",
+                "rendered_reasoning_effort": "high",
+                "plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_not_called()
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="make a plan",
+            model="gpt-plan",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_plan_mode_rejects_changed_model_without_medium_effort(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        selected_model = _make_model("gpt-no-medium")
+        selected_model.supported_reasoning_efforts = [
+            selected_model.supported_reasoning_efforts[index] for index in (0, 2)
+        ]
+        selected_model.default_reasoning_effort = SimpleNamespace(value="low")
+        caches._store_models_cache(
+            enable_memories=False,
+            models_data=[
+                _make_model("gpt-current", is_default=True),
+                selected_model,
+            ],
+        )
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "gpt-current",
+                "hitch_reasoning_effort": "high",
+            },
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "make a plan",
+                "cwd": self.REPO,
+                "model": "gpt-no-medium",
+                "rendered_model": "gpt-current",
+                "rendered_reasoning_effort": "high",
+                "plan_mode": "true",
+            },
+        )
+
+        self.assertContains(
+            response,
+            "reasoning effort 'medium' is not supported by model 'gpt-no-medium'",
+            status_code=400,
+        )
+        mock_codex.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_rejects_unsupported_model_effort_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(
+            mock_codex,
+            models=[_make_model("gpt-default", is_default=True)],
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "model": "gpt-default",
+                "reasoning_effort": "xhigh",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "reasoning effort 'xhigh' is not supported by model 'gpt-default'",
+            status_code=400,
+        )
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_accepts_current_provider_effort_without_constraints(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        cases = ("unconstrained catalog", "empty catalog")
+
+        for index, label in enumerate(cases):
+            with self.subTest(label=label):
+                self._clear_models_cache()
+                client = Client()
+                model = _make_model("provider-model", is_default=True)
+                model.supported_reasoning_efforts = []
+                models = [model] if label == "unconstrained catalog" else []
+                _setup_codex(mock_codex, models=models)
+                if models:
+                    caches._store_models_cache(
+                        enable_memories=False,
+                        models_data=models,
+                    )
+                _seed_cookies(
+                    client,
+                    **{
+                        _MODEL_COOKIE: "provider-model",
+                        "hitch_reasoning_effort": "provider-effort",
+                    },
+                )
+                mock_spawn.return_value = SimpleNamespace(
+                    thread_id=f"thread-provider-effort-{index}"
+                )
+                mock_spawn.reset_mock()
+
+                response = client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "do thing",
+                        "cwd": self.REPO,
+                        "model": "provider-model",
+                        "reasoning_effort": "provider-effort",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(
+                    mock_spawn,
+                    model="provider-model",
+                    reasoning_effort="provider-effort",
+                )
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_new_session_rejects_unadvertised_effort_without_constraints(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        cases = ("unconstrained catalog", "empty catalog")
+
+        for label in cases:
+            with self.subTest(label=label):
+                self._clear_models_cache()
+                client = Client()
+                model = _make_model("provider-model", is_default=True)
+                model.supported_reasoning_efforts = []
+                models = [model] if label == "unconstrained catalog" else []
+                _setup_codex(mock_codex, models=models)
+                if models:
+                    caches._store_models_cache(
+                        enable_memories=False,
+                        models_data=models,
+                    )
+                _seed_cookies(
+                    client,
+                    **{
+                        _MODEL_COOKIE: "provider-model",
+                        "hitch_reasoning_effort": "provider-effort",
+                    },
+                )
+
+                response = client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "do thing",
+                        "cwd": self.REPO,
+                        "model": "provider-model",
+                        "reasoning_effort": "crafted-effort",
+                    },
+                )
+
+                self.assertContains(
+                    response,
+                    "invalid reasoning effort",
+                    status_code=400,
+                )
+                mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
     @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
@@ -3486,3 +3910,75 @@ class NewSessionViewTests(TestCase):
         self.assertContains(response, 'class="new-session-close"')
         self.assertContains(response, 'aria-label="Cancel new session"')
         self.assertContains(response, ">Cancel</a>", count=1)
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_cold_first_visit_renders_preferred_effort_snapshot(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        caches._store_models_cache(enable_memories=False, models_data=[])
+        mock_discover.return_value = [Path(self.REPO)]
+
+        response = self.client.get(reverse("new_session"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
+        self.assertEqual(
+            response.context["current_effort"],
+            UserSettings.DEFAULT_REASONING_EFFORT,
+        )
+        self.assertContains(
+            response,
+            'name="rendered_model" value=""',
+        )
+        self.assertContains(
+            response,
+            'name="rendered_reasoning_effort" value="high"',
+        )
+        self.assertContains(response, 'value="high" selected')
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_renders_model_and_reasoning_selectors(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        default_model = _make_model("gpt-default", is_default=True)
+        default_model.supported_reasoning_efforts = (
+            default_model.supported_reasoning_efforts[:2]
+        )
+        caches._store_models_cache(
+            enable_memories=False,
+            models_data=[default_model, _make_model("gpt-fast")],
+        )
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "gpt-default",
+                "hitch_reasoning_effort": "medium",
+            },
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+
+        response = self.client.get(reverse("new_session"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
+        self.assertContains(response, "Model")
+        self.assertContains(response, "Reasoning effort")
+        self.assertContains(response, 'name="model"')
+        self.assertContains(response, 'name="reasoning_effort"')
+        self.assertContains(response, 'data-supported-efforts="low medium"')
+        self.assertContains(response, "Plan mode uses medium reasoning.")
+        self.assertContains(
+            response,
+            "newSessionEffortSelect.disabled = enabled",
+        )
+        self.assertEqual(response.context["current_model"], "gpt-default")
+        self.assertEqual(response.context["current_effort"], "medium")
+        effort_options = {
+            option["value"]: option["supported"]
+            for option in response.context["effort_options"]
+        }
+        self.assertTrue(effort_options["low"])
+        self.assertTrue(effort_options["medium"])
+        self.assertFalse(effort_options["high"])

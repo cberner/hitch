@@ -2,9 +2,9 @@
             // user has selected: each model advertises the efforts it accepts
             // via `data-supported-efforts`, and the server rejects unsupported
             // (model, effort) pairs with a 400. Hiding the efforts the chosen
-            // model can't use stops the user from saving a combination that
-            // would bounce. An empty advertised set means "no constraint", so
-            // every effort stays available.
+            // model can't use stops the user from submitting a combination
+            // that would bounce. An empty advertised set means "no
+            // constraint", so every effort stays available.
             const settingsModelSelect = document.querySelector("[data-settings-model-select]");
             const settingsEffortSelect = document.querySelector("[data-settings-effort-select]");
             function applySupportedEffortFilter() {

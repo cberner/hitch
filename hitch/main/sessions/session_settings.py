@@ -47,6 +47,7 @@ from hitch.main.workflows import system_agents
 
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
 _QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT
+_PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 
 
 def _new_session_form_context(
@@ -469,6 +470,39 @@ def _reasoning_effort_values(
         add(_model_default_effort(model_obj))
     add(current_effort)
     return values
+
+
+def _validate_model_and_effort_against_models(
+    model: str, effort: str, models_data: list[Any]
+) -> str | None:
+    """Return an error for a model/effort pair Codex does not offer.
+
+    An empty catalog means a temporary provider failure cannot be
+    distinguished from an unconstrained local provider, so callers trust the
+    posted pair. A blank model means Codex's advertised default model.
+    """
+    if not models_data:
+        return None
+    valid_ids = {model_obj.id for model_obj in models_data}
+    if model and model not in valid_ids:
+        return f"model {model!r} is not available"
+    if effort:
+        effective = (
+            next((model_obj for model_obj in models_data if model_obj.id == model), None)
+            if model
+            else next(
+                (model_obj for model_obj in models_data if model_obj.is_default),
+                models_data[0],
+            )
+        )
+        if effective is not None:
+            supported = _supported_effort_values(effective)
+            if supported and effort not in supported:
+                return (
+                    f"reasoning effort {effort!r} is not supported by "
+                    f"model {effective.id!r}"
+                )
+    return None
 
 
 def _project_for_proposed_session(
