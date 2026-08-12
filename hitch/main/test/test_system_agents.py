@@ -208,6 +208,14 @@ def _gh_monitor_observation(
     }
 
 
+def _agent_gh_monitor_observation(
+    pr: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return _gh_monitor_observation(
+        pr, feedback="Review feedback needs interpretation."
+    )
+
+
 def _agent_message_events_file(
     test: TestCase, text: str, *, phase: str | None = "final_answer"
 ) -> str:
@@ -5038,7 +5046,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_start_pr_monitor_workflow_skips_qa_and_starts_monitor(
@@ -5088,6 +5096,228 @@ class SpecCriticWorkflowTests(TestCase):
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_start_pr_monitor_uses_deterministic_clean_observation(
+        self, mock_spawn: MagicMock, _mock_observe: MagicMock
+    ) -> None:
+        workflow = pr_qa.start_pr_monitor_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/169",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        self.assertEqual(
+            workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 1
+        )
+        monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+        self.assertEqual(
+            monitor[system_agents._PR_MONITOR_FEEDBACK_OBSERVATION_KEY][
+                "feedback"
+            ],
+            "",
+        )
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
+    def test_clean_fast_path_reinterprets_comment_arriving_during_backoff(
+        self, mock_observe: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        pending_observation = _gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "ci_status": "pending",
+                "pending_jobs": [{"name": "tests", "status": "queued"}],
+            }
+        )
+        commented_observation = _gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "ci_status": "success",
+                "pending_jobs": [],
+            },
+            feedback="A new reviewer comment appeared while CI was pending.",
+        )
+        mock_observe.side_effect = [
+            pending_observation,
+            commented_observation,
+            commented_observation,
+        ]
+        mock_spawn.side_effect = lambda **kwargs: _instance(
+            thread_id="comment-monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=kwargs["workflow_id"],
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            user_message_index=kwargs["user_message_index"],
+        )
+
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = pr_qa.start_pr_monitor_workflow(
+                main_thread_id="main-thread",
+                cwd=cwd,
+                pr_url="https://github.com/cberner/hitch/pull/169",
+                sandbox_policy="workspace-write",
+                approval_mode="auto_review",
+            )
+            workflow.refresh_from_db()
+            backoff = dict(
+                workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]
+            )
+            backoff["next_attempt_at"] = int(datetime.now(UTC).timestamp()) - 1
+            workflow.state = {
+                **workflow.state,
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: backoff,
+            }
+            workflow.save(update_fields=["state", "updated_at"])
+
+            self.assertEqual(
+                pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk), 1
+            )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+        self.assertTrue(
+            monitor[system_agents._PR_MONITOR_REINTERPRETATION_REQUIRED_KEY]
+        )
+        run = SystemAgentRun.objects.get(thread_id="comment-monitor-thread")
+        self.assertEqual(run.input["gh_observation"], commented_observation)
+        self.assertIn(
+            "A new reviewer comment appeared",
+            mock_spawn.call_args.kwargs["prompt"],
+        )
+
+    def test_gh_monitor_feedback_ignores_pending_jobs_without_failures(self) -> None:
+        feedback = gh_observations._gh_monitor_feedback(
+            {},
+            [],
+            {
+                "ci_status": "pending",
+                "pending_jobs": [{"name": "tests", "status": "queued"}],
+            },
+        )
+
+        self.assertEqual(feedback, "")
+
+    def test_deterministic_blockers_do_not_require_monitor_agent(self) -> None:
+        self.assertFalse(
+            pr_qa._gh_observation_requires_monitor(
+                {"feedback": "", "blockers": ["The branch has merge conflicts."]}
+            )
+        )
+        self.assertTrue(
+            pr_qa._gh_observation_requires_monitor(
+                {"feedback": "A reviewer left a comment.", "blockers": []}
+            )
+        )
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "ci_status": "success",
+            }
+        ),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_clean_passing_observation_completes_without_monitor_agent(
+        self, mock_spawn: MagicMock, _mock_observe: MagicMock
+    ) -> None:
+        workflow = pr_qa.start_pr_monitor_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/169",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {
+                "state": "merged",
+                "merged": True,
+                "review_signal": "approved",
+                "ci_status": "success",
+            }
+        ),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_clean_terminal_observation_completes_without_monitor_agent(
+        self,
+        mock_spawn: MagicMock,
+        _mock_observe: MagicMock,
+        mock_auto_pull: MagicMock,
+    ) -> None:
+        workflow = pr_qa.start_pr_monitor_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/169",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn.assert_not_called()
+        mock_auto_pull.assert_called_once_with(workflow)
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
+    def test_clean_observation_yields_to_newer_monitor_generation(
+        self, mock_observe: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        def supersede_monitor(workflow: SystemWorkflow) -> dict[str, object]:
+            workflow.refresh_from_db()
+            workflow.state = {**workflow.state, "pr_monitor_revision": 2}
+            workflow.save(update_fields=["state", "updated_at"])
+            return _gh_monitor_observation(
+                {"review_signal": "approved", "ci_status": "success"}
+            )
+
+        mock_observe.side_effect = supersede_monitor
+
+        workflow = pr_qa.start_pr_monitor_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/169",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertEqual(workflow.state["pr_monitor_revision"], 2)
+        self.assertNotIn(
+            system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state
+        )
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -5178,7 +5408,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("framework already fetched", kwargs["prompt"])
         self.assertIn("Active PR: #169", kwargs["prompt"])
         self.assertIn("https://github.com/cberner/hitch/pull/169", kwargs["prompt"])
-        self.assertIn("wait 2 minutes", kwargs["prompt"])
+        self.assertNotIn("wait 2 minutes", kwargs["prompt"])
         mock_observe.assert_called_once_with(workflow)
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "monitor-thread")
@@ -5209,7 +5439,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 170}),
+        return_value=_agent_gh_monitor_observation({"pr_number": 170}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -5325,7 +5555,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 170}),
+        return_value=_agent_gh_monitor_observation({"pr_number": 170}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -5887,7 +6117,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 173}),
+        return_value=_agent_gh_monitor_observation({"pr_number": 173}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -6000,7 +6230,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 174}),
+        return_value=_agent_gh_monitor_observation({"pr_number": 174}),
     )
     @patch("hitch.main.workflows.autonomous_goals.codex_events.latest_pr_snapshot_for_instance")
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -6124,7 +6354,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 171}),
+        return_value=_agent_gh_monitor_observation({"pr_number": 171}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -6221,7 +6451,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -6295,7 +6525,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -6383,7 +6613,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -8097,7 +8327,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"head_sha": "newsha"}),
+        return_value=_agent_gh_monitor_observation({"head_sha": "newsha"}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -8208,7 +8438,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -8507,7 +8737,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(
+        return_value=_agent_gh_monitor_observation(
             {"pr_number": 174, "head": "followup", "head_sha": "followupsha"}
         ),
     )
@@ -9679,7 +9909,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation(),
+        return_value=_agent_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_recovers_stale_pr_monitor_without_run(
@@ -9729,7 +9959,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.thread_id, "monitor-thread")
         self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
         self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
-        self.assertEqual(run.input["gh_observation"], _gh_monitor_observation())
+        self.assertEqual(
+            run.input["gh_observation"],
+            _agent_gh_monitor_observation(),
+        )
         mock_observe.assert_called_once_with(workflow)
         mock_spawn.assert_called_once()
 
@@ -12043,7 +12276,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         def observe(_workflow: SystemWorkflow) -> dict[str, Any]:
             self.assertEqual(lock_depth, 0)
-            return _gh_monitor_observation()
+            return _agent_gh_monitor_observation()
 
         def spawn(**_kwargs: object) -> CodexInstance:
             self.assertEqual(lock_depth, 1)
