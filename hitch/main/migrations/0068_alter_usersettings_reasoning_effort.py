@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 def backfill_blank_reasoning_effort(apps, schema_editor):
     UserSettings = apps.get_model("main", "UserSettings")
-    UserSettings.objects.filter(reasoning_effort="").update(
+    UserSettings.objects.filter(model="", reasoning_effort="").update(
         reasoning_effort="high"
     )
 

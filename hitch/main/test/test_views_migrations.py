@@ -204,7 +204,7 @@ class ReasoningEffortDefaultMigrationTests(TransactionTestCase):
         executor.migrate(targets)
         return executor
 
-    def test_backfills_only_blank_account_efforts(self) -> None:
+    def test_backfills_only_entirely_unset_account_efforts(self) -> None:
         leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
         self.addCleanup(self._migrate, leaf)
 
@@ -215,9 +215,19 @@ class ReasoningEffortDefaultMigrationTests(TransactionTestCase):
         UserSettings = old_apps.get_model("main", "UserSettings")
 
         blank_user = User.objects.create(username="blank-effort")
+        model_default_user = User.objects.create(username="model-default-effort")
         saved_user = User.objects.create(username="saved-effort")
         UserSettings.objects.create(user=blank_user, reasoning_effort="")
-        UserSettings.objects.create(user=saved_user, reasoning_effort="xhigh")
+        UserSettings.objects.create(
+            user=model_default_user,
+            model="gpt-5.6-sol",
+            reasoning_effort="",
+        )
+        UserSettings.objects.create(
+            user=saved_user,
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
+        )
 
         new_apps = self._migrate(self.migrate_to).loader.project_state(
             self.migrate_to
@@ -227,6 +237,12 @@ class ReasoningEffortDefaultMigrationTests(TransactionTestCase):
         self.assertEqual(
             UserSettings.objects.get(user_id=blank_user.pk).reasoning_effort,
             "high",
+        )
+        self.assertEqual(
+            UserSettings.objects.get(
+                user_id=model_default_user.pk
+            ).reasoning_effort,
+            "",
         )
         self.assertEqual(
             UserSettings.objects.get(user_id=saved_user.pk).reasoning_effort,
