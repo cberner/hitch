@@ -361,7 +361,7 @@ def _usage_context(request: HttpRequest) -> UsageContext:
     resolved_settings = _resolved_settings(request, models_data)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
-    rate_limits = caches._rate_limits_for_usage_context(
+    rate_limits_state = caches._rate_limits_for_usage_context(
         enable_memories=current_settings.enable_memories
     )
     session_index_state = _usage_session_index_state()
@@ -390,7 +390,8 @@ def _usage_context(request: HttpRequest) -> UsageContext:
         template_context={
             "login_url": reverse("login"),
             "register_url": reverse("register"),
-            "rate_limits": rate_limits,
+            "rate_limits": rate_limits_state.rate_limits,
+            "rate_limits_refresh_pending": rate_limits_state.refresh_pending,
             "lifetime_usage": lifetime_usage,
             **settings_context,
         },

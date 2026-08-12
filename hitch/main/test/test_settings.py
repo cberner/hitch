@@ -131,6 +131,7 @@ def _clear_rate_limits_cache() -> None:
         caches._RATE_LIMITS_CACHE_VALUE = None
         caches._RATE_LIMITS_CACHE_HAS_VALUE = False
         caches._RATE_LIMITS_CACHE_FETCHED_AT = None
+        caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT = None
         caches._RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 
@@ -334,8 +335,67 @@ class UsageRateLimitCacheTests(SimpleTestCase):
             caches._RATE_LIMITS_CACHE_VALUE = None
             caches._RATE_LIMITS_CACHE_HAS_VALUE = False
             caches._RATE_LIMITS_CACHE_FETCHED_AT = None
+            caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT = None
             caches._RATE_LIMITS_REFRESH_IN_FLIGHT = False
         super().tearDown()
+
+    def test_usage_state_reads_value_and_pending_from_one_snapshot(self) -> None:
+        snapshot = {
+            "windows": [],
+            "limit_name": "Codex",
+            "plan_type": "pro",
+        }
+
+        def complete_refresh(*, enable_memories: bool) -> None:
+            self.assertFalse(enable_memories)
+            with caches._RATE_LIMITS_REFRESH_LOCK:
+                caches._RATE_LIMITS_CACHE_VALUE = snapshot
+                caches._RATE_LIMITS_CACHE_HAS_VALUE = True
+                caches._RATE_LIMITS_REFRESH_IN_FLIGHT = False
+
+        with patch(
+            "hitch.main.caches._schedule_rate_limits_refresh",
+            side_effect=complete_refresh,
+        ):
+            state = caches._rate_limits_for_usage_context(enable_memories=False)
+
+        self.assertEqual(state.rate_limits, snapshot)
+        self.assertFalse(state.refresh_pending)
+
+    def test_denied_cold_refresh_becomes_terminal_until_retry_ttl(self) -> None:
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
+
+        with patch("hitch.main.caches.rate_limit.claim", return_value=False):
+            caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
+
+        state = caches._rate_limits_for_usage_context(enable_memories=False)
+
+        self.assertIsNone(state.rate_limits)
+        self.assertFalse(state.refresh_pending)
+        self.assertFalse(caches._rate_limits_refresh_needed())
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
+
+    def test_failed_cold_refresh_becomes_terminal_until_retry_ttl(self) -> None:
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
+
+        with (
+            patch("hitch.main.caches.rate_limit.claim", return_value=True),
+            patch(
+                "hitch.main.caches.app_server_pool.borrow_codex",
+                side_effect=RuntimeError("codex unavailable"),
+            ),
+            self.assertLogs("hitch.main.caches", level="ERROR"),
+        ):
+            caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
+
+        state = caches._rate_limits_for_usage_context(enable_memories=False)
+
+        self.assertIsNone(state.rate_limits)
+        self.assertFalse(state.refresh_pending)
+        self.assertFalse(caches._rate_limits_refresh_needed())
 
     def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
         snapshot = {
@@ -358,6 +418,7 @@ class UsageRateLimitCacheTests(SimpleTestCase):
             caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
 
         with (
+            patch("hitch.main.caches.rate_limit.claim", return_value=True),
             patch("hitch.main.runtime.codex_pool.app_server_config", return_value=object()),
             patch("hitch.main.caches.Codex"),
             patch("hitch.main.caches._fetch_rate_limits", return_value=None),
@@ -867,9 +928,11 @@ class SettingsPageRenderTests(TestCase):
         )
 
         with (
-            patch("hitch.main.caches._cached_rate_limits", return_value=rate_limits),
+            patch(
+                "hitch.main.caches._rate_limits_for_usage_context",
+                return_value=caches._RateLimitsUsageState(rate_limits, False),
+            ),
             patch("hitch.main.caches._start_models_refresh_thread"),
-            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -939,6 +1002,7 @@ class SettingsPageRenderTests(TestCase):
             # the endpoint isn't wired in the current build.
             rate_limits=MethodNotFoundError(-32601, "method not found", None),
         )
+        caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
@@ -966,6 +1030,7 @@ class SettingsPageRenderTests(TestCase):
             models=[],
             rate_limits=ValueError("malformed payload"),
         )
+        caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
@@ -992,6 +1057,7 @@ class SettingsPageRenderTests(TestCase):
             models=[],
             rate_limits=_rate_limit_snapshot(),
         )
+        caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
