@@ -149,6 +149,11 @@
                 </section>
                 {% endfor %}
             </div>
+            {% elif rate_limits_refresh_pending %}
+            <div class="empty" aria-live="polite">
+                <p>Refreshing quota usage...</p>
+                <p class="hint">Reload in a moment to see any available quota details.</p>
+            </div>
             {% else %}
             <div class="empty">
                 <p>Usage unavailable.</p>

@@ -13,7 +13,7 @@ import logging
 import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.db import close_old_connections, transaction
 from django.utils import timezone
@@ -35,6 +35,7 @@ _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 _RATE_LIMITS_CACHE_VALUE: dict[str, Any] | None = None
 _RATE_LIMITS_CACHE_HAS_VALUE = False
 _RATE_LIMITS_CACHE_FETCHED_AT: datetime | None = None
+_RATE_LIMITS_REFRESH_ATTEMPTED_AT: datetime | None = None
 # The account rate-limit endpoint is a real OpenAI ping; honour the central
 # debounce floor rather than re-hitting it every render.
 _RATE_LIMITS_CACHE_TTL = rate_limit.DEFAULT_MIN_INTERVAL
@@ -44,6 +45,11 @@ _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
+
+
+class _RateLimitsUsageState(NamedTuple):
+    rate_limits: dict[str, Any] | None
+    refresh_pending: bool
 
 
 def _cached_models_data(*, enable_memories: bool) -> list[Any]:
@@ -206,20 +212,17 @@ def _cached_rate_limits() -> dict[str, Any] | None:
         return _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
 
 
-def _rate_limits_for_usage_context(*, enable_memories: bool) -> dict[str, Any] | None:
-    _refresh_rate_limits_cache_if_cold(enable_memories=enable_memories)
-    rate_limits = _cached_rate_limits()
+def _rate_limits_for_usage_context(*, enable_memories: bool) -> _RateLimitsUsageState:
     _schedule_rate_limits_refresh(enable_memories=enable_memories)
-    return rate_limits
-
-
-def _refresh_rate_limits_cache_if_cold(*, enable_memories: bool) -> None:
-    global _RATE_LIMITS_REFRESH_IN_FLIGHT
     with _RATE_LIMITS_REFRESH_LOCK:
-        if _RATE_LIMITS_CACHE_HAS_VALUE or _RATE_LIMITS_REFRESH_IN_FLIGHT:
-            return
-        _RATE_LIMITS_REFRESH_IN_FLIGHT = True
-    _refresh_rate_limits_cache_best_effort(enable_memories=enable_memories)
+        return _RateLimitsUsageState(
+            rate_limits=(
+                _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
+            ),
+            refresh_pending=(
+                not _RATE_LIMITS_CACHE_HAS_VALUE and _RATE_LIMITS_REFRESH_IN_FLIGHT
+            ),
+        )
 
 
 def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
@@ -232,19 +235,31 @@ def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
 
 def _rate_limits_refresh_needed() -> bool:
     with _RATE_LIMITS_REFRESH_LOCK:
-        if _RATE_LIMITS_CACHE_FETCHED_AT is None:
+        if _RATE_LIMITS_REFRESH_IN_FLIGHT:
+            return False
+        last_attempt_at = (
+            _RATE_LIMITS_CACHE_FETCHED_AT
+            if _RATE_LIMITS_CACHE_HAS_VALUE
+            else _RATE_LIMITS_REFRESH_ATTEMPTED_AT
+        )
+        if last_attempt_at is None:
             return True
-        return timezone.now() - _RATE_LIMITS_CACHE_TTL >= _RATE_LIMITS_CACHE_FETCHED_AT
+        return timezone.now() - _RATE_LIMITS_CACHE_TTL >= last_attempt_at
 
 
 def _start_rate_limits_refresh_thread(*, enable_memories: bool) -> None:
     global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    global _RATE_LIMITS_REFRESH_ATTEMPTED_AT
     with _RATE_LIMITS_REFRESH_LOCK:
         if _RATE_LIMITS_REFRESH_IN_FLIGHT:
             return
-        if (
-            _RATE_LIMITS_CACHE_FETCHED_AT is not None
-            and timezone.now() - _RATE_LIMITS_CACHE_TTL < _RATE_LIMITS_CACHE_FETCHED_AT
+        last_attempt_at = (
+            _RATE_LIMITS_CACHE_FETCHED_AT
+            if _RATE_LIMITS_CACHE_HAS_VALUE
+            else _RATE_LIMITS_REFRESH_ATTEMPTED_AT
+        )
+        if last_attempt_at is not None and (
+            timezone.now() - _RATE_LIMITS_CACHE_TTL < last_attempt_at
         ):
             return
         _RATE_LIMITS_REFRESH_IN_FLIGHT = True
@@ -258,6 +273,7 @@ def _start_rate_limits_refresh_thread(*, enable_memories: bool) -> None:
     except Exception:
         with _RATE_LIMITS_REFRESH_LOCK:
             _RATE_LIMITS_REFRESH_IN_FLIGHT = False
+            _RATE_LIMITS_REFRESH_ATTEMPTED_AT = timezone.now()
         logger.exception("failed to start rate limits refresh thread")
 
 
@@ -265,6 +281,7 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
     global _RATE_LIMITS_CACHE_FETCHED_AT
     global _RATE_LIMITS_CACHE_HAS_VALUE
     global _RATE_LIMITS_CACHE_VALUE
+    global _RATE_LIMITS_REFRESH_ATTEMPTED_AT
     global _RATE_LIMITS_REFRESH_IN_FLIGHT
     rate_limits: dict[str, Any] | None = None
     fetched = False
@@ -284,17 +301,18 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
     finally:
         close_old_connections()
         with _RATE_LIMITS_REFRESH_LOCK:
+            attempted_at = timezone.now()
             if fetched and (rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE):
                 _RATE_LIMITS_CACHE_VALUE = rate_limits
                 _RATE_LIMITS_CACHE_HAS_VALUE = True
-            # Advance the local TTL when we fetched, or when we already have a
-            # value to keep serving -- then this process backs off and trusts the
-            # global owner. A still-cold process whose claim was denied must NOT
-            # back off, or it would hide the rate-limit section for the full TTL
-            # without ever populating its own cache; leave it due so it retries
-            # and wins a claim shortly.
+            # Preserve a usable snapshot through failed refreshes. Every
+            # terminal attempt is recorded separately so a cold process whose
+            # global claim was denied or whose worker failed shows unavailable
+            # and retries after the debounce floor instead of claiming forever
+            # that a refresh is pending.
             if fetched or _RATE_LIMITS_CACHE_HAS_VALUE:
-                _RATE_LIMITS_CACHE_FETCHED_AT = timezone.now()
+                _RATE_LIMITS_CACHE_FETCHED_AT = attempted_at
+            _RATE_LIMITS_REFRESH_ATTEMPTED_AT = attempted_at
             _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 

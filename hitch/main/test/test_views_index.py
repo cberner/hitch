@@ -22,13 +22,12 @@ from django.utils import timezone
 from openai_codex.errors import CodexError as CodexError
 from openai_codex.errors import InvalidRequestError
 from openai_codex.generated.v2_all import (
-    GetAccountRateLimitsResponse,
     SortDirection,
     ThreadSortKey,
     ThreadSource,
 )
 
-from hitch.main import demo
+from hitch.main import caches, demo
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -3217,7 +3216,10 @@ class IndexViewTests(TestCase):
         mock_discover.return_value = []
 
         with (
-            patch("hitch.main.caches._rate_limits_for_usage_context", return_value=None),
+            patch(
+                "hitch.main.caches._rate_limits_for_usage_context",
+                return_value=caches._RateLimitsUsageState(None, False),
+            ),
             patch(
                 "hitch.main.views.common._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
@@ -5281,7 +5283,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
 
     @patch("hitch.main.caches.Codex")
-    def test_usage_page_fetches_rate_limits_before_first_render(
+    def test_usage_page_refreshes_rate_limits_after_first_render(
         self, mock_codex: MagicMock
     ) -> None:
         session_index.mark_synced(archived=False, complete=True)
@@ -5305,27 +5307,41 @@ class IndexViewTests(TestCase):
             patch("hitch.main.caches._RATE_LIMITS_CACHE_VALUE", None),
             patch("hitch.main.caches._RATE_LIMITS_CACHE_HAS_VALUE", False),
             patch("hitch.main.caches._RATE_LIMITS_CACHE_FETCHED_AT", None),
+            patch("hitch.main.caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT", None),
             patch("hitch.main.caches._RATE_LIMITS_REFRESH_IN_FLIGHT", False),
             patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches.threading.Thread") as refresh_thread,
             patch(
-                "hitch.main.caches._start_rate_limits_refresh_thread"
-            ) as start_rate_limits,
-            self.captureOnCommitCallbacks(execute=True),
+                "hitch.main.caches.transaction.on_commit",
+                side_effect=lambda callback: callback(),
+            ),
         ):
             response = self.client.get(reverse("usage"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Codex rate limits")
-        self.assertContains(response, "Plan: Pro")
-        self.assertContains(response, "27% remaining")
-        self.assertContains(response, "5-hour window")
-        self.assertNotContains(response, "Usage unavailable.")
-        client._client.request.assert_called_once_with(
-            "account/rateLimits/read",
-            None,
-            response_model=GetAccountRateLimitsResponse,
-        )
-        start_rate_limits.assert_not_called()
+            self.assertEqual(response.status_code, 200)
+            self.assertNotContains(response, "Codex rate limits")
+            self.assertContains(response, "Refreshing quota usage...")
+            self.assertNotContains(response, "Usage unavailable.")
+            client._client.request.assert_not_called()
+            refresh_thread.assert_called_once_with(
+                target=caches._refresh_rate_limits_cache_best_effort,
+                kwargs={"enable_memories": False},
+                name="rate-limits-refresh",
+                daemon=True,
+            )
+            refresh_thread.return_value.start.assert_called_once_with()
+
+            caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
+
+            refreshed_response = self.client.get(reverse("usage"))
+
+            self.assertContains(refreshed_response, "Codex rate limits")
+            self.assertContains(refreshed_response, "Plan: Pro")
+            self.assertContains(refreshed_response, "27% remaining")
+            self.assertContains(refreshed_response, "5-hour window")
+            self.assertNotContains(refreshed_response, "Refreshing quota usage...")
+            client._client.request.assert_called_once()
+            refresh_thread.assert_called_once()
 
     def test_lifetime_usage_skips_stale_file_backed_cache(self) -> None:
         rollout_path = _make_rollout(

@@ -134,6 +134,7 @@ def _profile_usage_context(request: HttpRequest) -> common.UsageContext:
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "rate_limits": None,
+            "rate_limits_refresh_pending": False,
             "lifetime_usage": None,
             **settings_context,
         },
