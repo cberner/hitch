@@ -30,7 +30,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import demo
+from hitch.main import demo, diffs
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
@@ -52,7 +52,7 @@ from hitch.main.models import (
 )
 from hitch.main.repos import AutoPullError, AutoPullResult
 from hitch.main.runtime import codex_events, rate_limit, streaming
-from hitch.main.test.support import _make_project, _rollout_line
+from hitch.main.test.support import _git, _make_project, _rollout_line
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
@@ -483,6 +483,35 @@ class PrQaWorkflowTests(TestCase):
 
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
+
+    @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_pr_qa_blocks_before_spawn_when_untracked_files_are_omitted(
+        self, mock_spawn: MagicMock, mock_surface_failure: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            _git(repo, "init")
+            for index in range(diffs._MAX_UNTRACKED_FILES + 1):
+                (repo / f"new-{index}.txt").write_text(f"change {index}\n")
+
+            workflow = pr_qa.start_pr_qa_workflow(
+                main_thread_id="main-thread",
+                cwd=str(repo),
+                sandbox_policy=None,
+                approval_mode="auto_review",
+            )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn(
+            f"more than {diffs._MAX_UNTRACKED_FILES} untracked files",
+            workflow.state["error"],
+        )
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn.assert_not_called()
+        mock_surface_failure.assert_called_once()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
