@@ -26,7 +26,6 @@ from hitch.main.models import (
     Project,
     ProposedSession,
     SessionMetadata,
-    UserSettings,
 )
 from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
@@ -58,6 +57,7 @@ from hitch.main.sessions.session_settings import (
     _new_session_form_context,
     _project_for_proposed_session,
     _reasoning_effort_values,
+    _rendered_settings_with_guest_effort_default,
     _resolved_settings,
     _save_user_settings,
     _selected_project_for_settings,
@@ -65,7 +65,6 @@ from hitch.main.sessions.session_settings import (
     _validate_model_and_effort_against_models,
 )
 from hitch.main.sessions.settings_cookies import (
-    _EFFORT_COOKIE,
     _LAST_SELECTED_REPO_COOKIE,
     _MODEL_MAX_LEN,
     _REASONING_EFFORT_MAX_LEN,
@@ -806,23 +805,6 @@ def _prefill_bare_repo_cwd_for_new_session_page(
     return cwd
 
 
-def _new_session_rendered_settings(
-    request: HttpRequest,
-    settings: SettingsValues,
-    models_data: list[Any],
-) -> SettingsValues:
-    """Materialize the first-use effort that POST reconciliation will prefer."""
-    if (
-        not models_data
-        and not settings.reasoning_effort
-        and _authenticated_user(request) is None
-        and _EFFORT_COOKIE not in request.COOKIES
-    ):
-        return settings._replace(
-            reasoning_effort=UserSettings.DEFAULT_REASONING_EFFORT
-        )
-    return settings
-
 def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     reconciliation.reconcile_dead_if_due()
     repos = [str(p) for p in repos_module.discover_repos()]
@@ -832,10 +814,9 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     )
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
-    rendered_settings = _new_session_rendered_settings(
+    rendered_settings = _rendered_settings_with_guest_effort_default(
         request,
         current_settings,
-        models_data,
     )
     cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
@@ -961,10 +942,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         request.POST.get("rendered_model") is not None
         and request.POST.get("rendered_reasoning_effort") is not None
     ):
-        default_settings = _new_session_rendered_settings(
+        default_settings = _rendered_settings_with_guest_effort_default(
             request,
             default_settings,
-            models_data,
         )
     settings, model_settings_error = _posted_model_settings_override(
         request,

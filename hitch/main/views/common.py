@@ -225,6 +225,8 @@ _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
 def _settings_context(
     current_settings: SettingsValues,
     models_data: list[Any],
+    *,
+    preserve_current_choices: bool = False,
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -238,21 +240,44 @@ def _settings_context(
     # advertise any constraint, so every effort is allowed (matching
     # ``_validate_model_and_effort_against_models``).
     supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
+    if (
+        preserve_current_choices
+        and current_settings.model in supported_by_model
+        and current_settings.reasoning_effort
+        and supported_by_model[current_settings.model]
+    ):
+        supported_by_model[current_settings.model].add(
+            current_settings.reasoning_effort
+        )
     current_supported = supported_by_model.get(current_settings.model, set())
+    model_options = [
+        {
+            "id": m.id,
+            "display_name": m.display_name,
+            # Space-separated so the template can drop it into a single
+            # data attribute the effort-filter script splits on whitespace.
+            "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
+        }
+        for m in models_data
+    ]
+    if (
+        preserve_current_choices
+        and current_settings.model not in supported_by_model
+        and (current_settings.model or models_data)
+    ):
+        model_options.insert(
+            0,
+            {
+                "id": current_settings.model,
+                "display_name": current_settings.model or "Model default",
+                "supported_efforts": "",
+            },
+        )
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
         "edit_project_url": reverse("edit_project"),
-        "model_options": [
-            {
-                "id": m.id,
-                "display_name": m.display_name,
-                # Space-separated so the template can drop it into a single
-                # data attribute the effort-filter script splits on whitespace.
-                "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
-            }
-            for m in models_data
-        ],
+        "model_options": model_options,
         "effort_options": [
             {
                 "value": effort,

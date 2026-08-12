@@ -40,6 +40,7 @@ from hitch.main.sessions.settings_cookies import (
     SessionProjectVisibility,
     SettingsValues,
     _read_cookie,
+    _read_signed_cookie_if_present,
     _settings_cookie_updates,
     _web_search_mode_label,
 )
@@ -269,12 +270,13 @@ def _effective_auto_pr_enabled(
     return global_enabled
 
 
-def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> ResolvedSettings:
-    """Read the dialog state from storage and reconcile against Codex.
+def _reconciled_settings(
+    request: HttpRequest, models_data: list[Any]
+) -> ResolvedSettings:
+    """Compute provider-compatible settings without persisting them.
 
-    The returned ``cookie_updates`` map must be persisted on the response
-    (via ``_apply_cookie_updates``) so corrected state takes effect on the
-    next request.
+    ``cookie_updates`` describes the corrections an anonymous caller may
+    choose to apply; this function itself never writes cookies or account rows.
 
     Model reconciliation handles these cases:
       1. The saved model id is no longer offered → snap to the provider's
@@ -286,10 +288,6 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
          default while leaving the model alone.
       3. No model has been saved yet → choose the provider's default model
          while retaining Hitch's preferred effort when that model supports it.
-
-    Authenticated users read from ``UserSettings`` and get a full cookie
-    mirror back on each resolution. Anonymous users continue to read and
-    write the signed cookies directly.
 
     Empty ``models_data`` (transport hiccup, mock in tests) means we can't
     validate model compatibility; return the saved values untouched.
@@ -303,6 +301,47 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
     reviewer in the loop) when the cookie is missing or invalid, so the
     UI is never left in an ambiguous "no policy picked" state.
     """
+    saved = _stored_settings_with_local_defaults(request)
+
+    if not models_data:
+        return ResolvedSettings(values=saved, cookie_updates={})
+
+    valid_ids = {m.id for m in models_data}
+    if saved.model and saved.model in valid_ids:
+        model_obj = next(m for m in models_data if m.id == saved.model)
+        if saved.reasoning_effort:
+            supported = _supported_effort_values(model_obj)
+            if supported and saved.reasoning_effort not in supported:
+                new_effort = _model_default_effort(model_obj)
+                return ResolvedSettings(
+                    values=saved._replace(reasoning_effort=new_effort),
+                    cookie_updates={_EFFORT_COOKIE: new_effort},
+                )
+        return ResolvedSettings(values=saved, cookie_updates={})
+
+    default_model = next((m for m in models_data if m.is_default), models_data[0])
+    supported = _supported_effort_values(default_model)
+    preferred_effort = ""
+    if not saved.model:
+        preferred_effort = saved.reasoning_effort
+        if (
+            not preferred_effort
+            and _guest_model_preferences_are_missing(request)
+        ):
+            preferred_effort = UserSettings.DEFAULT_REASONING_EFFORT
+    new_effort = (
+        preferred_effort
+        if preferred_effort and (not supported or preferred_effort in supported)
+        else _model_default_effort(default_model)
+    )
+    return ResolvedSettings(
+        values=saved._replace(model=default_model.id, reasoning_effort=new_effort),
+        cookie_updates={_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
+    )
+
+
+def _stored_settings_with_local_defaults(request: HttpRequest) -> SettingsValues:
+    """Apply only Hitch-owned static defaults, without provider reconciliation."""
     saved = _stored_settings(request)
     saved_sandbox = saved.sandbox_policy
     saved_approval = saved.approval_mode
@@ -313,59 +352,24 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
         saved_approval = _DEFAULT_APPROVAL_MODE
     if saved_web_search and saved_web_search not in _VALID_WEB_SEARCH_MODES:
         saved_web_search = ""
-    saved = saved._replace(
+    return saved._replace(
         sandbox_policy=saved_sandbox,
         approval_mode=saved_approval,
         web_search_mode=saved_web_search,
     )
-    if not models_data:
-        return _resolved_settings_result(request, saved, {})
-
-    valid_ids = {m.id for m in models_data}
-    if saved.model and saved.model in valid_ids:
-        model_obj = next(m for m in models_data if m.id == saved.model)
-        if saved.reasoning_effort:
-            supported = _supported_effort_values(model_obj)
-            if supported and saved.reasoning_effort not in supported:
-                new_effort = _model_default_effort(model_obj)
-                return _resolved_settings_result(
-                    request,
-                    saved._replace(reasoning_effort=new_effort),
-                    {_EFFORT_COOKIE: new_effort},
-                )
-        return _resolved_settings_result(request, saved, {})
-
-    default_model = next((m for m in models_data if m.is_default), models_data[0])
-    supported = _supported_effort_values(default_model)
-    preferred_effort = ""
-    if not saved.model:
-        preferred_effort = saved.reasoning_effort
-        if (
-            not preferred_effort
-            and _authenticated_user(request) is None
-            and _EFFORT_COOKIE not in request.COOKIES
-        ):
-            preferred_effort = UserSettings.DEFAULT_REASONING_EFFORT
-    new_effort = (
-        preferred_effort
-        if preferred_effort and (not supported or preferred_effort in supported)
-        else _model_default_effort(default_model)
-    )
-    return _resolved_settings_result(
-        request,
-        saved._replace(model=default_model.id, reasoning_effort=new_effort),
-        {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
-    )
 
 
-def _resolved_settings_result(
-    request: HttpRequest, values: SettingsValues, cookie_updates: dict[str, str]
-) -> ResolvedSettings:
+def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> ResolvedSettings:
+    """Reconcile provider settings and persist authoritative corrections."""
+    result = _reconciled_settings(request, models_data)
     user = _authenticated_user(request)
     if user is not None:
-        _save_user_settings(user, values)
-        cookie_updates = _settings_cookie_updates(values)
-    return ResolvedSettings(values=values, cookie_updates=cookie_updates)
+        _save_user_settings(user, result.values)
+        return ResolvedSettings(
+            values=result.values,
+            cookie_updates=_settings_cookie_updates(result.values),
+        )
+    return result
 
 
 def _authenticated_user(request: HttpRequest) -> Any | None:
@@ -413,10 +417,52 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
 
 
 def _cached_models_and_settings(request: HttpRequest) -> tuple[list[Any], ResolvedSettings]:
-    stored_settings = _stored_settings(request)
+    models_data, _stored = _cached_models_and_stored_settings(request)
+    return models_data, _resolved_settings(request, models_data)
+
+
+def _cached_models_and_stored_settings(
+    request: HttpRequest,
+) -> tuple[list[Any], SettingsValues]:
+    """Return cache-backed choices without letting them rewrite stored values."""
+    stored_settings = _stored_settings_with_local_defaults(request)
     models_data = caches._cached_models_data(enable_memories=stored_settings.enable_memories)
     caches._schedule_models_refresh(enable_memories=stored_settings.enable_memories)
-    return models_data, _resolved_settings(request, models_data)
+    return models_data, stored_settings
+
+
+def _rendered_settings_with_guest_effort_default(
+    request: HttpRequest,
+    settings: SettingsValues,
+) -> SettingsValues:
+    """Materialize the first-use effort that fresh POST reconciliation prefers."""
+    if (
+        not settings.model
+        and not settings.reasoning_effort
+        and _guest_model_preferences_are_missing(request)
+    ):
+        return settings._replace(
+            reasoning_effort=UserSettings.DEFAULT_REASONING_EFFORT
+        )
+    return settings
+
+
+def _guest_model_preferences_are_missing(request: HttpRequest) -> bool:
+    """Treat missing and invalid signatures identically across the lifecycle."""
+    return (
+        _authenticated_user(request) is None
+        and _read_signed_cookie_if_present(request, _MODEL_COOKIE) is None
+        and _read_signed_cookie_if_present(request, _EFFORT_COOKIE) is None
+    )
+
+
+def _posted_model_settings_are_unchanged(
+    request: HttpRequest, *, model: str, reasoning_effort: str
+) -> bool:
+    """Compare a POST pair with the trusted snapshot settings GET would render."""
+    stored = _stored_settings_with_local_defaults(request)
+    rendered = _rendered_settings_with_guest_effort_default(request, stored)
+    return model == rendered.model and reasoning_effort == rendered.reasoning_effort
 
 
 def _effort_option_value(option: Any) -> str:

@@ -32,8 +32,11 @@ from hitch.main.sessions.project_visibility import (
 )
 from hitch.main.sessions.session_settings import (
     _authenticated_user,
+    _cached_models_and_stored_settings,
+    _posted_model_settings_are_unchanged,
     _reasoning_effort_values,
-    _resolved_settings,
+    _reconciled_settings,
+    _rendered_settings_with_guest_effort_default,
     _save_user_settings,
     _stored_settings,
     _validate_model_and_effort_against_models,
@@ -46,7 +49,6 @@ from hitch.main.sessions.settings_cookies import (
     _VALID_APPROVAL_MODES,
     _VALID_SANDBOX_POLICIES,
     _VALID_WEB_SEARCH_MODES,
-    ResolvedSettings,
     SettingsValues,
     _apply_cookie_updates,
     _extra_system_prompt_cookie_fits,
@@ -64,20 +66,6 @@ def _fresh_models_data(*, enable_memories: bool) -> list[Any]:
     return caches._fetch_models_data(
         enable_memories=enable_memories, codex_cls=common.Codex
     )
-
-def _fresh_models_and_settings(
-    request: HttpRequest,
-) -> tuple[list[Any], ResolvedSettings]:
-    stored_settings = _stored_settings(request)
-    try:
-        models_data = _fresh_models_data(enable_memories=stored_settings.enable_memories)
-    except Exception:
-        logger.exception("failed to fetch fresh models for settings")
-        models_data = caches._cached_models_data(
-            enable_memories=stored_settings.enable_memories
-        )
-        return models_data, _resolved_settings(request, models_data)
-    return models_data, _resolved_settings(request, models_data)
 
 def _apply_live_global_approval_mode(effective_approval_mode: str) -> None:
     explicit_override_thread_ids = SessionMetadata.objects.filter(
@@ -183,22 +171,25 @@ def _creatable_project_repos(discovered_repos: list[str]) -> list[str]:
 @require_http_methods(["GET", "POST"])
 def update_settings(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
-        models_data, resolved_settings = _fresh_models_and_settings(request)
+        models_data, stored_settings = _cached_models_and_stored_settings(request)
+        rendered_settings = _rendered_settings_with_guest_effort_default(
+            request,
+            stored_settings,
+        )
         next_url = common._safe_next_url(request) or reverse("index")
-        response = render(
+        return render(
             request,
             "settings.html",
             {
                 "settings_next_url": next_url,
                 "settings_cancel_url": next_url,
                 **common._settings_context(
-                    resolved_settings.values,
+                    rendered_settings,
                     models_data,
+                    preserve_current_choices=True,
                 ),
             },
         )
-        _apply_cookie_updates(response, resolved_settings.cookie_updates)
-        return response
 
     model = request.POST.get("model", "").strip()
     effort = request.POST.get("reasoning_effort", "").strip()
@@ -282,27 +273,46 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if enable_memories not in {"", "true"}:
         return HttpResponseBadRequest("invalid memories setting")
     enable_memories = "true" if enable_memories == "true" else "false"
+    model_settings_unchanged = _posted_model_settings_are_unchanged(
+        request,
+        model=model,
+        reasoning_effort=effort,
+    )
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
         # the chosen model doesn't support) gets a clean 400 instead of
         # quietly poisoning every subsequent turn at runtime.
         enable_memories_value = enable_memories == "true"
+        catalog_is_fresh = False
         try:
             models_data = _fresh_models_data(enable_memories=enable_memories_value)
+            catalog_is_fresh = True
         except Exception:
             logger.exception("failed to fetch fresh models for settings validation")
             models_data = caches._cached_models_data(
                 enable_memories=enable_memories_value
             )
-        valid_efforts = set(_reasoning_effort_values(models_data))
-        if effort and effort not in valid_efforts:
-            return HttpResponseBadRequest("invalid reasoning effort")
-        compat_error = _validate_model_and_effort_against_models(
-            model, effort, models_data
-        )
-        if compat_error:
-            return HttpResponseBadRequest(compat_error)
+        if model_settings_unchanged and catalog_is_fresh:
+            fresh_settings = _reconciled_settings(request, models_data).values
+            model = fresh_settings.model
+            effort = fresh_settings.reasoning_effort
+            validate_model_settings = True
+        elif model_settings_unchanged:
+            # A fallback catalog cannot authoritatively reject an unchanged
+            # stored choice. Preserve it until fresh metadata is available.
+            validate_model_settings = False
+        else:
+            validate_model_settings = True
+        if validate_model_settings:
+            valid_efforts = set(_reasoning_effort_values(models_data))
+            if effort and effort not in valid_efforts:
+                return HttpResponseBadRequest("invalid reasoning effort")
+            compat_error = _validate_model_and_effort_against_models(
+                model, effort, models_data
+            )
+            if compat_error:
+                return HttpResponseBadRequest(compat_error)
     stored = _stored_settings(request)
     values = SettingsValues(
         model=model,

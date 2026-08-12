@@ -506,9 +506,8 @@ class SettingsPageRenderTests(TestCase):
     def test_page_lists_models_and_efforts(
         self, _mock_hash: MagicMock, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, display_name="GPT-5")]
         )
         mock_discover.return_value = []
 
@@ -517,7 +516,7 @@ class SettingsPageRenderTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         self.assertContains(response, "data-nav-menu")
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
@@ -615,13 +614,13 @@ class SettingsPageRenderTests(TestCase):
         GlobalSettings.objects.create(
             pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
         )
-        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        _seed_models_cache([_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         self.assertContains(response, "Max Hitch disk usage (%)")
         self.assertContains(response, 'name="initial_disk_usage_max_percent"')
         self.assertContains(response, 'name="disk_usage_max_percent"')
@@ -635,13 +634,13 @@ class SettingsPageRenderTests(TestCase):
         GlobalSettings.objects.create(
             pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.55
         )
-        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        _seed_models_cache([_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         self.assertContains(response, 'name="disk_usage_max_percent"')
         self.assertContains(response, 'value="35.5"')
         self.assertNotContains(response, 'value="35.55"')
@@ -668,9 +667,8 @@ class SettingsPageRenderTests(TestCase):
         _seed_cookies(
             self.client, **{_MODEL_COOKIE: "gpt-5-codex", _EFFORT_COOKIE: "low"}
         )
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model(
                     "gpt-5-codex",
                     is_default=True,
@@ -689,7 +687,7 @@ class SettingsPageRenderTests(TestCase):
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         body = response.content.decode()
         # Efforts the selected model accepts stay selectable...
         for supported in ("low", "medium"):
@@ -714,16 +712,15 @@ class SettingsPageRenderTests(TestCase):
         """A model that advertises no supported-effort constraint accepts any
         effort (matching ``_validate_model_and_effort_against_models``), so the dialog
         must keep every effort selectable rather than hiding them all."""
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, supported_efforts=[])],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, supported_efforts=[])]
         )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         body = response.content.decode()
         for effort in (e.value for e in ReasoningEffort):
             option = self._effort_option(body, effort)
@@ -1162,9 +1159,8 @@ class ReconcileSettingsTests(TestCase):
     ) -> None:
         user = get_user_model().objects.create_user("dev@example.com")
         self.client.force_login(user)
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model("other"),
                 _model("gpt-5", is_default=True, default_effort="low"),
             ],
@@ -1173,36 +1169,43 @@ class ReconcileSettingsTests(TestCase):
 
         response = self.client.get(reverse("update_settings"))
 
-        # Hitch prefers high over the provider's low default and writes it
-        # back so the next request has the application default in hand.
-        mock_codex.assert_called_once()
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+        # Cached data can drive the form display, but opening settings does
+        # not make it authoritative enough to update account settings.
+        mock_codex.assert_not_called()
+        self.assertContains(response, 'value="" selected')
+        self.assertContains(response, 'value="gpt-5"')
+        self.assertContains(response, 'value="high" selected')
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "")
+        self.assertEqual(settings.reasoning_effort, "high")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_guest_defaults_to_high(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, default_effort="low")],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, default_effort="low")]
         )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+        self.assertContains(response, 'value="" selected')
+        self.assertContains(response, 'value="gpt-5"')
+        self.assertContains(response, 'value="high" selected')
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_guest_default_falls_back_when_high_is_unsupported(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model(
                     "gpt-5-codex",
                     is_default=True,
@@ -1215,7 +1218,9 @@ class ReconcileSettingsTests(TestCase):
 
         response = self.client.get(reverse("update_settings"))
 
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
+        self.assertContains(response, 'value="high" selected')
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1251,9 +1256,8 @@ class ReconcileSettingsTests(TestCase):
         _seed_cookies(
             self.client, **{_MODEL_COOKIE: "gpt-5", _EFFORT_COOKIE: "low"}
         )
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model("gpt-5", is_default=True, default_effort="medium"),
                 _model("other"),
             ],
@@ -1263,7 +1267,7 @@ class ReconcileSettingsTests(TestCase):
         response = self.client.get(reverse("update_settings"))
 
         # Saved values are still valid → no Set-Cookie on this response.
-        mock_codex.assert_called_once()
+        mock_codex.assert_not_called()
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
         self.assertNotIn(_EFFORT_COOKIE, response.cookies)
         self.assertContains(response, 'value="gpt-5"')
@@ -1339,17 +1343,19 @@ class ReconcileSettingsTests(TestCase):
         rotation) must not 500 the page; we treat it as absent and let
         reconcile reseed from Codex defaults."""
         self.client.cookies[_MODEL_COOKIE] = "not-a-signed-value"
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, default_effort="medium")],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, default_effort="medium")]
         )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        mock_codex.assert_not_called()
+        self.assertContains(response, 'value="" selected')
+        self.assertContains(response, 'value="high" selected')
+        self.assertContains(response, 'value="gpt-5"')
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
 
     def test_unexpected_signed_cookie_errors_are_not_hidden(self) -> None:
         request = MagicMock()
@@ -1380,35 +1386,221 @@ class UpdateSettingsViewTests(TestCase):
         assert match is not None, f"effort option {value!r} missing from settings page"
         return match.group(0)
 
+    @patch("hitch.main.views.settings.caches._schedule_models_refresh")
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_get_uses_fresh_models_over_stale_cache(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_get_uses_cached_models_and_schedules_refresh(
+        self, mock_discover: MagicMock, mock_schedule: MagicMock
     ) -> None:
         _seed_models_cache(
             [_model("cached-model", is_default=True, display_name="Cached Model")]
         )
         self.addCleanup(_clear_models_cache)
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5.6", is_default=True, display_name="GPT-5.6")],
-        )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "GPT-5.6")
-        self.assertNotContains(response, "Cached Model")
-        mock_codex.assert_called_once()
+        self.assertContains(response, "Cached Model")
+        mock_schedule.assert_called_once_with(enable_memories=False)
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_cold_cache_guest_unrelated_save_preserves_preferred_effort(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-current",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["medium", "high"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="high" selected')
+        self.assertNotIn(_MODEL_COOKIE, get_response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, get_response.cookies)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "gpt-current")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "high")
+        self.assertEqual(_cookie_value(post_response, _USE_WORKTREES_COOKIE), "true")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_invalid_effort_cookie_uses_same_guest_default_on_get_and_post(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        self.client.cookies[_EFFORT_COOKIE] = "not-a-signed-value"
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-current",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["medium", "high"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="high" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "gpt-current")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "high")
+        self.assertEqual(_cookie_value(post_response, _USE_WORKTREES_COOKIE), "true")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_cold_cache_guest_default_reconciles_to_supported_effort(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-current",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "high"},
+        )
+
+        self.assertContains(get_response, 'value="high" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "gpt-current")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "medium")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_cold_cache_account_default_reconciles_before_unrelated_save(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        user = get_user_model().objects.create_user("dev@example.com")
+        UserSettings.objects.create(
+            user=user,
+            model="",
+            reasoning_effort="high",
+        )
+        self.client.force_login(user)
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-current",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="" selected')
+        self.assertContains(get_response, 'value="high" selected')
+        self.assertEqual(post_response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "gpt-current")
+        self.assertEqual(settings.reasoning_effort, "medium")
+        self.assertTrue(settings.use_worktrees)
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_cold_cache_guest_with_saved_model_does_not_synthesize_effort(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "saved-model"})
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "saved-model",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "saved-model",
+                "reasoning_effort": "",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="saved-model" selected')
+        self.assertNotContains(get_response, 'value="high" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "saved-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_get_uses_raw_models_when_sdk_rejects_new_efforts(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_get_uses_cached_provider_advertised_efforts(
+        self, mock_discover: MagicMock
     ) -> None:
-        ctx = mock_codex.return_value.__enter__.return_value
-        ctx._client._request_raw.return_value = {
+        raw_response = {
             "data": [
                 {
                     "id": "gpt-5.6",
@@ -1422,7 +1614,8 @@ class UpdateSettingsViewTests(TestCase):
                 }
             ]
         }
-        ctx.models.side_effect = AssertionError("typed model list should not be used")
+        _seed_models_cache(caches._models_data_from_raw_response(raw_response))
+        self.addCleanup(_clear_models_cache)
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
@@ -1435,8 +1628,9 @@ class UpdateSettingsViewTests(TestCase):
             option = self._effort_option(body, effort)
             self.assertNotIn("hidden", option)
             self.assertNotIn("disabled", option)
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.6")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
+        self.assertContains(response, 'value="" selected')
+        self.assertNotIn(_MODEL_COOKIE, response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
         cached_models = caches._cached_models_data(enable_memories=False)
         self.assertEqual([model.id for model in cached_models], ["gpt-5.6"])
         self.assertEqual(
@@ -1449,7 +1643,7 @@ class UpdateSettingsViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_get_falls_back_to_cached_models_when_fresh_fetch_fails(
+    def test_get_preserves_saved_cookie_choices_missing_from_cache(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_models_cache(
@@ -1466,19 +1660,147 @@ class UpdateSettingsViewTests(TestCase):
             self.client,
             **{_MODEL_COOKIE: "retired-model", _EFFORT_COOKIE: "ultra"},
         )
-        ctx = mock_codex.return_value.__enter__.return_value
-        ctx._client._request_raw.side_effect = ValueError("bad raw model list")
-        ctx.models.side_effect = ValueError("bad typed model list")
         mock_discover.return_value = []
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "retired-model",
+                    is_default=True,
+                    default_effort="ultra",
+                    supported_efforts=["medium", "ultra"],
+                )
+            ],
+        )
 
-        with patch("hitch.main.views.settings.logger.exception") as log_exception:
-            response = self.client.get(reverse("update_settings"))
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "retired-model",
+                "reasoning_effort": "ultra",
+                "use_worktrees": "true",
+            },
+        )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Cached Model")
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "cached-model")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
-        log_exception.assert_called_once()
+        self.assertEqual(get_response.status_code, 200)
+        self.assertContains(get_response, "Cached Model")
+        self.assertContains(get_response, 'value="retired-model" selected')
+        self.assertContains(get_response, 'value="ultra" selected')
+        self.assertNotIn(_MODEL_COOKIE, get_response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, get_response.cookies)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "retired-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "ultra")
+        self.assertEqual(_cookie_value(post_response, _USE_WORKTREES_COOKIE), "true")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_unrelated_save_preserves_account_choice_missing_from_cache(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        user = get_user_model().objects.create_user("dev@example.com")
+        UserSettings.objects.create(
+            user=user,
+            model="still-live-model",
+            reasoning_effort="high",
+        )
+        self.client.force_login(user)
+        _seed_models_cache(
+            [
+                _model(
+                    "cached-default",
+                    is_default=True,
+                    display_name="Cached Default",
+                    default_effort="medium",
+                )
+            ]
+        )
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "still-live-model",
+                    is_default=True,
+                    supported_efforts=["medium", "high"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "still-live-model",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertContains(get_response, "Cached Default")
+        self.assertContains(get_response, 'value="still-live-model" selected')
+        self.assertEqual(post_response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "still-live-model")
+        self.assertEqual(settings.reasoning_effort, "high")
+        self.assertTrue(settings.use_worktrees)
+        self.assertNotIn(_MODEL_COOKIE, get_response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, get_response.cookies)
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_unrelated_save_preserves_effort_missing_from_cached_model(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "saved-model", _EFFORT_COOKIE: "high"},
+        )
+        _seed_models_cache(
+            [
+                _model(
+                    "saved-model",
+                    is_default=True,
+                    supported_efforts=["low", "medium"],
+                )
+            ]
+        )
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "saved-model",
+                    is_default=True,
+                    supported_efforts=["medium", "high"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "saved-model",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="saved-model" selected')
+        self.assertContains(get_response, 'data-supported-efforts="high low medium"')
+        self.assertContains(get_response, 'value="high" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "saved-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "high")
 
     @patch("hitch.main.views.common.Codex")
     def test_saves_model_and_effort_to_signed_cookies(
@@ -1574,6 +1896,178 @@ class UpdateSettingsViewTests(TestCase):
             [model.id for model in caches._cached_models_data(enable_memories=False)],
             ["gpt-5.6"],
         )
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_post_rejects_stale_model_rendered_by_get(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_models_cache(
+            [
+                _model(
+                    "cached-model",
+                    is_default=True,
+                    display_name="Cached Model",
+                    supported_efforts=["medium", "high"],
+                )
+            ]
+        )
+        self.addCleanup(_clear_models_cache)
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-5.6",
+                    is_default=True,
+                    supported_efforts=["medium", "high"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "cached-model", "reasoning_effort": "high"},
+        )
+
+        self.assertContains(get_response, "Cached Model")
+        self.assertEqual(post_response.status_code, 400)
+        self.assertEqual(
+            post_response.content.decode(), "model 'cached-model' is not available"
+        )
+        self.assertNotIn(_MODEL_COOKIE, post_response.cookies)
+        self.assertNotIn(_EFFORT_COOKIE, post_response.cookies)
+        self.assertEqual(
+            [model.id for model in caches._cached_models_data(enable_memories=False)],
+            ["gpt-5.6"],
+        )
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_unrelated_save_reconciles_unchanged_removed_model(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "removed-model", _EFFORT_COOKIE: "high"},
+        )
+        _seed_models_cache(
+            [_model("removed-model", is_default=True, supported_efforts=["high"])]
+        )
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "current-model",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+
+        get_response = self.client.get(reverse("update_settings"))
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "removed-model",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertContains(get_response, 'value="removed-model" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "current-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "medium")
+        self.assertEqual(_cookie_value(post_response, _USE_WORKTREES_COOKIE), "true")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_unrelated_save_reconciles_unchanged_narrowed_effort(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "current-model", _EFFORT_COOKIE: "high"},
+        )
+        _seed_models_cache(
+            [_model("current-model", is_default=True, supported_efforts=["high"])]
+        )
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "current-model",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+
+        post_response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "current-model",
+                "reasoning_effort": "high",
+                "use_worktrees": "true",
+            },
+        )
+
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "current-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "medium")
+
+    @patch("hitch.main.sessions.session_settings.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_unrelated_save_preserves_provider_only_effort_when_fetch_fails(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_schedule: MagicMock,
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "saved-model", _EFFORT_COOKIE: "ultra"},
+        )
+        _seed_models_cache(
+            [_model("cached-default", is_default=True, supported_efforts=["medium"])]
+        )
+        ctx = mock_codex.return_value.__enter__.return_value
+        ctx._client._request_raw.side_effect = ValueError("bad raw model list")
+        ctx.models.side_effect = ValueError("bad typed model list")
+
+        get_response = self.client.get(reverse("update_settings"))
+        with patch("hitch.main.views.settings.logger.exception") as log_exception:
+            post_response = self.client.post(
+                reverse("update_settings"),
+                data={
+                    "model": "saved-model",
+                    "reasoning_effort": "ultra",
+                    "use_worktrees": "true",
+                },
+            )
+
+        self.assertContains(get_response, 'value="saved-model" selected')
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(_cookie_value(post_response, _MODEL_COOKIE), "saved-model")
+        self.assertEqual(_cookie_value(post_response, _EFFORT_COOKIE), "ultra")
+        self.assertEqual(_cookie_value(post_response, _USE_WORKTREES_COOKIE), "true")
+        log_exception.assert_called_once()
 
     @patch("hitch.main.views.common.Codex")
     def test_post_validates_against_cached_models_when_fresh_fetch_fails(
@@ -2143,7 +2637,7 @@ class AuthenticatedWebSearchSettingsTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'value="cached" selected')
-        self.assertEqual(_cookie_value(response, _WEB_SEARCH_COOKIE), "cached")
+        self.assertNotIn(_WEB_SEARCH_COOKIE, response.cookies)
 
     def test_update_settings_saves_web_search_to_account(self) -> None:
         user_model = get_user_model()
