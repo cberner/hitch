@@ -736,6 +736,15 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("visible.txt", {file.path for file in diff.files})
 
+    def test_reviewer_diff_rejects_tabbed_untracked_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "before\tafter.txt").write_text("cannot be represented safely\n")
+
+            with self.assertRaisesRegex(IncompleteDiffError, "untracked path"):
+                build_worktree_diff_text(str(repo))
+
     def test_reviewer_diff_rejects_untracked_binary_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
