@@ -28,6 +28,7 @@ from hitch.main.runtime.host_probes import (
     ScopeProcess,
     WorkerScopeProbe,
 )
+from hitch.main.workflows import system_agents
 
 
 def _make_user(username: str = "dev@example.com", password: str = "StrongPass123!") -> Any:
@@ -117,6 +118,45 @@ class CollectHealthReportTests(TestCase):
         report = health.collect_health_report()
 
         self.assertEqual(_find(report, "stale_blocked_workflows").value, "1")
+
+    def test_stale_pending_pr_gate_warns_without_terminating_workflow(self) -> None:
+        old = (
+            timezone.now()
+            - health._STALE_PENDING_PR_GATE_AGE
+            - timedelta(minutes=1)
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="pending-pr",
+            cwd="/r",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_PENDING_SINCE_STATE_KEY: int(old.timestamp()),
+                system_agents._PR_PENDING_CHECKS_STATE_KEY: 12,
+            },
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="recent-pending-pr",
+            cwd="/r",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_PENDING_SINCE_STATE_KEY: int(
+                    timezone.now().timestamp()
+                )
+            },
+        )
+
+        report = health.collect_health_report()
+
+        metric = _find(report, "stale_pending_pr_gates")
+        self.assertEqual(metric.value, "1")
+        self.assertEqual(metric.severity, health.SEVERITY_WARN)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
 
     def test_stuck_turn_flagged(self) -> None:
         instance = _make_instance(status=CodexInstance.STATUS_RUNNING)

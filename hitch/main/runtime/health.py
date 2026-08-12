@@ -67,6 +67,7 @@ _APP_SERVER_LEAK_DANGER = app_server_pool._SHARED_POOL_MAX + 5
 # worker process is gone.
 _STUCK_TURN_AGE = timedelta(hours=6)
 _RECENT_FAILURE_AGE = timedelta(hours=24)
+_STALE_PENDING_PR_GATE_AGE = timedelta(hours=24)
 # Bound how often the proc-scanning, database-reading report is rebuilt under load.
 _REPORT_CACHE_TTL = timedelta(seconds=15)
 _report_cache_lock = threading.Lock()
@@ -319,6 +320,27 @@ def _stale_blocked_count() -> int:
     return len(system_agents.archive_stale_blocked_workflows(older_than=cutoff, apply=False))
 
 
+def _stale_pending_pr_gate_count() -> int:
+    cutoff = int((timezone.now() - _STALE_PENDING_PR_GATE_AGE).timestamp())
+    workflows = SystemWorkflow.objects.filter(
+        kind=SystemWorkflow.KIND_PR_QA,
+        status=SystemWorkflow.STATUS_RUNNING,
+        step=system_agents.STEP_PR_MONITORING,
+    ).only("state")
+    stale = 0
+    for workflow in workflows:
+        pending_since = workflow.state.get(
+            system_agents._PR_PENDING_SINCE_STATE_KEY
+        )
+        if (
+            isinstance(pending_since, int)
+            and not isinstance(pending_since, bool)
+            and pending_since <= cutoff
+        ):
+            stale += 1
+    return stale
+
+
 def _leak_section(*, hitch_disk_metric: HealthMetric | None = None) -> HealthSection:
     disk_metric = hitch_disk_metric if hitch_disk_metric is not None else _hitch_disk_metric()
     return HealthSection(
@@ -377,6 +399,14 @@ def _backlog_section() -> HealthSection:
                     status=SystemWorkflow.STATUS_RUNNING,
                     step=system_agents.STEP_PR_MONITORING,
                 ).count(),
+            ),
+            _count_metric(
+                "stale_pending_pr_gates",
+                "PR gates pending >24h",
+                _stale_pending_pr_gate_count,
+                warn_at=1,
+                detail="Long-running external gate waits. Monitoring continues; "
+                "this warning does not terminate the workflow.",
             ),
             _count_metric(
                 "pending_approvals",
