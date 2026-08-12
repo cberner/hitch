@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from hitch.main.models import CodexInstance
+from hitch.main.runtime.pr_reviews import latest_effective_reviews_by_author
 from hitch.main.runtime.sdk_values import is_nonbool_int, positive_int, string_from_any
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,6 @@ _PR_INFO_TOOLS = frozenset(
 _PR_COMMENT_TOOLS = frozenset({"fetch_pr_comments"})
 _PR_THREAD_TOOLS = frozenset({"list_pull_request_review_threads"})
 _PR_REVIEW_TOOLS = frozenset({"list_pull_request_reviews"})
-_PR_DECISIVE_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _PR_REACTION_TOOLS = frozenset({"get_pr_reactions"})
 _CI_STATUS_TOOLS = frozenset(
     {
@@ -693,7 +693,7 @@ def _copy_review_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
     reviews = source.get("reviews")
     if not isinstance(reviews, list):
         return
-    reviews = _latest_effective_reviews_by_author(reviews)
+    reviews = latest_effective_reviews_by_author(reviews)
     states = [
         state.upper()
         for review in reviews
@@ -711,71 +711,6 @@ def _copy_review_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
     else:
         # ``""`` is the explicit review-signal clear; see _merge_pr_snapshot_update.
         target["review_signal"] = ""
-
-
-def _latest_effective_reviews_by_author(reviews: list[Any]) -> list[Any]:
-    """Keep each reviewer's latest decision, independent of result ordering."""
-    latest_by_author: dict[str, tuple[dict[str, Any], int]] = {}
-    anonymous: list[Any] = []
-    for index, review in enumerate(reviews):
-        if not isinstance(review, dict):
-            anonymous.append(review)
-            continue
-        author = review.get("author")
-        login = ""
-        if isinstance(author, dict):
-            login = string_from_any(author.get("login"))
-        user = review.get("user")
-        if not login and isinstance(user, dict):
-            login = string_from_any(user.get("login"))
-        if not login:
-            login = string_from_any(review.get("author_login"))
-        if login:
-            key = login.casefold()
-            current = latest_by_author.get(key)
-            if current is None or _review_supersedes(
-                review, index=index, current=current[0], current_index=current[1]
-            ):
-                latest_by_author[key] = (review, index)
-        else:
-            anonymous.append(review)
-    return [*anonymous, *(review for review, _index in latest_by_author.values())]
-
-
-def _review_supersedes(
-    review: dict[str, Any],
-    *,
-    index: int,
-    current: dict[str, Any],
-    current_index: int,
-) -> bool:
-    state = string_from_any(review.get("state")).upper()
-    current_state = string_from_any(current.get("state")).upper()
-    # Dismissals clear change requests but do not erase approvals.
-    changes_request_dismissal_pair = {state, current_state} == {
-        "CHANGES_REQUESTED",
-        "DISMISSED",
-    }
-    if not changes_request_dismissal_pair:
-        if (
-            state in _PR_DECISIVE_REVIEW_STATES
-            and current_state not in _PR_DECISIVE_REVIEW_STATES
-        ):
-            return True
-        if (
-            state not in _PR_DECISIVE_REVIEW_STATES
-            and current_state in _PR_DECISIVE_REVIEW_STATES
-        ):
-            return False
-    submitted_at = string_from_any(
-        review.get("submitted_at") or review.get("submittedAt")
-    )
-    current_submitted_at = string_from_any(
-        current.get("submitted_at") or current.get("submittedAt")
-    )
-    if submitted_at and current_submitted_at:
-        return (submitted_at, index) > (current_submitted_at, current_index)
-    return index > current_index
 
 
 def _copy_reaction_fields(target: dict[str, Any], source: dict[str, Any]) -> None:

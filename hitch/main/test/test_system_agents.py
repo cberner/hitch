@@ -6793,6 +6793,101 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(pr["review_signal"], "commented")
 
+    def test_pr_monitor_observation_normalizes_full_review_history(self) -> None:
+        pr: dict[str, Any] = {}
+        payload = {
+            "latestReviews": [
+                {
+                    "state": "COMMENTED",
+                    "body": "Thanks for the update",
+                    "author": {"login": "reviewer"},
+                    "submittedAt": "2026-01-01T11:00:00Z",
+                }
+            ],
+            "reviews": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "body": "Fix the retry race",
+                    "author": {"login": "Reviewer"},
+                    "submittedAt": "2026-01-01T10:00:00Z",
+                },
+                {
+                    "state": "COMMENTED",
+                    "body": "Thanks for the update",
+                    "author": {"login": "reviewer"},
+                    "submittedAt": "2026-01-01T11:00:00Z",
+                },
+            ],
+            "reviewDecision": None,
+        }
+        gh_observations._copy_gh_review_fields(
+            pr,
+            payload,
+        )
+        gh_observations._copy_gh_reaction_fields(
+            pr,
+            {
+                "reactionGroups": [
+                    {"content": "THUMBS_UP", "users": {"totalCount": 1}}
+                ]
+            },
+        )
+
+        self.assertEqual(pr["review_count"], 1)
+        self.assertEqual(pr["review_signal"], "changes_requested")
+        feedback = gh_observations._gh_comment_feedback(payload)
+        self.assertIn("Fix the retry race", feedback)
+        self.assertNotIn("Thanks for the update", feedback)
+
+    def test_pr_monitor_observation_combines_capped_and_latest_reviews(self) -> None:
+        pr: dict[str, Any] = {}
+
+        gh_observations._copy_gh_review_fields(
+            pr,
+            {
+                "reviews": [
+                    {
+                        "state": "COMMENTED",
+                        "author": {"login": "early-reviewer"},
+                    }
+                ],
+                "latestReviews": [
+                    {
+                        "state": "APPROVED",
+                        "author": {"login": "reviewer-after-history-cap"},
+                    }
+                ],
+                "reviewDecision": None,
+            },
+        )
+
+        self.assertEqual(pr["review_count"], 2)
+        self.assertEqual(pr["review_signal"], "approved")
+
+    def test_pr_monitor_feedback_prioritizes_blocking_review_bodies(self) -> None:
+        payload = {
+            "reviews": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "body": "Fix the only blocking issue",
+                    "author": {"login": "blocking-reviewer"},
+                },
+                *[
+                    {
+                        "state": "COMMENTED",
+                        "body": f"Later non-blocking comment {number}",
+                        "author": {"login": f"commenter-{number}"},
+                    }
+                    for number in range(5)
+                ],
+            ]
+        }
+
+        feedback = gh_observations._gh_comment_feedback(payload)
+
+        self.assertIn("Fix the only blocking issue", feedback)
+        self.assertNotIn("Later non-blocking comment 0", feedback)
+
     def test_pr_monitor_reactions_do_not_override_required_review(
         self,
     ) -> None:

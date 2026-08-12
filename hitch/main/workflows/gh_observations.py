@@ -13,6 +13,7 @@ from typing import Any
 
 from django.utils import timezone
 
+from hitch.main.runtime.pr_reviews import latest_effective_reviews_by_author
 from hitch.main.runtime.sdk_values import is_nonbool_int, string_from_any, truncate_for_prompt
 from hitch.main.workflows.pr_handoff import (
     _PR_SAFE_LIST_ITEM_FIELDS,
@@ -73,11 +74,7 @@ _CI_BLOCKING_STATUSES = frozenset(
 
 
 def _copy_gh_review_fields(target: dict[str, Any], payload: dict[str, Any]) -> None:
-    reviews = payload.get("latestReviews")
-    if not isinstance(reviews, list):
-        reviews = payload.get("reviews")
-    if not isinstance(reviews, list):
-        reviews = []
+    reviews = _effective_gh_reviews(payload)
     states = [
         state.upper()
         for review in reviews
@@ -101,6 +98,16 @@ def _copy_gh_review_fields(target: dict[str, Any], payload: dict[str, Any]) -> N
         target["review_signal"] = "commented"
     else:
         target["review_signal"] = ""
+
+
+def _effective_gh_reviews(payload: dict[str, Any]) -> list[Any]:
+    """Combine gh's capped history with GitHub's latest-per-author view."""
+    reviews = payload.get("reviews")
+    history = list(reviews) if isinstance(reviews, list) else []
+    latest_reviews = payload.get("latestReviews")
+    if isinstance(latest_reviews, list):
+        history.extend(latest_reviews)
+    return latest_effective_reviews_by_author(history)
 
 
 def _copy_gh_reaction_fields(target: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -435,10 +442,18 @@ def _gh_comment_feedback(payload: dict[str, Any]) -> str:
         text = _gh_body_item_feedback("comment", comment)
         if text:
             items.append(text)
-    reviews = payload.get("latestReviews")
-    if not isinstance(reviews, list):
-        reviews = payload.get("reviews")
-    for review in _list_dicts(reviews)[-5:]:
+    reviews = [
+        review
+        for review in _list_dicts(_effective_gh_reviews(payload))
+        if string_from_any(review.get("body"))
+    ]
+    blocking_reviews = [
+        review
+        for review in reviews
+        if string_from_any(review.get("state")).upper() == "CHANGES_REQUESTED"
+    ]
+    other_reviews = [review for review in reviews if review not in blocking_reviews]
+    for review in [*other_reviews, *blocking_reviews][-5:]:
         text = _gh_body_item_feedback(
             f"review {string_from_any(review.get('state')).lower() or 'comment'}",
             review,
