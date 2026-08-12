@@ -192,3 +192,43 @@ class StagedCustomCodingAgentRemovalMigrationTests(TransactionTestCase):
             ).base_instructions,
             "",
         )
+
+
+class ReasoningEffortDefaultMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0067_workflowsteeringmessage")]
+    migrate_to = [("main", "0068_alter_usersettings_reasoning_effort")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_backfills_only_blank_account_efforts(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        User = old_apps.get_model("auth", "User")
+        UserSettings = old_apps.get_model("main", "UserSettings")
+
+        blank_user = User.objects.create(username="blank-effort")
+        saved_user = User.objects.create(username="saved-effort")
+        UserSettings.objects.create(user=blank_user, reasoning_effort="")
+        UserSettings.objects.create(user=saved_user, reasoning_effort="xhigh")
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        UserSettings = new_apps.get_model("main", "UserSettings")
+
+        self.assertEqual(
+            UserSettings.objects.get(user_id=blank_user.pk).reasoning_effort,
+            "high",
+        )
+        self.assertEqual(
+            UserSettings.objects.get(user_id=saved_user.pk).reasoning_effort,
+            "xhigh",
+        )
