@@ -616,6 +616,30 @@ class WorktreeDiffTests(SimpleTestCase):
             with self.assertRaisesRegex(IncompleteDiffError, "tracked non-UTF-8"):
                 build_worktree_diff_text(str(repo))
 
+    def test_reviewer_diff_quotes_non_utf8_tracked_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            raw_path = os.path.join(os.fsencode(repo), b"bad-\xff.txt")
+            fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            try:
+                os.write(fd, b"old text\n")
+            finally:
+                os.close(fd)
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "config", "core.quotePath", "false")
+            fd = os.open(raw_path, os.O_WRONLY | os.O_TRUNC)
+            try:
+                os.write(fd, b"new text\n")
+            finally:
+                os.close(fd)
+
+            diff_text = build_worktree_diff_text(str(repo))
+
+        self.assertIn('"a/bad-\\377.txt"', diff_text)
+        self.assertIn("+new text", diff_text)
+
     def test_reviewer_diff_rejects_nul_forced_to_text(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)

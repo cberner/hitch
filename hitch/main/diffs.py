@@ -225,7 +225,9 @@ def _strict_worktree_diff_text(cwd: str | None) -> str:
 
 def _strict_tracked_diff(repo: Path) -> str:
     diff_base = _strict_branch_diff_base_ref(repo)
-    result = _strict_git_result(repo, [*_DIFF_ARGS, diff_base, "--"])
+    result = _strict_git_result(
+        repo, ["-c", "core.quotePath=true", *_DIFF_ARGS, diff_base, "--"]
+    )
     if b"\0" in result.stdout:
         raise IncompleteDiffError(
             "tracked NUL-bearing changes cannot be represented in the reviewer diff"
