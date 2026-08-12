@@ -35,7 +35,6 @@ from hitch.main.sessions.session_pr_plan import (
     _pr_url_for_thread,
 )
 from hitch.main.test.support import (
-    _cookie_value,
     _make_project,
     _rollout_line,
     _seed_cookies,
@@ -208,6 +207,13 @@ def _clear_models_cache() -> None:
         caches._MODELS_CACHE_VALUE = {}
         caches._MODELS_CACHE_FETCHED_AT = {}
         caches._MODELS_REFRESH_IN_FLIGHT = set()
+
+
+def _seed_models_cache(models: list[SimpleNamespace]) -> None:
+    with caches._MODELS_REFRESH_LOCK:
+        caches._MODELS_CACHE_VALUE[False] = list(models)
+        caches._MODELS_CACHE_FETCHED_AT[False] = timezone.now()
+        caches._MODELS_REFRESH_IN_FLIGHT.discard(False)
 
 
 def _make_rollout(test: TestCase, lines: list[str], *, binary: bytes | None = None) -> Path:
@@ -563,7 +569,7 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "@media (max-width: 900px)")
 
     @patch("hitch.main.views.common.Codex")
-    def test_settings_page_uses_resolved_settings(
+    def test_settings_page_preserves_saved_choices_missing_from_cache(
         self, mock_codex: MagicMock
     ) -> None:
         models = [
@@ -580,15 +586,16 @@ class SessionViewTests(TestCase):
             hitch_model="stale-model",
             hitch_reasoning_effort="high",
         )
-        mock_codex.return_value.__enter__.return_value.models.return_value.data = models
+        _seed_models_cache(models)
 
         response = cast(HttpResponse, self.client.get(reverse("update_settings")))
 
         self.assertEqual(response.status_code, 200)
-        mock_codex.assert_called_once()
-        self.assertContains(response, 'value="gpt-current" selected')
-        self.assertEqual(_cookie_value(response, "hitch_model"), "gpt-current")
-        self.assertEqual(_cookie_value(response, "hitch_reasoning_effort"), "medium")
+        mock_codex.assert_not_called()
+        self.assertContains(response, 'value="stale-model" selected')
+        self.assertContains(response, 'value="high" selected')
+        self.assertNotIn("hitch_model", response.cookies)
+        self.assertNotIn("hitch_reasoning_effort", response.cookies)
 
     @patch("hitch.main.views.common.Codex")
     def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
