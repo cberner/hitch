@@ -233,15 +233,19 @@ def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
     )
 
 
+def _rate_limits_last_attempt_at_locked() -> datetime | None:
+    if _RATE_LIMITS_CACHE_FETCHED_AT is None:
+        return _RATE_LIMITS_REFRESH_ATTEMPTED_AT
+    if _RATE_LIMITS_REFRESH_ATTEMPTED_AT is None:
+        return _RATE_LIMITS_CACHE_FETCHED_AT
+    return max(_RATE_LIMITS_CACHE_FETCHED_AT, _RATE_LIMITS_REFRESH_ATTEMPTED_AT)
+
+
 def _rate_limits_refresh_needed() -> bool:
     with _RATE_LIMITS_REFRESH_LOCK:
         if _RATE_LIMITS_REFRESH_IN_FLIGHT:
             return False
-        last_attempt_at = (
-            _RATE_LIMITS_CACHE_FETCHED_AT
-            if _RATE_LIMITS_CACHE_HAS_VALUE
-            else _RATE_LIMITS_REFRESH_ATTEMPTED_AT
-        )
+        last_attempt_at = _rate_limits_last_attempt_at_locked()
         if last_attempt_at is None:
             return True
         return timezone.now() - _RATE_LIMITS_CACHE_TTL >= last_attempt_at
@@ -253,11 +257,7 @@ def _start_rate_limits_refresh_thread(*, enable_memories: bool) -> None:
     with _RATE_LIMITS_REFRESH_LOCK:
         if _RATE_LIMITS_REFRESH_IN_FLIGHT:
             return
-        last_attempt_at = (
-            _RATE_LIMITS_CACHE_FETCHED_AT
-            if _RATE_LIMITS_CACHE_HAS_VALUE
-            else _RATE_LIMITS_REFRESH_ATTEMPTED_AT
-        )
+        last_attempt_at = _rate_limits_last_attempt_at_locked()
         if last_attempt_at is not None and (
             timezone.now() - _RATE_LIMITS_CACHE_TTL < last_attempt_at
         ):

@@ -54,8 +54,9 @@ spec covers both surfaces.
 - Usage does not require an aggregate token-usage snapshot table. Request-time
   aggregation over cached per-session database rows is acceptable when it meets
   the performance target.
-- Usage does not make quota or rate-limit data cache-only. Quota and rate-limit
-  sections remain live and outside the token-usage refresh contract.
+- Usage does not persist quota or rate-limit data in the token cache. Those
+  sections remain backed by live account data through a short-lived process
+  snapshot and stay outside the token-usage refresh contract.
 - Usage does not provide billing-grade accounting beyond the token counts Codex
   records in rollouts.
 - Usage does not add team, user, or organization-level breakdowns.
@@ -92,8 +93,12 @@ spec covers both surfaces.
   They must not appear on `/usage/` unless a future spec explicitly changes the
   Usage page information architecture.
 - `USAGE-quota-live`: Quota and rate-limit sections are not governed by the
-  token cache. They may use their existing live fetch/cache behavior and should
-  keep their current unavailable-state behavior when the live source fails.
+  token cache. Initial page rendering must use the current short-lived,
+  process-local snapshot and must not wait for the live account request. A
+  missing or stale snapshot must schedule a coalesced background fetch. A cold
+  page must show a refreshing state while that fetch is active, then show the
+  refreshed snapshot on a later request or the unavailable state after a
+  terminal failure.
 
 ### 4.2 Cached Rendering and Performance
 
@@ -256,7 +261,8 @@ spec covers both surfaces.
   stacked usage-by-day chart when daily data exists on the surfaces where those
   sections are visible.
 - `USAGE-accept-no-quota-charts`: Quota and rate-limit sections keep their
-  current live rate-limit presentation and do not gain daily usage charts.
+  background-refreshed live rate-limit presentation and do not gain daily usage
+  charts.
 - `USAGE-accept-accessible-expansion`: Chart expansion works by mouse and
   keyboard, uses accurate `aria-expanded` state, and leaves chartless sections
   non-interactive.
