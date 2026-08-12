@@ -594,7 +594,7 @@ class SettingsPageRenderTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         """A model that advertises no supported-effort constraint accepts any
-        effort (matching ``_validate_settings_against_models``), so the dialog
+        effort (matching ``_validate_model_and_effort_against_models``), so the dialog
         must keep every effort selectable rather than hiding them all."""
         _configure_codex(
             mock_codex,
