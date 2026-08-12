@@ -128,6 +128,25 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.reasoning_effort, "ultra")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
 
+    def test_login_seeds_blank_account_model_settings_from_cookies(self) -> None:
+        user = _make_user()
+        UserSettings.objects.create(user=user)
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "gpt-5.6", _EFFORT_COOKIE: "ultra"},
+        )
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "gpt-5.6")
+        self.assertEqual(settings.reasoning_effort, "ultra")
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.6")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
+
     def test_login_without_settings_cookies_preserves_db_settings(self) -> None:
         user = _make_user()
         UserSettings.objects.create(

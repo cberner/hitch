@@ -185,12 +185,15 @@ def nuke_codex(request: HttpRequest) -> HttpResponse:
 
 def _import_cookie_settings_to_user(request: HttpRequest, user: Any) -> UserSettings:
     settings, created = UserSettings.objects.get_or_create(user=user)
+    preserve_account_model_settings = not created and bool(settings.model)
     updates: list[str] = []
     for field, value in _valid_cookie_setting_updates(request).items():
-        # Cookies seed a new account, but an older browser must not replace an
-        # existing model/effort pair during login. Other settings retain their
-        # established login-import behavior.
-        if not created and field in _ACCOUNT_MODEL_SETTING_FIELDS:
+        # A saved model makes the account pair authoritative. Blank account
+        # model settings may still be seeded from a guest browser at login.
+        if (
+            preserve_account_model_settings
+            and field in _ACCOUNT_MODEL_SETTING_FIELDS
+        ):
             continue
         if getattr(settings, field) != value:
             setattr(settings, field, value)
