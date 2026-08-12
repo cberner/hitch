@@ -284,12 +284,14 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
     global _RATE_LIMITS_REFRESH_ATTEMPTED_AT
     global _RATE_LIMITS_REFRESH_IN_FLIGHT
     rate_limits: dict[str, Any] | None = None
+    claimed = False
     fetched = False
     try:
         # Hit OpenAI for the account rate limits only when the central, app-wide
         # debounce floor allows; otherwise serve the last cached value. This is
         # the cross-process guard the per-process TTL cannot provide.
-        if rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY):
+        claimed = rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY)
+        if claimed:
             close_old_connections()
             with app_server_pool.borrow_codex(
                 Codex, enable_memories=enable_memories
@@ -305,14 +307,14 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
             if fetched and (rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE):
                 _RATE_LIMITS_CACHE_VALUE = rate_limits
                 _RATE_LIMITS_CACHE_HAS_VALUE = True
-            # Preserve a usable snapshot through failed refreshes. Every
-            # terminal attempt is recorded separately so a cold process whose
-            # global claim was denied or whose worker failed shows unavailable
-            # and retries after the debounce floor instead of claiming forever
-            # that a refresh is pending.
+            # Preserve a usable snapshot through failed refreshes. Record local
+            # backoff only after winning the shared claim; a cold process that
+            # loses the claim must remain eligible to observe when the shared
+            # throttle becomes due.
             if fetched or _RATE_LIMITS_CACHE_HAS_VALUE:
                 _RATE_LIMITS_CACHE_FETCHED_AT = attempted_at
-            _RATE_LIMITS_REFRESH_ATTEMPTED_AT = attempted_at
+            if claimed:
+                _RATE_LIMITS_REFRESH_ATTEMPTED_AT = attempted_at
             _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 
