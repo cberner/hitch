@@ -2583,7 +2583,7 @@ class NewSessionViewTests(TestCase):
                 "checkbox",
                 {"prompt": "make a migration plan", "cwd": self.REPO, "plan_mode": "true"},
                 {},
-                {"model": "gpt-default", "reasoning_effort": "high"},
+                {"model": "gpt-default"},
             ),
             (
                 "slash command",
@@ -2659,7 +2659,6 @@ class NewSessionViewTests(TestCase):
             mock_spawn,
             prompt="",
             model="gpt-default",
-            reasoning_effort="high",
             plan_mode=True,
             input_image_paths=image_paths,
         )

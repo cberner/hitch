@@ -561,7 +561,7 @@ def _start_candidate_proposal_session(
         "prompt": prompt,
         "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
-        "reasoning_effort": settings.reasoning_effort or None,
+        "reasoning_effort": None if plan_mode else settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
     }
@@ -1074,7 +1074,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "prompt": prompt,
         "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
-        "reasoning_effort": settings.reasoning_effort or None,
+        "reasoning_effort": None if plan_mode else settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
