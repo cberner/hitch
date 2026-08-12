@@ -410,7 +410,14 @@ def _gh_monitor_feedback(
     thread_text = _gh_review_thread_feedback(review_threads)
     if thread_text:
         sections.append("Unresolved review threads:\n" + thread_text)
-    ci_text = _ci_feedback_details(pr)
+    # Pending jobs are fully represented by the deterministic CI gate and PR
+    # handoff. Only failure details need interpretation by the monitor agent.
+    ci_text = (
+        _ci_feedback_details(pr)
+        if _pr_list_has_items(pr.get("failing_jobs"))
+        or _normalize_ci_status(pr.get("ci_status")) == "failure"
+        else ""
+    )
     if ci_text:
         sections.append(ci_text)
     if not sections:
