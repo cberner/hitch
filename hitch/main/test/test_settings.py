@@ -1034,26 +1034,65 @@ class ReconcileSettingsTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_seeds_defaults_when_no_cookies(
+    def test_new_account_defaults_to_high(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
+        user = get_user_model().objects.create_user("dev@example.com")
+        self.client.force_login(user)
         _configure_codex(
             mock_codex,
             models=[
                 _model("other"),
-                _model("gpt-5", is_default=True, default_effort="high"),
+                _model("gpt-5", is_default=True, default_effort="low"),
             ],
         )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
-        # Defaults are written back to the browser so the next request has
-        # them in hand — the "reset on server start based on what Codex
-        # provides" behavior expressed through signed cookies.
+        # Hitch prefers high over the provider's low default and writes it
+        # back so the next request has the application default in hand.
         mock_codex.assert_called_once()
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_guest_defaults_to_high(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, default_effort="low")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_guest_default_falls_back_when_high_is_unsupported(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[
+                _model(
+                    "gpt-5-codex",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")

@@ -22,7 +22,6 @@ from hitch.main.sessions.project_visibility import (
 )
 from hitch.main.sessions.session_settings import (
     _authenticated_user,
-    _settings_for_user,
     _stored_settings,
 )
 from hitch.main.sessions.settings_cookies import (
@@ -31,6 +30,8 @@ from hitch.main.sessions.settings_cookies import (
     _valid_cookie_setting_updates,
 )
 from hitch.main.views import common
+
+_ACCOUNT_MODEL_SETTING_FIELDS = frozenset({"model", "reasoning_effort"})
 
 
 @require_http_methods(["GET", "POST"])
@@ -183,9 +184,14 @@ def nuke_codex(request: HttpRequest) -> HttpResponse:
     return redirect(f"{reverse('profile')}?nuked={killed}")
 
 def _import_cookie_settings_to_user(request: HttpRequest, user: Any) -> UserSettings:
-    settings = _settings_for_user(user)
+    settings, created = UserSettings.objects.get_or_create(user=user)
     updates: list[str] = []
     for field, value in _valid_cookie_setting_updates(request).items():
+        # Cookies seed a new account, but an older browser must not replace an
+        # existing model/effort pair during login. Other settings retain their
+        # established login-import behavior.
+        if not created and field in _ACCOUNT_MODEL_SETTING_FIELDS:
+            continue
         if getattr(settings, field) != value:
             setattr(settings, field, value)
             updates.append(field)

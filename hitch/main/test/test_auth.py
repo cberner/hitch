@@ -53,7 +53,8 @@ class AuthViewTests(TestCase):
         user_model = get_user_model()
         user = user_model.objects.get(username="dev@example.com")
         self.assertEqual(int(self.client.session["_auth_user_id"]), user.pk)
-        self.assertTrue(UserSettings.objects.filter(user=user).exists())
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.reasoning_effort, "high")
 
     def test_login_imports_anonymous_cookie_settings_to_account(self) -> None:
         user = _make_user()
@@ -165,6 +166,29 @@ class AuthViewTests(TestCase):
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/stored"
         )
+
+    def test_login_preserves_account_settings_over_stale_browser_cookies(self) -> None:
+        user = _make_user()
+        UserSettings.objects.create(
+            user=user,
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
+        )
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "gpt-5.5", _EFFORT_COOKIE: "low"},
+        )
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "gpt-5.6-sol")
+        self.assertEqual(settings.reasoning_effort, "xhigh")
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.6-sol")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "xhigh")
 
     def test_logout_mirrors_account_settings_to_cookies_for_guest_mode(self) -> None:
         user = _make_user()

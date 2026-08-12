@@ -846,7 +846,7 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
             model="gpt-5.4",
-            reasoning_effort="medium",
+            reasoning_effort="high",
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=0,
@@ -2583,7 +2583,7 @@ class NewSessionViewTests(TestCase):
                 "checkbox",
                 {"prompt": "make a migration plan", "cwd": self.REPO, "plan_mode": "true"},
                 {},
-                {"model": "gpt-default", "reasoning_effort": "medium"},
+                {"model": "gpt-default", "reasoning_effort": "high"},
             ),
             (
                 "slash command",
@@ -2659,7 +2659,7 @@ class NewSessionViewTests(TestCase):
             mock_spawn,
             prompt="",
             model="gpt-default",
-            reasoning_effort="medium",
+            reasoning_effort="high",
             plan_mode=True,
             input_image_paths=image_paths,
         )
@@ -2731,7 +2731,7 @@ class NewSessionViewTests(TestCase):
                 },
                 {
                     "model": "gpt-5.4",
-                    "reasoning_effort": "medium",
+                    "reasoning_effort": "high",
                     "developer_instructions": None,
                     "web_search_mode": "disabled",
                     "open_pr_on_lgtm": False,
