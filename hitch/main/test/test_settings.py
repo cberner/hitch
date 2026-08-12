@@ -362,20 +362,28 @@ class UsageRateLimitCacheTests(SimpleTestCase):
         self.assertEqual(state.rate_limits, snapshot)
         self.assertFalse(state.refresh_pending)
 
-    def test_denied_cold_refresh_becomes_terminal_until_retry_ttl(self) -> None:
+    def test_denied_cold_refresh_remains_eligible_to_retry(self) -> None:
         with caches._RATE_LIMITS_REFRESH_LOCK:
             caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
 
         with patch("hitch.main.caches.rate_limit.claim", return_value=False):
             caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
 
-        state = caches._rate_limits_for_usage_context(enable_memories=False)
+        with (
+            patch("hitch.main.caches._start_rate_limits_refresh_thread") as start_refresh,
+            patch(
+                "hitch.main.caches.transaction.on_commit",
+                side_effect=lambda callback: callback(),
+            ),
+        ):
+            state = caches._rate_limits_for_usage_context(enable_memories=False)
 
         self.assertIsNone(state.rate_limits)
         self.assertFalse(state.refresh_pending)
-        self.assertFalse(caches._rate_limits_refresh_needed())
+        self.assertTrue(caches._rate_limits_refresh_needed())
+        start_refresh.assert_called_once_with(enable_memories=False)
         with caches._RATE_LIMITS_REFRESH_LOCK:
-            self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
+            self.assertIsNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
 
     def test_failed_cold_refresh_becomes_terminal_until_retry_ttl(self) -> None:
         with caches._RATE_LIMITS_REFRESH_LOCK:
@@ -396,6 +404,8 @@ class UsageRateLimitCacheTests(SimpleTestCase):
         self.assertIsNone(state.rate_limits)
         self.assertFalse(state.refresh_pending)
         self.assertFalse(caches._rate_limits_refresh_needed())
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
 
     def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
         snapshot = {
