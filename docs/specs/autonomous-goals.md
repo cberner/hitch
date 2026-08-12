@@ -86,6 +86,12 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-stack-limit`: AGs must not continue past configured stack depth.
 - `AG-budget-limit`: AGs must not start another automatic background session when doing so
   would exceed the configured token budget.
+- `AG-no-proposal-stall-limit`: A token budget does not authorize an unbounded
+  sequence of candidates that repeatedly conclude no proposal is possible.
+  Hitch stops after three consecutive budgeted no-proposal retries. Producing a
+  candidate resets this stall counter; candidate execution failures preserve
+  it. The resulting Inbox notice or published stacked proposal identifies the
+  stall limit as the stop reason.
 
 ### 4.3 Quota
 
@@ -154,7 +160,8 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
   do not count as new stack levels.
 - `AG-accept-budget-retries`: An AG with stack depth `1` and a token budget can
   retry no-proposal attempts until it produces a Proposal, exhausts token
-  budget, or hits a terminal failure.
+  budget, reaches the consecutive no-proposal stall limit, or hits a terminal
+  failure.
 - `AG-accept-low-quota-auto`: Low quota prevents automatic AG starts and shows a low-quota reason.
 - `AG-accept-manual-quota-override`: Manual Run can start an AG below the automatic quota threshold.
 - `AG-accept-background-queue`: Multiple eligible AGs execute only one AG-owned background session at a
