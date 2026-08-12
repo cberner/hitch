@@ -422,6 +422,38 @@ class UsageRateLimitCacheTests(SimpleTestCase):
             self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
         self.assertFalse(caches._rate_limits_refresh_needed())
 
+    def test_warm_rate_limit_thread_start_failure_backs_off(self) -> None:
+        snapshot = {
+            "windows": [],
+            "limit_name": "Codex",
+            "plan_type": "pro",
+        }
+        fetched_at = timezone.now() - caches._RATE_LIMITS_CACHE_TTL
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            caches._RATE_LIMITS_CACHE_VALUE = snapshot
+            caches._RATE_LIMITS_CACHE_HAS_VALUE = True
+            caches._RATE_LIMITS_CACHE_FETCHED_AT = fetched_at
+
+        with (
+            patch(
+                "hitch.main.caches.threading.Thread",
+                side_effect=RuntimeError("thread limit"),
+            ),
+            self.assertLogs("hitch.main.caches", level="ERROR"),
+        ):
+            caches._start_rate_limits_refresh_thread(enable_memories=False)
+
+        self.assertEqual(caches._cached_rate_limits(), snapshot)
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            attempted_at = caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT
+        self.assertIsNotNone(attempted_at)
+        assert attempted_at is not None
+        self.assertGreater(attempted_at, fetched_at)
+        self.assertFalse(caches._rate_limits_refresh_needed())
+        with patch("hitch.main.caches.threading.Thread") as retry_thread:
+            caches._start_rate_limits_refresh_thread(enable_memories=False)
+        retry_thread.assert_not_called()
+
     def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
         snapshot = {
             "windows": [
