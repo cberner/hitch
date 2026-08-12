@@ -407,6 +407,21 @@ class UsageRateLimitCacheTests(SimpleTestCase):
         with caches._RATE_LIMITS_REFRESH_LOCK:
             self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
 
+    def test_rate_limit_thread_start_failure_clears_pending_and_backs_off(self) -> None:
+        with (
+            patch(
+                "hitch.main.caches.threading.Thread",
+                side_effect=RuntimeError("thread limit"),
+            ),
+            self.assertLogs("hitch.main.caches", level="ERROR"),
+        ):
+            caches._start_rate_limits_refresh_thread(enable_memories=False)
+
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            self.assertFalse(caches._RATE_LIMITS_REFRESH_IN_FLIGHT)
+            self.assertIsNotNone(caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT)
+        self.assertFalse(caches._rate_limits_refresh_needed())
+
     def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
         snapshot = {
             "windows": [
