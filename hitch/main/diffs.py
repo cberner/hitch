@@ -555,7 +555,7 @@ def _strict_untracked_diff(repo: Path) -> str:
             raise IncompleteDiffError(
                 "untracked non-UTF-8 path cannot be represented in the reviewer diff"
             ) from exc
-        if "\n" in relpath or "\r" in relpath:
+        if "\n" in relpath or "\r" in relpath or "\t" in relpath:
             raise IncompleteDiffError(
                 f"untracked path cannot be represented in the reviewer diff: {relpath!r}"
             )
