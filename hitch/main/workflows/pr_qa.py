@@ -527,6 +527,7 @@ _PR_QA_STATE_KEYS = frozenset(
         "pr_monitor_backoff",
         _PR_MONITOR_REVISION_STATE_KEY,
         "pr_pending_checks",
+        system_agents._PR_PENDING_SINCE_STATE_KEY,
         "pr_prompt",
         _PR_PUBLICATION_INSTANCE_STATE_KEY,
         "pr_stage_refresh",
@@ -2089,6 +2090,7 @@ def _commit_pr_monitor_result(
 
 def _fail_pr_monitor_max_iterations(workflow: SystemWorkflow) -> None:
     workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+    workflow.state.pop(system_agents._PR_PENDING_SINCE_STATE_KEY, None)
     system_agents._complete_workflow(
         workflow,
         system_agents.STEP_MAX_ITERATIONS_REACHED,
@@ -2102,6 +2104,7 @@ def _start_pr_followup_feedback(workflow: SystemWorkflow) -> None:
         system_agents._PR_PENDING_CHECKS_STATE_KEY: 0,
     }
     workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+    workflow.state.pop(system_agents._PR_PENDING_SINCE_STATE_KEY, None)
     system_agents._advance_workflow_step(
         workflow,
         system_agents.STEP_PR_FEEDBACK_RUNNING,
@@ -2119,12 +2122,14 @@ def _advance_pr_workflow_from_monitor_result(
     handoff = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(handoff):
         workflow.state.pop(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, None)
+        workflow.state.pop(system_agents._PR_PENDING_SINCE_STATE_KEY, None)
         _complete_terminal_pr_workflow(workflow, run_auto_pull=False)
         return "terminal", ""
 
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
     workflow.state = {**workflow.state, system_agents._PR_GATES_STATE_KEY: gates}
     if _pr_gates_all_passed(gates):
+        workflow.state.pop(system_agents._PR_PENDING_SINCE_STATE_KEY, None)
         if _pr_monitor_reinterpretation_required(parsed):
             workflow.state = {
                 **workflow.state,
@@ -2160,13 +2165,17 @@ def _advance_pr_workflow_from_monitor_result(
     pending_checks = (
         _state_int(workflow, system_agents._PR_PENDING_CHECKS_STATE_KEY) + 1
     )
+    pending_since = _state_int(
+        workflow, system_agents._PR_PENDING_SINCE_STATE_KEY
+    ) or int(timezone.now().timestamp())
     workflow.state = {
         **workflow.state,
         system_agents._PR_PENDING_CHECKS_STATE_KEY: pending_checks,
+        system_agents._PR_PENDING_SINCE_STATE_KEY: pending_since,
     }
-    if pending_checks >= workflow.max_iterations:
-        _fail_pr_monitor_max_iterations(workflow)
-        return "maxed", feedback
+    # Pending gates are external waiting, not a remediation attempt. Keep the
+    # durable monitor alive until GitHub reports a terminal or actionable state;
+    # the bounded backoff below prevents pending CI from creating a hot loop.
     backoff_error = _schedule_pr_monitor_backoff(
         workflow,
         reason="pending_gates",
@@ -3350,6 +3359,7 @@ def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:
     if reset_gates:
         workflow.state.pop(system_agents._PR_GATES_STATE_KEY, None)
         workflow.state.pop(system_agents._PR_PENDING_CHECKS_STATE_KEY, None)
+        workflow.state.pop(system_agents._PR_PENDING_SINCE_STATE_KEY, None)
 
 def _pr_handoff_from_workflow(workflow: SystemWorkflow) -> dict[str, Any]:
     return _compact_pr_handoff(workflow.state.get(system_agents._PR_HANDOFF_STATE_KEY))

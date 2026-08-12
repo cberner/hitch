@@ -9395,9 +9395,206 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.assert_not_called()
         mock_surface.assert_called_once()
 
+    def _pending_monitor_beyond_old_limit(self, *, suffix: str) -> SystemWorkflow:
+        cwd = tempfile.TemporaryDirectory()
+        self.addCleanup(cwd.cleanup)
+        now = int(datetime.now(UTC).timestamp())
+        return SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=f"main-thread-{suffix}",
+            cwd=cwd.name,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            max_iterations=3,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+                system_agents._PR_PENDING_CHECKS_STATE_KEY: 3,
+                system_agents._PR_PENDING_SINCE_STATE_KEY: now - 2 * 24 * 60 * 60,
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                    "reason": "pending_gates",
+                    "scheduled_at": now - 301,
+                    "next_attempt_at": now - 1,
+                    "delay_seconds": system_agents._PR_MONITOR_PENDING_POLL_MAX_SECONDS,
+                },
+            },
+        )
+
+    def _expire_pr_monitor_backoff(self, workflow: SystemWorkflow) -> None:
+        workflow.refresh_from_db()
+        now = int(datetime.now(UTC).timestamp())
+        backoff = dict(workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY])
+        backoff["scheduled_at"] = now - 1
+        backoff["next_attempt_at"] = now - 1
+        workflow.state = {
+            **workflow.state,
+            system_agents._PR_MONITOR_BACKOFF_STATE_KEY: backoff,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
+    def test_pending_gate_beyond_limit_can_become_ready_without_monitor_agent(
+        self,
+        mock_observe: MagicMock,
+        mock_spawn_session: MagicMock,
+        mock_spawn_turn: MagicMock,
+    ) -> None:
+        mock_observe.side_effect = [
+            _gh_monitor_observation({"ci_status": "pending"}),
+            _gh_monitor_observation(
+                {
+                    "review_signal": "approved",
+                    "unresolved_thread_count": 0,
+                    "ci_status": "success",
+                }
+            ),
+        ]
+        workflow = self._pending_monitor_beyond_old_limit(suffix="ready")
+        pending_since = workflow.state[system_agents._PR_PENDING_SINCE_STATE_KEY]
+
+        self.assertEqual(
+            pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk), 1
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertEqual(
+            workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 4
+        )
+        self.assertEqual(
+            workflow.state[system_agents._PR_PENDING_SINCE_STATE_KEY],
+            pending_since,
+        )
+        self.assertEqual(
+            workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY][
+                "delay_seconds"
+            ],
+            system_agents._PR_MONITOR_PENDING_POLL_MAX_SECONDS,
+        )
+        self._expire_pr_monitor_backoff(workflow)
+
+        self.assertEqual(
+            pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk), 1
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        self.assertNotIn(
+            system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state
+        )
+        self.assertNotIn(
+            system_agents._PR_PENDING_SINCE_STATE_KEY, workflow.state
+        )
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn_session.assert_not_called()
+        mock_spawn_turn.assert_not_called()
+        self.assertEqual(mock_observe.call_count, 2)
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
+    def test_pending_gate_beyond_limit_can_become_actionable_without_monitor_agent(
+        self,
+        mock_observe: MagicMock,
+        mock_spawn_session: MagicMock,
+        mock_spawn_turn: MagicMock,
+    ) -> None:
+        mock_observe.side_effect = [
+            _gh_monitor_observation({"ci_status": "pending"}),
+            _gh_monitor_observation({"ci_status": "failure"}),
+        ]
+        workflow = self._pending_monitor_beyond_old_limit(suffix="failure")
+
+        self.assertEqual(
+            pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk), 1
+        )
+        self._expire_pr_monitor_backoff(workflow)
+        self.assertEqual(
+            pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk), 1
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+        self.assertEqual(workflow.iteration, 1)
+        self.assertEqual(
+            workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 0
+        )
+        self.assertNotIn(
+            system_agents._PR_PENDING_SINCE_STATE_KEY, workflow.state
+        )
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
+        mock_spawn_session.assert_not_called()
+        mock_spawn_turn.assert_called_once()
+        self.assertIn(
+            "Fix the failing CI checks", mock_spawn_turn.call_args.kwargs["prompt"]
+        )
+        self.assertEqual(mock_observe.call_count, 2)
+
+    @patch(
+        "hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_monitor_merge"
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    def test_pending_gate_beyond_limit_can_observe_terminal_pr_without_agent(
+        self,
+        mock_spawn_session: MagicMock,
+        mock_spawn_turn: MagicMock,
+        mock_auto_pull: MagicMock,
+    ) -> None:
+        terminal_cases = {
+            "merged": {"state": "merged", "merged": True},
+            "closed": {"state": "closed", "merged": False},
+        }
+        for suffix, terminal_pr in terminal_cases.items():
+            with self.subTest(state=suffix), patch(
+                "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
+                side_effect=[
+                    _gh_monitor_observation({"ci_status": "pending"}),
+                    _gh_monitor_observation(terminal_pr),
+                ],
+            ) as mock_observe:
+                workflow = self._pending_monitor_beyond_old_limit(suffix=suffix)
+
+                self.assertEqual(
+                    pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk),
+                    1,
+                )
+                self._expire_pr_monitor_backoff(workflow)
+                self.assertEqual(
+                    pr_qa.refresh_due_pr_monitor_backoffs(workflow_id=workflow.pk),
+                    1,
+                )
+
+                workflow.refresh_from_db()
+                self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+                self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+                self.assertNotIn(
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state
+                )
+                self.assertNotIn(
+                    system_agents._PR_PENDING_SINCE_STATE_KEY, workflow.state
+                )
+                self.assertFalse(
+                    SystemAgentRun.objects.filter(workflow=workflow).exists()
+                )
+                self.assertEqual(mock_observe.call_count, 2)
+
+        mock_spawn_session.assert_not_called()
+        mock_spawn_turn.assert_not_called()
+        mock_auto_pull.assert_called_once()
+
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_pending_gate_at_monitor_limit_stops_without_new_monitor(
+    def test_pending_gate_at_monitor_limit_keeps_waiting_without_new_monitor(
         self, mock_spawn_new_session: MagicMock, mock_surface: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -9439,10 +9636,17 @@ class SpecCriticWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED)
-        self.assertEqual(workflow.step, system_agents.STEP_MAX_ITERATIONS_REACHED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertEqual(
+            workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 3
+        )
+        self.assertEqual(
+            workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]["reason"],
+            "pending_gates",
+        )
         mock_spawn_new_session.assert_not_called()
-        mock_surface.assert_called_once()
+        mock_surface.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_completion_recovers_when_run_row_does_not_exist_yet(
