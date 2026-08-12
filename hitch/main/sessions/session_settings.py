@@ -275,7 +275,7 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
     (via ``_apply_cookie_updates``) so corrected state takes effect on the
     next request.
 
-    Two stale-state cases handled here:
+    Model reconciliation handles these cases:
       1. The saved model id is no longer offered → snap to the provider's
          default model *and* that model's default effort, since the
          supported-effort set can differ between providers.
@@ -283,6 +283,8 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
          ``supported_reasoning_efforts`` has narrowed under us so the
          saved effort no longer fits → snap effort to that model's
          default while leaving the model alone.
+      3. No model has been saved yet → choose the provider's default model
+         while retaining Hitch's preferred effort when that model supports it.
 
     Authenticated users read from ``UserSettings`` and get a full cookie
     mirror back on each resolution. Anonymous users continue to read and
@@ -333,7 +335,21 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
         return _resolved_settings_result(request, saved, {})
 
     default_model = next((m for m in models_data if m.is_default), models_data[0])
-    new_effort = _model_default_effort(default_model)
+    supported = _supported_effort_values(default_model)
+    preferred_effort = ""
+    if not saved.model:
+        preferred_effort = saved.reasoning_effort
+        if (
+            not preferred_effort
+            and _authenticated_user(request) is None
+            and _EFFORT_COOKIE not in request.COOKIES
+        ):
+            preferred_effort = UserSettings.DEFAULT_REASONING_EFFORT
+    new_effort = (
+        preferred_effort
+        if preferred_effort and (not supported or preferred_effort in supported)
+        else _model_default_effort(default_model)
+    )
     return _resolved_settings_result(
         request,
         saved._replace(model=default_model.id, reasoning_effort=new_effort),

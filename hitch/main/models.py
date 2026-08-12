@@ -908,11 +908,15 @@ class ArchivedSessionTokenUsage(models.Model):
 class UserSettings(models.Model):
     """Per-account mirror of the settings that guests keep in signed cookies."""
 
+    DEFAULT_REASONING_EFFORT = "high"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="hitch_settings"
     )
     model = models.CharField(max_length=256, blank=True, default="")
-    reasoning_effort = models.CharField(max_length=32, blank=True, default="")
+    reasoning_effort = models.CharField(
+        max_length=32, blank=True, default=DEFAULT_REASONING_EFFORT
+    )
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
     extra_system_prompt = models.TextField(blank=True, default="")
