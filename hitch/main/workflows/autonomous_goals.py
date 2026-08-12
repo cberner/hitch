@@ -159,6 +159,14 @@ _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY = (
 
 _AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT = 1
 
+_AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY = "proposal_budget_no_proposal_streak"
+
+_AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT = 3
+
+_AUTONOMOUS_GOAL_NO_PROPOSAL_RETRIES_METADATA_KEY = "no_proposal_retries"
+
+_AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT_METADATA_KEY = "no_proposal_retry_limit"
+
 _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND = "autonomous_goal_candidate"
 
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_RETRY_KIND = "autonomous_goal_history_summary"
@@ -1188,6 +1196,7 @@ class _AutonomousGoalHandler(engine.WorkflowHandler):
             "proposal_budget_failed_attempts",
             "proposal_budget_last_failure",
             "proposal_budget_no_progress_retries",
+            "proposal_budget_no_proposal_streak",
             "proposal_budget_token_totals",
             "proposal_budget_tokens_used",
             "proposal_id",
@@ -1507,10 +1516,15 @@ def _handle_autonomous_goal_agent_finished_locked(
                 )
                 system_agents._advance_workflow_step(workflow, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
                 return retry_action
+            no_proposal_stop_reason = (
+                "candidate_no_proposal_stall_limit"
+                if _autonomous_goal_no_proposal_stall_limit_reached(workflow)
+                else "candidate_no_proposal"
+            )
             if previous_proposal is not None and _publish_current_stack_proposal(
                 previous_proposal,
                 workflow=workflow,
-                continuation_stopped_reason="candidate_no_proposal",
+                continuation_stopped_reason=no_proposal_stop_reason,
             ):
                 cleanup_cwd = system_agents._candidate_session_cwd_from_state(
                     workflow, "candidate_session_id"
@@ -1518,7 +1532,7 @@ def _handle_autonomous_goal_agent_finished_locked(
                 workflow.state = {
                     **state,
                     "candidate": candidate_output,
-                    "stacked_diff_stopped_reason": "candidate_no_proposal",
+                    "stacked_diff_stopped_reason": no_proposal_stop_reason,
                 }
                 system_agents._complete_workflow(workflow, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
                 return _AutonomousGoalPostCommitAction(
@@ -1536,13 +1550,17 @@ def _handle_autonomous_goal_agent_finished_locked(
                 candidate_session=_session_metadata_from_state(
                     workflow, "candidate_session_id"
                 ),
-                outcome_metadata=_autonomous_goal_proposal_budget_metadata(workflow),
+                outcome_metadata={
+                    **_autonomous_goal_no_proposal_notice_metadata(workflow),
+                    **_autonomous_goal_proposal_budget_metadata(workflow),
+                },
             )
             _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
             workflow.state = {**state, "candidate": candidate_output}
             system_agents._complete_workflow(workflow, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
             return None
         candidate = cast(dict[str, Any], candidate_output["proposal"])
+        state.pop(_AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY, None)
         workflow.state = {**state, "candidate": candidate}
         system_agents._advance_workflow_step(workflow, system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING)
         return _AutonomousGoalPostCommitAction(
@@ -1890,6 +1908,12 @@ def _retry_budgeted_unaccepted_autonomous_goal_candidate(
 ) -> _AutonomousGoalPostCommitAction | None:
     if _session_metadata_from_state(workflow, "candidate_session_id") is None:
         return None
+    if (
+        reason == "candidate_no_proposal"
+        and _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY)
+        >= _AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT
+    ):
+        return None
     if not _autonomous_goal_proposal_budget_allows_retry(
         workflow, tokens_used=tokens_used, token_delta=token_delta
     ):
@@ -1906,6 +1930,46 @@ def _retry_budgeted_unaccepted_autonomous_goal_candidate(
     return _AutonomousGoalPostCommitAction(
         _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION
     )
+
+
+def _autonomous_goal_no_proposal_notice_metadata(
+    workflow: SystemWorkflow,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "automation_status": "skipped",
+        "skip_reason": "candidate_no_proposal",
+    }
+    if _autonomous_goal_no_proposal_stall_limit_reached(workflow):
+        metadata.update(
+            {
+                "skip_reason": "candidate_no_proposal_stall_limit",
+                **_autonomous_goal_no_proposal_stall_metadata(workflow),
+            }
+        )
+    return metadata
+
+
+def _autonomous_goal_no_proposal_stall_limit_reached(
+    workflow: SystemWorkflow,
+) -> bool:
+    return (
+        _autonomous_goal_workflow_proposal_budget(workflow) > 0
+        and _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY)
+        >= _AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT
+    )
+
+
+def _autonomous_goal_no_proposal_stall_metadata(
+    workflow: SystemWorkflow,
+) -> dict[str, object]:
+    return {
+        _AUTONOMOUS_GOAL_NO_PROPOSAL_RETRIES_METADATA_KEY: _state_int(
+            workflow, _AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY
+        ),
+        _AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT_METADATA_KEY: (
+            _AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT
+        ),
+    }
 
 def _advance_to_candidate_after_history_summary(
     workflow: SystemWorkflow,
@@ -2003,6 +2067,12 @@ def _record_autonomous_goal_failed_attempt(
             next_state[_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
                 _autonomous_goal_no_progress_budget_retries(workflow) + 1
             )
+    if reason == "candidate_no_proposal":
+        next_state[_AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY] = (
+            _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY) + 1
+        )
+    elif reason != "candidate_failed":
+        next_state.pop(_AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY, None)
     workflow.state = next_state
 
 def _autonomous_goal_failed_candidate_context(
@@ -2041,6 +2111,7 @@ def _state_after_autonomous_goal_proposal_progress(
 ) -> dict[str, Any]:
     next_state = dict(state)
     next_state.pop(_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY, None)
+    next_state.pop(_AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY, None)
     next_state.pop(_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY, None)
     return next_state
 
@@ -2154,6 +2225,11 @@ def _publish_current_stack_proposal(
         reason=continuation_stopped_reason,
         error=continuation_stopped_error,
     )
+    if (
+        workflow is not None
+        and continuation_stopped_reason == "candidate_no_proposal_stall_limit"
+    ):
+        stop_metadata.update(_autonomous_goal_no_proposal_stall_metadata(workflow))
     if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
         if not budget_metadata and not stop_metadata:
             return ProposedSession.objects.filter(

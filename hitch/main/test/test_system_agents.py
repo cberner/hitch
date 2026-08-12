@@ -16400,7 +16400,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_stacked_diff_no_proposal_publishes_existing_proposal(
+    def test_stacked_diff_no_proposal_stall_publishes_existing_proposal(
         self,
         mock_spawn: MagicMock,
         _mock_default_sha: MagicMock,
@@ -16415,6 +16415,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             stacked_diff_depth=2,
+            proposal_budget=100_000_000,
         )
         self.mock_create_worktree.side_effect = [
             MagicMock(path=Path("/repo-worktree-1")),
@@ -16477,6 +16478,15 @@ class AutonomousGoalWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(candidate_1)
         system_agents.on_codex_instance_finished(judge_1)
 
+        workflow.refresh_from_db()
+        workflow.state = {
+            **workflow.state,
+            autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY: (
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT
+            ),
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+
         system_agents.on_codex_instance_finished(candidate_2)
 
         workflow.refresh_from_db()
@@ -16489,8 +16499,17 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         self.assertEqual(
             workflow.state["stacked_diff_stopped_reason"],
-            "candidate_no_proposal",
+            "candidate_no_proposal_stall_limit",
         )
+        stop_reason_key = (
+            autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+        )
+        self.assertEqual(
+            proposal.outcome_metadata[stop_reason_key],
+            "candidate_no_proposal_stall_limit",
+        )
+        self.assertEqual(proposal.outcome_metadata["no_proposal_retries"], 3)
+        self.assertEqual(proposal.outcome_metadata["no_proposal_retry_limit"], 3)
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
@@ -19374,6 +19393,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY: 2,
             },
         )
         candidate_metadata = SessionMetadata.objects.create(
@@ -19427,6 +19447,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING)
         self.assertEqual(workflow.state["candidate"]["title"], "Add parser coverage")
+        self.assertNotIn(
+            autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY,
+            workflow.state,
+        )
         memory = AutonomousGoalMemory.objects.get()
         self.assertEqual(memory.autonomous_goal, autonomous_goal)
         self.assertEqual(memory.candidate_session, candidate_metadata)
@@ -19799,6 +19823,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 },
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY: 2,
                 autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread-1": 400,
                 },
@@ -19859,6 +19884,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
         self.assertEqual(failure["reason"], "candidate_failed")
         self.assertIn("worker process exited", failure["error"])
+        self.assertEqual(
+            workflow.state[
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY
+            ],
+            2,
+        )
         retry_run = SystemAgentRun.objects.get(instance=retry_instance)
         self.assertEqual(retry_run.status, SystemAgentRun.STATUS_RUNNING)
         self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 400)
@@ -21560,6 +21591,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY: 2,
             },
         )
         instance = _instance(
@@ -21625,6 +21657,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(failure["tokens_used"], 350)
         self.assertEqual(failure["error"], "autonomous goal candidate output was not valid JSON")
         self.assertEqual(failure["raw_output"], "not json")
+        self.assertEqual(
+            workflow.state[
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY
+            ],
+            2,
+        )
         retry_run = SystemAgentRun.objects.get(instance=retry_instance)
         self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 350)
         self.assertIn("not json", mock_spawn.call_args.kwargs["prompt"])
@@ -22014,6 +22052,80 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 250)
         self.assertIn("No safe target found", mock_spawn.call_args.kwargs["prompt"])
         self.assertFalse(ProposedSession.objects.exists())
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_consecutive_no_proposals_stop_before_large_budget_is_exhausted(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = _make_project()
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Pursue hard theorem",
+            goal="Only propose mathematically honest progress.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 100_000_000,
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_STREAK_STATE_KEY: (
+                    autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT
+                ),
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "proposal": None,
+                    "message": "No honest implementation clears the threshold.",
+                    "next_steps_summary": "A theorem is still missing.",
+                    "memory_relevant_files": [],
+                },
+                thread_id="candidate-thread",
+                tokens_used=250,
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
+        self.assertEqual(workflow.state["proposal_budget_tokens_used"], 250)
+        notice = ProposedSession.objects.get()
+        self.assertIn("No honest implementation", notice.summary)
+        self.assertEqual(notice.outcome_metadata["automation_status"], "skipped")
+        self.assertEqual(
+            notice.outcome_metadata["skip_reason"],
+            "candidate_no_proposal_stall_limit",
+        )
+        self.assertEqual(notice.outcome_metadata["no_proposal_retries"], 3)
+        self.assertEqual(notice.outcome_metadata["no_proposal_retry_limit"], 3)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_below_threshold_retries_candidate_within_proposal_budget(

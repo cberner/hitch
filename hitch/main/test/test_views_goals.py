@@ -1401,7 +1401,11 @@ class AutonomousGoalViewTests(TestCase):
                 "stacked_diff_depth": 3,
                 "stacked_diff_iteration": 2,
                 "proposal_budget_tokens_used": 1250,
-                "stacked_diff_continuation_stopped_reason": "candidate_no_proposal",
+                "stacked_diff_continuation_stopped_reason": (
+                    "candidate_no_proposal_stall_limit"
+                ),
+                "no_proposal_retries": 3,
+                "no_proposal_retry_limit": 3,
             },
         )
 
@@ -1413,7 +1417,7 @@ class AutonomousGoalViewTests(TestCase):
             "Improve tests - High ambition - High confidence - Stack 2 of 3",
         )
         self.assertContains(response, "Tokens used: 1,250 tokens")
-        self.assertContains(response, "Stack stopped: no further proposal found")
+        self.assertContains(response, "Stack stopped: no proposal after 3 retries")
 
     def test_proposed_session_stack_label_omits_invalid_iteration(self) -> None:
         proposed_session = ProposedSession(
@@ -1826,6 +1830,12 @@ class AutonomousGoalViewTests(TestCase):
             title="No proposal from Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             summary="No concrete test increment was worth proposing.",
+            outcome_metadata={
+                "automation_status": "skipped",
+                "skip_reason": "candidate_no_proposal_stall_limit",
+                "no_proposal_retries": 3,
+                "no_proposal_retry_limit": 3,
+            },
         )
 
         response = self.client.get(reverse("inbox"))
@@ -1836,6 +1846,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response, "No concrete test increment was worth proposing."
         )
+        self.assertContains(response, "Run stopped: no proposal after 3 retries")
         self.assertContains(response, "Dismiss")
         self.assertNotContains(response, 'data-proposed-session-id="')
         self.assertNotContains(response, 'data-reject-url="')
