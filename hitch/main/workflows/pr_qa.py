@@ -109,9 +109,11 @@ from hitch.main.workflows.pr_stage_refresh_state import (
 from hitch.main.workflows.qa_prompts import (
     _QA_DESIGN_SYNTHESIS_STATE_KEY,
     _QA_REVIEW_REVISION_STATE_KEY,
+    _cleanup_qa_handoff,
     _maybe_build_qa_design_synthesis_gate,
     _qa_design_synthesis_feedback_prompt,
-    _qa_prompt,
+    _qa_handoff_path,
+    _qa_review_handoff,
     _qa_review_revision,
 )
 from hitch.main.workflows.workflow_state import _state_bool, _state_int, _state_string
@@ -2737,24 +2739,37 @@ def _spawn_pr_qa_run(
             _start_user_steering_if_ready(workflow, lifecycle_lock_held=True)
             return None
         diff_text = system_agents._review_diff_text_for_workflow(workflow)
-        prompt = _qa_prompt(workflow.cwd, diff_text)
-        instance = codex_pool.spawn_new_session(
-            cwd=workflow.cwd,
-            prompt=prompt,
-            developer_instructions=_state_string(workflow, "developer_instructions") or None,
-            model=_state_string(workflow, "model") or None,
-            reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-            approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
-            sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-            enable_memories=_state_bool(workflow, "enable_memories"),
-            web_search_mode=system_agents._workflow_web_search_mode(workflow),
-            thread_source=ThreadSource.subagent,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        handoff = _qa_review_handoff(
+            workflow.cwd,
+            diff_text,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            user_message_index=_qa_review_revision(workflow),
+            review_revision=_qa_review_revision(workflow),
+            workflow_iteration=workflow.iteration,
+            target_branch=_state_string(workflow, "auto_merge_branch"),
         )
+        try:
+            instance = codex_pool.spawn_new_session(
+                cwd=workflow.cwd,
+                prompt=handoff.prompt,
+                developer_instructions=(
+                    _state_string(workflow, "developer_instructions") or None
+                ),
+                model=_state_string(workflow, "model") or None,
+                reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+                approval_mode=system_agents.SYSTEM_AGENT_APPROVAL_MODE,
+                sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+                enable_memories=_state_bool(workflow, "enable_memories"),
+                web_search_mode=system_agents._workflow_web_search_mode(workflow),
+                thread_source=ThreadSource.subagent,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                agent_kind=system_agents.PR_QA_AGENT_KIND,
+                display_author=system_agents.QA_DISPLAY_AUTHOR,
+                user_message_index=_qa_review_revision(workflow),
+            )
+        except Exception:
+            _cleanup_qa_handoff(handoff.ref)
+            raise
         run, _created = SystemAgentRun.objects.get_or_create(
             instance=instance,
             defaults={
@@ -2765,11 +2780,38 @@ def _spawn_pr_qa_run(
                 "input": {
                     "cwd": workflow.cwd,
                     "diff_chars": len(diff_text),
+                    "qa_handoff_mode": handoff.mode,
+                    "qa_handoff_ref": handoff.ref,
+                    "qa_prompt_chars": len(handoff.prompt),
+                    "qa_handoff_chunks": handoff.chunk_count,
+                    "qa_handoff_bytes": handoff.total_bytes,
+                    "qa_embedded_diff_chars": handoff.embedded_diff_chars,
+                    "qa_omitted_diff_chars": (
+                        len(diff_text) - handoff.embedded_diff_chars
+                    ),
                     "qa_review_revision": _qa_review_revision(workflow),
+                    "qa_workflow_iteration": workflow.iteration,
                 },
             },
         )
         return run
+
+
+def _cleanup_qa_review_handoff_for_instance(instance: CodexInstance) -> None:
+    run = SystemAgentRun.objects.filter(instance=instance).first()
+    if run is None or not isinstance(run.input, dict):
+        return
+    ref = run.input.get("qa_handoff_ref")
+    if not isinstance(ref, str) or not _cleanup_qa_handoff(ref):
+        return
+    run.input = {**run.input, "qa_handoff_cleaned": True}
+    run.save(update_fields=["input", "updated_at"])
+
+
+def _qa_review_handoff_ref(
+    workflow_id: int, review_revision: int, workflow_iteration: int
+) -> str:
+    return str(_qa_handoff_path(workflow_id, review_revision, workflow_iteration))
 
 def _spawn_pr_followup_monitor_run(
     workflow: SystemWorkflow, *, lifecycle_lock_held: bool = False

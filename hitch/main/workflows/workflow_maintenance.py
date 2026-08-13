@@ -10,7 +10,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
-from hitch.main.workflows import pr_qa, system_agents
+from hitch.main.workflows import pr_qa, qa_prompts, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,19 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
 
 
 def _workflow_maintenance_tick() -> None:
-    reconciliation.reconcile_dead()
+    try:
+        reconciliation.reconcile_dead()
+    finally:
+        try:
+            reaped = qa_prompts.reap_stale_qa_handoffs(
+                stale_before=(
+                    timezone.now() - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+                )
+            )
+            if reaped:
+                logger.info("reaped %s stale QA review handoff(s)", reaped)
+        except Exception:
+            logger.exception("failed to reap stale QA review handoffs")
     refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
         limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
     )
