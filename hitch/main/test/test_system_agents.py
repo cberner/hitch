@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
@@ -53,6 +54,7 @@ from hitch.main.models import (
 from hitch.main.repos import AutoPullError, AutoPullResult
 from hitch.main.runtime import codex_events, rate_limit, streaming
 from hitch.main.test.support import _git, _make_project, _rollout_line
+from hitch.main.test.support import _init_repo as _init_test_repo
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
@@ -73,6 +75,8 @@ from hitch.main.workflows import (
 def _instance(
     *,
     thread_id: str = "thread-1",
+    cwd: str = "/repo",
+    prompt: str = "prompt",
     purpose: str = CodexInstance.PURPOSE_USER,
     workflow_id: int | None = None,
     events_path: str = "/dev/null",
@@ -98,8 +102,8 @@ def _instance(
     return CodexInstance.objects.create(
         pid=1,
         thread_id=thread_id,
-        cwd="/repo",
-        prompt="prompt",
+        cwd=cwd,
+        prompt=prompt,
         developer_instructions=developer_instructions,
         enable_memories=enable_memories,
         model=model,
@@ -131,6 +135,14 @@ def _synchronous_thread(
     thread = MagicMock()
     thread.start.side_effect = lambda: target(*args)
     return thread
+
+
+def _qa_handoff_contents(ref: str) -> tuple[str, dict[str, Any], list[Path]]:
+    handoff_dir = Path(ref)
+    manifest = json.loads((handoff_dir / "manifest.json").read_text(encoding="utf-8"))
+    parts = sorted(handoff_dir.glob("*.diffpart"))
+    data = b"".join(part.read_bytes() for part in parts)
+    return data.decode("utf-8"), manifest, parts
 
 
 def _events_file(
@@ -3823,6 +3835,373 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, "feedback_running")
         self.assertEqual(workflow.iteration, 1)
         self.assertEqual(workflow.state["next_user_message_index"], 3)
+
+    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
+    def test_large_worktree_qa_handoff_preserves_exact_untracked_diff(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            hitch_home = root / "hitch-home"
+            _init_test_repo(repo, initial_branch="main", configure_user=True)
+            marker = "untracked-large-review-marker"
+            (repo / "new-feature.txt").write_text(
+                f"{marker}\n" + ("x" * 101_000) + "\n"
+            )
+            expected_diff = diffs.build_worktree_diff_text(str(repo))
+            object_state = _git(repo, "count-objects", "-v")
+
+            def spawn(**kwargs: Any) -> CodexInstance:
+                return _instance(
+                    thread_id="large-worktree-review",
+                    cwd=kwargs["cwd"],
+                    prompt=kwargs["prompt"],
+                    purpose=kwargs["purpose"],
+                    workflow_id=kwargs["workflow_id"],
+                    agent_kind=kwargs["agent_kind"],
+                    status=CodexInstance.STATUS_RUNNING,
+                )
+
+            mock_spawn.side_effect = spawn
+            with override_settings(HITCH_HOME_DIR=hitch_home):
+                workflow = pr_qa.start_pr_qa_workflow(
+                    main_thread_id="large-worktree-main",
+                    cwd=str(repo),
+                    sandbox_policy="workspaceWrite",
+                    approval_mode="auto_review",
+                    open_pr_on_lgtm=False,
+                )
+
+                run = workflow.agent_runs.select_related("instance").get()
+                handoff_ref = run.input["qa_handoff_ref"]
+                handoff_text, manifest, parts = _qa_handoff_contents(handoff_ref)
+
+                self.assertTrue(Path(handoff_ref).is_relative_to(hitch_home))
+                self.assertFalse(Path(handoff_ref).is_relative_to(repo))
+                self.assertEqual(
+                    Path(handoff_ref).name,
+                    f"workflow-{workflow.pk}-review-0-iteration-0",
+                )
+                self.assertEqual(handoff_text, expected_diff)
+                self.assertIn(marker, handoff_text)
+                self.assertGreater(
+                    max(len(line.encode()) for line in expected_diff.splitlines()),
+                    12_000,
+                )
+                self.assertTrue(all(part.stat().st_size <= 12_000 for part in parts))
+                self.assertEqual(len(parts), len(manifest["parts"]))
+                self.assertEqual(manifest["total_bytes"], len(expected_diff.encode()))
+                self.assertEqual(manifest["workflow_id"], workflow.pk)
+                self.assertEqual(manifest["review_revision"], 0)
+                self.assertEqual(manifest["workflow_iteration"], 0)
+                self.assertGreater(len(parts), 1)
+                self.assertNotIn(marker, run.instance.prompt)
+                self.assertIn(
+                    "tracked and untracked worktree patch", run.instance.prompt
+                )
+                self.assertIn("one file per command", run.instance.prompt)
+                self.assertTrue(
+                    codex_worker_module._is_native_review_verdict_worker(run.instance)
+                )
+                self.assertEqual(run.input["qa_handoff_mode"], "chunked_files")
+                self.assertEqual(run.input["qa_workflow_iteration"], 0)
+                self.assertEqual(run.input["qa_handoff_chunks"], len(parts))
+                self.assertEqual(
+                    run.input["qa_handoff_bytes"], len(expected_diff.encode())
+                )
+                self.assertEqual(run.input["diff_chars"], len(expected_diff))
+                self.assertEqual(run.input["qa_embedded_diff_chars"], 0)
+                self.assertEqual(run.input["qa_omitted_diff_chars"], len(expected_diff))
+                self.assertEqual(run.input["qa_prompt_chars"], len(run.instance.prompt))
+                self.assertEqual(_git(repo, "count-objects", "-v"), object_state)
+
+                run.status = SystemAgentRun.STATUS_FAILED
+                run.save(update_fields=["status", "updated_at"])
+                run.instance.status = CodexInstance.STATUS_FAILED
+                run.instance.error = "cancelled"
+                run.instance.save(update_fields=["status", "error"])
+                system_agents.on_codex_instance_finished(run.instance)
+                run.refresh_from_db()
+
+                self.assertFalse(Path(handoff_ref).exists())
+                self.assertIs(run.input["qa_handoff_cleaned"], True)
+
+    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
+    def test_large_auto_merge_qa_handoff_preserves_exact_committed_diff(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            hitch_home = root / "hitch-home"
+            _init_test_repo(repo, initial_branch="main", configure_user=True)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            marker = "committed-large-review-marker"
+            (session / "committed-feature.txt").write_text(
+                f"{marker}\n" + ("y" * 101_000) + "\n"
+            )
+            _git(session, "add", "committed-feature.txt")
+            _git(session, "commit", "-m", "large committed feature")
+            self.assertEqual(_git(session, "status", "--porcelain"), "")
+
+            def spawn(**kwargs: Any) -> CodexInstance:
+                return _instance(
+                    thread_id="large-auto-merge-review",
+                    cwd=kwargs["cwd"],
+                    prompt=kwargs["prompt"],
+                    purpose=kwargs["purpose"],
+                    workflow_id=kwargs["workflow_id"],
+                    agent_kind=kwargs["agent_kind"],
+                    status=CodexInstance.STATUS_RUNNING,
+                )
+
+            mock_spawn.side_effect = spawn
+            with override_settings(HITCH_HOME_DIR=hitch_home):
+                workflow = pr_qa.start_pr_qa_workflow(
+                    main_thread_id="large-auto-merge-main",
+                    cwd=str(session),
+                    sandbox_policy="workspaceWrite",
+                    approval_mode="auto_review",
+                    auto_merge_branch="main",
+                )
+                workflow.refresh_from_db()
+                run = workflow.agent_runs.select_related("instance").get()
+                reviewed_diff = workflow.state[
+                    system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY
+                ]
+                handoff_text, manifest, parts = _qa_handoff_contents(
+                    run.input["qa_handoff_ref"]
+                )
+
+                self.assertEqual(handoff_text, reviewed_diff)
+                self.assertIn(marker, handoff_text)
+                self.assertTrue(all(part.stat().st_size <= 12_000 for part in parts))
+                self.assertEqual(len(parts), len(manifest["parts"]))
+                self.assertGreater(len(parts), 1)
+                self.assertNotIn(marker, run.instance.prompt)
+                self.assertIn(
+                    "auto-merge patch for target branch 'main'", run.instance.prompt
+                )
+                self.assertIn("one file per command", run.instance.prompt)
+                self.assertTrue(
+                    codex_worker_module._is_native_review_verdict_worker(run.instance)
+                )
+                self.assertEqual(run.input["qa_handoff_mode"], "chunked_files")
+                self.assertEqual(run.input["qa_handoff_chunks"], len(parts))
+                self.assertEqual(
+                    run.input["qa_handoff_bytes"], len(reviewed_diff.encode())
+                )
+                self.assertEqual(run.input["diff_chars"], len(reviewed_diff))
+                self.assertEqual(run.input["qa_embedded_diff_chars"], 0)
+                self.assertEqual(run.input["qa_omitted_diff_chars"], len(reviewed_diff))
+                self.assertEqual(run.input["qa_prompt_chars"], len(run.instance.prompt))
+
+    def test_large_qa_handoff_falls_back_to_exact_inline_diff(self) -> None:
+        marker = "large-inline-fallback-marker"
+        diff = "diff --git a/app.py b/app.py\n" + (f"+{marker}\n" * 4_000)
+
+        with patch.object(
+            qa_prompts,
+            "_write_qa_handoff_chunks",
+            side_effect=RuntimeError("read-only Hitch storage"),
+        ):
+            handoff = qa_prompts._qa_review_handoff(
+                "/repo",
+                diff,
+                workflow_id=1,
+                review_revision=0,
+                workflow_iteration=0,
+            )
+
+        self.assertEqual(handoff.mode, "inline_diff_fallback")
+        self.assertEqual(handoff.ref, "")
+        self.assertEqual(handoff.embedded_diff_chars, len(diff))
+        self.assertIn(marker, handoff.prompt)
+
+    @patch(
+        "hitch.main.workflows.pr_qa.codex_pool.spawn_new_session",
+        side_effect=RuntimeError("worker launch failed"),
+    )
+    def test_large_qa_handoff_is_cleaned_when_worker_spawn_fails(
+        self, _mock_spawn: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            hitch_home = root / "hitch-home"
+            _init_test_repo(repo, initial_branch="main", configure_user=True)
+            (repo / "large.txt").write_text("z" * 101_000)
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="spawn-failure-main",
+                cwd=str(repo),
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_QA_RUNNING,
+            )
+
+            with override_settings(HITCH_HOME_DIR=hitch_home), self.assertRaisesRegex(
+                RuntimeError, "worker launch failed"
+            ):
+                pr_qa._spawn_pr_qa_run(workflow)
+
+            handoff_root = hitch_home / "qa_review_handoffs"
+            self.assertEqual(list(handoff_root.iterdir()), [])
+
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    def test_recovered_qa_run_reconstructs_and_cleans_crash_window_handoff(
+        self, _mock_surface: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            hitch_home = root / "hitch-home"
+            _init_test_repo(repo, initial_branch="main", configure_user=True)
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="crash-window-main",
+                cwd=str(repo),
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_QA_RUNNING,
+            )
+            diff = "diff --git a/a b/a\n" + ("+sensitive\n" * 10_000)
+
+            with override_settings(HITCH_HOME_DIR=hitch_home):
+                handoff = qa_prompts._qa_review_handoff(
+                    str(repo),
+                    diff,
+                    workflow_id=workflow.pk,
+                    review_revision=0,
+                    workflow_iteration=0,
+                )
+                instance = _instance(
+                    thread_id="crash-window-review",
+                    cwd=str(repo),
+                    prompt=handoff.prompt,
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                    workflow_id=workflow.pk,
+                    agent_kind=system_agents.PR_QA_AGENT_KIND,
+                    status=CodexInstance.STATUS_FAILED,
+                    error="web process died before run ownership was saved",
+                    user_message_index=0,
+                )
+                self.assertFalse(
+                    SystemAgentRun.objects.filter(instance=instance).exists()
+                )
+
+                system_agents.on_codex_instance_finished(instance)
+
+                recovered = SystemAgentRun.objects.get(instance=instance)
+                self.assertFalse(Path(handoff.ref).exists())
+                self.assertEqual(recovered.input["qa_handoff_ref"], handoff.ref)
+                self.assertIs(recovered.input["qa_handoff_cleaned"], True)
+
+    def test_stale_qa_handoff_reaper_preserves_live_and_fresh_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            hitch_home = root / "hitch-home"
+            old_time = datetime.now(UTC) - timedelta(minutes=30)
+            stale_before = datetime.now(UTC) - timedelta(minutes=15)
+
+            with override_settings(HITCH_HOME_DIR=hitch_home):
+                live = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id="live-owner",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                )
+                fresh = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id="fresh-owner",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                )
+                prior_generation = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id="prior-generation-owner",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                    iteration=1,
+                )
+                abandoned = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id="abandoned-owner",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                )
+                terminal = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id="terminal-owner",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_BLOCKED,
+                    step=system_agents.STEP_BLOCKED,
+                )
+                _instance(
+                    thread_id="live-review",
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                    workflow_id=live.pk,
+                    agent_kind=system_agents.PR_QA_AGENT_KIND,
+                    status=CodexInstance.STATUS_RUNNING,
+                    user_message_index=0,
+                )
+                prior_instance = _instance(
+                    thread_id="prior-generation-review",
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                    workflow_id=prior_generation.pk,
+                    agent_kind=system_agents.PR_QA_AGENT_KIND,
+                    status=CodexInstance.STATUS_RUNNING,
+                    user_message_index=0,
+                )
+                SystemWorkflow.objects.filter(pk=abandoned.pk).update(
+                    updated_at=old_time
+                )
+                handoff_paths = {
+                    name: qa_prompts._write_qa_handoff_chunks(
+                        "+sensitive\n" * 10_000,
+                        workflow_id=owner_id,
+                        review_revision=0,
+                        workflow_iteration=0,
+                    )[0]
+                    for name, owner_id in {
+                        "live": live.pk,
+                        "fresh": fresh.pk,
+                        "prior": prior_generation.pk,
+                        "abandoned": abandoned.pk,
+                        "terminal": terminal.pk,
+                        "missing": 999_999,
+                    }.items()
+                }
+                SystemAgentRun.objects.create(
+                    workflow=prior_generation,
+                    instance=prior_instance,
+                    agent_kind=system_agents.PR_QA_AGENT_KIND,
+                    thread_id=prior_instance.thread_id,
+                    status=SystemAgentRun.STATUS_RUNNING,
+                    input={"qa_handoff_ref": str(handoff_paths["prior"])},
+                )
+                staging = qa_prompts._qa_handoff_root() / ".staging-crashed-write"
+                staging.mkdir()
+                (staging / "secret").write_text("sensitive", encoding="utf-8")
+                for path in [*handoff_paths.values(), staging]:
+                    os.utime(path, (old_time.timestamp(), old_time.timestamp()))
+
+                removed = qa_prompts.reap_stale_qa_handoffs(
+                    stale_before=stale_before
+                )
+
+                self.assertEqual(removed, 4)
+                self.assertTrue(handoff_paths["live"].exists())
+                self.assertTrue(handoff_paths["fresh"].exists())
+                self.assertTrue(handoff_paths["prior"].exists())
+                self.assertFalse(handoff_paths["abandoned"].exists())
+                self.assertFalse(handoff_paths["terminal"].exists())
+                self.assertFalse(handoff_paths["missing"].exists())
+                self.assertFalse(staging.exists())
 
     @patch(
         "hitch.main.workflows.system_agents._review_diff_text_for_workflow",

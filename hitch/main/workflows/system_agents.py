@@ -1003,6 +1003,17 @@ def on_codex_instance_finished(instance: CodexInstance) -> bool:
         if route_claimed:
             _clear_workflow_instance_routing_claim(instance)
         raise
+    finally:
+        if (
+            instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and instance.agent_kind == PR_QA_AGENT_KIND
+        ):
+            try:
+                pr_qa._cleanup_qa_review_handoff_for_instance(instance)
+            except Exception:
+                logger.exception(
+                    "failed to clean QA review handoff for instance %s", instance.pk
+                )
 
 
 def _route_finished_codex_instance(instance: CodexInstance) -> bool:
@@ -2283,6 +2294,12 @@ def _recovered_system_agent_run_input(
         return run_input
     revision = instance.user_message_index
     run_input[revision_key] = revision if revision is not None else 0
+    if instance.agent_kind == PR_QA_AGENT_KIND:
+        run_input["qa_handoff_ref"] = pr_qa._qa_review_handoff_ref(
+            workflow.pk,
+            revision if revision is not None else 0,
+            workflow.iteration,
+        )
     return run_input
 
 
