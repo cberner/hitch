@@ -33,6 +33,7 @@ from hitch.main.runtime import app_server_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _rollout_path_for,
+    _rollout_paths_are_storage_aliases,
     _RolloutFileState,
     _thread_is_archived,
 )
@@ -270,12 +271,22 @@ def _cached_token_usage_matches_missing_rollout_path(
     )
 
 
-def _missing_path_refresh_is_terminal(
+def _missing_path_observation_is_terminal(
     metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
+    # Terminal describes a recent sweep result, not permanent freshness. Once
+    # it expires, both concrete missing paths and blank paths rerun path repair.
     return (
-        metadata.usage_last_checked_at is not None
-        and _cached_token_usage_matches_missing_rollout_path(metadata, cache)
+        _cached_token_usage_matches_missing_rollout_path(metadata, cache)
+        and not _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
+    )
+
+
+def _cached_token_usage_path_matches_metadata(
+    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage
+) -> bool:
+    return cache.rollout_path == metadata.codex_path or _rollout_paths_are_storage_aliases(
+        cache.rollout_path, metadata.codex_path
     )
 
 
@@ -497,32 +508,20 @@ def _usage_token_cache_state(
 ) -> _UsageTokenCacheState:
     if not metadata.thread_id:
         return _UsageTokenCacheState(refresh_pending=False, cache_usable=False)
-    if not metadata.codex_path:
-        cache_usable = _cached_token_usage_usable_without_rollout_state(cache)
-        return _UsageTokenCacheState(
-            refresh_pending=not _missing_path_refresh_is_terminal(metadata, cache),
-            cache_usable=cache_usable,
-        )
+    cache_usable = _cached_token_usage_usable_without_rollout_state(cache)
     if cache is None:
         return _UsageTokenCacheState(refresh_pending=True, cache_usable=False)
-    rollout_state = _rollout_file_state_from_value(metadata.codex_path)
-    if rollout_state is None:
-        return _UsageTokenCacheState(
-            refresh_pending=not _missing_path_refresh_is_terminal(metadata, cache),
-            cache_usable=_cached_token_usage_usable_without_rollout_state(cache),
-        )
-    cache_is_current = _cached_token_usage_matches_rollout_state(cache, rollout_state)
-    if _cached_token_usage_has_counts(cache) and not _daily_token_usage_from_cache(cache):
-        return _UsageTokenCacheState(
-            refresh_pending=True,
-            cache_usable=cache_is_current,
-        )
+    if not cache_usable or not _cached_token_usage_path_matches_metadata(metadata, cache):
+        return _UsageTokenCacheState(refresh_pending=True, cache_usable=cache_usable)
+    # The sweep owns rollout stat calls. A recently checked cache can be at most
+    # this interval stale before a later page view schedules another sweep.
+    # The timestamp also settles incomplete observations the sweep could not
+    # improve, such as headline-only data whose rollout is still missing.
     return _UsageTokenCacheState(
-        refresh_pending=(
-            not cache_is_current
-            or _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
+        refresh_pending=_usage_token_refresh_check_is_stale(
+            metadata.usage_last_checked_at
         ),
-        cache_usable=cache_is_current,
+        cache_usable=cache_usable,
     )
 
 
@@ -594,10 +593,10 @@ def _usage_token_refresh_needed(
     metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
     if not metadata.codex_path:
-        return not _missing_path_refresh_is_terminal(metadata, cache)
+        return not _missing_path_observation_is_terminal(metadata, cache)
     rollout_state = _rollout_file_state_from_value(metadata.codex_path)
     if rollout_state is None:
-        return not _missing_path_refresh_is_terminal(metadata, cache)
+        return not _missing_path_observation_is_terminal(metadata, cache)
     if cache is None:
         return True
     if not _cached_token_usage_matches_rollout_state(cache, rollout_state):
