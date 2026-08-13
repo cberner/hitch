@@ -99,6 +99,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-system-approve-all-fresh-consent`: System sessions may inherit Approve all only after re-checking current approval mode and workflow policy immediately before start.
 - `PERM-system-approve-all-revocation`: If current approval mode and workflow policy no longer permit Approve all, the system session denies escalations or fails closed.
 - `PERM-system-safe-fallback`: Without an associated user session, write-capable system sessions use the narrowest safe sandbox plus isolation, or run read-only/fail closed.
+- `PERM-system-sandbox-inputs`: System-session inputs kept outside the workspace must use private ephemeral storage visible to the selected sandbox and must be reclaimed after completion or a bounded crash-recovery window.
 - `PERM-system-no-associated-full-access`: System sessions without an associated user session cannot use Danger - full access unless an explicit product requirement and isolation boundary allow it.
 - `PERM-system-no-user-escalation`: System sessions never surface execution approval prompts to users.
 - `PERM-system-escalation-denied`: System-session escalations are denied unless covered by `PERM-system-approve-all-worktree`; system sessions must not fall back to server-side Auto review approval.

@@ -29,6 +29,7 @@ from openai_codex.generated.v2_all import (
     Turn,
     TurnCompletedNotification,
     TurnStatus,
+    WorkspaceWriteSandboxPolicy,
 )
 
 from hitch.main import demo, diffs
@@ -3861,10 +3862,17 @@ class SpecCriticWorkflowTests(TestCase):
                     workflow_id=kwargs["workflow_id"],
                     agent_kind=kwargs["agent_kind"],
                     status=CodexInstance.STATUS_RUNNING,
+                    sandbox_policy=kwargs["sandbox_policy"],
                 )
 
             mock_spawn.side_effect = spawn
-            with override_settings(HITCH_HOME_DIR=hitch_home):
+            with (
+                override_settings(HITCH_HOME_DIR=hitch_home),
+                patch(
+                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
+                    return_value=raw,
+                ),
+            ):
                 workflow = pr_qa.start_pr_qa_workflow(
                     main_thread_id="large-worktree-main",
                     cwd=str(repo),
@@ -3877,7 +3885,8 @@ class SpecCriticWorkflowTests(TestCase):
                 handoff_ref = run.input["qa_handoff_ref"]
                 handoff_text, manifest, parts = _qa_handoff_contents(handoff_ref)
 
-                self.assertTrue(Path(handoff_ref).is_relative_to(hitch_home))
+                self.assertTrue(Path(handoff_ref).is_relative_to(root))
+                self.assertFalse(Path(handoff_ref).is_relative_to(hitch_home))
                 self.assertFalse(Path(handoff_ref).is_relative_to(repo))
                 self.assertEqual(
                     Path(handoff_ref).name,
@@ -3904,6 +3913,15 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertTrue(
                     codex_worker_module._is_native_review_verdict_worker(run.instance)
                 )
+                policy = codex_worker_module._build_sandbox_policy(
+                    run.instance.sandbox_policy
+                )
+                self.assertIsNotNone(policy)
+                assert policy is not None
+                self.assertIsInstance(policy.root, WorkspaceWriteSandboxPolicy)
+                assert isinstance(policy.root, WorkspaceWriteSandboxPolicy)
+                self.assertFalse(policy.root.exclude_slash_tmp)
+                self.assertFalse(policy.root.exclude_tmpdir_env_var)
                 self.assertEqual(run.input["qa_handoff_mode"], "chunked_files")
                 self.assertEqual(run.input["qa_workflow_iteration"], 0)
                 self.assertEqual(run.input["qa_handoff_chunks"], len(parts))
@@ -3955,10 +3973,17 @@ class SpecCriticWorkflowTests(TestCase):
                     workflow_id=kwargs["workflow_id"],
                     agent_kind=kwargs["agent_kind"],
                     status=CodexInstance.STATUS_RUNNING,
+                    sandbox_policy=kwargs["sandbox_policy"],
                 )
 
             mock_spawn.side_effect = spawn
-            with override_settings(HITCH_HOME_DIR=hitch_home):
+            with (
+                override_settings(HITCH_HOME_DIR=hitch_home),
+                patch(
+                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
+                    return_value=raw,
+                ),
+            ):
                 workflow = pr_qa.start_pr_qa_workflow(
                     main_thread_id="large-auto-merge-main",
                     cwd=str(session),
@@ -4041,13 +4066,19 @@ class SpecCriticWorkflowTests(TestCase):
                 step=system_agents.STEP_QA_RUNNING,
             )
 
-            with override_settings(HITCH_HOME_DIR=hitch_home), self.assertRaisesRegex(
-                RuntimeError, "worker launch failed"
+            with (
+                override_settings(HITCH_HOME_DIR=hitch_home),
+                patch(
+                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
+                    return_value=raw,
+                ),
+                self.assertRaisesRegex(RuntimeError, "worker launch failed"),
             ):
                 pr_qa._spawn_pr_qa_run(workflow)
 
-            handoff_root = hitch_home / "qa_review_handoffs"
-            self.assertEqual(list(handoff_root.iterdir()), [])
+            handoff_roots = list(root.glob("qa_review_handoffs-*"))
+            self.assertEqual(len(handoff_roots), 1)
+            self.assertEqual(list(handoff_roots[0].iterdir()), [])
 
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_recovered_qa_run_reconstructs_and_cleans_crash_window_handoff(
@@ -4067,7 +4098,13 @@ class SpecCriticWorkflowTests(TestCase):
             )
             diff = "diff --git a/a b/a\n" + ("+sensitive\n" * 10_000)
 
-            with override_settings(HITCH_HOME_DIR=hitch_home):
+            with (
+                override_settings(HITCH_HOME_DIR=hitch_home),
+                patch(
+                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
+                    return_value=raw,
+                ),
+            ):
                 handoff = qa_prompts._qa_review_handoff(
                     str(repo),
                     diff,
@@ -4104,7 +4141,13 @@ class SpecCriticWorkflowTests(TestCase):
             old_time = datetime.now(UTC) - timedelta(minutes=30)
             stale_before = datetime.now(UTC) - timedelta(minutes=15)
 
-            with override_settings(HITCH_HOME_DIR=hitch_home):
+            with (
+                override_settings(HITCH_HOME_DIR=hitch_home),
+                patch(
+                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
+                    return_value=raw,
+                ),
+            ):
                 live = SystemWorkflow.objects.create(
                     kind=SystemWorkflow.KIND_PR_QA,
                     main_thread_id="live-owner",
