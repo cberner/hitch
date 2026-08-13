@@ -5249,12 +5249,48 @@ class IndexViewTests(TestCase):
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
+            patch(
+                "hitch.main.sessions.token_usage._rollout_file_state_from_value"
+            ) as rollout_state,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
 
         latest_usage.assert_not_called()
         usage_history.assert_not_called()
+        rollout_state.assert_not_called()
+        start_refresh.assert_not_called()
+        self.assertNotContains(response, "Refreshing session token usage...")
+        self.assertContains(response, "90K")
+        self.assertContains(response, "23K")
+        self.assertContains(response, "10K")
+        self.assertNotContains(response, "810K")
+        self.assertNotContains(response, "909,999")
+        self.assertNotContains(response, "999,999")
+
+        SessionMetadata.objects.filter(thread_id="archived").update(
+            usage_last_checked_at=(
+                datetime.now(UTC)
+                - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
+                - timedelta(seconds=1)
+            )
+        )
+        with (
+            patch("hitch.main.runtime.rollout.latest_token_usage") as latest_usage,
+            patch("hitch.main.runtime.rollout.token_usage_history") as usage_history,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
+            patch(
+                "hitch.main.sessions.token_usage._rollout_file_state_from_value"
+            ) as rollout_state,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        latest_usage.assert_not_called()
+        usage_history.assert_not_called()
+        rollout_state.assert_not_called()
         start_refresh.assert_called_once()
         refresh_items = start_refresh.call_args.args[0]
         self.assertEqual(len(refresh_items), 1)
@@ -5262,12 +5298,12 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].codex_path, str(rollout_path))
         self.assertContains(response, "Refreshing session token usage...")
         lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
-        self.assertEqual(lifetime_usage["total"]["input"], "0")
-        self.assertEqual(lifetime_usage["total"]["output"], "0")
-        self.assertEqual(lifetime_usage["total"]["cached"], "0")
-        self.assertNotContains(response, "90K")
-        self.assertNotContains(response, "23K")
-        self.assertNotContains(response, "10K")
+        self.assertEqual(lifetime_usage["total"]["input"], "90K")
+        self.assertEqual(lifetime_usage["total"]["output"], "23K")
+        self.assertEqual(lifetime_usage["total"]["cached"], "10K")
+        self.assertContains(response, "90K")
+        self.assertContains(response, "23K")
+        self.assertContains(response, "10K")
         self.assertNotContains(response, "810K")
         self.assertNotContains(response, "909,999")
         self.assertNotContains(response, "999,999")
@@ -5343,7 +5379,7 @@ class IndexViewTests(TestCase):
             client._client.request.assert_called_once()
             refresh_thread.assert_called_once()
 
-    def test_lifetime_usage_skips_stale_file_backed_cache(self) -> None:
+    def test_lifetime_usage_shows_cached_values_without_statting_rollout(self) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5368,16 +5404,21 @@ class IndexViewTests(TestCase):
             output_tokens=600,
             total_tokens=1_000,
             daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
 
-        lifetime_usage = token_usage._lifetime_token_usage_for_metadata([metadata])
+        with patch(
+            "hitch.main.sessions.token_usage._rollout_file_state_from_value"
+        ) as rollout_state:
+            lifetime_usage = token_usage._lifetime_token_usage_for_metadata([metadata])
 
-        self.assertTrue(lifetime_usage["refresh_pending"])
-        self.assertEqual(lifetime_usage["refresh_pending_count"], 1)
-        self.assertEqual(lifetime_usage["total"]["input"], "0")
-        self.assertEqual(lifetime_usage["total"]["output"], "0")
-        self.assertEqual(lifetime_usage["total"]["cached"], "0")
-        self.assertEqual(lifetime_usage["total"]["chart"], [])
+        rollout_state.assert_not_called()
+        self.assertFalse(lifetime_usage["refresh_pending"])
+        self.assertEqual(lifetime_usage["refresh_pending_count"], 0)
+        self.assertEqual(lifetime_usage["total"]["input"], "350")
+        self.assertEqual(lifetime_usage["total"]["output"], "600")
+        self.assertEqual(lifetime_usage["total"]["cached"], "50")
+        self.assertEqual(len(lifetime_usage["total"]["chart"]), 1)
 
     @patch("hitch.main.views.common.Codex")
     def test_usage_page_schedules_initial_active_and_archived_index_refresh(
@@ -5749,7 +5790,7 @@ class IndexViewTests(TestCase):
         # contributing pre-fix counts to the summed totals while a refresh is
         # pending.
         metadata = token_usage._UsageTokenRefreshCandidate(
-            thread_id="t", codex_path="", usage_last_checked_at=None
+            thread_id="t", codex_path="", usage_last_checked_at=datetime.now(UTC)
         )
         current = ArchivedSessionTokenUsage(
             thread_id="t",
@@ -5762,7 +5803,39 @@ class IndexViewTests(TestCase):
             rollout_path="",
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
-        self.assertFalse(token_usage._usage_token_cache_state(metadata, legacy).cache_usable)
+        legacy_state = token_usage._usage_token_cache_state(metadata, legacy)
+        self.assertFalse(legacy_state.cache_usable)
+        self.assertTrue(legacy_state.refresh_pending)
+
+    def test_usage_token_cache_state_accepts_archived_rollout_path_aliases(self) -> None:
+        filename = "rollout-2025-01-05T12-00-00-thread.jsonl"
+        active_path = f"/codex/sessions/2025/01/05/{filename}"
+        metadata = token_usage._UsageTokenRefreshCandidate(
+            thread_id="thread",
+            codex_path=active_path,
+            usage_last_checked_at=datetime.now(UTC),
+        )
+
+        for archived_path in (
+            f"/codex/archived_sessions/{filename}",
+            f"/codex/archived_sessions/2025/01/05/{filename}",
+        ):
+            with self.subTest(archived_path=archived_path):
+                cache = ArchivedSessionTokenUsage(
+                    thread_id="thread",
+                    rollout_path=archived_path,
+                    usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+                    daily_usage={"2025-01-05": {"input": 1}},
+                )
+
+                with patch(
+                    "hitch.main.sessions.token_usage._rollout_file_state_from_value"
+                ) as rollout_state:
+                    cache_state = token_usage._usage_token_cache_state(metadata, cache)
+
+                rollout_state.assert_not_called()
+                self.assertTrue(cache_state.cache_usable)
+                self.assertFalse(cache_state.refresh_pending)
 
     def test_token_usage_snapshot_survives_compaction_reset(self) -> None:
         # A session that exhausts its context window records a token_count
@@ -6641,7 +6714,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].codex_path, "/nonexistent/rollout.jsonl")
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_treats_checked_missing_path_zero_cache_as_terminal(
+    def test_usage_page_rechecks_expired_missing_path_observation(
         self, mock_codex: MagicMock
     ) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
@@ -6675,12 +6748,197 @@ class IndexViewTests(TestCase):
             response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "Refreshing session token usage...")
+        self.assertContains(response, "Refreshing session token usage...")
         lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
-        self.assertFalse(lifetime_usage["refresh_pending"])
-        self.assertEqual(lifetime_usage["refresh_pending_count"], 0)
-        start_refresh.assert_not_called()
+        self.assertTrue(lifetime_usage["refresh_pending"])
+        self.assertEqual(lifetime_usage["refresh_pending_count"], 1)
+        start_refresh.assert_called_once()
         client.thread_list.assert_not_called()
+
+    def test_usage_sweep_refreshes_terminal_rollout_that_reappears(self) -> None:
+        rollout_path = _make_rollout(self, [])
+        rollout_path.unlink()
+        metadata = _seed_usage_metadata("restored", path=rollout_path)
+        metadata.usage_last_checked_at = (
+            datetime.now(UTC)
+            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
+            - timedelta(seconds=1)
+        )
+        metadata.save(update_fields=["usage_last_checked_at"])
+        cache = ArchivedSessionTokenUsage.objects.create(
+            thread_id="restored",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=0,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        candidates = token_usage._usage_token_refresh_candidates([metadata])
+
+        self.assertTrue(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        rollout_path.write_text(
+            _token_count_line(
+                input_tokens=400,
+                cached_input_tokens=50,
+                output_tokens=600,
+                total_tokens=1_000,
+            ),
+            encoding="utf-8",
+        )
+
+        token_usage._refresh_usage_token_cache_best_effort(candidates)
+
+        metadata.refresh_from_db()
+        cache.refresh_from_db()
+        self.assertGreater(cache.rollout_mtime_ns, 0)
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_sweep_repairs_expired_terminal_blank_path(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        metadata = _seed_usage_metadata("restored")
+        metadata.usage_last_checked_at = (
+            datetime.now(UTC)
+            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
+            - timedelta(seconds=1)
+        )
+        metadata.save(update_fields=["usage_last_checked_at"])
+        cache = ArchivedSessionTokenUsage.objects.create(
+            thread_id="restored",
+            rollout_path="",
+            rollout_mtime_ns=0,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("restored", path=str(rollout_path), cwd="/repo")
+        )
+        candidates = token_usage._usage_token_refresh_candidates([metadata])
+
+        self.assertTrue(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
+
+        token_usage._refresh_usage_token_cache_best_effort(candidates)
+
+        client._client.thread_resume.assert_called_once_with("restored")
+        metadata.refresh_from_db()
+        cache.refresh_from_db()
+        self.assertEqual(metadata.codex_path, str(rollout_path))
+        self.assertEqual(cache.rollout_path, str(rollout_path))
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_sweep_repairs_expired_terminal_missing_path(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        missing_path = "/nonexistent/rollout.jsonl"
+        metadata = _seed_usage_metadata("restored", path=missing_path)
+        metadata.usage_last_checked_at = (
+            datetime.now(UTC)
+            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
+            - timedelta(seconds=1)
+        )
+        metadata.save(update_fields=["usage_last_checked_at"])
+        cache = ArchivedSessionTokenUsage.objects.create(
+            thread_id="restored",
+            rollout_path=missing_path,
+            rollout_mtime_ns=0,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("restored", path=str(rollout_path), cwd="/repo")
+        )
+        candidates = token_usage._usage_token_refresh_candidates([metadata])
+
+        self.assertTrue(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
+
+        token_usage._refresh_usage_token_cache_best_effort(candidates)
+
+        client._client.thread_resume.assert_called_once_with("restored")
+        metadata.refresh_from_db()
+        cache.refresh_from_db()
+        self.assertEqual(metadata.codex_path, str(rollout_path))
+        self.assertEqual(cache.rollout_path, str(rollout_path))
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+
+    @patch("hitch.main.sessions.token_usage.Codex")
+    def test_usage_sweep_settles_unrepairable_terminal_headline_only_cache(
+        self, mock_codex: MagicMock
+    ) -> None:
+        missing_path = "/nonexistent/rollout.jsonl"
+        metadata = _seed_usage_metadata("missing", path=missing_path)
+        metadata.usage_last_checked_at = (
+            datetime.now(UTC)
+            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
+            - timedelta(seconds=1)
+        )
+        metadata.save(update_fields=["usage_last_checked_at"])
+        cache = ArchivedSessionTokenUsage.objects.create(
+            thread_id="missing",
+            rollout_path=missing_path,
+            rollout_mtime_ns=0,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            daily_usage={},
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = CodexError("resume failed")
+        candidates = token_usage._usage_token_refresh_candidates([metadata])
+
+        self.assertTrue(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
+        token_usage._refresh_usage_token_cache_best_effort(candidates)
+
+        client._client.thread_resume.assert_called_once_with("missing")
+        metadata.refresh_from_db()
+        cache.refresh_from_db()
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertEqual(cache.daily_usage, {})
+        self.assertFalse(
+            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
+        )
 
     @patch("hitch.main.views.common.Codex")
     def test_usage_page_uses_indexed_usage_when_session_list_fails(
@@ -6856,7 +7114,7 @@ class IndexViewTests(TestCase):
         cache_state = token_usage._usage_token_cache_state(metadata, cache)
 
         self.assertTrue(cache_state.cache_usable)
-        self.assertTrue(cache_state.refresh_pending)
+        self.assertFalse(cache_state.refresh_pending)
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = CodexError("resume failed")
@@ -7068,7 +7326,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
         self.assertEqual(cache.daily_usage, {})
 
-    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.sessions.token_usage.Codex")
     def test_usage_refresh_preserves_cache_when_rollout_path_missing(
         self, mock_codex: MagicMock
     ) -> None:

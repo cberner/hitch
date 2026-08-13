@@ -60,14 +60,35 @@ def _rollout_file_state_for_path(rollout_path: Path) -> _RolloutFileState | None
 def _archived_rollout_file_state_for_missing_session_path(
     rollout_path: Path,
 ) -> _RolloutFileState | None:
+    for candidate in _archived_rollout_paths_for_session_path(rollout_path):
+        rollout_state = _rollout_file_state_for_path(candidate)
+        if rollout_state is not None:
+            return rollout_state
+    return None
+
+
+def _rollout_paths_are_storage_aliases(left: object, right: object) -> bool:
+    if not isinstance(left, str) or not left or not isinstance(right, str) or not right:
+        return False
+    left_path = Path(left)
+    right_path = Path(right)
+    if left_path == right_path:
+        return True
+    return (
+        right_path in _archived_rollout_paths_for_session_path(left_path)
+        or left_path in _archived_rollout_paths_for_session_path(right_path)
+    )
+
+
+def _archived_rollout_paths_for_session_path(rollout_path: Path) -> tuple[Path, ...]:
     if rollout_path.suffix != ".jsonl" or not rollout_path.name.startswith("rollout-"):
-        return None
+        return ()
     sessions_dir = next(
         (parent for parent in rollout_path.parents if parent.name == "sessions"),
         None,
     )
     if sessions_dir is None:
-        return None
+        return ()
     archived_dir = sessions_dir.parent / _ARCHIVED_SESSIONS_DIR
     candidates = [archived_dir / rollout_path.name]
     try:
@@ -76,11 +97,7 @@ def _archived_rollout_file_state_for_missing_session_path(
         archived_relative_path = None
     if archived_relative_path is not None and archived_relative_path not in candidates:
         candidates.append(archived_relative_path)
-    for candidate in candidates:
-        rollout_state = _rollout_file_state_for_path(candidate)
-        if rollout_state is not None:
-            return rollout_state
-    return None
+    return tuple(candidates)
 
 
 def _rollout_mtime_ns(rollout_path: Path | None) -> int:
