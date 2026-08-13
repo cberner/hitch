@@ -29,8 +29,8 @@ from hitch.main.workflows.workflow_state import _state_int
 _QA_VERDICT_AGENT_KINDS = ("pr_qa",)
 
 # Keep smaller patches inline for a cheap, exact handoff. Larger patches live
-# briefly in private Hitch storage so QA context does not duplicate them and
-# the reviewed repository never retains sensitive worktree-only content.
+# briefly in private, sandbox-visible Hitch temp storage so QA context does not
+# duplicate them and the reviewed repository never retains worktree-only data.
 _QA_INLINE_DIFF_MAX_CHARS = 100_000
 _QA_HANDOFF_MODE_INLINE = "inline_diff"
 _QA_HANDOFF_MODE_INLINE_FALLBACK = "inline_diff_fallback"
@@ -173,7 +173,8 @@ def _qa_review_handoff(
 
 
 def _qa_handoff_root() -> Path:
-    return Path(settings.HITCH_HOME_DIR) / _QA_HANDOFF_ROOT_NAME
+    deployment = sha256(str(Path(settings.HITCH_HOME_DIR)).encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"{_QA_HANDOFF_ROOT_NAME}-{deployment}"
 
 
 def _qa_handoff_path(
