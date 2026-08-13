@@ -354,7 +354,7 @@ class DiscoverReposTests(TestCase):
             patch.object(
                 repos,
                 "_commit_hash_for_ref",
-                side_effect=["abc123", "def456", "def456"],
+                side_effect=["abc123", "def456"],
             ),
             patch.object(
                 repos,
@@ -395,7 +395,7 @@ class DiscoverReposTests(TestCase):
             self.assertEqual(result.before_sha, head_sha)
             self.assertEqual(result.after_sha, head_sha)
 
-    def test_pull_default_branch_from_origin_rejects_ahead_only_checkout(self) -> None:
+    def test_pull_default_branch_from_origin_allows_ahead_only_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             source = root / "source"
@@ -408,9 +408,15 @@ class DiscoverReposTests(TestCase):
             _git(repo, "config", "user.name", "Dev")
             (repo / "README.md").write_text("local\n")
             _git(repo, "commit", "-am", "local")
+            head_sha = _git(repo, "rev-parse", "HEAD")
 
-            with self.assertRaisesRegex(AutoPullError, "ahead of origin/main"):
-                pull_default_branch_from_origin(repo)
+            result = pull_default_branch_from_origin(repo)
+
+            self.assertEqual(result.branch, "main")
+            self.assertFalse(result.changed)
+            self.assertEqual(result.before_sha, head_sha)
+            self.assertEqual(result.after_sha, head_sha)
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), head_sha)
 
     def test_pull_default_branch_from_origin_rejects_dirty_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
