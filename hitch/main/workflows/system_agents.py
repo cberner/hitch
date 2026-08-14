@@ -191,6 +191,11 @@ _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # The window sits well above ``_WORKFLOW_ROUTE_CLAIM_TIMEOUT`` so a slow-but-live
 # spawn is never raced into a double review or a spurious failure.
 _WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
+# A steering message supersedes hidden QA/monitor output, but first gives the
+# worker a brief graceful-cancellation window to emit its terminal event. Native
+# review cancellation can be ignored indefinitely, so reconciliation force-stops
+# only that obsolete hidden run after this bound.
+_USER_STEERING_INTERRUPT_GRACE = timedelta(seconds=10)
 # Transient PR-QA steps whose worker is a visible coding/feedback turn spawned
 # right after the step is committed, and whose prompt is *not* reconstructable
 # (the QA feedback or the user's text is gone). A lost spawn here cannot be
@@ -562,6 +567,7 @@ def reconcile_terminal_workflow_instances(
     )
     reconciled = 0
     if workflows:
+        _escalate_stale_user_steering_interrupts(workflows)
         reconciled += _reconcile_terminal_system_agent_instances(workflows)
         reconciled += _reconcile_terminal_workflow_turns(workflows)
         reconciled += _drive_orphaned_workflow_spawns(workflows)
@@ -577,6 +583,71 @@ def reconcile_terminal_workflow_instances(
         if _finish_deferred_workflow_block_if_settled(deferred_id):
             reconciled += 1
     return reconciled
+
+
+def _escalate_stale_user_steering_interrupts(
+    workflows: list[SystemWorkflow],
+) -> None:
+    """Bound cancellation of hidden runs superseded by user steering.
+
+    The initial steering claim sends a graceful interrupt. If that request is
+    ignored, the active hidden run otherwise keeps ``user_steering_running``
+    from spawning the user's turn forever. Reconciliation retries a missed
+    launch-race interrupt, then force-stops only a run whose graceful window
+    expired. Ordinary Stop requests retain their existing explicit second-click
+    escalation semantics.
+    """
+    workflow_ids = [
+        workflow.pk
+        for workflow in workflows
+        if workflow.kind == SystemWorkflow.KIND_PR_QA
+        and workflow.step == STEP_USER_STEERING_RUNNING
+        and workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
+    ]
+    if not workflow_ids:
+        return
+    now = timezone.now()
+    stale_before = now - _USER_STEERING_INTERRUPT_GRACE
+    instances = CodexInstance.objects.filter(
+        workflow_id__in=workflow_ids,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        agent_kind__in=(
+            *_QA_INTERRUPTIBLE_AGENT_KINDS,
+            PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        ),
+        status__in=CodexInstance.ACTIVE_STATUSES,
+    ).order_by("started_at", "id")
+    for instance in instances:
+        workflow_id = instance.workflow_id
+        if workflow_id is None:
+            continue
+        workflow = SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            kind=SystemWorkflow.KIND_PR_QA,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=STEP_USER_STEERING_RUNNING,
+        ).first()
+        if (
+            workflow is None
+            or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is True
+        ):
+            continue
+        if instance.interrupt_requested_at is None:
+            if workflow.updated_at > stale_before:
+                continue
+            codex_pool.interrupt_instance(
+                instance.pk,
+                expected_thread_id=instance.thread_id,
+            )
+            continue
+        if instance.interrupt_requested_at > stale_before:
+            continue
+        codex_pool.interrupt_instance(
+            instance.pk,
+            expected_thread_id=instance.thread_id,
+            force=True,
+            error="hidden workflow run superseded by user steering",
+        )
 
 
 def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:

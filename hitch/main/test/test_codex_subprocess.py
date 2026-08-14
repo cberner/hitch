@@ -5399,6 +5399,31 @@ class InterruptInstanceTests(TestCase):
         self.assertIsNone(bystander.interrupt_requested_at)
         self.assertEqual(bystander.status, CodexInstance.STATUS_RUNNING)
 
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    def test_internal_force_interrupt_skips_graceful_signal(
+        self,
+        mock_kill: MagicMock,
+        mock_killpg: MagicMock,
+        _mock_identity: MagicMock,
+    ) -> None:
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_instance(
+            instance.pk,
+            expected_thread_id="t",
+            force=True,
+            error="superseded by steering",
+        )
+
+        self.assertIsNotNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "superseded by steering")
+
     def test_unknown_instance_returns_none(self) -> None:
         # A stale form value for a row that's been deleted (or never
         # existed) must not 500 the stop endpoint.
