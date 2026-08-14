@@ -17,7 +17,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast, override
+from typing import Any, Literal, cast, override
 
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
@@ -121,7 +121,9 @@ _AUTO_PROPOSAL_QUOTA_CACHE_TTL = timedelta(minutes=5)
 
 _quota_cache_lock = threading.Lock()
 
-_quota_cache_paused = False
+AutoProposalQuotaStatus = Literal["available", "low", "unavailable"]
+
+_quota_cache_status: AutoProposalQuotaStatus = "available"
 
 _quota_cache_checked_at: datetime | None = None
 
@@ -306,28 +308,34 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
 def _reset_auto_proposal_quota_cache() -> None:
     """Clear the throttled quota verdict. Used by tests to isolate the
     module-level cache between cases."""
-    global _quota_cache_paused, _quota_cache_checked_at
+    global _quota_cache_status, _quota_cache_checked_at
     with _quota_cache_lock:
-        _quota_cache_paused = False
+        _quota_cache_status = "available"
         _quota_cache_checked_at = None
 
 def _auto_proposals_paused_by_usage_quota_throttled() -> bool:
-    """Return the quota pause verdict, refreshing the remote check at most once
+    return _auto_proposal_quota_status_throttled() != "available"
+
+def _auto_proposal_quota_status_throttled() -> AutoProposalQuotaStatus:
+    """Return quota status, refreshing the remote check at most once
     per ``_AUTO_PROPOSAL_QUOTA_CACHE_TTL`` so the minute-cadence scheduler does
     not poll the Codex rate-limit endpoint every tick."""
-    global _quota_cache_paused, _quota_cache_checked_at
+    global _quota_cache_status, _quota_cache_checked_at
     with _quota_cache_lock:
         now = timezone.now()
         if (
             _quota_cache_checked_at is not None
             and now - _quota_cache_checked_at < _AUTO_PROPOSAL_QUOTA_CACHE_TTL
         ):
-            return _quota_cache_paused
-        _quota_cache_paused = _auto_proposals_paused_by_usage_quota()
+            return _quota_cache_status
+        _quota_cache_status = _auto_proposal_quota_status()
         _quota_cache_checked_at = now
-        return _quota_cache_paused
+        return _quota_cache_status
 
 def _auto_proposals_paused_by_usage_quota() -> bool:
+    return _auto_proposal_quota_status() != "available"
+
+def _auto_proposal_quota_status() -> AutoProposalQuotaStatus:
     try:
         with app_server_pool.borrow_codex(Codex) as codex:
             response = codex._client.request(
@@ -335,39 +343,62 @@ def _auto_proposals_paused_by_usage_quota() -> bool:
                 None,
                 response_model=GetAccountRateLimitsResponse,
             )
+        return _auto_proposal_quota_status_from_rate_limits(
+            response.rate_limits,
+            now=timezone.now(),
+        )
     except CodexError:
-        return False
+        # Automatic work must fail closed when the account snapshot is
+        # unavailable. A manual Run bypasses this scheduler guard, so users can
+        # still explicitly override an unverified quota state.
+        return "unavailable"
     except Exception:
         system_agents.logger.exception(
-            "failed to fetch account rate limits for auto-proposal quota pause"
+            "failed to verify account rate limits for auto-proposal quota pause"
         )
-        return False
+        return "unavailable"
 
-    now = timezone.now()
-    for window in (response.rate_limits.primary, response.rate_limits.secondary):
-        if window is not None and _rate_limit_window_below_auto_proposal_quota(
-            window, now=now
-        ):
-            return True
-    return False
+
+def _auto_proposal_quota_status_from_rate_limits(
+    rate_limits: Any, *, now: datetime
+) -> AutoProposalQuotaStatus:
+    windows = tuple(
+        window
+        for window in (rate_limits.primary, rate_limits.secondary)
+        if window is not None
+    )
+    statuses = tuple(
+        _rate_limit_window_auto_proposal_quota_status(window, now=now)
+        for window in windows
+    )
+    if "low" in statuses:
+        return "low"
+    if not statuses or None in statuses:
+        return "unavailable"
+    return "available"
 
 def _rate_limit_window_below_auto_proposal_quota(
     window: Any, *, now: datetime
 ) -> bool:
+    return _rate_limit_window_auto_proposal_quota_status(window, now=now) == "low"
+
+def _rate_limit_window_auto_proposal_quota_status(
+    window: Any, *, now: datetime
+) -> Literal["available", "low"] | None:
     used_percent = getattr(window, "used_percent", None)
     resets_at = getattr(window, "resets_at", None)
     duration_mins = getattr(window, "window_duration_mins", None)
     if used_percent is None or resets_at is None or duration_mins is None:
-        return False
+        return None
 
     try:
         used = float(used_percent)
         reset_timestamp = float(resets_at)
         duration_seconds = float(duration_mins) * system_agents._SECONDS_PER_MINUTE
     except (TypeError, ValueError):
-        return False
+        return None
     if duration_seconds <= 0:
-        return False
+        return None
 
     if timezone.is_naive(now):
         now = now.replace(tzinfo=UTC)
@@ -380,7 +411,7 @@ def _rate_limit_window_below_auto_proposal_quota(
     pause_threshold = (
         expected_remaining_percent * _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION
     )
-    return remaining_percent < pause_threshold
+    return "low" if remaining_percent < pause_threshold else "available"
 
 def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
     autonomous_goal = (

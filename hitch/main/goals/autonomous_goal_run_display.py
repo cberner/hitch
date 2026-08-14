@@ -39,6 +39,7 @@ AutonomousGoalRunState = Literal[
     "maxed",
     "queued",
     "quota",
+    "quota-unavailable",
     "ready",
     "review",
     "running",
@@ -73,10 +74,11 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         goals,
         continuable_stack_goal_ids=pending_proposal_state.continuable_stack_goal_ids,
     )
-    auto_proposals_paused_by_quota = (
-        any(goal.auto_proposal_enabled for goal in goals)
-        and autonomous_goals._auto_proposals_paused_by_usage_quota_throttled()
-    )
+    auto_proposal_quota_status: autonomous_goals.AutoProposalQuotaStatus = "available"
+    if any(goal.auto_proposal_enabled for goal in goals):
+        auto_proposal_quota_status = (
+            autonomous_goals._auto_proposal_quota_status_throttled()
+        )
     # Only the newest workflow per goal is displayed, but auto-proposal
     # creates a workflow per scheduler run and nothing prunes terminal rows
     # -- materializing the full history (each row carrying a multi-KB state
@@ -132,7 +134,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
             autonomous_goal_queue_busy=autonomous_goal_queue_busy,
             no_change_goal_ids=no_change_goal_ids,
-            auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
+            auto_proposal_quota_status=auto_proposal_quota_status,
         )
         goal.run_status_state = run_badge.state  # type: ignore[attr-defined]
         goal.run_status_label = run_badge.label  # type: ignore[attr-defined]
@@ -181,7 +183,7 @@ def _autonomous_goal_run_badge(
     accepted_session_blocking_goal_ids: set[int],
     autonomous_goal_queue_busy: bool,
     no_change_goal_ids: set[int],
-    auto_proposals_paused_by_quota: bool,
+    auto_proposal_quota_status: autonomous_goals.AutoProposalQuotaStatus,
 ) -> AutonomousGoalRunBadge:
     if goal.pk in accepted_session_blocking_goal_ids:
         return AutonomousGoalRunBadge(
@@ -256,7 +258,18 @@ def _autonomous_goal_run_badge(
                 "for the tracked branch. It will try again after that branch changes."
             ),
         )
-    if goal.auto_proposal_enabled and auto_proposals_paused_by_quota:
+    if goal.auto_proposal_enabled and auto_proposal_quota_status == "unavailable":
+        return AutonomousGoalRunBadge(
+            state="quota-unavailable",
+            label="Quota unavailable",
+            title="Autonomous goal quota could not be checked",
+            detail=(
+                "Not running because Codex quota could not be checked. Automatic "
+                "work will remain paused until quota is available; use Run to "
+                "start this goal manually."
+            ),
+        )
+    if goal.auto_proposal_enabled and auto_proposal_quota_status == "low":
         return AutonomousGoalRunBadge(
             state="quota",
             label="Quota",
