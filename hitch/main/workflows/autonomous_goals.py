@@ -370,10 +370,10 @@ def _auto_proposal_quota_status_from_rate_limits(
         )
         for window in (rate_limits.primary, rate_limits.secondary)
     )
-    if "low" in statuses:
-        return "low"
     if None in statuses:
         return "unavailable"
+    if "low" in statuses:
+        return "low"
     return "available"
 
 def _rate_limit_window_below_auto_proposal_quota(
