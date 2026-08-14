@@ -46,10 +46,10 @@ class AutonomousGoalViewTests(TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.quota_patcher = patch(
-            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota_throttled",
-            return_value=False,
+            "hitch.main.workflows.autonomous_goals._auto_proposal_quota_status_throttled",
+            return_value="available",
         )
-        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.mock_auto_proposal_quota_status = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
 
     def _create_running_auto_proposal(self, *, repo_path: str = "/other") -> None:
@@ -638,7 +638,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_shows_quota_pause_instead_of_completed_run(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        self.mock_auto_proposals_paused_by_quota.return_value = True
+        self.mock_auto_proposal_quota_status.return_value = "low"
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
@@ -670,6 +670,31 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "remaining Codex quota is below")
         self.assertNotContains(response, ">Done</button>", html=False)
         self.assertNotContains(response, "The last run proposed useful work.")
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
+    def test_page_explains_when_quota_cannot_be_checked(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        self.mock_auto_proposal_quota_status.return_value = "unavailable"
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="quota-unavailable"')
+        self.assertContains(response, ">Quota unavailable</button>", html=False)
+        self.assertContains(response, "Codex quota could not be checked")
+        self.assertContains(response, "use Run to start this goal manually")
+        self.assertNotContains(response, "remaining Codex quota is below")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -1180,7 +1205,7 @@ class AutonomousGoalViewTests(TestCase):
     def test_page_keeps_quota_reason_when_auto_proposal_runs_elsewhere(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        self.mock_auto_proposals_paused_by_quota.return_value = True
+        self.mock_auto_proposal_quota_status.return_value = "low"
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)

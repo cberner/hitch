@@ -21,6 +21,7 @@ from django.db import (
 )
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
+from openai_codex import CodexError
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     GetAccountRateLimitsResponse,
@@ -14154,39 +14155,68 @@ class AutoProposalQuotaPauseTests(TestCase):
             )
         )
 
-        paused = autonomous_goals._auto_proposals_paused_by_usage_quota()
+        status = autonomous_goals._auto_proposal_quota_status()
 
-        self.assertTrue(paused)
+        self.assertEqual(status, "low")
         ctx._client.request.assert_called_once_with(
             "account/rateLimits/read",
             None,
             response_model=GetAccountRateLimitsResponse,
         )
 
+    @patch("hitch.main.workflows.autonomous_goals.Codex")
+    def test_auto_proposal_quota_is_unavailable_without_usable_windows(
+        self, mock_codex: MagicMock
+    ) -> None:
+        ctx = mock_codex.return_value.__enter__.return_value
+        ctx._client.request.return_value = SimpleNamespace(
+            rate_limits=SimpleNamespace(primary=None, secondary=None)
+        )
+
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status(), "unavailable"
+        )
+
+    @patch("hitch.main.workflows.autonomous_goals.app_server_pool.borrow_codex")
+    def test_auto_proposal_quota_pause_fails_closed_when_unavailable(
+        self, mock_borrow_codex: MagicMock
+    ) -> None:
+        mock_borrow_codex.return_value.__enter__.side_effect = CodexError(
+            "rate limits unavailable"
+        )
+
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status(), "unavailable"
+        )
+
     @patch("hitch.main.workflows.system_agents.timezone.now")
-    @patch("hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota")
+    @patch("hitch.main.workflows.autonomous_goals._auto_proposal_quota_status")
     def test_quota_throttle_caches_verdict_within_ttl(
         self, mock_quota: MagicMock, mock_now: MagicMock
     ) -> None:
         autonomous_goals._reset_auto_proposal_quota_cache()
         self.addCleanup(autonomous_goals._reset_auto_proposal_quota_cache)
         start = datetime(2026, 1, 1, tzinfo=UTC)
-        mock_quota.return_value = True
+        mock_quota.return_value = "low"
 
         mock_now.return_value = start
-        self.assertTrue(autonomous_goals._auto_proposals_paused_by_usage_quota_throttled())
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status_throttled(), "low"
+        )
 
         # A second call one minute later reuses the cached verdict without
-        # re-querying, even though the underlying check would now say False.
-        mock_quota.return_value = False
+        # re-querying, even though the underlying check would now say available.
+        mock_quota.return_value = "available"
         mock_now.return_value = start + timedelta(minutes=1)
-        self.assertTrue(autonomous_goals._auto_proposals_paused_by_usage_quota_throttled())
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status_throttled(), "low"
+        )
         mock_quota.assert_called_once()
 
         # Past the TTL the remote check runs again and the verdict refreshes.
         mock_now.return_value = start + timedelta(minutes=6)
-        self.assertFalse(
-            autonomous_goals._auto_proposals_paused_by_usage_quota_throttled()
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status_throttled(), "available"
         )
         self.assertEqual(mock_quota.call_count, 2)
 
@@ -14197,10 +14227,10 @@ class AutonomousGoalAutoProposalConcurrencyTests(TransactionTestCase):
         super().setUp()
         autonomous_goals._reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
-            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota",
-            return_value=False,
+            "hitch.main.workflows.autonomous_goals._auto_proposal_quota_status",
+            return_value="available",
         )
-        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.mock_auto_proposal_quota_status = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
         self.worktree_patcher = patch(
             "hitch.main.workflows.autonomous_goals.create_worktree_for_session",
@@ -14298,10 +14328,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         super().setUp()
         autonomous_goals._reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
-            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota",
-            return_value=False,
+            "hitch.main.workflows.autonomous_goals._auto_proposal_quota_status",
+            return_value="available",
         )
-        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.mock_auto_proposal_quota_status = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
         self.worktree_patcher = patch(
             "hitch.main.workflows.autonomous_goals.create_worktree_for_session",
@@ -18322,7 +18352,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     def test_auto_proposal_pauses_when_usage_quota_is_low(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
-        self.mock_auto_proposals_paused_by_quota.return_value = True
+        self.mock_auto_proposal_quota_status.return_value = "low"
         project = _make_project()
         AutonomousGoal.objects.create(
             project=project,
