@@ -362,18 +362,17 @@ def _auto_proposal_quota_status() -> AutoProposalQuotaStatus:
 def _auto_proposal_quota_status_from_rate_limits(
     rate_limits: Any, *, now: datetime
 ) -> AutoProposalQuotaStatus:
-    windows = tuple(
-        window
-        for window in (rate_limits.primary, rate_limits.secondary)
-        if window is not None
-    )
     statuses = tuple(
-        _rate_limit_window_auto_proposal_quota_status(window, now=now)
-        for window in windows
+        (
+            _rate_limit_window_auto_proposal_quota_status(window, now=now)
+            if window is not None
+            else None
+        )
+        for window in (rate_limits.primary, rate_limits.secondary)
     )
     if "low" in statuses:
         return "low"
-    if not statuses or None in statuses:
+    if None in statuses:
         return "unavailable"
     return "available"
 
