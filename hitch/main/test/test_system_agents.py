@@ -14108,6 +14108,23 @@ class SpecCriticWorkflowTests(TestCase):
 
 
 class AutoProposalQuotaPauseTests(TestCase):
+    @patch("hitch.main.workflows.autonomous_goals._auto_proposal_quota_status")
+    def test_unthrottled_quota_pause_maps_statuses(
+        self, mock_quota_status: MagicMock
+    ) -> None:
+        for status, expected_paused in (
+            ("available", False),
+            ("low", True),
+            ("unavailable", True),
+        ):
+            with self.subTest(status=status):
+                mock_quota_status.return_value = status
+
+                self.assertIs(
+                    autonomous_goals._auto_proposals_paused_by_usage_quota(),
+                    expected_paused,
+                )
+
     def test_rate_limit_window_pauses_below_half_linear_remaining_threshold(
         self,
     ) -> None:
@@ -14198,6 +14215,62 @@ class AutoProposalQuotaPauseTests(TestCase):
 
                 self.assertEqual(status, "unavailable")
 
+    def test_auto_proposal_quota_is_available_with_verified_windows(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        primary = SimpleNamespace(
+            used_percent=0,
+            resets_at=int((now + timedelta(hours=5)).timestamp()),
+            window_duration_mins=5 * 60,
+        )
+        secondary = SimpleNamespace(
+            used_percent=0,
+            resets_at=int((now + timedelta(days=7)).timestamp()),
+            window_duration_mins=7 * 24 * 60,
+        )
+
+        status = autonomous_goals._auto_proposal_quota_status_from_rate_limits(
+            SimpleNamespace(primary=primary, secondary=secondary),
+            now=now,
+        )
+
+        self.assertEqual(status, "available")
+
+    def test_auto_proposal_quota_is_unavailable_with_malformed_weekly_window(
+        self,
+    ) -> None:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        primary = SimpleNamespace(
+            used_percent=0,
+            resets_at=int((now + timedelta(hours=5)).timestamp()),
+            window_duration_mins=5 * 60,
+        )
+        weekly_reset = int((now + timedelta(days=7)).timestamp())
+        malformed_windows = {
+            "missing duration": SimpleNamespace(
+                used_percent=0,
+                resets_at=weekly_reset,
+            ),
+            "nonnumeric usage": SimpleNamespace(
+                used_percent="unknown",
+                resets_at=weekly_reset,
+                window_duration_mins=7 * 24 * 60,
+            ),
+            "nonpositive duration": SimpleNamespace(
+                used_percent=0,
+                resets_at=weekly_reset,
+                window_duration_mins=0,
+            ),
+        }
+
+        for case, secondary in malformed_windows.items():
+            with self.subTest(case=case):
+                status = autonomous_goals._auto_proposal_quota_status_from_rate_limits(
+                    SimpleNamespace(primary=primary, secondary=secondary),
+                    now=now,
+                )
+
+                self.assertEqual(status, "unavailable")
+
     @patch("hitch.main.workflows.autonomous_goals.app_server_pool.borrow_codex")
     def test_auto_proposal_quota_pause_fails_closed_when_unavailable(
         self, mock_borrow_codex: MagicMock
@@ -14208,6 +14281,21 @@ class AutoProposalQuotaPauseTests(TestCase):
 
         self.assertEqual(
             autonomous_goals._auto_proposal_quota_status(), "unavailable"
+        )
+
+    @patch("hitch.main.workflows.system_agents.logger")
+    @patch("hitch.main.workflows.autonomous_goals.app_server_pool.borrow_codex")
+    def test_auto_proposal_quota_pause_fails_closed_on_malformed_response(
+        self, mock_borrow_codex: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        ctx = mock_borrow_codex.return_value.__enter__.return_value
+        ctx._client.request.return_value = SimpleNamespace(rate_limits=object())
+
+        self.assertEqual(
+            autonomous_goals._auto_proposal_quota_status(), "unavailable"
+        )
+        mock_logger.exception.assert_called_once_with(
+            "failed to verify account rate limits for auto-proposal quota pause"
         )
 
     @patch("hitch.main.workflows.system_agents.timezone.now")
