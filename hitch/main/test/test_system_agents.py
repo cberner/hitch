@@ -14146,7 +14146,11 @@ class AutoProposalQuotaPauseTests(TestCase):
         ctx = mock_codex.return_value.__enter__.return_value
         ctx._client.request.return_value = SimpleNamespace(
             rate_limits=SimpleNamespace(
-                primary=None,
+                primary=SimpleNamespace(
+                    used_percent=0,
+                    resets_at=int((now + timedelta(hours=5)).timestamp()),
+                    window_duration_mins=5 * 60,
+                ),
                 secondary=SimpleNamespace(
                     used_percent=76,
                     resets_at=int((now + timedelta(days=3, hours=12)).timestamp()),
@@ -14179,18 +14183,20 @@ class AutoProposalQuotaPauseTests(TestCase):
 
     def test_auto_proposal_quota_is_unavailable_without_weekly_window(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=UTC)
-        primary = SimpleNamespace(
-            used_percent=0,
-            resets_at=int((now + timedelta(hours=5)).timestamp()),
-            window_duration_mins=5 * 60,
-        )
+        for primary_used_percent in (0, 51):
+            with self.subTest(primary_used_percent=primary_used_percent):
+                primary = SimpleNamespace(
+                    used_percent=primary_used_percent,
+                    resets_at=int((now + timedelta(hours=5)).timestamp()),
+                    window_duration_mins=5 * 60,
+                )
 
-        status = autonomous_goals._auto_proposal_quota_status_from_rate_limits(
-            SimpleNamespace(primary=primary, secondary=None),
-            now=now,
-        )
+                status = autonomous_goals._auto_proposal_quota_status_from_rate_limits(
+                    SimpleNamespace(primary=primary, secondary=None),
+                    now=now,
+                )
 
-        self.assertEqual(status, "unavailable")
+                self.assertEqual(status, "unavailable")
 
     @patch("hitch.main.workflows.autonomous_goals.app_server_pool.borrow_codex")
     def test_auto_proposal_quota_pause_fails_closed_when_unavailable(
