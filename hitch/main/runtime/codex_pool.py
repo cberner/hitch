@@ -589,7 +589,11 @@ def interrupt_active(thread_id: str) -> CodexInstance | None:
 
 
 def interrupt_instance(
-    instance_id: int, *, expected_thread_id: str
+    instance_id: int,
+    *,
+    expected_thread_id: str,
+    force: bool = False,
+    error: str | None = None,
 ) -> CodexInstance | None:
     """Stop a specific worker, identified by its primary key.
 
@@ -604,9 +608,13 @@ def interrupt_instance(
     so a tampered/stale post can't be used to stop a worker that
     belongs to a different thread.
 
-    Returns None when the instance is unknown, belongs to a different
-    thread, has already reached a terminal status, is still launching
-    (pid unset), or could not be signaled.
+    ``force`` is reserved for internal workflow recovery after a bounded
+    graceful-interrupt window. It skips the first-click SIGTERM path while
+    retaining the same worker-identity checks and terminal-row update.
+
+    Returns None when the instance is unknown, belongs to a different thread,
+    has already reached a terminal status, is still launching (pid unset), or
+    could not be signaled.
     """
     try:
         instance = CodexInstance.objects.get(pk=instance_id)
@@ -616,7 +624,7 @@ def interrupt_instance(
         return None
     if not instance.is_active:
         return None
-    return _interrupt_instance(instance)
+    return _interrupt_instance(instance, force=force, error=error)
 
 
 def steer_active(
@@ -799,7 +807,12 @@ def _append_control_request(instance: CodexInstance, payload: dict[str, Any]) ->
         fh.write(line.encode("utf-8"))
 
 
-def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
+def _interrupt_instance(
+    instance: CodexInstance,
+    *,
+    force: bool = False,
+    error: str | None = None,
+) -> CodexInstance | None:
     """Stop one worker, escalating SIGTERM → SIGKILL on a second click.
 
     The first Stop request sends SIGTERM to the worker (not its group).
@@ -844,9 +857,9 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
         # target for either SIGTERM or SIGKILL, but the leftover row
         # still has to be flipped to failed so the UI exits streaming
         # mode rather than waiting on ``reconcile_dead``.
-        return _mark_failed(instance, "interrupted by user")
+        return _mark_failed(instance, error or "interrupted by user")
 
-    if instance.interrupt_requested_at is None:
+    if not force and instance.interrupt_requested_at is None:
         # First click: polite interrupt. Signal only the worker (not
         # the group) — the worker's handler turns this into an SDK
         # ``turn.interrupt()`` and lets the app-server emit its
@@ -884,7 +897,7 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
         pass
     except OSError:
         return None
-    return _mark_failed(instance, "forcibly stopped by user")
+    return _mark_failed(instance, error or "forcibly stopped by user")
 
 
 def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:

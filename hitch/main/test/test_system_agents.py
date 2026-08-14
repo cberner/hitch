@@ -11882,6 +11882,138 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    def test_reconcile_force_stops_stale_qa_interrupt_for_user_steering(
+        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+            state={
+                "next_user_message_index": 1,
+                "user_steering_prompt": "answer the follow-up",
+                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
+                "user_steering_message_index": 1,
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 1,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_USER_STEERING_RUNNING
+                ),
+            },
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=(
+                datetime.now(UTC)
+                - system_agents._USER_STEERING_INTERRUPT_GRACE
+                - timedelta(seconds=1)
+            )
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        def force_interrupt(
+            instance_id: int,
+            *,
+            expected_thread_id: str,
+            force: bool = False,
+            error: str | None = None,
+        ) -> CodexInstance:
+            self.assertEqual(instance_id, instance.pk)
+            self.assertEqual(expected_thread_id, instance.thread_id)
+            self.assertTrue(force)
+            self.assertEqual(
+                error, "hidden workflow run superseded by user steering"
+            )
+            CodexInstance.objects.filter(pk=instance_id).update(
+                status=CodexInstance.STATUS_FAILED,
+                ended_at=datetime.now(UTC),
+                error=error or "",
+            )
+            return CodexInstance.objects.get(pk=instance_id)
+
+        mock_interrupt.side_effect = force_interrupt
+        mock_spawn.side_effect = lambda **kwargs: _instance(
+            thread_id=kwargs["thread_id"],
+            purpose=kwargs["purpose"],
+            workflow_id=kwargs["workflow_id"],
+            status=CodexInstance.STATUS_RUNNING,
+            user_message_index=kwargs["user_message_index"],
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_interrupt.assert_called_once_with(
+            instance.pk,
+            expected_thread_id=instance.thread_id,
+            force=True,
+            error="hidden workflow run superseded by user steering",
+        )
+        instance.refresh_from_db()
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(
+            run.error, "stale QA review superseded by a user steering message"
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "answer the follow-up")
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["purpose"], CodexInstance.PURPOSE_USER
+        )
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    def test_reconcile_leaves_fresh_user_steering_interrupt_graceful(
+        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+            state={"user_steering_prompt": "answer the follow-up"},
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=datetime.now(UTC)
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 0)
+        mock_interrupt.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_user_steering_turn_keeps_uninterrupted_qa_run_running(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock
     ) -> None:
