@@ -12012,6 +12012,65 @@ class SpecCriticWorkflowTests(TestCase):
         mock_interrupt.assert_not_called()
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    def test_escalation_retries_stale_interrupt_launch_race(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=(
+                datetime.now(UTC)
+                - system_agents._USER_STEERING_INTERRUPT_GRACE
+                - timedelta(seconds=1)
+            )
+        )
+        workflow.refresh_from_db()
+
+        system_agents._escalate_stale_user_steering_interrupts([workflow])
+
+        mock_interrupt.assert_called_once_with(
+            instance.pk, expected_thread_id=instance.thread_id
+        )
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    def test_escalation_skips_workflow_stopped_after_snapshot(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+        )
+        _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            state={system_agents._WORKFLOW_STOP_REQUESTED_STATE_KEY: True}
+        )
+
+        system_agents._escalate_stale_user_steering_interrupts([workflow])
+
+        mock_interrupt.assert_not_called()
+
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_user_steering_turn_keeps_uninterrupted_qa_run_running(

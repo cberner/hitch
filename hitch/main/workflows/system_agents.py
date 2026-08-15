@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, override
+from typing import Any, cast, override
 
 from django.db import models, transaction
 from django.db.models import QuerySet
@@ -618,9 +618,7 @@ def _escalate_stale_user_steering_interrupts(
         status__in=CodexInstance.ACTIVE_STATUSES,
     ).order_by("started_at", "id")
     for instance in instances:
-        workflow_id = instance.workflow_id
-        if workflow_id is None:
-            continue
+        workflow_id = cast(int, instance.workflow_id)
         workflow = SystemWorkflow.objects.filter(
             pk=workflow_id,
             kind=SystemWorkflow.KIND_PR_QA,
