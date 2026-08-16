@@ -775,8 +775,17 @@ class SessionDetailFastPathTests(TestCase):
                     {
                         "type": "function_call",
                         "name": "exec_command",
-                        "arguments": json.dumps({"cmd": "printf lazy-loaded-command"}),
-                        "call_id": "call-lazy",
+                        "arguments": json.dumps({"cmd": "printf lazy-loaded-first"}),
+                        "call_id": "call-lazy-first",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf lazy-loaded-latest"}),
+                        "call_id": "call-lazy-latest",
                     },
                 ),
                 _rollout_line(
@@ -816,7 +825,7 @@ class SessionDetailFastPathTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "1 tool call")
+        self.assertContains(response, "2 command messages")
         self.assertContains(
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
@@ -827,9 +836,11 @@ class SessionDetailFastPathTests(TestCase):
                 kwargs={"session_id": "lazy-intermediate", "entry_index": 1},
             ),
         )
-        self.assertNotContains(response, "printf lazy-loaded-command")
+        self.assertNotContains(response, "printf lazy-loaded-first")
+        self.assertContains(response, "printf lazy-loaded-latest")
         self.assertEqual(fragment.status_code, 200)
-        self.assertContains(fragment, "printf lazy-loaded-command")
+        self.assertContains(fragment, "printf lazy-loaded-first")
+        self.assertContains(fragment, "printf lazy-loaded-latest")
         self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()
 
@@ -850,7 +861,16 @@ class SessionDetailFastPathTests(TestCase):
                         "type": "function_call",
                         "name": "exec_command",
                         "arguments": json.dumps({"cmd": "printf first-command"}),
-                        "call_id": "call-race",
+                        "call_id": "call-race-first",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf second-command"}),
+                        "call_id": "call-race-second",
                     },
                 ),
             ],
@@ -905,6 +925,7 @@ class SessionDetailFastPathTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(fragment, "first-command")
+        self.assertContains(fragment, "second-command")
         self.assertContains(fragment, "appended-command")
         mock_codex.assert_not_called()
 
@@ -925,8 +946,17 @@ class SessionDetailFastPathTests(TestCase):
                     {
                         "type": "function_call",
                         "name": "exec_command",
-                        "arguments": json.dumps({"cmd": "printf active-lazy-command"}),
-                        "call_id": "call-active-lazy",
+                        "arguments": json.dumps({"cmd": "printf active-lazy-first"}),
+                        "call_id": "call-active-lazy-first",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf active-lazy-latest"}),
+                        "call_id": "call-active-lazy-latest",
                     },
                 ),
                 _rollout_line(
@@ -981,10 +1011,12 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
-        self.assertContains(response, "1 tool call")
-        self.assertNotContains(response, "printf active-lazy-command")
+        self.assertContains(response, "2 command messages")
+        self.assertNotContains(response, "printf active-lazy-first")
+        self.assertContains(response, "printf active-lazy-latest")
         self.assertEqual(fragment.status_code, 200)
-        self.assertContains(fragment, "printf active-lazy-command")
+        self.assertContains(fragment, "printf active-lazy-first")
+        self.assertContains(fragment, "printf active-lazy-latest")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -1017,15 +1049,37 @@ class SessionDetailFastPathTests(TestCase):
             {"kind": "user", "text": "Run a command"},
             {
                 "kind": "intermediate",
-                "thinking_count": 0,
-                "tool_call_count": 1,
+                "reasoning_count": 0,
+                "command_count": 2,
+                "item_count": 2,
                 "items": [
                     {
                         "kind": "tool_call",
+                        "type": "commandExecution",
                         "label": "Command",
-                        "detail": "printf sdk-fallback-command",
+                        "detail": "printf sdk-fallback-first",
+                    },
+                    {
+                        "kind": "tool_call",
+                        "type": "commandExecution",
+                        "label": "Command",
+                        "detail": "printf sdk-fallback-latest",
+                    },
+                ],
+                "earlier_items": [
+                    {
+                        "kind": "tool_call",
+                        "type": "commandExecution",
+                        "label": "Command",
+                        "detail": "printf sdk-fallback-first",
                     }
                 ],
+                "latest_item": {
+                    "kind": "tool_call",
+                    "type": "commandExecution",
+                    "label": "Command",
+                    "detail": "printf sdk-fallback-latest",
+                },
             },
             {"kind": "agent", "text": "Done."},
         ]
@@ -1046,7 +1100,8 @@ class SessionDetailFastPathTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "printf sdk-fallback-command")
+        self.assertContains(response, "printf sdk-fallback-first")
+        self.assertContains(response, "printf sdk-fallback-latest")
         self.assertNotContains(
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
@@ -1072,6 +1127,9 @@ class SessionDetailFastPathTests(TestCase):
                         "arguments": json.dumps({"cmd": "printf demo-only-command"}),
                         "call_id": "call-demo",
                     },
+                ),
+                _rollout_line(
+                    "event_msg", {"type": "agent_reasoning", "text": "demo reasoning"}
                 ),
                 _rollout_line(
                     "response_item",

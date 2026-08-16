@@ -54,6 +54,12 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     body.innerHTML = await response.text();
                     formatTimestamps(body);
+                    const latest = details.parentElement
+                        ? details.parentElement.querySelector("[data-intermediate-latest]")
+                        : null;
+                    const loadedItems = body.querySelectorAll(":scope > .entry");
+                    const latestItem = loadedItems[loadedItems.length - 1];
+                    if (latest && latestItem) latest.replaceChildren(latestItem);
                     details.dataset.loaded = "true";
                 } catch (_error) {
                     body.textContent = "Unable to load details.";
@@ -934,6 +940,7 @@
             // node so deltas append directly.
             const items = new Map();
             const planViews = new Map();
+            let liveActivityRun = null;
             const taskPlan = document.querySelector("[data-task-plan]");
             const taskPlanToggle = taskPlan && taskPlan.querySelector("[data-task-plan-toggle]");
             const taskPlanCurrent = taskPlan && taskPlan.querySelector("[data-task-plan-current]");
@@ -1043,6 +1050,18 @@
                 if (item.type === "fileChange") {
                     return demoFileChangeDetail(item.changes || []) || "Demo setup file change";
                 }
+                if (item.type === "reasoning") {
+                    return "Reasoning details hidden in demo panel.";
+                }
+                if (
+                    item.type === "mcpToolCall"
+                    || item.type === "webSearch"
+                    || item.type === "plan"
+                    || item.type === "imageView"
+                    || item.type === "imageGeneration"
+                ) {
+                    return rawToolDetail(item);
+                }
                 return "";
             }
 
@@ -1050,9 +1069,95 @@
                 if (empty && empty.parentNode) empty.remove();
             }
 
-            function insertBeforeLive(node) {
+            function placeBeforeLive(node) {
                 if (!liveRoot || !liveRoot.parentNode) return;
                 liveRoot.parentNode.insertBefore(node, liveRoot);
+            }
+
+            function insertBeforeLive(node) {
+                liveActivityRun = null;
+                placeBeforeLive(node);
+            }
+
+            function activitySummary(reasoningCount, commandCount) {
+                const parts = [];
+                if (reasoningCount) {
+                    parts.push(reasoningCount + " reasoning message" + (reasoningCount === 1 ? "" : "s"));
+                }
+                if (commandCount) {
+                    parts.push(commandCount + " command message" + (commandCount === 1 ? "" : "s"));
+                }
+                return parts.join(" and ");
+            }
+
+            function activityAction(className, text) {
+                const action = document.createElement("span");
+                action.className = "intermediate-action " + className;
+                action.textContent = text;
+                return action;
+            }
+
+            function createActivityGroup(run, nextNode, nextType) {
+                const group = document.createElement("div");
+                group.className = "intermediate-group";
+                const details = document.createElement("details");
+                details.className = "intermediate";
+                const summary = document.createElement("summary");
+                const summaryText = document.createElement("span");
+                summary.appendChild(summaryText);
+                summary.appendChild(activityAction("intermediate-action-expand", "Show all"));
+                summary.appendChild(activityAction("intermediate-action-collapse", "Show latest"));
+                const body = document.createElement("div");
+                body.className = "intermediate-body";
+                body.dataset.intermediateBody = "";
+                const latest = document.createElement("div");
+                latest.className = "intermediate-latest";
+                latest.dataset.intermediateLatest = "";
+                details.appendChild(summary);
+                details.appendChild(body);
+                group.appendChild(details);
+                group.appendChild(latest);
+
+                run.latestNode.parentNode.insertBefore(group, run.latestNode);
+                body.appendChild(run.latestNode);
+                latest.appendChild(nextNode);
+                run.group = group;
+                run.body = body;
+                run.latest = latest;
+                run.summaryText = summaryText;
+                run.latestNode = nextNode;
+                if (nextType === "reasoning") run.reasoningCount += 1;
+                if (nextType === "commandExecution") run.commandCount += 1;
+                summaryText.textContent = activitySummary(run.reasoningCount, run.commandCount);
+            }
+
+            function insertActivityBeforeLive(node, itemType) {
+                if (!liveActivityRun) {
+                    placeBeforeLive(node);
+                    liveActivityRun = {
+                        group: null,
+                        body: null,
+                        latest: null,
+                        summaryText: null,
+                        latestNode: node,
+                        reasoningCount: itemType === "reasoning" ? 1 : 0,
+                        commandCount: itemType === "commandExecution" ? 1 : 0,
+                    };
+                    return;
+                }
+                if (!liveActivityRun.group) {
+                    createActivityGroup(liveActivityRun, node, itemType);
+                    return;
+                }
+                liveActivityRun.body.appendChild(liveActivityRun.latestNode);
+                liveActivityRun.latest.appendChild(node);
+                liveActivityRun.latestNode = node;
+                if (itemType === "reasoning") liveActivityRun.reasoningCount += 1;
+                if (itemType === "commandExecution") liveActivityRun.commandCount += 1;
+                liveActivityRun.summaryText.textContent = activitySummary(
+                    liveActivityRun.reasoningCount,
+                    liveActivityRun.commandCount
+                );
             }
 
             function renderUserItem(item, timestampSeconds) {
@@ -1244,8 +1349,17 @@
                 row.appendChild(status);
                 wrap.appendChild(header);
                 wrap.appendChild(row);
-                insertBeforeLive(wrap);
-                items.set(item.id, { kind: "tool", node: wrap, rowNode: row, statusNode: status, detail });
+                if (item.type === "commandExecution" || item.type === "reasoning") {
+                    insertActivityBeforeLive(wrap, item.type);
+                } else {
+                    insertBeforeLive(wrap);
+                }
+                const entry = { kind: "tool", node: wrap, rowNode: row, statusNode: status, detail };
+                if (item.type === "reasoning") {
+                    entry.reasoningSummary = reasoningParts(item.summary);
+                    entry.reasoningContent = reasoningParts(item.content);
+                }
+                items.set(item.id, entry);
                 followRenderedContent();
             }
 
@@ -1396,11 +1510,32 @@
                 if (sessionMain) sessionMain.classList.toggle("has-task-plan", visible);
             }
 
-            function toolDetail(item) {
-                if (SANITIZE_LIVE_DETAILS) {
-                    const sanitized = sanitizedToolDetail(item);
-                    if (sanitized) return sanitized;
+            function reasoningParts(value) {
+                if (Array.isArray(value)) {
+                    return value.map((part) => typeof part === "string" ? part : "");
                 }
+                return typeof value === "string" ? [value] : [];
+            }
+
+            function firstReasoningText(summary, content) {
+                for (const parts of [summary, content]) {
+                    for (const part of parts) {
+                        if (part.trim()) return part.trim().split("\n", 1)[0];
+                    }
+                }
+                return "";
+            }
+
+            function reasoningSnapshotText(item) {
+                const text = firstReasoningText(
+                    reasoningParts(item.summary),
+                    reasoningParts(item.content)
+                );
+                if (text) return text;
+                return typeof item.text === "string" ? item.text.trim().split("\n", 1)[0] : "";
+            }
+
+            function rawToolDetail(item) {
                 switch (item.type) {
                     case "commandExecution": return item.command || "";
                     case "mcpToolCall": return (item.server || "") + " / " + (item.tool || "");
@@ -1412,8 +1547,16 @@
                     case "plan": return (item.text || "").split("\n", 1)[0];
                     case "imageView": return item.path || "";
                     case "imageGeneration": return item.revisedPrompt || item.savedPath || "";
+                    case "reasoning": return reasoningSnapshotText(item);
                     default: return "";
                 }
+            }
+
+            // All text written to live tool-detail nodes crosses this policy boundary.
+            function toolDetail(item) {
+                return SANITIZE_LIVE_DETAILS
+                    ? sanitizedToolDetail(item)
+                    : rawToolDetail(item);
             }
 
             function handleItemStarted(payload, event) {
@@ -1445,6 +1588,25 @@
                 const entry = items.get(payload.itemId);
                 if (!entry || entry.kind !== "agent") return;
                 entry.body.textContent += payload.delta || "";
+                followRenderedContent();
+            }
+
+            function handleReasoningDelta(payload, partsKey, indexKey) {
+                const entry = items.get(payload.itemId);
+                if (!entry || entry.kind !== "tool" || !entry.detail) return;
+                const delta = typeof payload.delta === "string" ? payload.delta : "";
+                if (!delta) return;
+                const rawIndex = Number(payload[indexKey]);
+                const index = Number.isSafeInteger(rawIndex) && rawIndex >= 0 ? rawIndex : 0;
+                const parts = Array.isArray(entry[partsKey]) ? entry[partsKey] : [];
+                while (parts.length <= index) parts.push("");
+                parts[index] += delta;
+                entry[partsKey] = parts;
+                entry.detail.textContent = toolDetail({
+                    type: "reasoning",
+                    summary: entry.reasoningSummary || [],
+                    content: entry.reasoningContent || [],
+                });
                 followRenderedContent();
             }
 
@@ -1500,6 +1662,10 @@
                     return;
                 }
                 if (entry.kind === "tool" && entry.statusNode) {
+                    if (item.type === "reasoning") {
+                        entry.reasoningSummary = reasoningParts(item.summary);
+                        entry.reasoningContent = reasoningParts(item.content);
+                    }
                     const status = readStatus(item);
                     entry.statusNode.classList.remove("inProgress");
                     if (status && status !== "completed") {
@@ -1958,6 +2124,12 @@
                 "item/started": (payload, parsed, order) => handleItemStarted(payload, parsed),
                 "item/agentMessage/delta": (payload, parsed, order) => handleAgentDelta(payload),
                 "item/plan/delta": (payload, parsed, order) => handlePlanDelta(payload, parsed),
+                "item/reasoning/summaryTextDelta": (payload, parsed, order) => {
+                    handleReasoningDelta(payload, "reasoningSummary", "summaryIndex");
+                },
+                "item/reasoning/textDelta": (payload, parsed, order) => {
+                    handleReasoningDelta(payload, "reasoningContent", "contentIndex");
+                },
                 "item/completed": (payload, parsed, order) => handleItemCompleted(payload, parsed),
                 "thread/goal/updated": (payload, parsed, order) => handleGoalUpdated(payload, order),
                 "thread/goal/cleared": (payload, parsed, order) => handleGoalCleared(order),

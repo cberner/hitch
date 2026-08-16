@@ -1094,7 +1094,7 @@
             background: var(--surface-2);
         }
 
-        details.intermediate {
+        .intermediate-group {
             margin: 0;
             padding: 0;
             border: 1px solid var(--border);
@@ -1103,6 +1103,12 @@
             font-size: 0.88rem;
             color: var(--text-muted);
             overflow: hidden;
+        }
+        details.intermediate {
+            margin: 0;
+            padding: 0;
+            border: 0;
+            background: transparent;
         }
         details.intermediate > summary {
             cursor: pointer;
@@ -1116,6 +1122,7 @@
             color: var(--text-muted);
             background: var(--surface-2);
             transition: background 0.12s ease;
+            border-bottom: 1px solid var(--border);
         }
         details.intermediate > summary::-webkit-details-marker { display: none; }
         details.intermediate > summary::before {
@@ -1128,9 +1135,15 @@
         }
         details.intermediate[open] > summary::before { transform: rotate(90deg); }
         details.intermediate > summary:hover { background: var(--surface-3); }
-        details.intermediate[open] > summary {
-            border-bottom: 1px solid var(--border);
+        .intermediate-action {
+            margin-left: auto;
+            color: var(--text-faint);
+            font-size: 0.74rem;
+            white-space: nowrap;
         }
+        .intermediate-action-collapse { display: none; }
+        details.intermediate[open] .intermediate-action-expand { display: none; }
+        details.intermediate[open] .intermediate-action-collapse { display: inline; }
         details.intermediate .intermediate-body {
             padding: 0.75rem 0.9rem;
             display: flex;
@@ -1139,6 +1152,13 @@
         }
         details.intermediate .intermediate-body > .entry:first-child { margin-top: 0; }
         details.intermediate .intermediate-body > .entry:last-child { margin-bottom: 0; }
+        .intermediate-latest {
+            padding: 0.75rem 0.9rem;
+            border-top: 1px solid var(--border);
+        }
+        details.intermediate:not([open]) + .intermediate-latest {
+            border-top: 0;
+        }
 
         .composer {
             position: fixed;

@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import CodexError
+from openai_codex.generated.v2_all import ReasoningThreadItem
 
 from hitch.main import caches, demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
@@ -92,7 +93,7 @@ class AutoPullTextTests(TestCase):
         )
 
 
-def _root(item: SimpleNamespace) -> SimpleNamespace:
+def _root(item: Any) -> SimpleNamespace:
     """Wrap an item to look like a pydantic RootModel from the codex SDK."""
     return SimpleNamespace(root=item)
 
@@ -130,6 +131,17 @@ def _command(command: str, status: str = "completed") -> SimpleNamespace:
             type="commandExecution",
             command=command,
             status=SimpleNamespace(value=status),
+        )
+    )
+
+
+def _reasoning(text: str) -> SimpleNamespace:
+    return _root(
+        ReasoningThreadItem(
+            id="reasoning-item",
+            type="reasoning",
+            summary=[text],
+            content=[],
         )
     )
 
@@ -1280,6 +1292,13 @@ class SessionViewTests(TestCase):
         header_timestamp_count = 0
         tool_box_timestamp_count = 0
         expandable_command_count = 0
+        activity_group_count = 0
+        first_command_hidden = False
+        latest_command_visible = False
+        reasoning_snapshot_text = ""
+        reasoning_summary_delta_text = ""
+        reasoning_content_delta_text = ""
+        latest_reasoning_visible = False
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)
@@ -1455,6 +1474,76 @@ class SessionViewTests(TestCase):
                                 },
                             },
                         });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "search-1",
+                                    type: "webSearch",
+                                    query: "public documentation",
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "reasoning-1",
+                                    type: "reasoning",
+                                    summary: ["Registration token: token-secret"],
+                                    content: ["Started SDK content with token-secret"],
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/completed",
+                            payload: {
+                                item: {
+                                    id: "reasoning-1",
+                                    type: "reasoning",
+                                    summary: ["Completed SDK summary with token-secret"],
+                                    content: ["Completed SDK content with token-secret"],
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "reasoning-2",
+                                    type: "reasoning",
+                                    summary: [],
+                                    content: [],
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/reasoning/summaryTextDelta",
+                            payload: {
+                                itemId: "reasoning-2",
+                                summaryIndex: 0,
+                                delta: "Streamed summary with token-secret",
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "reasoning-3",
+                                    type: "reasoning",
+                                    summary: [],
+                                    content: [],
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/reasoning/textDelta",
+                            payload: {
+                                itemId: "reasoning-3",
+                                contentIndex: 0,
+                                delta: "podman run --token token-secret",
+                            },
+                        });
                     }
                     """
                 )
@@ -1480,6 +1569,21 @@ class SessionViewTests(TestCase):
                 expandable_command_count = page.locator(
                     "[data-expandable-command]"
                 ).count()
+                activity_group_count = page.locator(".intermediate-group").count()
+                first_command_hidden = page.locator('[data-item-id="cmd-1"]').is_hidden()
+                latest_command_visible = page.locator('[data-item-id="cmd-2"]').is_visible()
+                reasoning_snapshot_text = page.locator(
+                    '[data-item-id="reasoning-1"] .detail'
+                ).text_content() or ""
+                reasoning_summary_delta_text = page.locator(
+                    '[data-item-id="reasoning-2"] .detail'
+                ).text_content() or ""
+                reasoning_content_delta_text = page.locator(
+                    '[data-item-id="reasoning-3"] .detail'
+                ).text_content() or ""
+                latest_reasoning_visible = page.locator(
+                    '[data-item-id="reasoning-3"]'
+                ).is_visible()
                 body = page.locator("body").inner_text()
             finally:
                 browser.close()
@@ -1490,6 +1594,14 @@ class SessionViewTests(TestCase):
         self.assertGreaterEqual(header_timestamp_count, 4)
         self.assertEqual(tool_box_timestamp_count, 0)
         self.assertEqual(expandable_command_count, 2)
+        self.assertEqual(activity_group_count, 2)
+        self.assertTrue(first_command_hidden)
+        self.assertTrue(latest_command_visible)
+        reasoning_placeholder = "Reasoning details hidden in demo panel."
+        self.assertEqual(reasoning_snapshot_text, reasoning_placeholder)
+        self.assertEqual(reasoning_summary_delta_text, reasoning_placeholder)
+        self.assertEqual(reasoning_content_delta_text, reasoning_placeholder)
+        self.assertTrue(latest_reasoning_visible)
         self.assertEqual(sum(row["className"] == "timestamp" for row in timestamp_rows), 0)
         for row in timestamp_rows:
             self.assertTrue(row["dateTime"])
@@ -1511,6 +1623,97 @@ class SessionViewTests(TestCase):
         self.assertIn("Command details hidden in demo panel.", body)
         self.assertIn("Demo setup file change approval requested. 2 files", body)
         self.assertIn("Demo setup file change", body)
+        self.assertIn("public documentation", body)
+
+    @patch("hitch.main.views.common.Codex")
+    def test_user_worker_keeps_live_reasoning_details(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt="hello",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+        html = response.content.decode()
+        self.assertIn('data-sanitize-live-details="false"', html)
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.evaluate(
+                    """
+                    () => {
+                        class MockEventSource {
+                            constructor(url) {
+                                this.url = url;
+                                this.listeners = {};
+                                window.__eventSource = this;
+                            }
+                            addEventListener(type, callback) {
+                                this.listeners[type] = callback;
+                            }
+                            close() {}
+                            emit(type, data) {
+                                this.listeners[type]({ data: JSON.stringify(data) });
+                            }
+                        }
+                        window.EventSource = MockEventSource;
+                    }
+                    """
+                )
+                page.set_content(html, wait_until="load")
+                page.wait_for_function("window.__eventSource !== undefined")
+                page.evaluate(
+                    """
+                    () => window.__eventSource.emit("message", {
+                        method: "item/started",
+                        payload: {
+                            item: {
+                                id: "reasoning-1",
+                                type: "reasoning",
+                                summary: ["Visible reasoning"],
+                                content: [],
+                            },
+                        },
+                    })
+                    """
+                )
+                detail = page.locator('[data-item-id="reasoning-1"] .detail')
+                self.assertEqual(detail.text_content(), "Visible reasoning")
+
+                page.evaluate(
+                    """
+                    () => window.__eventSource.emit("message", {
+                        method: "item/reasoning/summaryTextDelta",
+                        payload: {
+                            itemId: "reasoning-1",
+                            summaryIndex: 0,
+                            delta: " update",
+                        },
+                    })
+                    """
+                )
+                self.assertEqual(detail.text_content(), "Visible reasoning update")
+            finally:
+                browser.close()
 
     @patch("hitch.main.views.common.Codex")
     def test_input_request_focusing_other_field_keeps_selection(
@@ -2113,9 +2316,6 @@ class SessionViewTests(TestCase):
             try:
                 page = browser.new_page(viewport={"width": 480, "height": 800})
                 page.set_content(html, wait_until="load")
-                page.locator("details.intermediate").evaluate(
-                    "(el) => { el.open = true; }"
-                )
                 command = page.locator("[data-expandable-command]")
 
                 self.assertEqual(command.get_attribute("aria-expanded"), "false")
@@ -2324,8 +2524,8 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "build it")
         self.assertContains(response, "cargo build --release")
         self.assertContains(response, "done")
-        self.assertContains(response, '<details class="intermediate">')
-        self.assertContains(response, "1 thinking message and 1 tool call")
+        self.assertContains(response, ">Agent (thinking)<")
+        self.assertNotContains(response, '<details class="intermediate">')
 
     @patch("hitch.main.views.common.Codex")
     def test_rollout_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
@@ -2413,7 +2613,7 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "Pushing directly to origin/master is risky.")
         self.assertNotContains(response, "I explicitly approve")
         self.assertNotContains(response, "No, do not run this command")
-        self.assertLess(body.index("</details>"), body.index("Approval declined"))
+        self.assertLess(body.index("git push origin master"), body.index("Approval declined"))
         self.assertLess(body.index("Approval declined"), body.index("Please confirm explicitly."))
 
     @patch("hitch.main.views.common.Codex")
@@ -2701,8 +2901,8 @@ class RolloutFileViewTests(TestCase):
 
     @patch("hitch.main.views.common.Codex")
     def test_rollout_groups_multiple_turns_separately(self, mock_codex: MagicMock) -> None:
-        # Two user messages in the rollout should produce two independent
-        # intermediate blocks — one per turn — rather than one giant block.
+        # Consecutive activity in separate user turns should produce two
+        # independent groups rather than one giant block.
         rollout_lines = [
             _rollout_line("event_msg", {"type": "user_message", "message": "first ask"}),
             _rollout_line(
@@ -2714,6 +2914,9 @@ class RolloutFileViewTests(TestCase):
                     "call_id": "c1",
                 },
             ),
+            _rollout_line(
+                "event_msg", {"type": "agent_reasoning", "text": "checking first"}
+            ),
             _rollout_line("event_msg", {"type": "agent_message", "message": "first reply"}),
             _rollout_line("event_msg", {"type": "user_message", "message": "second ask"}),
             _rollout_line(
@@ -2724,6 +2927,9 @@ class RolloutFileViewTests(TestCase):
                     "arguments": json.dumps({"cmd": "echo b"}),
                     "call_id": "c2",
                 },
+            ),
+            _rollout_line(
+                "event_msg", {"type": "agent_reasoning", "text": "checking second"}
             ),
             _rollout_line("event_msg", {"type": "agent_message", "message": "second reply"}),
         ]
@@ -2739,9 +2945,8 @@ class RolloutFileViewTests(TestCase):
     def test_rollout_turn_with_only_tool_calls_has_no_final_agent(
         self, mock_codex: MagicMock
     ) -> None:
-        # An interrupted turn that produced no agent reply should still
-        # render, with the tool call(s) inside the intermediate block and no
-        # top-level agent message.
+        # An interrupted turn that produced no agent reply should still render
+        # its single command normally and have no top-level agent message.
         rollout_lines = [
             _rollout_line("event_msg", {"type": "user_message", "message": "try this"}),
             _rollout_line(
@@ -2762,7 +2967,7 @@ class RolloutFileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "try this")
         self.assertContains(response, "sleep 1")
-        self.assertContains(response, '<details class="intermediate">')
+        self.assertNotContains(response, '<details class="intermediate">')
         self.assertNotContains(response, ">Agent<")
 
     @patch("hitch.main.views.common.Codex")
@@ -2800,15 +3005,15 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "preamble")
         self.assertContains(response, "narrating")
         self.assertNotContains(response, ">Agent<")
-        self.assertContains(response, "2 thinking messages and 1 tool call")
+        self.assertContains(response, ">Agent (thinking)<", count=2)
+        self.assertNotContains(response, '<details class="intermediate">')
 
     @patch("hitch.main.views.common.Codex")
     def test_rollout_final_answer_phase_wins_over_later_unphased(
         self, mock_codex: MagicMock
     ) -> None:
         # The explicit final_answer is the final agent reply even when an
-        # un-phased agent message follows it; the trailing message folds
-        # into the post-final intermediate block.
+        # un-phased Thinking message follows it.
         rollout_lines = [
             _rollout_line("event_msg", {"type": "user_message", "message": "go"}),
             _rollout_line(
@@ -2827,19 +3032,17 @@ class RolloutFileViewTests(TestCase):
         body = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
-        # The final_answer text renders outside the <details> block...
-        self.assertLess(body.index("the answer"), body.index('<details class="intermediate"'))
-        # ...while the trailing un-phased message goes inside it.
+        self.assertLess(body.index("the answer"), body.index("post-answer note"))
         self.assertContains(response, "post-answer note")
-        self.assertContains(response, "1 thinking message")
+        self.assertContains(response, ">Agent (thinking)<")
+        self.assertNotContains(response, '<details class="intermediate">')
 
 
 class IntermediateCollapseTests(TestCase):
-    """Non-final agent messages and tool calls fold into a <details> block so
-    the page renders only the user/final-agent conversation by default."""
+    """Only consecutive command/reasoning activity collapses in transcripts."""
 
     @patch("hitch.main.views.common.Codex")
-    def test_intermediate_thinking_and_tool_calls_collapse(
+    def test_thinking_messages_stay_visible_and_split_activity_groups(
         self, mock_codex: MagicMock
     ) -> None:
         thread = _thread(
@@ -2848,8 +3051,11 @@ class IntermediateCollapseTests(TestCase):
                     [
                         _user_message("Help me out"),
                         _agent_message("Let me look at this."),
+                        _reasoning("Inspecting the code"),
                         _command("./scripts/check.sh"),
                         _agent_message("Trying something else."),
+                        _command("./scripts/check-again.sh"),
+                        _reasoning("Reviewing the result"),
                         _agent_message("Here is the answer."),
                     ]
                 ),
@@ -2862,54 +3068,103 @@ class IntermediateCollapseTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Here is the answer.")
-        self.assertContains(response, '<details class="intermediate">')
-        self.assertContains(response, "2 thinking messages and 1 tool call")
-        # Intermediate content stays in the document (collapsed, not removed).
+        self.assertContains(response, '<details class="intermediate">', count=2)
+        self.assertContains(response, "1 reasoning message and 1 command message", count=2)
         self.assertContains(response, "Let me look at this.")
         self.assertContains(response, "Trying something else.")
         self.assertContains(response, "./scripts/check.sh")
-        # <details> appears before the final agent message in source order.
-        self.assertLess(body.index("<details"), body.index("Here is the answer."))
+        self.assertContains(response, ">Agent (thinking)<", count=2)
+        self.assertLess(body.index("Let me look at this."), body.index("<details"))
+        self.assertLess(body.index("./scripts/check.sh"), body.index("Trying something else."))
 
     @patch("hitch.main.views.common.Codex")
-    def test_no_collapse_when_nothing_intermediate(
+    def test_collapsed_group_shows_only_latest_item(
         self, mock_codex: MagicMock
     ) -> None:
-        thread = _thread([_turn([_user_message("Hi"), _agent_message("Hello.")])])
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Run checks"),
+                        _command("first command"),
+                        _reasoning("latest reasoning"),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+        html = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<details class="intermediate">')
+        self.assertContains(response, "Show all")
+        self.assertContains(response, "Show latest")
+        details_start = html.index('<details class="intermediate">')
+        details_end = html.index("</details>", details_start)
+        latest_start = html.index('data-intermediate-latest', details_end)
+        latest_end = html.index("</div>\n                </div>", latest_start)
+        self.assertIn("first command", html[details_start:details_end])
+        self.assertNotIn("latest reasoning", html[details_start:details_end])
+        self.assertIn("latest reasoning", html[latest_start:latest_end])
+
+    @patch("hitch.main.views.common.Codex")
+    def test_summary_pluralization(self, mock_codex: MagicMock) -> None:
+        cases: list[tuple[list[SimpleNamespace], str]] = [
+            (
+                [
+                    _user_message("Run it"),
+                    _command("one"),
+                    _command("two"),
+                    _agent_message("Done."),
+                ],
+                "2 command messages",
+            ),
+            (
+                [
+                    _user_message("Think it through"),
+                    _reasoning("one"),
+                    _reasoning("two"),
+                    _agent_message("Final."),
+                ],
+                "2 reasoning messages",
+            ),
+        ]
+        for items, expected in cases:
+            with self.subTest(expected=expected):
+                _patch_thread(self, mock_codex, _thread([_turn(items)]))
+                response = _get_session(self.client)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, expected)
+
+    @patch("hitch.main.views.common.Codex")
+    def test_single_activity_and_other_tools_do_not_get_empty_toggles(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Run it"),
+                        _command("one"),
+                        _file_change("changed.py"),
+                        _command("two"),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
         _patch_thread(self, mock_codex, thread)
 
         response = _get_session(self.client)
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, '<details class="intermediate"')
-
-    @patch("hitch.main.views.common.Codex")
-    def test_summary_pluralization(self, mock_codex: MagicMock) -> None:
-        """The summary shows just the relevant kind(s) and pluralizes
-        correctly: 1 tool call, 1 thinking message, etc."""
-        # The "must_not_contain" pattern is anchored to ``</summary>`` so it
-        # matches only the rendered summary text — the streaming script
-        # also mentions ``tool call`` and ``thinking`` in its tool-label
-        # map and would otherwise trigger a false positive.
-        cases: list[tuple[list[SimpleNamespace], str, str]] = [
-            (
-                [_user_message("Run it"), _command("./scripts/run.sh"), _agent_message("Done.")],
-                "<summary>1 tool call</summary>",
-                "thinking message</summary>",
-            ),
-            (
-                [_user_message("Think it through"), _agent_message("Step 1."), _agent_message("Final.")],
-                "<summary>1 thinking message</summary>",
-                "tool call</summary>",
-            ),
-        ]
-        for items, expected, must_not_contain in cases:
-            with self.subTest(expected=expected):
-                _patch_thread(self, mock_codex, _thread([_turn(items)]))
-                response = _get_session(self.client)
-                self.assertEqual(response.status_code, 200)
-                self.assertContains(response, expected, html=False)
-                self.assertNotContains(response, must_not_contain)
+        self.assertContains(response, "one")
+        self.assertContains(response, "changed.py")
+        self.assertContains(response, "two")
 
     @patch("hitch.main.views.common.Codex")
     def test_phase_final_answer_wins_over_position(
@@ -2939,13 +3194,12 @@ class IntermediateCollapseTests(TestCase):
         noise_pos = body.index("post-answer noise")
         self.assertLess(agent_pos, answer_pos)
         self.assertLess(answer_pos, noise_pos)
-        # The trailing message lives inside an intermediate block.
         self.assertContains(response, ">Agent (thinking)<")
+        self.assertNotContains(response, '<details class="intermediate"')
 
     @patch("hitch.main.views.common.Codex")
     def test_commentary_phase_is_never_final(self, mock_codex: MagicMock) -> None:
-        """All-commentary turns (in-progress) collapse entirely; no top-level
-        Agent block."""
+        """All-commentary turns keep every Thinking message top-level."""
         thread = _thread(
             [
                 _turn(
@@ -2962,10 +3216,9 @@ class IntermediateCollapseTests(TestCase):
         response = _get_session(self.client)
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<details class="intermediate">')
-        self.assertContains(response, "2 thinking messages")
+        self.assertNotContains(response, '<details class="intermediate">')
         self.assertNotContains(response, ">Agent<")
-        self.assertContains(response, ">Agent (thinking)<")
+        self.assertContains(response, ">Agent (thinking)<", count=2)
 
     @patch("hitch.main.views.common.Codex")
     def test_phase_accepts_raw_string_shape(self, mock_codex: MagicMock) -> None:
@@ -3148,6 +3401,23 @@ class ToolCallDetailTests(TestCase):
         for tool_type, label, item, expected in cases:
             with self.subTest(tool_type=tool_type, case=label):
                 self.assertEqual(tool_call_detail(item, tool_type), expected)
+
+    def test_reasoning_detail_uses_real_sdk_list_shape(self) -> None:
+        summary = ReasoningThreadItem(
+            id="summary",
+            type="reasoning",
+            summary=["", "SDK summary"],
+            content=["SDK content"],
+        )
+        content = ReasoningThreadItem(
+            id="content",
+            type="reasoning",
+            summary=[],
+            content=["", "SDK content"],
+        )
+
+        self.assertEqual(tool_call_detail(summary, "reasoning"), "SDK summary")
+        self.assertEqual(tool_call_detail(content, "reasoning"), "SDK content")
 
     def test_collab_agent_detail(self) -> None:
         # Two cases share an assertion shape but differ in what they expose.
