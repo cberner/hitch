@@ -9895,6 +9895,111 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b'"delta": "lo"', body)
         self.assertNotIn(b'"text":"Hello"', body)
 
+    def test_initial_backlog_skips_completed_reasoning_deltas(self) -> None:
+        events = [
+            {
+                "method": "item/started",
+                "payload": {
+                    "item": {
+                        "id": "reasoning-1",
+                        "summary": [],
+                        "content": [],
+                        "type": "reasoning",
+                    }
+                },
+            },
+            {
+                "method": "item/reasoning/summaryTextDelta",
+                "payload": {
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 0,
+                    "delta": "Checking ",
+                },
+            },
+            {
+                "method": "item/reasoning/textDelta",
+                "payload": {
+                    "itemId": "reasoning-1",
+                    "contentIndex": 0,
+                    "delta": "the implementation",
+                },
+            },
+            {
+                "method": "item/completed",
+                "payload": {
+                    "item": {
+                        "id": "reasoning-1",
+                        "summary": ["Checking the implementation"],
+                        "content": ["The final reasoning content"],
+                        "type": "reasoning",
+                    }
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(event) + "\n" for event in events)
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertNotIn(b"item/started", body)
+        self.assertNotIn(b"item/reasoning/summaryTextDelta", body)
+        self.assertNotIn(b"item/reasoning/textDelta", body)
+        self.assertIn(b"item/completed", body)
+        self.assertIn(b"Checking the implementation", body)
+
+    def test_initial_backlog_preserves_incomplete_reasoning_deltas(self) -> None:
+        events = [
+            {
+                "method": "item/started",
+                "payload": {
+                    "item": {
+                        "id": "reasoning-1",
+                        "summary": [],
+                        "content": [],
+                        "type": "reasoning",
+                    }
+                },
+            },
+            {
+                "method": "item/reasoning/summaryTextDelta",
+                "payload": {
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 0,
+                    "delta": "Checking ",
+                },
+            },
+            {
+                "method": "item/reasoning/textDelta",
+                "payload": {
+                    "itemId": "reasoning-1",
+                    "contentIndex": 0,
+                    "delta": "the implementation",
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(event) + "\n" for event in events)
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertIn(b"item/started", body)
+        self.assertIn(b"item/reasoning/summaryTextDelta", body)
+        self.assertIn(b"item/reasoning/textDelta", body)
+        self.assertIn(b"Checking ", body)
+        self.assertIn(b"the implementation", body)
+
     def test_initial_backlog_skips_only_method_output_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")

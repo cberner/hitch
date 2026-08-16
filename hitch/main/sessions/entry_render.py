@@ -1,11 +1,9 @@
-"""Collapse a Codex thread's turns/items into the entries the thread template
-renders.
+"""Shape a Codex thread's turns/items for the session transcript.
 
-Each turn's user message and final agent reply become top-level entries; all
-intermediate agent commentary and tool calls fold into a single collapsible
-"intermediate" entry so long sessions don't bury the answer. The same shaping is
-applied to the flat per-item entries produced by the rollout parser
-(``collapse_flat_entries``) so resumed/replayed threads render identically.
+User, final-agent, and Thinking messages remain top-level entries. Consecutive
+runs of command and reasoning entries are grouped so the transcript can show
+only the latest activity by default without hiding the agent's narration. The
+same shaping is applied to rollout-parser entries and SDK fallback entries.
 """
 
 from __future__ import annotations
@@ -33,10 +31,11 @@ _NON_MESSAGE_LABELS = {
     "contextCompaction": "Context compaction",
 }
 
+_COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "reasoning"}
+
 
 def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    """Apply the same intermediate-collapsing as ``render_entries`` to the
-    flat per-item entries produced by the rollout parser.
+    """Apply the same activity grouping as ``render_entries`` to rollout entries.
 
     Turn boundaries are detected via the user kind because the rollout file
     is a chronological log without per-item turn ids exposed at the entry
@@ -55,29 +54,27 @@ def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]
 
 def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     final_idx = _final_agent_idx_in_flat(turn)
-    intermediate: list[dict[str, Any]] = []
+    activity: list[dict[str, Any]] = []
     for i, entry in enumerate(turn):
         if i == final_idx:
-            if intermediate:
-                yield _make_intermediate_entry(intermediate)
-                intermediate = []
-            yield _finalize_agent_entry(_strip_phase(entry))
+            display_entry = _finalize_agent_entry(_strip_phase(entry))
         elif entry["kind"] == "user":
             # `collapse_flat_entries` splits on every user past the first, so
             # any user reaching this branch is the leading entry of the turn
-            # and intermediate is empty.
-            yield entry
+            # and activity is empty.
+            display_entry = entry
         elif entry["kind"] == "agent":
-            intermediate.append({**_strip_phase(entry), "kind": "thinking"})
-        elif entry["kind"] in {"approval_declined", "plan"}:
-            if intermediate:
-                yield _make_intermediate_entry(intermediate)
-                intermediate = []
-            yield entry
+            display_entry = {**_strip_phase(entry), "kind": "thinking"}
         else:
-            intermediate.append(entry)
-    if intermediate:
-        yield _make_intermediate_entry(intermediate)
+            display_entry = entry
+
+        if _is_collapsible_activity(display_entry):
+            activity.append(display_entry)
+            continue
+        yield from _emit_activity_run(activity)
+        activity = []
+        yield display_entry
+    yield from _emit_activity_run(activity)
 
 
 def _final_agent_idx_in_flat(entries: list[dict[str, Any]]) -> int:
@@ -110,7 +107,7 @@ def _finalize_agent_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Annotate a turn's final agent entry with rendered-markdown HTML.
 
     Only the final agent message of a turn is ever fed through this
-    function, so collapsed "thinking" messages stay plain-text. A failure
+    function, so Thinking messages stay plain-text. A failure
     to recognise the text as markdown leaves the entry untouched, and the
     template falls back to the plain-text body.
     """
@@ -121,11 +118,11 @@ def _finalize_agent_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
-    """Walk every turn's items in order, surfacing the user message and the
-    final agent reply as top-level entries and folding everything else
-    (intermediate agent commentary plus every tool-call variant) into a
-    single collapsible "intermediate" entry per run so long sessions don't
-    bury the actual answer behind dozens of tool rows.
+    """Walk every turn's items in order and group repetitive activity.
+
+    User messages, final replies, Thinking messages, plans, and tool calls other
+    than commands/reasoning remain top-level. Consecutive command/reasoning runs
+    are grouped only when there is an earlier item to hide.
 
     The SDK marks final responses with MessagePhase.final_answer when known;
     for sessions where phase is unset (older data or an in-progress turn)
@@ -137,13 +134,10 @@ def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
         timestamp = getattr(turn, "started_at", None)
         items = [thread_item.root for thread_item in turn.items]
         final_idx = find_final_agent_idx(items)
-        intermediate: list[dict[str, Any]] = []
+        activity: list[dict[str, Any]] = []
 
         for i, item in enumerate(items):
             if i == final_idx:
-                if intermediate:
-                    yield _make_intermediate_entry(intermediate)
-                    intermediate = []
                 agent_entry: dict[str, Any] = {
                     "kind": "agent",
                     "text": item.text,
@@ -152,12 +146,9 @@ def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                 memory_citation = _memory_citation_from_item(item)
                 if memory_citation is not None:
                     agent_entry["memory_citation"] = memory_citation
-                yield _finalize_agent_entry(agent_entry)
+                display_entry = _finalize_agent_entry(agent_entry)
             elif item.type == "userMessage":
-                if intermediate:
-                    yield _make_intermediate_entry(intermediate)
-                    intermediate = []
-                yield {
+                display_entry = {
                     "kind": "user",
                     "text": user_message_text(item),
                     "timestamp": timestamp,
@@ -171,21 +162,24 @@ def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                 memory_citation = _memory_citation_from_item(item)
                 if memory_citation is not None:
                     thinking_entry["memory_citation"] = memory_citation
-                intermediate.append(thinking_entry)
+                display_entry = thinking_entry
             elif item.type == "plan":
-                if intermediate:
-                    yield _make_intermediate_entry(intermediate)
-                    intermediate = []
-                yield {
+                display_entry = {
                     "kind": "plan",
                     "text": getattr(item, "text", "") or "",
                     "timestamp": timestamp,
                 }
             else:
-                intermediate.append(_make_tool_call_entry(item, timestamp))
+                display_entry = _make_tool_call_entry(item, timestamp)
 
-        if intermediate:
-            yield _make_intermediate_entry(intermediate)
+            if _is_collapsible_activity(display_entry):
+                activity.append(display_entry)
+                continue
+            yield from _emit_activity_run(activity)
+            activity = []
+            yield display_entry
+
+        yield from _emit_activity_run(activity)
 
 
 def find_final_agent_idx(items: list[Any]) -> int:
@@ -280,14 +274,35 @@ def _make_tool_call_entry(item: Any, timestamp: Any) -> dict[str, Any]:
     }
 
 
+def _is_collapsible_activity(entry: dict[str, Any]) -> bool:
+    return (
+        entry.get("kind") == "tool_call"
+        and entry.get("type") in _COLLAPSIBLE_ACTIVITY_TYPES
+    )
+
+
+def _emit_activity_run(
+    items: list[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    if len(items) == 1:
+        yield items[0]
+    elif items:
+        yield _make_intermediate_entry(items)
+
+
 def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
-    thinking_count = sum(1 for e in items if e["kind"] == "thinking")
-    tool_call_count = sum(1 for e in items if e["kind"] == "tool_call")
+    reasoning_count = sum(1 for entry in items if entry["type"] == "reasoning")
+    command_count = sum(
+        1 for entry in items if entry["type"] == "commandExecution"
+    )
     return {
         "kind": "intermediate",
-        "thinking_count": thinking_count,
-        "tool_call_count": tool_call_count,
+        "reasoning_count": reasoning_count,
+        "command_count": command_count,
+        "item_count": len(items),
         "items": items,
+        "earlier_items": items[:-1],
+        "latest_item": items[-1],
     }
 
 
@@ -319,6 +334,12 @@ def tool_call_detail(item: Any, item_type: str) -> str:
     match item_type:
         case "commandExecution":
             return getattr(item, "command", "") or ""
+        case "reasoning":
+            for field in ("summary", "content"):
+                for value in sequence_value(value_for(item, field)):
+                    if text := string_value(value):
+                        return text.split("\n", 1)[0]
+            return ""
         case "mcpToolCall":
             return f"{item.server} / {item.tool}"
         case "dynamicToolCall":

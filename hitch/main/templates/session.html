@@ -165,12 +165,21 @@
             {% endif %}
             {% for entry in entries %}
                 {% if entry.kind == "intermediate" %}
-                <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
-                    <summary>{% if entry.thinking_count and entry.tool_call_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }} and {{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% elif entry.thinking_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }}{% else %}{{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% endif %}</summary>
-                    <div class="intermediate-body" data-intermediate-body{% if entry.lazy_url %} hidden{% endif %}>
-                        {% for item in entry.items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
+                <div class="intermediate-group">
+                    <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
+                        <summary>
+                            <span>{% if entry.reasoning_count and entry.command_count %}{{ entry.reasoning_count }} reasoning message{{ entry.reasoning_count|pluralize }} and {{ entry.command_count }} command message{{ entry.command_count|pluralize }}{% elif entry.reasoning_count %}{{ entry.reasoning_count }} reasoning message{{ entry.reasoning_count|pluralize }}{% else %}{{ entry.command_count }} command message{{ entry.command_count|pluralize }}{% endif %}</span>
+                            <span class="intermediate-action intermediate-action-expand">Show all</span>
+                            <span class="intermediate-action intermediate-action-collapse">Show latest</span>
+                        </summary>
+                        <div class="intermediate-body" data-intermediate-body{% if entry.lazy_url %} hidden{% endif %}>
+                            {% for item in entry.earlier_items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
+                        </div>
+                    </details>
+                    <div class="intermediate-latest" data-intermediate-latest>
+                        {% include "_session_entry.html" with entry=entry.latest_item %}
                     </div>
-                </details>
+                </div>
                 {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
             {% endfor %}
             {% if latest_user_turn_failure %}

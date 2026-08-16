@@ -1094,6 +1094,7 @@ def _attach_lazy_intermediate_context(
         )
         entry["item_count"] = len(entry.get("items", []))
         entry["items"] = []
+        entry["earlier_items"] = []
 
 def _intermediate_detail_cache_key(
     *,
@@ -1126,9 +1127,12 @@ def _cache_intermediate_detail(
     )
     cached_entry = {
         "kind": "intermediate",
-        "thinking_count": entry.get("thinking_count", 0),
-        "tool_call_count": entry.get("tool_call_count", 0),
+        "reasoning_count": entry.get("reasoning_count", 0),
+        "command_count": entry.get("command_count", 0),
+        "item_count": entry.get("item_count", 0),
         "items": entry.get("items", []),
+        "earlier_items": entry.get("earlier_items", []),
+        "latest_item": entry.get("latest_item"),
     }
     with _INTERMEDIATE_DETAIL_CACHE_LOCK:
         _INTERMEDIATE_DETAIL_CACHE[key] = cached_entry

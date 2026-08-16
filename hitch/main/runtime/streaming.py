@@ -72,6 +72,15 @@ _IDLE_RECONNECT_MILLISECONDS = 5000
 # active sessions are open. Idle streams do not consume these slots.
 _ACTIVE_STREAM_SLOTS = threading.BoundedSemaphore(48)
 
+_COMPACTABLE_TEXT_DELTA_METHODS = frozenset(
+    {
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+    }
+)
+
 # System-workflow streams are active status channels and remain open between
 # heartbeats. Recycle them sooner than a direct worker stream.
 _IDLE_MAX_STREAM_SECONDS = 5 * 60
@@ -434,7 +443,7 @@ def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
             item_id = _event_item_id(payload)
             if item_id in completed_item_ids:
                 continue
-        elif method in {"item/agentMessage/delta", "item/plan/delta"}:
+        elif method in _COMPACTABLE_TEXT_DELTA_METHODS:
             item_id = _event_payload_item_id(payload)
             if item_id in completed_item_ids:
                 continue
@@ -484,7 +493,7 @@ def _event_line_method(line: bytes) -> str:
 
 def _decode_backlog_event_line(method: str, line: bytes) -> dict[str, Any] | None:
     if (
-        method not in {"item/agentMessage/delta", "item/plan/delta"}
+        method not in _COMPACTABLE_TEXT_DELTA_METHODS
         and not (
             method in {"item/started", "item/completed"}
             and _has_text_item_type(line)
@@ -529,6 +538,8 @@ def _has_text_item_type(line: bytes) -> bool:
         or b'"type":"agentMessage"' in line
         or b'"type": "plan"' in line
         or b'"type":"plan"' in line
+        or b'"type": "reasoning"' in line
+        or b'"type":"reasoning"' in line
     )
 
 
