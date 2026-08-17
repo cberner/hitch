@@ -5,15 +5,15 @@ Status: Implemented
 ## Overview
 
 The session transcript keeps the agent's narrative visible while reducing the
-space used by repetitive reasoning and command activity.
+space used by repetitive reasoning, command, and web-search activity.
 
 ## Requirements
 
 - `ST-thinking-visible`: Thinking messages are always rendered as normal,
   top-level transcript entries and are never hidden by an activity toggle.
-- `ST-activity-runs`: Each consecutive run of two or more Reasoning and Command
-  messages is rendered as one collapsible group. Thinking messages and every
-  other transcript entry end the current group.
+- `ST-activity-runs`: Each consecutive run of two or more Reasoning, Command,
+  and Web search messages is rendered as one collapsible group. Thinking
+  messages and every other transcript entry end the current group.
 - `ST-latest-default`: Activity groups are collapsed by default. A collapsed
   group shows its count, its toggle, and only its latest message; expanding the
   group reveals the earlier messages without duplicating the latest message.
@@ -30,5 +30,5 @@ space used by repetitive reasoning and command activity.
 ## Success Criteria
 
 - A reader can scan every Thinking message without opening a toggle.
-- Long consecutive runs of reasoning and commands occupy one message row plus
-  a compact toggle until expanded.
+- Long consecutive runs of reasoning, commands, and web searches occupy one
+  message row plus a compact toggle until expanded.

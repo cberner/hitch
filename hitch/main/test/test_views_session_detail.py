@@ -1049,6 +1049,7 @@ class SessionDetailFastPathTests(TestCase):
             {"kind": "user", "text": "Run a command"},
             {
                 "kind": "intermediate",
+                "summary": "2 command messages",
                 "reasoning_count": 0,
                 "command_count": 2,
                 "item_count": 2,

@@ -146,6 +146,10 @@ def _reasoning(text: str) -> SimpleNamespace:
     )
 
 
+def _web_search(query: str) -> SimpleNamespace:
+    return _root(SimpleNamespace(type="webSearch", query=query))
+
+
 def _file_change(*paths: str, status: str = "completed") -> SimpleNamespace:
     return _root(
         SimpleNamespace(
@@ -1295,6 +1299,9 @@ class SessionViewTests(TestCase):
         activity_group_count = 0
         first_command_hidden = False
         latest_command_visible = False
+        web_search_hidden = False
+        web_search_text = ""
+        activity_summaries: list[str] = []
         reasoning_snapshot_text = ""
         reasoning_summary_delta_text = ""
         reasoning_content_delta_text = ""
@@ -1572,6 +1579,15 @@ class SessionViewTests(TestCase):
                 activity_group_count = page.locator(".intermediate-group").count()
                 first_command_hidden = page.locator('[data-item-id="cmd-1"]').is_hidden()
                 latest_command_visible = page.locator('[data-item-id="cmd-2"]').is_visible()
+                web_search_hidden = page.locator(
+                    '[data-item-id="search-1"]'
+                ).is_hidden()
+                web_search_text = page.locator(
+                    '[data-item-id="search-1"] .detail'
+                ).text_content() or ""
+                activity_summaries = page.locator(
+                    ".intermediate > summary > span:first-child"
+                ).all_text_contents()
                 reasoning_snapshot_text = page.locator(
                     '[data-item-id="reasoning-1"] .detail'
                 ).text_content() or ""
@@ -1597,6 +1613,9 @@ class SessionViewTests(TestCase):
         self.assertEqual(activity_group_count, 2)
         self.assertTrue(first_command_hidden)
         self.assertTrue(latest_command_visible)
+        self.assertTrue(web_search_hidden)
+        self.assertEqual(web_search_text, "public documentation")
+        self.assertIn("3 reasoning messages and 1 web search", activity_summaries)
         reasoning_placeholder = "Reasoning details hidden in demo panel."
         self.assertEqual(reasoning_snapshot_text, reasoning_placeholder)
         self.assertEqual(reasoning_summary_delta_text, reasoning_placeholder)
@@ -1623,7 +1642,6 @@ class SessionViewTests(TestCase):
         self.assertIn("Command details hidden in demo panel.", body)
         self.assertIn("Demo setup file change approval requested. 2 files", body)
         self.assertIn("Demo setup file change", body)
-        self.assertIn("public documentation", body)
 
     @patch("hitch.main.views.common.Codex")
     def test_user_worker_keeps_live_reasoning_details(
@@ -3039,7 +3057,7 @@ class RolloutFileViewTests(TestCase):
 
 
 class IntermediateCollapseTests(TestCase):
-    """Only consecutive command/reasoning activity collapses in transcripts."""
+    """Consecutive command/reasoning/web-search activity collapses."""
 
     @patch("hitch.main.views.common.Codex")
     def test_thinking_messages_stay_visible_and_split_activity_groups(
@@ -3111,6 +3129,35 @@ class IntermediateCollapseTests(TestCase):
         self.assertIn("latest reasoning", html[latest_start:latest_end])
 
     @patch("hitch.main.views.common.Codex")
+    def test_web_search_collapses_with_commands_and_reasoning(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Research it"),
+                        _command("check local sources"),
+                        _web_search("current documentation"),
+                        _reasoning("Compare the results"),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<details class="intermediate">', count=1)
+        self.assertContains(
+            response,
+            "1 reasoning message, 1 command message, and 1 web search",
+        )
+        self.assertContains(response, "current documentation")
+
+    @patch("hitch.main.views.common.Codex")
     def test_summary_pluralization(self, mock_codex: MagicMock) -> None:
         cases: list[tuple[list[SimpleNamespace], str]] = [
             (
@@ -3130,6 +3177,15 @@ class IntermediateCollapseTests(TestCase):
                     _agent_message("Final."),
                 ],
                 "2 reasoning messages",
+            ),
+            (
+                [
+                    _user_message("Search for it"),
+                    _web_search("first query"),
+                    _web_search("second query"),
+                    _agent_message("Found it."),
+                ],
+                "2 web searches",
             ),
         ]
         for items, expected in cases:

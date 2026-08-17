@@ -168,7 +168,7 @@
                 <div class="intermediate-group">
                     <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
                         <summary>
-                            <span>{% if entry.reasoning_count and entry.command_count %}{{ entry.reasoning_count }} reasoning message{{ entry.reasoning_count|pluralize }} and {{ entry.command_count }} command message{{ entry.command_count|pluralize }}{% elif entry.reasoning_count %}{{ entry.reasoning_count }} reasoning message{{ entry.reasoning_count|pluralize }}{% else %}{{ entry.command_count }} command message{{ entry.command_count|pluralize }}{% endif %}</span>
+                            <span>{{ entry.summary }}</span>
                             <span class="intermediate-action intermediate-action-expand">Show all</span>
                             <span class="intermediate-action intermediate-action-collapse">Show latest</span>
                         </summary>

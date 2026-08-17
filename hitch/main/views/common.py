@@ -1127,8 +1127,10 @@ def _cache_intermediate_detail(
     )
     cached_entry = {
         "kind": "intermediate",
+        "summary": entry.get("summary", ""),
         "reasoning_count": entry.get("reasoning_count", 0),
         "command_count": entry.get("command_count", 0),
+        "web_search_count": entry.get("web_search_count", 0),
         "item_count": entry.get("item_count", 0),
         "items": entry.get("items", []),
         "earlier_items": entry.get("earlier_items", []),
