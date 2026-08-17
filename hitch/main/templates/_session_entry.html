@@ -1,7 +1,7 @@
 {% comment %}
 Renders a single entry (user, agent, thinking, or tool_call). Used for both
-top-level entries and command/reasoning activity groups so the per-item layout
-stays identical in both contexts.
+top-level entries and command/reasoning/web-search activity groups so the
+per-item layout stays identical in both contexts.
 {% endcomment %}
 {% if entry.kind == "user" or entry.kind == "agent" or entry.kind == "thinking" %}
 <div class="entry">

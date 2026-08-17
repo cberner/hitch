@@ -1,9 +1,10 @@
 """Shape a Codex thread's turns/items for the session transcript.
 
 User, final-agent, and Thinking messages remain top-level entries. Consecutive
-runs of command and reasoning entries are grouped so the transcript can show
-only the latest activity by default without hiding the agent's narration. The
-same shaping is applied to rollout-parser entries and SDK fallback entries.
+runs of command, reasoning, and web-search entries are grouped so the transcript
+can show only the latest activity by default without hiding the agent's
+narration. The same shaping is applied to rollout-parser entries and SDK
+fallback entries.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ _NON_MESSAGE_LABELS = {
     "contextCompaction": "Context compaction",
 }
 
-_COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "reasoning"}
+_COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "reasoning", "webSearch"}
 
 
 def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
@@ -121,8 +122,8 @@ def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
     """Walk every turn's items in order and group repetitive activity.
 
     User messages, final replies, Thinking messages, plans, and tool calls other
-    than commands/reasoning remain top-level. Consecutive command/reasoning runs
-    are grouped only when there is an earlier item to hide.
+    than commands/reasoning/web searches remain top-level. Consecutive activity
+    runs are grouped only when there is an earlier item to hide.
 
     The SDK marks final responses with MessagePhase.final_answer when known;
     for sessions where phase is unset (older data or an in-progress turn)
@@ -295,15 +296,38 @@ def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
     command_count = sum(
         1 for entry in items if entry["type"] == "commandExecution"
     )
+    web_search_count = sum(1 for entry in items if entry["type"] == "webSearch")
     return {
         "kind": "intermediate",
+        "summary": _activity_summary(
+            reasoning_count, command_count, web_search_count
+        ),
         "reasoning_count": reasoning_count,
         "command_count": command_count,
+        "web_search_count": web_search_count,
         "item_count": len(items),
         "items": items,
         "earlier_items": items[:-1],
         "latest_item": items[-1],
     }
+
+
+def _activity_summary(
+    reasoning_count: int, command_count: int, web_search_count: int
+) -> str:
+    parts: list[str] = []
+    if reasoning_count:
+        suffix = "" if reasoning_count == 1 else "s"
+        parts.append(f"{reasoning_count} reasoning message{suffix}")
+    if command_count:
+        suffix = "" if command_count == 1 else "s"
+        parts.append(f"{command_count} command message{suffix}")
+    if web_search_count:
+        suffix = "" if web_search_count == 1 else "es"
+        parts.append(f"{web_search_count} web search{suffix}")
+    if len(parts) < 3:
+        return " and ".join(parts)
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}"
 
 
 def user_message_text(item: Any) -> str:

@@ -1079,7 +1079,7 @@
                 placeBeforeLive(node);
             }
 
-            function activitySummary(reasoningCount, commandCount) {
+            function activitySummary(reasoningCount, commandCount, webSearchCount) {
                 const parts = [];
                 if (reasoningCount) {
                     parts.push(reasoningCount + " reasoning message" + (reasoningCount === 1 ? "" : "s"));
@@ -1087,7 +1087,11 @@
                 if (commandCount) {
                     parts.push(commandCount + " command message" + (commandCount === 1 ? "" : "s"));
                 }
-                return parts.join(" and ");
+                if (webSearchCount) {
+                    parts.push(webSearchCount + " web search" + (webSearchCount === 1 ? "" : "es"));
+                }
+                if (parts.length < 3) return parts.join(" and ");
+                return parts.slice(0, -1).join(", ") + ", and " + parts[parts.length - 1];
             }
 
             function activityAction(className, text) {
@@ -1128,7 +1132,12 @@
                 run.latestNode = nextNode;
                 if (nextType === "reasoning") run.reasoningCount += 1;
                 if (nextType === "commandExecution") run.commandCount += 1;
-                summaryText.textContent = activitySummary(run.reasoningCount, run.commandCount);
+                if (nextType === "webSearch") run.webSearchCount += 1;
+                summaryText.textContent = activitySummary(
+                    run.reasoningCount,
+                    run.commandCount,
+                    run.webSearchCount
+                );
             }
 
             function insertActivityBeforeLive(node, itemType) {
@@ -1142,6 +1151,7 @@
                         latestNode: node,
                         reasoningCount: itemType === "reasoning" ? 1 : 0,
                         commandCount: itemType === "commandExecution" ? 1 : 0,
+                        webSearchCount: itemType === "webSearch" ? 1 : 0,
                     };
                     return;
                 }
@@ -1154,9 +1164,11 @@
                 liveActivityRun.latestNode = node;
                 if (itemType === "reasoning") liveActivityRun.reasoningCount += 1;
                 if (itemType === "commandExecution") liveActivityRun.commandCount += 1;
+                if (itemType === "webSearch") liveActivityRun.webSearchCount += 1;
                 liveActivityRun.summaryText.textContent = activitySummary(
                     liveActivityRun.reasoningCount,
-                    liveActivityRun.commandCount
+                    liveActivityRun.commandCount,
+                    liveActivityRun.webSearchCount
                 );
             }
 
@@ -1349,7 +1361,11 @@
                 row.appendChild(status);
                 wrap.appendChild(header);
                 wrap.appendChild(row);
-                if (item.type === "commandExecution" || item.type === "reasoning") {
+                if (
+                    item.type === "commandExecution"
+                    || item.type === "reasoning"
+                    || item.type === "webSearch"
+                ) {
                     insertActivityBeforeLive(wrap, item.type);
                 } else {
                     insertBeforeLive(wrap);
