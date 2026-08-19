@@ -26,6 +26,13 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-live-detail-authority`: When a live session requires detail sanitization,
   every tool-detail snapshot and delta is rendered through the same policy.
   Sensitive command, file, and reasoning details use safe placeholders.
+- `ST-history-preview`: Large sessions initially render a bounded preview of
+  recent persisted user and agent messages, including read-only system and
+  autonomous-goal logs. Scrolling upward loads older preview pages.
+- `ST-history-full`: A visible up-arrow reloads the canonical full transcript
+  and positions the reader at its beginning, including while a worker is
+  active. Activity, synthesized rows, and oversized message bodies remain
+  authoritative in this full view.
 
 ## Success Criteria
 

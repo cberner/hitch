@@ -102,6 +102,11 @@ urlpatterns = [
         session_actions.session_demo_proxy,
         name="session_demo_proxy",
     ),
+    path(
+        "sessions/<str:session_id>/history/",
+        session_detail.session_history,
+        name="session_history",
+    ),
     path("sessions/<str:session_id>/", session_detail.session, name="session"),
     path(
         "sessions/<str:session_id>/intermediate/<int:entry_index>/",

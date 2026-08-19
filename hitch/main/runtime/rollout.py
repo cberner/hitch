@@ -16,6 +16,7 @@ the SDK-built turns when the path is missing or the file can't be read.
 
 import json
 import logging
+import mmap
 import re
 from collections import Counter
 from collections.abc import Iterator
@@ -71,6 +72,25 @@ class SessionDetailData:
 
 
 @dataclass(frozen=True)
+class SessionHistoryPage:
+    """A bounded preview of persisted conversation messages."""
+
+    flat_entries: tuple[dict[str, Any], ...]
+    start_offset: int
+    has_older: bool
+    leading_user_text: str | None
+    partial_record_end: int | None = None
+    active_turn_unresolved: bool = False
+
+
+@dataclass(frozen=True)
+class SessionHistoryUserIdentity:
+    text: str
+    prompt: str
+    started_at: float
+
+
+@dataclass(frozen=True)
 class SessionStageData:
     entries: tuple[dict[str, Any], ...]
     pr_observation: codex_events.PrObservationResult
@@ -113,6 +133,304 @@ def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
     if lines is None:
         return
     yield from _entries_from_lines(lines)
+
+
+_HISTORY_RECORD_MAX_BYTES = 64 * 1024
+_HISTORY_STRUCTURAL_BYTES = 4 * 1024
+_HISTORY_SCAN_MAX_BYTES = 8 * 1024 * 1024
+_HISTORY_SCAN_MAX_RECORDS = 10_000
+_HISTORY_RECORD_TYPES_RE = re.compile(rb'"type"\s*:\s*"([^"]+)"')
+_HISTORY_TIMESTAMP_RE = re.compile(rb'"timestamp"\s*:\s*"([^"]+)"')
+_HISTORY_MESSAGE_FIELD_RE = re.compile(rb'(?<!\\)"message"\s*:\s*"')
+_HISTORY_PHASE_RE = re.compile(
+    rb'(?<!\\)"phase"\s*:\s*"(commentary|final_answer)"'
+)
+_HISTORY_COLLABORATION_MODE_RE = re.compile(
+    rb'"(?:collaboration_mode|collaborationMode)"\s*:\s*\{'
+    rb'.{0,3072}?"mode"\s*:\s*"([^"]+)"',
+    re.DOTALL,
+)
+_HISTORY_TASK_MODE_RE = re.compile(
+    rb'"collaboration_mode_kind"\s*:\s*"([^"]+)"'
+)
+_HISTORY_OMITTED_MESSAGE = "[Oversized message omitted from paged history.]"
+_HISTORY_HIDDEN_DEMO_KEY = "_hitch_hidden_demo"
+_HISTORY_ACTIVE_USER_KEY = "_hitch_active_user"
+
+
+def session_history_page(
+    rollout_path: Path,
+    *,
+    before_offset: int | None = None,
+    partial_record_end: int | None = None,
+    message_target: int = 40,
+    hidden_user_prompts: frozenset[str] | None = None,
+    active_user_identity: SessionHistoryUserIdentity | None = None,
+) -> SessionHistoryPage | None:
+    """Read recent conversation messages without loading the whole rollout.
+
+    Preview pages contain only persisted user/agent events. The full session
+    renderer remains authoritative for activity, projections, synthetic rows,
+    and oversized message bodies.
+    """
+    if message_target < 1:
+        raise ValueError("message_target must be positive")
+    if hidden_user_prompts is None:
+        hidden_user_prompts = frozenset()
+    try:
+        size = rollout_path.stat().st_size
+        end_offset = size if before_offset is None else before_offset
+        if end_offset < 0 or end_offset > size:
+            return None
+        if partial_record_end is not None and (
+            before_offset is None
+            or not end_offset < partial_record_end <= size
+        ):
+            return None
+        selected: list[dict[str, Any]] = []
+        start_offset = 0
+        next_partial_record_end = None
+        leading_user_text = None
+        active_boundary_found = False
+        selected_after_active_start = False
+        active_turn_unresolved = False
+        scanned_start = end_offset
+        encoded_hidden_prompts = tuple(
+            json.dumps(prompt, ensure_ascii=False).encode()
+            for prompt in hidden_user_prompts
+        )
+        encoded_active_prompt = (
+            json.dumps(active_user_identity.prompt, ensure_ascii=False).encode()
+            if active_user_identity is not None
+            else None
+        )
+        with rollout_path.open("rb") as fh:
+            if size == 0:
+                return SessionHistoryPage((), 0, False, None)
+            with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as contents:
+                for record_count, (offset, record_end, raw, oversized) in enumerate(
+                    _history_records_reverse(
+                        contents,
+                        end_offset,
+                        partial_record_end=partial_record_end,
+                    ),
+                    start=1,
+                ):
+                    scanned_start = offset
+                    entry = _history_message_record(
+                        raw,
+                        oversized=oversized,
+                        contents=contents,
+                        record_offset=offset,
+                        record_end=record_end,
+                        hidden_user_prompts=hidden_user_prompts,
+                        encoded_hidden_prompts=encoded_hidden_prompts,
+                        active_user_identity=active_user_identity,
+                        encoded_active_prompt=encoded_active_prompt,
+                    )
+                    if entry is None:
+                        payload: dict[str, Any] = {}
+                    else:
+                        payload = entry.get("payload") or {}
+                        active_boundary = (
+                            payload.get(_HISTORY_ACTIVE_USER_KEY) is True
+                        )
+                        active_boundary_found = active_boundary_found or active_boundary
+                        if len(selected) < message_target or active_boundary:
+                            selected.append(entry)
+                            start_offset = offset
+                            if active_user_identity is not None:
+                                event_timestamp = _history_record_timestamp(raw)
+                                selected_after_active_start = (
+                                    selected_after_active_start
+                                    or event_timestamp is not None
+                                    and event_timestamp
+                                    >= active_user_identity.started_at
+                                )
+                            if payload.get("type") != "user_message":
+                                leading_user_text = None
+                        if payload.get("type") == "user_message":
+                            if payload.get(_HISTORY_HIDDEN_DEMO_KEY) is True:
+                                leading_user_text = next(iter(hidden_user_prompts), "")
+                            elif payload.get(_HISTORY_HIDDEN_DEMO_KEY) is False:
+                                leading_user_text = ""
+                            else:
+                                leading_user_text = _user_message_text(payload)
+                        if (
+                            len(selected) >= message_target
+                            and leading_user_text is not None
+                        ):
+                            break
+                    if (
+                        end_offset - offset >= _HISTORY_SCAN_MAX_BYTES
+                        or record_count >= _HISTORY_SCAN_MAX_RECORDS
+                    ):
+                        active_turn_unresolved = (
+                            active_user_identity is not None
+                            and selected_after_active_start
+                            and not active_boundary_found
+                        )
+                        if not selected:
+                            start_offset = scanned_start
+                            if not raw and oversized:
+                                next_partial_record_end = record_end
+                        break
+    except OSError as exc:
+        logger.warning("failed to read rollout history %s: %s", rollout_path, exc)
+        return None
+    selected.reverse()
+    if leading_user_text is None and hidden_user_prompts:
+        # Unknown leading context is hidden conservatively until a visible user
+        # record establishes which turn this page starts in.
+        leading_user_text = next(iter(hidden_user_prompts))
+    return SessionHistoryPage(
+        flat_entries=tuple(_entries_from_lines(selected)),
+        start_offset=start_offset,
+        has_older=start_offset > 0,
+        leading_user_text=leading_user_text,
+        partial_record_end=next_partial_record_end,
+        active_turn_unresolved=active_turn_unresolved,
+    )
+
+
+def _history_records_reverse(
+    contents: mmap.mmap,
+    end_offset: int,
+    *,
+    partial_record_end: int | None = None,
+) -> Iterator[tuple[int, int, bytes, bool]]:
+    cursor = end_offset
+    if partial_record_end is None and cursor and contents[cursor - 1 : cursor] == b"\n":
+        cursor -= 1
+    record_end = cursor if partial_record_end is None else partial_record_end
+    while cursor >= 0:
+        search_start = max(0, cursor - _HISTORY_SCAN_MAX_BYTES)
+        newline = contents.rfind(b"\n", search_start, cursor)
+        if newline < 0 and search_start > 0:
+            yield search_start, record_end, b"", True
+            break
+        start = newline + 1
+        length = record_end - start
+        if length:
+            oversized = length > _HISTORY_RECORD_MAX_BYTES
+            retained_bytes = (
+                _HISTORY_STRUCTURAL_BYTES if oversized else _HISTORY_RECORD_MAX_BYTES
+            )
+            retained_end = min(record_end, start + retained_bytes)
+            yield start, record_end, contents[start:retained_end], oversized
+        if newline < 0:
+            break
+        cursor = newline
+        record_end = cursor
+
+
+def _history_message_record(
+    raw: bytes,
+    *,
+    oversized: bool,
+    contents: mmap.mmap | None = None,
+    record_offset: int = 0,
+    record_end: int = 0,
+    hidden_user_prompts: frozenset[str] | None = None,
+    encoded_hidden_prompts: tuple[bytes, ...] = (),
+    active_user_identity: SessionHistoryUserIdentity | None = None,
+    encoded_active_prompt: bytes | None = None,
+) -> dict[str, Any] | None:
+    if not oversized:
+        try:
+            entry = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(entry, dict) or entry.get("type") != "event_msg":
+            return None
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") not in {
+            "user_message",
+            "agent_message",
+        }:
+            return None
+        if payload.get("type") == "user_message" and hidden_user_prompts:
+            payload[_HISTORY_HIDDEN_DEMO_KEY] = (
+                _user_message_text(payload) in hidden_user_prompts
+            )
+        if payload.get("type") == "user_message" and active_user_identity is not None:
+            event_timestamp = _iso_to_unix_timestamp(entry.get("timestamp"))
+            payload[_HISTORY_ACTIVE_USER_KEY] = (
+                event_timestamp is not None
+                and event_timestamp >= active_user_identity.started_at
+                and _user_message_text(payload) == active_user_identity.text
+            )
+        return entry
+
+    record_types = _HISTORY_RECORD_TYPES_RE.findall(raw, 0, 4096)
+    if len(record_types) < 2 or record_types[0] != b"event_msg":
+        return None
+    payload_type = record_types[1]
+    if payload_type == b"user_message":
+        payload = {
+            "type": "user_message",
+            "message": _HISTORY_OMITTED_MESSAGE,
+            _HISTORY_HIDDEN_DEMO_KEY: _oversized_user_matches_prompt(
+                raw,
+                contents=contents,
+                record_offset=record_offset,
+                encoded_prompts=encoded_hidden_prompts,
+            ),
+        }
+        if active_user_identity is not None and encoded_active_prompt is not None:
+            record_timestamp = _history_record_timestamp(raw)
+            payload[_HISTORY_ACTIVE_USER_KEY] = (
+                record_timestamp is not None
+                and record_timestamp >= active_user_identity.started_at
+                and _oversized_user_matches_prompt(
+                    raw,
+                    contents=contents,
+                    record_offset=record_offset,
+                    encoded_prompts=(encoded_active_prompt,),
+                )
+            )
+    elif payload_type == b"agent_message":
+        payload = {"type": "agent_message", "message": _HISTORY_OMITTED_MESSAGE}
+        phase_match = _HISTORY_PHASE_RE.search(raw)
+        if phase_match is None and contents is not None:
+            tail_start = max(record_offset, record_end - _HISTORY_STRUCTURAL_BYTES)
+            phase_match = _HISTORY_PHASE_RE.search(contents[tail_start:record_end])
+        if phase_match is not None:
+            payload["phase"] = phase_match.group(1).decode()
+    else:
+        return None
+    return {"type": "event_msg", "payload": payload}
+
+
+def _history_record_timestamp(raw: bytes) -> float | None:
+    match = _HISTORY_TIMESTAMP_RE.search(raw)
+    if match is None:
+        return None
+    try:
+        value = match.group(1).decode()
+    except UnicodeDecodeError:
+        return None
+    return _iso_to_unix_timestamp(value)
+
+
+def _oversized_user_matches_prompt(
+    raw: bytes,
+    *,
+    contents: mmap.mmap | None,
+    record_offset: int,
+    encoded_prompts: tuple[bytes, ...],
+) -> bool:
+    if contents is None or not encoded_prompts:
+        return False
+    match = _HISTORY_MESSAGE_FIELD_RE.search(raw)
+    if match is None:
+        return False
+    value_offset = record_offset + match.end() - 1
+    return any(
+        contents.find(encoded, value_offset, value_offset + len(encoded))
+        == value_offset
+        for encoded in encoded_prompts
+    )
 
 
 def entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
@@ -281,6 +599,52 @@ def latest_collaboration_mode(rollout_path: Path) -> str | None:
     if lines is None:
         return None
     return _latest_collaboration_mode_from_lines(lines)
+
+
+def latest_collaboration_mode_bounded(rollout_path: Path) -> str | None:
+    """Return a recent collaboration mode without scanning a large rollout."""
+    try:
+        size = rollout_path.stat().st_size
+        if size == 0:
+            return None
+        with (
+            rollout_path.open("rb") as handle,
+            mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as contents,
+        ):
+            for record_count, (offset, _end, raw, oversized) in enumerate(
+                _history_records_reverse(contents, size),
+                start=1,
+            ):
+                mode = _history_collaboration_mode_record(raw, oversized=oversized)
+                if mode is not None:
+                    return mode
+                if (
+                    size - offset >= _HISTORY_SCAN_MAX_BYTES
+                    or record_count >= _HISTORY_SCAN_MAX_RECORDS
+                ):
+                    break
+    except OSError as exc:
+        logger.warning("failed to read rollout collaboration mode %s: %s", rollout_path, exc)
+    return None
+
+
+def _history_collaboration_mode_record(raw: bytes, *, oversized: bool) -> str | None:
+    if not raw:
+        return None
+    if not oversized:
+        entry = _rollout_entry_from_raw_line(raw)
+        if entry is not None:
+            return _collaboration_mode_from_line(entry)
+        return None
+    for pattern in (_HISTORY_COLLABORATION_MODE_RE, _HISTORY_TASK_MODE_RE):
+        match = pattern.search(raw)
+        if match is None:
+            continue
+        try:
+            return match.group(1).decode()
+        except UnicodeDecodeError:
+            return None
+    return None
 
 
 def latest_model_config(rollout_path: Path) -> SessionModelConfig | None:
@@ -644,11 +1008,18 @@ def _entry_from_event(
 ) -> dict[str, Any] | None:
     event_type = payload.get("type")
     if event_type == "user_message":
-        return {
+        user_entry = {
             "kind": "user",
             "text": _user_message_text(payload),
             "timestamp": timestamp,
         }
+        hidden_demo = payload.get(_HISTORY_HIDDEN_DEMO_KEY)
+        if isinstance(hidden_demo, bool):
+            user_entry[_HISTORY_HIDDEN_DEMO_KEY] = hidden_demo
+        active_user = payload.get(_HISTORY_ACTIVE_USER_KEY)
+        if isinstance(active_user, bool):
+            user_entry[_HISTORY_ACTIVE_USER_KEY] = active_user
+        return user_entry
     if event_type == "agent_message":
         text = payload.get("message")
         if not isinstance(text, str) or not text:
@@ -1713,6 +2084,11 @@ def _format_paths(paths: list[Any]) -> str:
 
 
 def _iso_to_unix_seconds(value: Any) -> int | None:
+    timestamp = _iso_to_unix_timestamp(value)
+    return int(timestamp) if timestamp is not None else None
+
+
+def _iso_to_unix_timestamp(value: Any) -> float | None:
     if not isinstance(value, str):
         return None
     try:
@@ -1721,4 +2097,4 @@ def _iso_to_unix_seconds(value: Any) -> int | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return int(dt.timestamp())
+    return dt.timestamp()

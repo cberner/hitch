@@ -35,7 +35,12 @@ _NON_MESSAGE_LABELS = {
 _COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "reasoning", "webSearch"}
 
 
-def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+def collapse_flat_entries(
+    flat: list[dict[str, Any]],
+    *,
+    leading_turn_continues: bool = False,
+    trailing_turn_continues: bool = False,
+) -> Iterator[dict[str, Any]]:
     """Apply the same activity grouping as ``render_entries`` to rollout entries.
 
     Turn boundaries are detected via the user kind because the rollout file
@@ -44,17 +49,32 @@ def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]
     that did not open turns explicitly.
     """
     turn: list[dict[str, Any]] = []
+    first_turn = True
     for entry in flat:
         if entry["kind"] == "user" and turn:
-            yield from _emit_collapsed_turn(turn)
+            yield from _emit_collapsed_turn(
+                turn,
+                allow_fallback_final=not (
+                    first_turn and leading_turn_continues
+                ),
+            )
+            first_turn = False
             turn = []
         turn.append(entry)
     if turn:
-        yield from _emit_collapsed_turn(turn)
+        yield from _emit_collapsed_turn(
+            turn,
+            allow_fallback_final=not trailing_turn_continues
+            and not (first_turn and leading_turn_continues),
+        )
 
 
-def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    final_idx = _final_agent_idx_in_flat(turn)
+def _emit_collapsed_turn(
+    turn: list[dict[str, Any]], *, allow_fallback_final: bool = True
+) -> Iterator[dict[str, Any]]:
+    final_idx = _final_agent_idx_in_flat(
+        turn, allow_fallback_final=allow_fallback_final
+    )
     activity: list[dict[str, Any]] = []
     for i, entry in enumerate(turn):
         if i == final_idx:
@@ -78,11 +98,15 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
     yield from _emit_activity_run(activity)
 
 
-def _final_agent_idx_in_flat(entries: list[dict[str, Any]]) -> int:
+def _final_agent_idx_in_flat(
+    entries: list[dict[str, Any]], *, allow_fallback_final: bool = True
+) -> int:
     for i in range(len(entries) - 1, -1, -1):
         entry = entries[i]
         if entry["kind"] == "agent" and entry.get("phase") == "final_answer":
             return i
+    if not allow_fallback_final:
+        return -1
     for i in range(len(entries) - 1, -1, -1):
         entry = entries[i]
         if entry["kind"] != "agent":
