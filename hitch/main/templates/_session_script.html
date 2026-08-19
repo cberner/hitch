@@ -857,6 +857,8 @@
 
             const sessionMain = document.querySelector("[data-session-main]");
             const liveRoot = document.querySelector("[data-live-root]");
+            const historyStartRequested = window.location.hash === "#history-start";
+            const historyPartial = sessionMain && sessionMain.dataset.historyPartial === "true";
             const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
             const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
             const HIDE_LIVE_USER_MESSAGE = liveRoot && liveRoot.dataset.hideUserMessage === "true";
@@ -872,9 +874,11 @@
                 : "";
             const empty = document.querySelector(".empty-thread");
             const jumpLatest = document.querySelector("[data-jump-latest]");
+            const historyLoader = document.querySelector("[data-history-loader]");
+            const historyAll = document.querySelector("[data-history-all]");
             const scrollRoot = document.scrollingElement || document.documentElement;
             const FOLLOW_MARGIN = 96;
-            let followLatest = !!liveRoot;
+            let followLatest = !!liveRoot && !historyStartRequested;
             let lastScrollY = window.scrollY;
             let followFrame = 0;
 
@@ -915,7 +919,7 @@
                 });
             }
 
-            if (liveRoot) {
+            if (liveRoot && !historyStartRequested) {
                 requestAnimationFrame(() => scrollToLatest(false));
             }
             window.addEventListener("scroll", () => {
@@ -933,6 +937,68 @@
                     followLatest = true;
                     scrollToLatest(true);
                 });
+            }
+            if (historyAll) {
+                historyAll.addEventListener("click", () => {
+                    const url = new URL(window.location.href);
+                    url.searchParams.set("history", "all");
+                    url.hash = "history-start";
+                    window.location.assign(url);
+                });
+            }
+            if (historyLoader) {
+                let historyLoading = false;
+                const loadEarlierHistory = async (emptyPageBudget = 1) => {
+                    if (historyLoading || !historyLoader.dataset.nextUrl) return;
+                    historyLoading = true;
+                    historyLoader.disabled = true;
+                    const oldHeight = scrollRoot.scrollHeight;
+                    const oldY = window.scrollY;
+                    try {
+                        const response = await fetch(historyLoader.dataset.nextUrl, {
+                            headers: { "X-Requested-With": "XMLHttpRequest" },
+                        });
+                        if (!response.ok) throw new Error(`history request failed: ${response.status}`);
+                        const documentFragment = document.createRange().createContextualFragment(
+                            await response.text()
+                        );
+                        const page = documentFragment.querySelector("[data-history-page]");
+                        if (!page) throw new Error("history response was invalid");
+                        formatTimestamps(page);
+                        const nextUrl = page.dataset.nextUrl || "";
+                        const entries = document.createDocumentFragment();
+                        while (page.firstChild) entries.appendChild(page.firstChild);
+                        historyLoader.after(entries);
+                        historyLoader.dataset.nextUrl = nextUrl;
+                        if (nextUrl) historyLoader.disabled = false;
+                        else historyLoader.remove();
+                        window.scrollTo(0, oldY + scrollRoot.scrollHeight - oldHeight);
+                        if (
+                            nextUrl
+                            && scrollRoot.scrollHeight === oldHeight
+                            && emptyPageBudget > 0
+                        ) {
+                            historyLoading = false;
+                            await loadEarlierHistory(emptyPageBudget - 1);
+                            return;
+                        }
+                    } catch (_error) {
+                        historyLoader.textContent = "Retry loading earlier messages";
+                        historyLoader.disabled = false;
+                    } finally {
+                        historyLoading = false;
+                    }
+                };
+                historyLoader.addEventListener("click", () => loadEarlierHistory());
+                const historyObserver = new IntersectionObserver((items) => {
+                    if (items.some((item) => item.isIntersecting)) loadEarlierHistory();
+                });
+                requestAnimationFrame(() => {
+                    window.scrollTo(0, scrollRoot.scrollHeight);
+                    historyObserver.observe(historyLoader);
+                });
+            } else if (historyPartial) {
+                requestAnimationFrame(() => window.scrollTo(0, scrollRoot.scrollHeight));
             }
 
             // Per-item DOM trackers. Items are keyed by the server-assigned

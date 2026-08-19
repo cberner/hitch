@@ -25,14 +25,14 @@ from hitch.main.models import (
     SessionMetadata,
     SystemWorkflow,
 )
-from hitch.main.runtime import app_server_pool, codex_pool, rollout
+from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _ARCHIVED_SESSIONS_DIR,
     _rollout_path_from_value,
     _rollout_path_is_archived,
 )
 from hitch.main.runtime.sdk_values import updated_at_seconds
-from hitch.main.sessions import session_index
+from hitch.main.sessions import session_index, token_usage
 from hitch.main.sessions.entry_render import collapse_flat_entries
 from hitch.main.sessions.settings_cookies import SettingsValues
 
@@ -61,6 +61,7 @@ class _MetadataResume:
     reasoning_effort: str = ""
     model_config: rollout.SessionModelConfig | None = None
     rollout_data: rollout.SessionDetailData | None = None
+    history_page: rollout.SessionHistoryPage | None = None
 
 
 _ROLLOUT_FILENAME_RE = re.compile(
@@ -183,6 +184,14 @@ def _stored_rollout_path_for_thread(
     return None
 
 
+def _rollout_path_for_session_detail(
+    session_id: str, metadata: SessionMetadata | None
+) -> Path | None:
+    if metadata is not None:
+        return _rollout_path_from_value(metadata.codex_path)
+    return _stored_rollout_path_for_thread(session_id)
+
+
 def _rollout_filename_matches_thread_id(path: Path, session_id: str) -> bool:
     match = _ROLLOUT_FILENAME_RE.fullmatch(path.name)
     return match is not None and match.group("thread_id") == session_id
@@ -195,8 +204,14 @@ def _metadata_resume_for_inactive_session(
     active_instance: CodexInstance | None,
     active_system_workflow: SystemWorkflow | None,
     require_system_agent_thread: bool,
+    history_message_target: int | None = None,
+    allow_active_rollout: bool = False,
+    hidden_user_prompts: frozenset[str] | None = None,
+    active_user_identity: rollout.SessionHistoryUserIdentity | None = None,
 ) -> _MetadataResume | None:
-    if metadata is None or require_system_agent_thread:
+    if metadata is None or (
+        require_system_agent_thread and not metadata.is_hidden_system_session
+    ):
         return None
     archived = (
         _metadata_indicates_archived(metadata)
@@ -204,19 +219,62 @@ def _metadata_resume_for_inactive_session(
     )
     # Archived Codex threads cannot be resumed. Their rollout remains the
     # authoritative detail source even if stale workflow state is still active.
-    if not archived and (
-        active_instance is not None or active_system_workflow is not None
+    if (
+        history_message_target is None
+        and not archived
+        and not allow_active_rollout
+        and (active_instance is not None or active_system_workflow is not None)
     ):
         return None
     rollout_path = _rollout_path_from_value(metadata.codex_path)
     if rollout_path is None:
         return None
-    rollout_data = _session_detail_data_for_metadata_resume(rollout_path)
-    if rollout_data is None:
-        return None
+    history_page: rollout.SessionHistoryPage | None = None
+    rollout_data: rollout.SessionDetailData | None
+    if history_message_target is not None:
+        history_page = rollout.session_history_page(
+            rollout_path,
+            message_target=history_message_target,
+            hidden_user_prompts=hidden_user_prompts,
+            active_user_identity=active_user_identity,
+        )
+        if history_page is None:
+            return None
+        model_config = _stored_model_config_for_session(session_id)
+        rollout_data = rollout.SessionDetailData(
+            flat_entries=history_page.flat_entries,
+            latest_token_usage=token_usage._cached_token_usage_numbers_for_rollout(
+                session_id, rollout_path
+            ),
+            latest_collaboration_mode=rollout.latest_collaboration_mode_bounded(
+                rollout_path
+            ),
+            latest_model_config=model_config,
+            latest_pr_url=None,
+            pr_observation=codex_events.PrObservationResult(None),
+        )
+    else:
+        rollout_data = _session_detail_data_for_metadata_resume(rollout_path)
+        if rollout_data is None:
+            return None
+    assert rollout_data is not None
     thread = _metadata_thread(metadata, rollout_path=rollout_path)
-    entries = tuple(collapse_flat_entries(list(rollout_data.flat_entries)))
-    if not archived and not _entries_include_transcript(entries):
+    entries = tuple(
+        collapse_flat_entries(
+            list(rollout_data.flat_entries),
+            leading_turn_continues=bool(
+                history_page is not None
+                and history_page.has_older
+                and history_page.flat_entries
+                and history_page.flat_entries[0].get("kind") != "user"
+            ),
+        )
+    )
+    if (
+        history_page is None
+        and not archived
+        and not _entries_include_transcript(entries)
+    ):
         return None
     model_config = rollout_data.latest_model_config or _stored_model_config_for_session(
         session_id
@@ -230,6 +288,7 @@ def _metadata_resume_for_inactive_session(
         ),
         model_config=model_config,
         rollout_data=rollout_data,
+        history_page=history_page,
     )
 
 

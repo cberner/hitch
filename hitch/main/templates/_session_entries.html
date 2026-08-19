@@ -1,0 +1,19 @@
+{% for entry in entries %}
+                {% if entry.kind == "intermediate" %}
+                <div class="intermediate-group">
+                    <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
+                        <summary>
+                            <span>{{ entry.summary }}</span>
+                            <span class="intermediate-action intermediate-action-expand">Show all</span>
+                            <span class="intermediate-action intermediate-action-collapse">Show latest</span>
+                        </summary>
+                        <div class="intermediate-body" data-intermediate-body{% if entry.lazy_url %} hidden{% endif %}>
+                            {% for item in entry.earlier_items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
+                        </div>
+                    </details>
+                    <div class="intermediate-latest" data-intermediate-latest>
+                        {% include "_session_entry.html" with entry=entry.latest_item %}
+                    </div>
+                </div>
+                {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
+{% endfor %}

@@ -2,6 +2,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import Any, override
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -38,6 +39,398 @@ def _write_rollout(lines: list[str]) -> Path:
         if lines:
             tmp.write("\n")
         return Path(tmp.name)
+
+
+class SessionHistoryPageTests(TestCase):
+    def test_reads_message_pages(self) -> None:
+        lines = [_line("session_meta", {"id": "session"})]
+        for index in range(4):
+            lines.extend(
+                [
+                    _line(
+                        "event_msg",
+                        {"type": "user_message", "message": f"Prompt {index}"},
+                    ),
+                    _line(
+                        "event_msg",
+                        {"type": "agent_message", "message": f"Answer {index}"},
+                    ),
+                ]
+            )
+        path = _write_rollout(lines)
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        recent = rollout.session_history_page(path, message_target=4)
+
+        self.assertIsNotNone(recent)
+        assert recent is not None
+        self.assertTrue(recent.has_older)
+        self.assertEqual(
+            [entry["text"] for entry in recent.flat_entries],
+            ["Prompt 2", "Answer 2", "Prompt 3", "Answer 3"],
+        )
+        older = rollout.session_history_page(
+            path, before_offset=recent.start_offset, message_target=4
+        )
+        self.assertIsNotNone(older)
+        assert older is not None
+        self.assertEqual(
+            [entry["text"] for entry in older.flat_entries],
+            ["Prompt 0", "Answer 0", "Prompt 1", "Answer 1"],
+        )
+
+    def test_compacts_one_oversized_message_record(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Prompt"},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "x" * (70 * 1024),
+                        "phase": "commentary",
+                    },
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        page = rollout.session_history_page(path, message_target=2)
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertEqual(page.flat_entries[0]["text"], "Prompt")
+        self.assertEqual(
+            page.flat_entries[1]["text"],
+            "[Oversized message omitted from paged history.]",
+        )
+        self.assertEqual(page.flat_entries[1]["phase"], "commentary")
+
+    def test_marks_one_oversized_hidden_demo_prompt(self) -> None:
+        hidden_prompt = "secret demo prompt " * 5000
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": hidden_prompt},
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "hidden answer"},
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        page = rollout.session_history_page(
+            path,
+            message_target=2,
+            hidden_user_prompts=frozenset({hidden_prompt}),
+        )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertTrue(page.flat_entries[0]["_hitch_hidden_demo"])
+
+    def test_bounds_scan_without_an_earlier_user_message(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": f"Answer {index}"},
+                )
+                for index in range(20)
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        with (
+            patch.object(rollout, "_HISTORY_SCAN_MAX_BYTES", 1),
+            patch.object(
+                rollout,
+                "_history_message_record",
+                wraps=rollout._history_message_record,
+            ) as message_record,
+        ):
+            page = rollout.session_history_page(path, message_target=1)
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertEqual(message_record.call_count, 1)
+        self.assertTrue(page.has_older)
+
+    def test_bounds_delimiter_search_inside_one_large_record(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Old prompt"},
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Old answer"},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "x" * 1024,
+                    },
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_BYTES", 128):
+            page = rollout.session_history_page(path, message_target=2)
+            self.assertIsNotNone(page)
+            assert page is not None
+            self.assertFalse(page.flat_entries)
+            self.assertIsNotNone(page.partial_record_end)
+            self.assertGreaterEqual(page.start_offset, path.stat().st_size - 129)
+
+            entries: list[dict[str, Any]] = []
+            for _ in range(20):
+                if not page.has_older:
+                    break
+                page = rollout.session_history_page(
+                    path,
+                    before_offset=page.start_offset,
+                    partial_record_end=page.partial_record_end,
+                    message_target=2,
+                )
+                self.assertIsNotNone(page)
+                assert page is not None
+                entries = list(page.flat_entries) + entries
+
+        self.assertFalse(page.has_older)
+        self.assertEqual(
+            [entry["text"] for entry in entries],
+            ["Old prompt", "Old answer"],
+        )
+
+    def test_partial_record_cursor_survives_appended_content(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Old prompt"},
+                ),
+                _line(
+                    "response_item",
+                    {"type": "function_call_output", "output": "x" * 1024},
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+        with path.open("rb+") as handle:
+            handle.seek(-1, 2)
+            handle.truncate()
+
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_BYTES", 128):
+            page = rollout.session_history_page(path, message_target=1)
+            self.assertIsNotNone(page)
+            assert page is not None
+            self.assertIsNotNone(page.partial_record_end)
+            with path.open("ab") as handle:
+                handle.write(b"still being written")
+            older = rollout.session_history_page(
+                path,
+                before_offset=page.start_offset,
+                partial_record_end=page.partial_record_end,
+                message_target=1,
+            )
+
+        self.assertIsNotNone(older)
+
+    def test_scan_cap_does_not_skip_unselected_messages(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": f"Answer {index}"},
+                )
+                for index in range(6)
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        entries: list[dict[str, Any]] = []
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_RECORDS", 3):
+            page = rollout.session_history_page(path, message_target=2)
+            for _ in range(4):
+                self.assertIsNotNone(page)
+                assert page is not None
+                entries = list(page.flat_entries) + entries
+                if not page.has_older:
+                    break
+                page = rollout.session_history_page(
+                    path,
+                    before_offset=page.start_offset,
+                    message_target=2,
+                )
+
+        assert page is not None
+        self.assertFalse(page.has_older)
+        self.assertEqual(
+            [entry["text"] for entry in entries],
+            [f"Answer {index}" for index in range(6)],
+        )
+
+    def test_scan_cap_keeps_unknown_leading_demo_context_hidden(self) -> None:
+        hidden_prompt = "Hidden demo prompt"
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": hidden_prompt},
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Hidden answer"},
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Visible prompt"},
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Visible answer"},
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_RECORDS", 3):
+            page = rollout.session_history_page(
+                path,
+                message_target=4,
+                hidden_user_prompts=frozenset({hidden_prompt}),
+            )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertEqual(page.flat_entries[0]["text"], "Hidden answer")
+        self.assertEqual(page.leading_user_text, hidden_prompt)
+
+    def test_retains_active_user_boundary_beyond_message_target(self) -> None:
+        lines = [
+            _line("event_msg", {"type": "user_message", "message": "Old prompt"}),
+            _line("event_msg", {"type": "agent_message", "message": "Old answer"}),
+            _line("event_msg", {"type": "user_message", "message": "Active prompt"}),
+        ]
+        lines.extend(
+            _line(
+                "event_msg",
+                {"type": "agent_message", "message": f"Active answer {index}"},
+            )
+            for index in range(5)
+        )
+        path = _write_rollout(lines)
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        page = rollout.session_history_page(
+            path,
+            message_target=2,
+            active_user_identity=rollout.SessionHistoryUserIdentity(
+                text="Active prompt",
+                prompt="Active prompt",
+                started_at=1736078400,
+            ),
+        )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertEqual(page.flat_entries[0]["kind"], "user")
+        self.assertTrue(page.flat_entries[0]["_hitch_active_user"])
+        older = rollout.session_history_page(
+            path,
+            before_offset=page.start_offset,
+            message_target=2,
+        )
+        self.assertIsNotNone(older)
+        assert older is not None
+        self.assertEqual(
+            [entry["text"] for entry in older.flat_entries],
+            ["Old prompt", "Old answer"],
+        )
+
+    def test_marks_active_turn_unresolved_when_scan_cap_precedes_user(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Active prompt"},
+                ),
+                *[
+                    _line(
+                        "event_msg",
+                        {
+                            "type": "agent_message",
+                            "message": f"Active answer {index}",
+                        },
+                    )
+                    for index in range(4)
+                ],
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_RECORDS", 2):
+            page = rollout.session_history_page(
+                path,
+                message_target=2,
+                active_user_identity=rollout.SessionHistoryUserIdentity(
+                    text="Active prompt",
+                    prompt="Active prompt",
+                    started_at=1736078400,
+                ),
+            )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertTrue(page.active_turn_unresolved)
+
+    def test_matches_delayed_oversized_active_prompt_but_not_older_repeat(
+        self,
+    ) -> None:
+        prompt = "Repeated active prompt " * 4000
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": prompt},
+                    timestamp="2025-01-05T11:59:59.900Z",
+                ),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": prompt},
+                    timestamp="2025-01-05T12:00:01Z",
+                ),
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        page = rollout.session_history_page(
+            path,
+            message_target=2,
+            active_user_identity=rollout.SessionHistoryUserIdentity(
+                text=prompt,
+                prompt=prompt,
+                started_at=1736078400.5,
+            ),
+        )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertEqual(
+            [entry["_hitch_active_user"] for entry in page.flat_entries],
+            [False, True],
+        )
 
 
 class LatestModelConfigTests(TestCase):

@@ -138,6 +138,29 @@ def _token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
     return snapshot["usage"] if snapshot is not None else None
 
 
+def _cached_token_usage_numbers_for_rollout(
+    thread_id: str, rollout_path: Path
+) -> dict[str, int] | None:
+    """Return a validated cached total without parsing the rollout."""
+    rollout_state = _rollout_file_state_from_value(str(rollout_path))
+    if rollout_state is None:
+        return None
+    cache = ArchivedSessionTokenUsage.objects.filter(thread_id=thread_id).first()
+    if (
+        cache is None
+        or not _cached_token_usage_logic_is_current(cache)
+        or cache.rollout_mtime_ns != rollout_state.mtime_ns
+        or not (
+            cache.rollout_path == str(rollout_state.path)
+            or _rollout_paths_are_storage_aliases(
+                cache.rollout_path, str(rollout_state.path)
+            )
+        )
+    ):
+        return None
+    return _token_usage_from_cache(cache)
+
+
 def _token_usage_snapshot_for(
     thread: Any,
     cached_usage: ArchivedSessionTokenUsage | object = _MISSING_TOKEN_USAGE_CACHE,

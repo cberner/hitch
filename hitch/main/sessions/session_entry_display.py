@@ -52,7 +52,10 @@ def _active_instance_for(session_id: str) -> CodexInstance | None:
 
 
 def _trim_in_progress_turn(
-    entries: list[dict[str, Any]], active: CodexInstance | None
+    entries: list[dict[str, Any]],
+    active: CodexInstance | None,
+    *,
+    active_turn_unresolved: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop the in-progress turn's entries from the tail of ``entries``.
 
@@ -69,12 +72,21 @@ def _trim_in_progress_turn(
     not change this identity; anything from the original user message onward
     is owned by the stream until the turn ends.
     """
+    if active_turn_unresolved and active is not None:
+        return []
     active_text = _active_user_message_text(active)
     if not active_text:
         return entries
     for i in range(len(entries) - 1, -1, -1):
         entry = entries[i]
-        if entry.get("kind") == "user" and entry.get("text") == active_text:
+        active_marker = entry.get("_hitch_active_user")
+        if entry.get("kind") == "user" and (
+            active_marker is True
+            or (
+                "_hitch_active_user" not in entry
+                and entry.get("text") == active_text
+            )
+        ):
             return entries[:i]
     return entries
 
@@ -148,6 +160,18 @@ def _active_user_message_text(active: CodexInstance | None) -> str:
         "[image]" for _path in _normalized_json_string_list(active.input_image_paths)
     )
     return "\n".join(parts)
+
+
+def _active_history_user_identity(
+    active: CodexInstance | None,
+) -> rollout.SessionHistoryUserIdentity | None:
+    if active is None:
+        return None
+    return rollout.SessionHistoryUserIdentity(
+        text=_active_user_message_text(active),
+        prompt=active.prompt,
+        started_at=active.started_at.timestamp(),
+    )
 
 
 def _normalized_json_string_list(value: Any) -> list[str]:
@@ -281,30 +305,44 @@ def _apply_system_author(
 
 
 def _filter_demo_agent_entries(
-    entries: list[dict[str, Any]], session_id: str
+    entries: list[dict[str, Any]],
+    session_id: str,
+    *,
+    initial_user_text: str | None = None,
+    hidden_prompts: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
-    hidden_prompts: set[str] = set()
-    for prompt in CodexInstance.objects.filter(
-        thread_id=session_id,
-        agent_kind=demo.DEMO_AGENT_KIND,
-    ).values_list("prompt", flat=True):
-        if isinstance(prompt, str) and prompt:
-            hidden_prompts.add(prompt)
+    if hidden_prompts is None:
+        hidden_prompts = _demo_agent_prompts(session_id)
     if not hidden_prompts:
         return entries
 
     filtered: list[dict[str, Any]] = []
-    suppress_turn = False
+    suppress_turn = initial_user_text in hidden_prompts
     for entry in entries:
         if entry.get("kind") == "user":
-            text = entry.get("text")
-            suppress_turn = isinstance(text, str) and text in hidden_prompts
+            hidden_demo = entry.get("_hitch_hidden_demo")
+            if isinstance(hidden_demo, bool):
+                suppress_turn = hidden_demo
+            else:
+                text = entry.get("text")
+                suppress_turn = isinstance(text, str) and text in hidden_prompts
         if suppress_turn and _preserve_during_hidden_demo_turn(entry):
             filtered.append(entry)
             continue
         if not suppress_turn:
             filtered.append(entry)
     return filtered
+
+
+def _demo_agent_prompts(session_id: str) -> frozenset[str]:
+    return frozenset(
+        prompt
+        for prompt in CodexInstance.objects.filter(
+            thread_id=session_id,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        ).values_list("prompt", flat=True)
+        if isinstance(prompt, str) and prompt
+    )
 
 
 def _preserve_during_hidden_demo_turn(entry: dict[str, Any]) -> bool:

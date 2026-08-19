@@ -86,10 +86,12 @@ from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_entry_display import (
+    _active_history_user_identity,
     _active_instance_for,
     _active_worker_status_text,
     _apply_qa_approval_messages,
     _apply_system_authors,
+    _demo_agent_prompts,
     _display_title,
     _entries_for_with_source,
     _filter_demo_agent_entries,
@@ -117,6 +119,7 @@ from hitch.main.sessions.session_pr_plan import (
 from hitch.main.sessions.session_resume import (
     _metadata_resume_for_inactive_session,
     _pending_resume_for_active_session,
+    _rollout_path_for_session_detail,
     _session_detail_metadata,
     _stored_model_config_for_session,
 )
@@ -213,6 +216,10 @@ _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _PLAN_REVISION_PROMPT = "Revise the plan."
 
 _SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT = "hitch.session-intermediate.demo-context"
+
+_SESSION_HISTORY_MIN_BYTES = 2 * 1024 * 1024
+
+_SESSION_HISTORY_MESSAGE_TARGET = 40
 
 _INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
 
@@ -460,30 +467,61 @@ def _render_session_detail(
     # miss on the next read rather than being masked behind a post-read stat.
     # See the matching rule in ``token_usage_snapshot``, the stage cache, and
     # the lazy intermediate-detail cache.
-    detail_rollout_state = (
-        _rollout_file_state_from_value(metadata.codex_path)
-        if metadata is not None
-        else None
+    detail_rollout_path = _rollout_path_for_session_detail(session_id, metadata)
+    detail_rollout_state = _rollout_file_state_from_value(
+        str(detail_rollout_path) if detail_rollout_path is not None else None
     )
     stage_cache_mtime_ns = (
         detail_rollout_state.mtime_ns if detail_rollout_state is not None else 0
     )
+    full_history_requested = request.GET.get("history") == "all"
+    hidden_demo_prompts = (
+        _demo_agent_prompts(session_id) if hide_demo_agent_entries else frozenset()
+    )
+    active_history_user = _active_history_user_identity(active_instance)
+    paginate_history = False
+    if (
+        detail_rollout_state is not None
+        and not full_history_requested
+    ):
+        with contextlib.suppress(OSError):
+            paginate_history = (
+                detail_rollout_state.path.stat().st_size
+                >= _SESSION_HISTORY_MIN_BYTES
+            )
+    if (
+        (paginate_history or full_history_requested)
+        and metadata is None
+        and detail_rollout_state is not None
+    ):
+        metadata = SessionMetadata(
+            thread_id=session_id,
+            codex_path=str(detail_rollout_state.path),
+        )
     metadata_resume = _metadata_resume_for_inactive_session(
         session_id,
         metadata,
         active_instance=active_instance,
         active_system_workflow=active_system_workflow,
         require_system_agent_thread=require_system_agent_thread,
+        history_message_target=(
+            _SESSION_HISTORY_MESSAGE_TARGET if paginate_history else None
+        ),
+        allow_active_rollout=full_history_requested,
+        hidden_user_prompts=hidden_demo_prompts,
+        active_user_identity=active_history_user,
     )
     resumed: Any
     thread: Any
     entries_backed_by_rollout = False
+    history_page: rollout.SessionHistoryPage | None = None
 
     if metadata_resume is not None:
         resumed = metadata_resume
         thread = metadata_resume.thread
         raw_entries = list(metadata_resume.entries)
         rollout_data = metadata_resume.rollout_data
+        history_page = metadata_resume.history_page
         models_data = caches._cached_models_for_session_detail(
             enable_memories=initial_settings.enable_memories
         )
@@ -586,10 +624,21 @@ def _render_session_detail(
         )
         rollout_data = None
     is_archived = _thread_is_archived(thread)
-    entries = _apply_system_authors(raw_entries, session_id)
-    entries = _apply_qa_approval_messages(entries, session_id)
+    history_paginated = history_page is not None
+    if history_paginated:
+        entries = raw_entries
+    else:
+        entries = _apply_system_authors(raw_entries, session_id)
+        entries = _apply_qa_approval_messages(entries, session_id)
     if hide_demo_agent_entries:
-        entries = _filter_demo_agent_entries(entries, session_id)
+        entries = _filter_demo_agent_entries(
+            entries,
+            session_id,
+            initial_user_text=(
+                history_page.leading_user_text if history_page is not None else None
+            ),
+            hidden_prompts=hidden_demo_prompts,
+        )
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -710,6 +759,18 @@ def _render_session_detail(
             ):
                 stage = cached_terminal
                 stage_refreshing = False
+        if (
+            history_paginated
+            and metadata is not None
+            and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
+            and active_instance is None
+            and active_system_workflow is None
+            and not awaiting_user_input
+        ):
+            cached_stage = session_stage.stage_for_key(metadata.derived_stage)
+            if cached_stage is not None:
+                stage = cached_stage
+                stage_refreshing = False
         # Only persist a rollout-derived stage; see _attach_session_stage_context
         # for why active-instance/workflow-forced stages must not enter the
         # mtime-keyed cache. The post-lifecycle ``stage_workflow``/
@@ -722,6 +783,7 @@ def _render_session_detail(
             and stage_pr_workflow is None
             and not awaiting_user_input
             and not stage_refreshing
+            and not history_paginated
         ):
             # Best-effort like the session-list path: this runs while rendering
             # the session detail page, so a contended write lock must skip the
@@ -739,7 +801,13 @@ def _render_session_detail(
     # events file, so leaving the rollout-rendered copy in place would
     # double up every entry in the live DOM. The page reload on stream end
     # restores the canonical view.
-    entries = _trim_in_progress_turn(entries, active_instance)
+    entries = _trim_in_progress_turn(
+        entries,
+        active_instance,
+        active_turn_unresolved=bool(
+            history_page is not None and history_page.active_turn_unresolved
+        ),
+    )
     plan_mode_state = _thread_plan_mode_state(
         session_id,
         thread,
@@ -773,14 +841,20 @@ def _render_session_detail(
         demo_entries_run_id=demo_entries_run_id,
         rollout_state=detail_rollout_state,
     )
-    goal_objective = codex_events.latest_goal_for_thread(session_id)
+    goal_objective = (
+        "" if history_paginated else codex_events.latest_goal_for_thread(session_id)
+    )
     # Scope the plan to the running worker, or to the latest worker on reload
     # when none is running, so a turn that finished without emitting its own
     # plan does not inherit an earlier turn's.
     task_plan = _task_plan_context(
-        codex_events.latest_task_plan_for_instance(active_instance)
-        if active_instance is not None
-        else codex_events.latest_task_plan_for_thread(session_id)
+        None
+        if history_paginated
+        else (
+            codex_events.latest_task_plan_for_instance(active_instance)
+            if active_instance is not None
+            else codex_events.latest_task_plan_for_thread(session_id)
+        )
     )
     thread_cwd = _thread_cwd(thread)
     # A running worker/workflow can change the diff continuously. The stream
@@ -844,7 +918,7 @@ def _render_session_detail(
         and not resumed_model
         and not getattr(active_instance, "plan_mode", False)
     )
-    if rollout_model_config is None and (
+    if not history_paginated and rollout_model_config is None and (
         needs_recorded_model_config or active_default_model_unresolved
     ):
         rollout_path = _rollout_path_for(thread)
@@ -867,6 +941,28 @@ def _render_session_detail(
         {
             "thread": _session_template_thread(thread),
             "entries": entries,
+            "history_partial": history_paginated,
+            "history_next_url": (
+                _session_history_url(
+                    session_id,
+                    before_offset=history_page.start_offset,
+                    partial_record_end=history_page.partial_record_end,
+                    newer_turn_continues=bool(
+                        history_page.flat_entries
+                        and history_page.flat_entries[0].get("kind") != "user"
+                    ),
+                    demo_context=(
+                        _session_intermediate_demo_context(
+                            session_id, demo_entries_run_id
+                        )
+                        if not hide_demo_agent_entries
+                        and demo_entries_run_id is not None
+                        else ""
+                    ),
+                )
+                if history_page is not None and history_page.has_older
+                else ""
+            ),
             "display_title": display_title or _display_title(thread),
             "read_only": read_only,
             "system_prompt": system_prompt,
@@ -969,6 +1065,27 @@ def _render_session_detail(
     )
     _apply_cookie_updates(response, cookie_updates)
     return _prevent_stale_cache(response)
+
+
+def _session_history_url(
+    session_id: str,
+    *,
+    before_offset: int,
+    partial_record_end: int | None = None,
+    newer_turn_continues: bool = False,
+    demo_context: str = "",
+) -> str:
+    params: dict[str, str | int] = {"before": before_offset}
+    if partial_record_end is not None:
+        params["record_end"] = partial_record_end
+    if newer_turn_continues:
+        params["newer_turn"] = "continued"
+    if demo_context:
+        params["demo_context"] = demo_context
+    return "{}?{}".format(
+        reverse("session_history", kwargs={"session_id": session_id}),
+        urlencode(params),
+    )
 
 def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
     message = exc.message.lower()

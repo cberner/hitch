@@ -53,6 +53,7 @@
     </header>
     <main data-session-main
           data-stream-url="{{ stream_url }}"
+          data-history-partial="{{ history_partial|yesno:'true,false' }}"
           class="{% if task_plan.visible %}has-task-plan{% endif %}">
         {% if messages %}
         <div class="session-messages" role="alert" aria-live="polite">
@@ -142,8 +143,8 @@
         </div>
         <div class="session-tab-panel" id="session-panel-conversation" role="tabpanel" aria-labelledby="session-tab-conversation">
         {% endif %}
-        {% if system_prompt or entries or latest_user_turn_failure or pending_user_prompt or queued_workflow_user_messages or active_worker or active_system_workflow or session_demo %}
-        <section class="thread" data-thread>
+        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or queued_workflow_user_messages or active_worker or active_system_workflow or session_demo %}
+        <section class="thread" data-thread id="history-start">
             {% if session_demo and not active_demo_worker %}
             <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
                 <summary>Demo {{ session_demo.status }}</summary>
@@ -163,25 +164,10 @@
                 <div class="system-prompt-body">{{ system_prompt }}</div>
             </details>
             {% endif %}
-            {% for entry in entries %}
-                {% if entry.kind == "intermediate" %}
-                <div class="intermediate-group">
-                    <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
-                        <summary>
-                            <span>{{ entry.summary }}</span>
-                            <span class="intermediate-action intermediate-action-expand">Show all</span>
-                            <span class="intermediate-action intermediate-action-collapse">Show latest</span>
-                        </summary>
-                        <div class="intermediate-body" data-intermediate-body{% if entry.lazy_url %} hidden{% endif %}>
-                            {% for item in entry.earlier_items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
-                        </div>
-                    </details>
-                    <div class="intermediate-latest" data-intermediate-latest>
-                        {% include "_session_entry.html" with entry=entry.latest_item %}
-                    </div>
-                </div>
-                {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
-            {% endfor %}
+            {% if history_next_url %}
+            <button type="button" class="history-loader" data-history-loader data-next-url="{{ history_next_url }}">Load earlier messages</button>
+            {% endif %}
+            {% include "_session_entries.html" %}
             {% if latest_user_turn_failure %}
             <div class="entry" data-turn-failure>
                 <div class="entry-header">
@@ -304,6 +290,10 @@
         <span>Diff</span>
         <span class="diff-fab-count">{{ diff_view.file_count }}</span>
     </button>
+    {% endif %}
+
+    {% if history_partial %}
+    <button type="button" class="jump-latest history-all" data-history-all aria-label="Load all history and jump to the beginning">↑</button>
     {% endif %}
 
     {% if active_worker %}

@@ -369,6 +369,15 @@
         .edit-title button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 
         section.thread { display: flex; flex-direction: column; gap: 0.85rem; }
+        .history-loader {
+            align-self: center;
+            border: 0;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            font: inherit;
+        }
+        .history-loader:hover { color: var(--text); }
         .system-prompt {
             border: 1px solid var(--border);
             border-left: 3px solid var(--border-strong);
@@ -1437,6 +1446,7 @@
             border-color: var(--accent-hover);
         }
         .jump-latest[hidden] { display: none; }
+        .history-all { right: calc(max(1rem, env(safe-area-inset-right, 0px)) + 3.4rem); }
         body.read-only .jump-latest {
             bottom: calc(1.9rem + var(--safe-bottom));
         }
@@ -2002,6 +2012,9 @@
             }
             .jump-latest {
                 right: 0.75rem;
+            }
+            .jump-latest.history-all {
+                right: calc(0.75rem + 3.4rem);
             }
             body.read-only .jump-latest {
                 bottom: calc(1.55rem + var(--safe-bottom));

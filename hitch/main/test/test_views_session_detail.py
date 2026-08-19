@@ -40,6 +40,7 @@ from hitch.main.test.support import (
 )
 from hitch.main.test.views_helpers import (
     _basic_session_rollout_lines,
+    _cache_token_usage,
     _due_pr_monitor_state,
     _make_rollout,
     _merged_pr_monitor_observation,
@@ -52,6 +53,404 @@ from hitch.main.workflows import system_agents
 
 
 class SessionDetailFastPathTests(TestCase):
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_large_session_without_metadata_uses_discovered_rollout_preview(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        session_id = "untracked-paged-session"
+        lines: list[str] = []
+        for index in range(45):
+            if index == 44:
+                lines.append(
+                    _rollout_line(
+                        "turn_context",
+                        {"collaboration_mode": {"mode": "plan"}},
+                    )
+                )
+            lines.extend(
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "user_message", "message": f"Prompt {index}"},
+                    ),
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "agent_message", "message": f"Answer {index}"},
+                    ),
+                ]
+            )
+        with tempfile.TemporaryDirectory() as codex_home:
+            active_path = _write_codex_home_rollout(codex_home, session_id, lines)
+            archived_path = Path(codex_home) / "archived_sessions" / active_path.name
+            archived_path.parent.mkdir(parents=True)
+            active_path.replace(archived_path)
+            _cache_token_usage(
+                session_id,
+                input_tokens=100,
+                cached_input_tokens=20,
+                output_tokens=30,
+                total_tokens=130,
+                path=archived_path,
+            )
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+                patch(
+                    "hitch.main.runtime.rollout._load_rollout_lines",
+                    wraps=rollout_module._load_rollout_lines,
+                ) as load_rollout_lines,
+            ):
+                response = self.client.get(
+                    reverse("session", kwargs={"session_id": session_id})
+                )
+                older = self.client.get(response.context["history_next_url"])
+                self.assertEqual(load_rollout_lines.call_count, 0)
+                full = self.client.get(
+                    reverse("session", kwargs={"session_id": session_id}),
+                    {"history": "all"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Prompt 44")
+        self.assertNotContains(response, "Prompt 0")
+        self.assertContains(response, "data-history-all")
+        self.assertTrue(response.context["default_plan_mode"])
+        self.assertEqual(
+            response.context["token_usage"],
+            {"input": "80", "cached": "20", "output": "30"},
+        )
+        self.assertEqual(older.status_code, 200)
+        self.assertContains(older, "Prompt 24")
+        self.assertEqual(full.status_code, 200)
+        self.assertContains(full, "Prompt 0")
+        self.assertGreater(load_rollout_lines.call_count, 0)
+        self.assertFalse(SessionMetadata.objects.filter(thread_id=session_id).exists())
+        mock_codex.assert_not_called()
+
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_large_active_session_pages_messages_and_loads_all(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        lines: list[str] = []
+        for index in range(45):
+            lines.extend(
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "user_message", "message": f"Prompt {index}"},
+                    ),
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "agent_message", "message": f"Answer {index}"},
+                    ),
+                ]
+            )
+        rollout_path = _make_rollout(self, lines)
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="paged-session",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Paged session",
+            codex_preview="Prompt 44",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="paged-session",
+            cwd="/repo",
+            prompt="Prompt 44",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+
+        with patch(
+            "hitch.main.runtime.rollout._load_rollout_lines",
+            wraps=rollout_module._load_rollout_lines,
+        ) as load_rollout_lines:
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "paged-session"})
+            )
+            self.assertEqual(load_rollout_lines.call_count, 0)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, "Prompt 44")
+            self.assertNotContains(response, "Prompt 0")
+            self.assertContains(response, "data-history-all")
+            self.assertContains(response, ".jump-latest.history-all {")
+            next_url = response.context["history_next_url"]
+            self.assertTrue(next_url)
+            older = self.client.get(next_url)
+            self.assertEqual(older.status_code, 200)
+            self.assertContains(older, "Prompt 24")
+            self.assertContains(response, "formatTimestamps(page);")
+
+            full = self.client.get(
+                reverse("session", kwargs={"session_id": "paged-session"}),
+                {"history": "all"},
+            )
+            self.assertGreater(load_rollout_lines.call_count, 0)
+        self.assertEqual(full.status_code, 200)
+        self.assertContains(full, "Prompt 0")
+        self.assertContains(full, "liveRoot && !historyStartRequested")
+        self.assertContains(full, "data-live-root")
+        self.assertNotContains(full, 'class="jump-latest history-all"')
+        mock_codex.assert_not_called()
+
+    @patch.object(rollout_module, "_HISTORY_SCAN_MAX_BYTES", 64)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_empty_initial_preview_keeps_history_loader(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Old prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Old answer"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "tool output",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="empty-preview",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Empty preview",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "empty-preview"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["entries"])
+        self.assertContains(response, "data-history-loader")
+        self.assertContains(
+            response,
+            "const loadEarlierHistory = async (emptyPageBudget = 1) => {",
+        )
+        self.assertContains(
+            response,
+            "await loadEarlierHistory(emptyPageBudget - 1);",
+        )
+        next_url = response.context["history_next_url"]
+        for _ in range(10):
+            older = self.client.get(next_url)
+            self.assertEqual(older.status_code, 200)
+            if b"Old answer" in older.content:
+                break
+            next_url = older.context["history_next_url"]
+        self.assertContains(older, "Old answer")
+        mock_codex.assert_not_called()
+
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_large_untracked_system_session_uses_read_only_preview(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "System prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "System answer"},
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="read-only-system",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Read-only system",
+            codex_created_at=now,
+            codex_updated_at=now,
+            is_hidden_system_session=True,
+        )
+
+        response = self.client.get(
+            reverse(
+                "system_session", kwargs={"session_id": "read-only-system"}
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "System answer")
+        self.assertContains(response, "data-history-all")
+        self.assertEqual(response.context["read_only"], True)
+        mock_codex.assert_not_called()
+
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.views.common.Codex")
+    def test_large_ordinary_uuid_is_not_a_system_session(
+        self, mock_codex: MagicMock
+    ) -> None:
+        session_id = "01a00cfd-d74e-7c60-bcc3-1883f856c96b"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Ordinary prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Ordinary answer"},
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id=session_id,
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Ordinary session",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session(session_id)
+        )
+
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": session_id})
+        )
+
+        self.assertEqual(response.status_code, 404)
+        client._client.thread_resume.assert_called_once_with(session_id)
+
+    @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_history_fragment_does_not_promote_partial_turn_fallback(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Prompt"},
+                ),
+                *[
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "agent_message", "message": f"Answer {index}"},
+                    )
+                    for index in range(4)
+                ],
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="partial-turn-page",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Partial turn page",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "partial-turn-page"})
+        )
+        next_url = response.context["history_next_url"]
+        older = self.client.get(next_url)
+
+        self.assertIn("newer_turn=continued", next_url)
+        self.assertEqual(older.status_code, 200)
+        self.assertContains(older, "Agent (thinking)", count=2)
+        self.assertNotContains(older, '<span class="role">Agent</span>')
+        mock_codex.assert_not_called()
+
+    @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_history_pages_keep_one_explicit_final_for_a_split_turn(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "Canonical final",
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Postscript 0"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Postscript 1"},
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="split-explicit-final",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Split explicit final",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "split-explicit-final"})
+        )
+        older = self.client.get(response.context["history_next_url"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [entry["kind"] for entry in response.context["entries"]],
+            ["thinking", "thinking"],
+        )
+        self.assertNotContains(response, '<span class="role">Agent</span>')
+        self.assertEqual(older.status_code, 200)
+        self.assertContains(older, '<span class="role">Agent</span>')
+        self.assertContains(older, "Canonical final")
+        mock_codex.assert_not_called()
+
     def test_pr_closed_workflow_surfaces_auto_pull_result(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -1822,6 +2221,49 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "")
         self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
 
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_active_paginated_detail_ignores_inactive_stage_cache(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Previous prompt", "Previous answer"),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="active-paged-stage",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            derived_stage="done_closed",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-paged-stage",
+            cwd="/repo",
+            prompt="New active prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active-paged-stage"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-history-all")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -2863,6 +3305,49 @@ class PendingPlanStateTests(TestCase):
         self.assertFalse(entries[1]["show_plan_actions"])
 
 class ActiveTurnTrimTests(TestCase):
+    def test_unresolved_active_page_is_owned_by_stream(self) -> None:
+        active = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="active prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        entries = [{"kind": "agent", "text": "persisted active reply"}]
+
+        self.assertEqual(
+            session_entry_display._trim_in_progress_turn(
+                entries,
+                active,
+                active_turn_unresolved=True,
+            ),
+            [],
+        )
+
+    def test_explicit_inactive_marker_prevents_repeated_prompt_trim(self) -> None:
+        active = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="repeated prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        entries: list[dict[str, Any]] = [
+            {
+                "kind": "user",
+                "text": "repeated prompt",
+                "_hitch_active_user": False,
+            },
+            {"kind": "agent", "text": "older reply"},
+        ]
+
+        self.assertEqual(
+            session_entry_display._trim_in_progress_turn(entries, active),
+            entries,
+        )
+
     def test_user_message_text_ignores_empty_text_parts_before_images(self) -> None:
         item = SimpleNamespace(
             content=[
