@@ -33,6 +33,7 @@ import itertools
 import json
 import logging
 import os
+import queue
 import signal
 import sys
 import threading
@@ -56,12 +57,14 @@ from openai_codex import (
     Thread,
     TurnHandle,
 )
+from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
     AskForApprovalValue,
     CollaborationMode,
     DangerFullAccessSandboxPolicy,
+    ErrorNotification,
     LocalImageUserInput,
     ModeKind,
     ReadOnlySandboxPolicy,
@@ -80,13 +83,16 @@ from openai_codex.generated.v2_all import (
 from openai_codex.generated.v2_all import (
     Settings as CodexModeSettings,
 )
-from openai_codex.models import Notification
+from openai_codex.models import JsonObject, Notification
 from pydantic import BaseModel
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime import disk_cleanup, rollout
 from hitch.main.runtime.app_server_pool import open_codex_resumed
-from hitch.main.runtime.codex_events import GOAL_METHODS, NATIVE_REVIEW_COMPLETED_METHOD
+from hitch.main.runtime.codex_events import (
+    GOAL_METHODS,
+    NATIVE_REVIEW_COMPLETED_METHOD,
+)
 from hitch.main.runtime.codex_pool import (
     WorkerSqliteHome,
     _record_session_activity,
@@ -177,17 +183,13 @@ _APPROVE_ALL = "approve_all"
 _DENY_ALL = "deny_all"
 _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _DEFAULT_COLLABORATION_MODE = "default"
+_CANCELLATION_POLL_INTERVAL = 0.1
 
 # Set by the SIGTERM handler so the turn-control paths know to call
 # ``turn.interrupt()``. Plain module-level bool is fine — CPython makes
 # single-attribute reads/writes atomic, and the signal handler is intentionally
 # minimal (it must not make a blocking JSON-RPC call itself).
 _cancel_requested = False
-
-# Set by the active turn so the SIGTERM handler can wake the interrupt
-# forwarder without making a blocking JSON-RPC call inside the handler.
-_interrupt_wakeup: threading.Event | None = None
-
 
 def _is_native_review_verdict_worker(instance: CodexInstance) -> bool:
     """Return whether this worker owns a hidden QA verdict review.
@@ -246,8 +248,6 @@ def _on_sigterm(_signum: int, _frame: Any) -> None:
     """
     global _cancel_requested
     _cancel_requested = True
-    if _interrupt_wakeup is not None:
-        _interrupt_wakeup.set()
 
 
 def _on_sigusr1(_signum: int, _frame: Any) -> None:
@@ -576,6 +576,7 @@ def _run_turn(
     goal_forwarder: threading.Thread | None = None
     steer_forwarder: _SteerControlForwarder | None = None
     notification_order: NotificationOrdering = _fallback_notification_order
+    notification_sequencer: _NotificationSequencer | None = None
     control_path = control_path_for(instance)
     resume_kwargs: dict[str, Any] = {}
     if instance.developer_instructions:
@@ -598,8 +599,9 @@ def _run_turn(
         # server: the first two only mutate the client, and a goal forwarder
         # left over from a discarded attempt exits cleanly once its transport
         # closes.
-        nonlocal notification_order, goal_forwarder
-        notification_order = _install_notification_sequencer(codex)
+        nonlocal notification_order, notification_sequencer, goal_forwarder
+        notification_sequencer = _install_notification_sequencer(codex)
+        notification_order = notification_sequencer
         # The Codex top-level class instantiates its own CodexClient
         # without an ``approval_handler`` argument, so the only way to wire
         # an interactive callback is to swap the bound method on the client
@@ -627,21 +629,59 @@ def _run_turn(
             resume_kwargs=resume_kwargs,
             configure=_configure,
         ) as (codex, thread):
-            turn = _start_turn(
-                codex,
-                thread,
-                prompt=prompt,
-                input_image_paths=_instance_input_image_paths(instance),
-                model=model,
-                effort=effort,
-                sandbox_policy=policy,
-                approval_mode=approval_mode,
-                collaboration_mode=collaboration_mode,
-                plan_mode=plan_mode,
-                output_schema=output_schema,
-                native_review=native_review,
+            client_message_id = None if native_review else f"hitch-instance-{instance.pk}"
+            submission = (
+                notification_sequencer.begin_submission(
+                    instance.thread_id,
+                    client_message_id,
+                )
+                if notification_sequencer is not None and client_message_id is not None
+                else None
             )
-            interrupt_forwarder = _start_interrupt_forwarder(turn)
+            try:
+                turn = _start_turn(
+                    codex,
+                    thread,
+                    prompt=prompt,
+                    input_image_paths=_instance_input_image_paths(instance),
+                    model=model,
+                    effort=effort,
+                    sandbox_policy=policy,
+                    approval_mode=approval_mode,
+                    collaboration_mode=collaboration_mode,
+                    plan_mode=plan_mode,
+                    output_schema=output_schema,
+                    native_review=native_review,
+                    client_user_message_id=client_message_id,
+                    submission=submission,
+                    notification_sequencer=notification_sequencer,
+                )
+                if submission is not None:
+                    assert notification_sequencer is not None
+                    returned_turn_id = turn.id
+                    if _supports_submission_binding(turn):
+                        interrupt_forwarder = _start_interrupt_forwarder(
+                            turn,
+                            target_turn_ids=lambda: (
+                                notification_sequencer.interrupt_turn_ids(submission)
+                            ),
+                        )
+                    _bind_submitted_turn_handle(
+                        turn,
+                        submission,
+                        notification_sequencer,
+                    )
+                    if turn.id != returned_turn_id:
+                        _worker_log(
+                            instance.pk,
+                            "bound submitted message from turn/start id "
+                            f"{returned_turn_id} to execution id {turn.id}",
+                        )
+            finally:
+                if submission is not None and notification_sequencer is not None:
+                    notification_sequencer.finish_submission(submission)
+            if interrupt_forwarder is None:
+                interrupt_forwarder = _start_interrupt_forwarder(turn)
             steer_forwarder = _start_steer_control_forwarder(
                 turn,
                 instance=instance,
@@ -653,7 +693,8 @@ def _run_turn(
                 # that the handle is ready.
                 _forward_interrupt_if_requested(
                     turn,
-                    sent=interrupt_forwarder.sent,
+                    target_turn_ids=interrupt_forwarder.target_turn_ids,
+                    sent_turn_ids=interrupt_forwarder.sent_turn_ids,
                     send_lock=interrupt_forwarder.send_lock,
                 )
                 for event in turn.stream():
@@ -673,7 +714,8 @@ def _run_turn(
                         # escalation if the user clicks Stop again.
                         _forward_interrupt_if_requested(
                             turn,
-                            sent=interrupt_forwarder.sent,
+                            target_turn_ids=interrupt_forwarder.target_turn_ids,
+                            sent_turn_ids=interrupt_forwarder.sent_turn_ids,
                             send_lock=interrupt_forwarder.send_lock,
                         )
                 if native_review:
@@ -723,86 +765,92 @@ def _try_interrupt(turn: TurnHandle) -> bool:
 @dataclasses.dataclass(slots=True)
 class _InterruptForwarder:
     thread: threading.Thread
-    wakeup: threading.Event
     stop: threading.Event
-    sent: threading.Event
+    target_turn_ids: Callable[[], tuple[str, ...]] | None
+    sent_turn_ids: set[str]
     send_lock: threading.Lock
 
 
-def _start_interrupt_forwarder(turn: TurnHandle) -> _InterruptForwarder:
+def _start_interrupt_forwarder(
+    turn: TurnHandle,
+    *,
+    target_turn_ids: Callable[[], tuple[str, ...]] | None = None,
+) -> _InterruptForwarder:
     """Forward SIGTERM cancellation even while the turn stream is silent."""
-    global _interrupt_wakeup
-    wakeup = threading.Event()
     stop = threading.Event()
-    sent = threading.Event()
+    sent_turn_ids: set[str] = set()
     send_lock = threading.Lock()
     forwarder = _InterruptForwarder(
         thread=threading.Thread(
             target=_forward_interrupt_requests,
             kwargs={
                 "turn": turn,
-                "wakeup": wakeup,
                 "stop": stop,
-                "sent": sent,
+                "target_turn_ids": target_turn_ids,
+                "sent_turn_ids": sent_turn_ids,
                 "send_lock": send_lock,
             },
             daemon=True,
         ),
-        wakeup=wakeup,
         stop=stop,
-        sent=sent,
+        target_turn_ids=target_turn_ids,
+        sent_turn_ids=sent_turn_ids,
         send_lock=send_lock,
     )
-    _interrupt_wakeup = wakeup
     forwarder.thread.start()
     return forwarder
 
 
 def _stop_interrupt_forwarder(forwarder: _InterruptForwarder) -> None:
-    global _interrupt_wakeup
     forwarder.stop.set()
-    forwarder.wakeup.set()
     forwarder.thread.join(timeout=0.5)
-    if _interrupt_wakeup is forwarder.wakeup:
-        _interrupt_wakeup = None
 
 
 def _forward_interrupt_requests(
     *,
     turn: TurnHandle,
-    wakeup: threading.Event,
     stop: threading.Event,
-    sent: threading.Event,
+    target_turn_ids: Callable[[], tuple[str, ...]] | None,
+    sent_turn_ids: set[str],
     send_lock: threading.Lock,
 ) -> None:
     while not stop.is_set():
-        if _forward_interrupt_if_requested(
+        _forward_interrupt_if_requested(
             turn,
-            sent=sent,
+            target_turn_ids=target_turn_ids,
+            sent_turn_ids=sent_turn_ids,
             send_lock=send_lock,
-        ):
-            return
-        wakeup.wait()
-        wakeup.clear()
+        )
+        stop.wait(timeout=_CANCELLATION_POLL_INTERVAL)
 
 
 def _forward_interrupt_if_requested(
     turn: TurnHandle,
     *,
-    sent: threading.Event,
+    target_turn_ids: Callable[[], tuple[str, ...]] | None = None,
+    sent_turn_ids: set[str],
     send_lock: threading.Lock,
 ) -> bool:
-    """Send at most one interrupt across the stream and watcher threads."""
-    if not _cancel_requested or sent.is_set():
+    """Interrupt each physical turn observed while cancellation is pending."""
+    if not _cancel_requested:
         return False
-    with send_lock:
-        if sent.is_set():
-            return False
-        # Claim the send before the blocking SDK call. If that call wedges, a
-        # second Stop still escalates to SIGKILL instead of piling up callers.
-        sent.set()
-    _try_interrupt(turn)
-    return True
+    candidates = target_turn_ids() if target_turn_ids is not None else ("",)
+    forwarded = False
+    for turn_id in candidates:
+        with send_lock:
+            if turn_id in sent_turn_ids:
+                continue
+            # Claim each physical turn before the blocking SDK call. If it
+            # wedges, a second Stop still escalates to SIGKILL instead of
+            # piling up callers.
+            sent_turn_ids.add(turn_id)
+        if target_turn_ids is None:
+            _try_interrupt(turn)
+        else:
+            with contextlib.suppress(Exception):
+                turn._client.turn_interrupt(turn.thread_id, turn_id)
+        forwarded = True
+    return forwarded
 
 
 @dataclasses.dataclass(slots=True)
@@ -1028,21 +1076,88 @@ def _start_turn(
     plan_mode: bool,
     output_schema: dict[str, Any] | None,
     native_review: bool = False,
+    client_user_message_id: str | None = None,
+    submission: _TurnSubmission | None = None,
+    notification_sequencer: _NotificationSequencer | None = None,
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
 
-    The custom user-reviewer modes are not ``ApprovalMode`` enum values, so
-    we bypass ``Thread.turn(approval_mode=)`` and post the wire-level params
-    directly: an on-request approval policy paired with the ``user`` reviewer
-    routes every escalation back to the client transport. ``prompt_user``
-    surfaces the normal browser prompt there; ``approve_all`` is answered by
-    a special rubber-stamp handler. Leaving ``approvals_reviewer`` unset falls
-    back to server-side routing (typically ``auto_review``), which can still
-    decide without involving the browser. Known SDK values (``auto_review``,
-    ``deny_all``) and the unset case go through the typed ``Thread.turn`` API.
+    Every ordinary start carries ``client_user_message_id``. App-server copies
+    it to the user-message item notification, giving the worker an exact
+    submission-to-execution correlation even when an active persisted goal
+    causes ``turn/start`` to return a submission id instead of a turn id.
     """
     if native_review:
         return _start_native_review_turn(codex, thread, prompt=prompt)
+    if client_user_message_id is None:
+        raise ValueError("ordinary turn start requires a client user message id")
+    client = codex._client
+    turn_start = client.turn_start
+    write_message = client._write_message
+
+    def correlated_turn_start(
+        thread_id: str,
+        input_items: Any,
+        params: TurnStartParams | dict[str, Any] | None = None,
+    ) -> Any:
+        if isinstance(params, TurnStartParams):
+            params = params.model_copy(
+                update={"client_user_message_id": client_user_message_id}
+            )
+        else:
+            params = {
+                **(params or {}),
+                "clientUserMessageId": client_user_message_id,
+            }
+        return turn_start(thread_id, input_items, params=params)
+
+    def correlated_write_message(payload: JsonObject) -> None:
+        if (
+            payload.get("method") == "turn/start"
+            and submission is not None
+            and notification_sequencer is not None
+        ):
+            notification_sequencer.send_submission(
+                lambda: write_message(payload),
+            )
+            return
+        write_message(payload)
+
+    client.turn_start = correlated_turn_start  # type: ignore[method-assign]
+    client._write_message = correlated_write_message  # type: ignore[method-assign]
+    try:
+        return _start_ordinary_turn(
+            codex,
+            thread,
+            prompt=prompt,
+            input_image_paths=input_image_paths,
+            model=model,
+            effort=effort,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+            collaboration_mode=collaboration_mode,
+            plan_mode=plan_mode,
+            output_schema=output_schema,
+        )
+    finally:
+        client.turn_start = turn_start  # type: ignore[method-assign]
+        client._write_message = write_message  # type: ignore[method-assign]
+
+
+def _start_ordinary_turn(
+    codex: Codex,
+    thread: Thread,
+    *,
+    prompt: str,
+    input_image_paths: list[str] | None,
+    model: str | None,
+    effort: ReasoningEffort | None,
+    sandbox_policy: SandboxPolicy | None,
+    approval_mode: str | None,
+    collaboration_mode: str | None,
+    plan_mode: bool,
+    output_schema: dict[str, Any] | None,
+) -> TurnHandle:
     if plan_mode:
         return _start_plan_turn(
             codex,
@@ -1344,7 +1459,262 @@ def _fallback_notification_order(_event: Notification) -> NotificationOrder:
     return (time.time_ns() // 1_000, 0)
 
 
-def _install_notification_sequencer(codex: Codex) -> NotificationOrdering:
+@dataclasses.dataclass(slots=True)
+class _TurnSubmission:
+    """Own one submission until an event scoped to that submission resolves it."""
+
+    thread_id: str
+    client_message_id: str
+    _wakeup: threading.Event = dataclasses.field(default_factory=threading.Event)
+    _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    _turn_id: str | None = None
+    _failure: BaseException | None = None
+    _returned_turn_id: str | None = None
+
+    def bind(self, turn_id: str, *, wake: bool = True) -> None:
+        with self._lock:
+            if self._turn_id is None:
+                self._turn_id = turn_id
+        if wake:
+            self._wakeup.set()
+
+    def wake(self) -> None:
+        self._wakeup.set()
+
+    def fail(self, exc: BaseException) -> None:
+        with self._lock:
+            self._failure = exc
+        self._wakeup.set()
+
+    def set_returned_turn_id(self, turn_id: str) -> None:
+        with self._lock:
+            self._returned_turn_id = turn_id
+
+    def bound_turn_id(self) -> str | None:
+        with self._lock:
+            return self._turn_id
+
+    def reject_if_unaccepted(self, exc: BaseException) -> None:
+        with self._lock:
+            if self._turn_id is not None or self._failure is not None:
+                return
+            self._failure = exc
+        self._wakeup.set()
+
+    def wait(self) -> str:
+        self._wakeup.wait()
+        with self._lock:
+            failure = self._failure
+            turn_id = self._turn_id
+        if turn_id is not None:
+            return turn_id
+        if failure is not None:
+            raise failure
+        raise RuntimeError("turn submission woke without an execution id")
+
+
+class _NotificationSequencer:
+    """Preserve arrival order and own submission/turn lifecycle transitions."""
+
+    def __init__(self, router: Any) -> None:
+        self._router = router
+        self._route_notification = router.route_notification
+        self._fail_all = getattr(router, "fail_all", None)
+        self._lock = threading.Lock()
+        self._counter = itertools.count(1)
+        self._order_by_id: dict[int, NotificationOrder] = {}
+        self._last_recorded_at = 0
+        self._submissions: dict[str, _TurnSubmission] = {}
+        self._submissions_by_returned_turn_id: dict[str, _TurnSubmission] = {}
+        self._unclaimed_turn_failures: dict[str, BaseException] = {}
+        self._active_turn_ids: dict[str, set[str]] = {}
+
+    def _next_order(self) -> NotificationOrder:
+        recorded_at = max(time.time_ns() // 1_000, self._last_recorded_at)
+        self._last_recorded_at = recorded_at
+        return (recorded_at, next(self._counter))
+
+    def _notification_turn_id(self, notification: Notification) -> str | None:
+        get_turn_id = getattr(self._router, "_notification_turn_id", None)
+        if get_turn_id is not None:
+            return cast(str | None, get_turn_id(notification))
+        turn_id = getattr(notification.payload, "turn_id", None)
+        if not isinstance(turn_id, str):
+            turn_id = getattr(getattr(notification.payload, "turn", None), "id", None)
+        return turn_id if isinstance(turn_id, str) else None
+
+    def route_notification(self, notification: Notification) -> None:
+        with self._lock:
+            self._order_by_id[id(notification)] = self._next_order()
+            self._observe_turn_started(notification)
+            accepted_submission = self._accept_submission(notification)
+            self._observe_submission_terminal(notification)
+            self._observe_turn_completed(notification)
+
+        if not _preserve_early_turn_completed(self._router, notification):
+            self._route_notification(notification)
+
+        if accepted_submission is not None:
+            accepted_submission.wake()
+
+    def _accept_submission(
+        self,
+        notification: Notification,
+    ) -> _TurnSubmission | None:
+        item = getattr(notification.payload, "item", None)
+        item = getattr(item, "root", item)
+        client_message_id = getattr(item, "client_id", None)
+        if not isinstance(client_message_id, str):
+            return None
+        turn_id = self._notification_turn_id(notification)
+        if turn_id is None:
+            return None
+        submission = self._submissions.get(client_message_id)
+        if submission is not None:
+            # Claim ownership at reader-thread arrival order, but wake only
+            # after the router has made the execution queue visible.
+            submission.bind(turn_id, wake=False)
+        return submission
+
+    def _observe_submission_terminal(self, notification: Notification) -> None:
+        failure = self._submission_terminal_failure(notification)
+        if failure is None:
+            return
+        turn_id, exc = failure
+        submission = self._submissions_by_returned_turn_id.get(turn_id)
+        if submission is None:
+            self._unclaimed_turn_failures[turn_id] = exc
+            return
+        submission.reject_if_unaccepted(exc)
+
+    def _submission_terminal_failure(
+        self,
+        notification: Notification,
+    ) -> tuple[str, RuntimeError] | None:
+        turn_id = self._notification_turn_id(notification)
+        if turn_id is None:
+            return None
+        if notification.method == "error":
+            payload = notification.payload
+            if not isinstance(payload, ErrorNotification) or payload.will_retry:
+                return None
+            return (
+                turn_id,
+                RuntimeError(
+                    f"turn/start submission {turn_id!r} was rejected before its "
+                    f"message was accepted: {payload.error.message}"
+                ),
+            )
+        if notification.method == "turn/completed":
+            return (
+                turn_id,
+                RuntimeError(
+                    f"turn/start submission {turn_id!r} completed before its "
+                    "message was accepted"
+                ),
+            )
+        return None
+
+    def _observe_turn_started(self, notification: Notification) -> None:
+        if notification.method != "turn/started":
+            return
+        thread_id = _notification_thread_id(notification.payload)
+        turn_id = self._notification_turn_id(notification)
+        if thread_id is None or turn_id is None:
+            return
+        self._active_turn_ids.setdefault(thread_id, set()).add(turn_id)
+
+    def _observe_turn_completed(self, notification: Notification) -> None:
+        if notification.method != "turn/completed":
+            return
+        thread_id = _notification_thread_id(notification.payload)
+        turn_id = self._notification_turn_id(notification)
+        if thread_id is None or turn_id is None:
+            return
+        active_turn_ids = self._active_turn_ids.get(thread_id)
+        if active_turn_ids is not None:
+            active_turn_ids.discard(turn_id)
+            if not active_turn_ids:
+                self._active_turn_ids.pop(thread_id, None)
+
+    def __call__(self, notification: Notification) -> NotificationOrder:
+        with self._lock:
+            order = self._order_by_id.pop(id(notification), None)
+            if order is None:
+                order = self._next_order()
+        return order
+
+    def begin_submission(
+        self,
+        thread_id: str,
+        client_message_id: str,
+    ) -> _TurnSubmission:
+        submission = _TurnSubmission(thread_id, client_message_id)
+        with self._lock:
+            if client_message_id in self._submissions:
+                raise RuntimeError(f"duplicate turn submission {client_message_id!r}")
+            self._submissions[client_message_id] = submission
+        return submission
+
+    def register_returned_turn(
+        self,
+        submission: _TurnSubmission,
+        turn_id: str,
+    ) -> None:
+        with self._lock:
+            existing = self._submissions_by_returned_turn_id.get(turn_id)
+            if existing is not None and existing is not submission:
+                raise RuntimeError(f"duplicate returned turn id {turn_id!r}")
+            submission.set_returned_turn_id(turn_id)
+            self._submissions_by_returned_turn_id[turn_id] = submission
+            failure = self._unclaimed_turn_failures.pop(turn_id, None)
+            if failure is not None:
+                submission.reject_if_unaccepted(failure)
+
+    def interrupt_turn_ids(
+        self,
+        submission: _TurnSubmission,
+    ) -> tuple[str, ...]:
+        """Return interrupt candidates without assigning submission ownership."""
+        bound_turn_id = submission.bound_turn_id()
+        if bound_turn_id is not None:
+            return (bound_turn_id,)
+        with self._lock:
+            active_turn_ids = self._active_turn_ids.get(submission.thread_id)
+            if active_turn_ids:
+                return tuple(sorted(active_turn_ids))
+        return ()
+
+    def send_submission(
+        self,
+        write: Callable[[], None],
+    ) -> None:
+        """Write turn/start within the same ordering boundary as notifications."""
+        with self._lock:
+            write()
+
+    def finish_submission(self, submission: _TurnSubmission) -> None:
+        with self._lock:
+            if self._submissions.get(submission.client_message_id) is submission:
+                self._submissions.pop(submission.client_message_id)
+            returned_turn_id = submission._returned_turn_id
+            if (
+                returned_turn_id is not None
+                and self._submissions_by_returned_turn_id.get(returned_turn_id)
+                is submission
+            ):
+                self._submissions_by_returned_turn_id.pop(returned_turn_id)
+
+    def fail_all(self, exc: BaseException) -> None:
+        with self._lock:
+            submissions = list(self._submissions.values())
+        for submission in submissions:
+            submission.fail(exc)
+        if self._fail_all is not None:
+            self._fail_all(exc)
+
+
+def _install_notification_sequencer(codex: Codex) -> _NotificationSequencer:
     """Tag SDK notifications in reader-thread arrival order before routing.
 
     The SDK splits notifications into turn-specific and global queues. Hitch
@@ -1352,35 +1722,61 @@ def _install_notification_sequencer(codex: Codex) -> NotificationOrdering:
     to recover the original arrival order later. Recording the timestamp and
     sequence at the router boundary preserves that order across the split.
     """
-    lock = threading.Lock()
-    counter = itertools.count(1)
-    order_by_id: dict[int, NotificationOrder] = {}
-    last_recorded_at = 0
     router = codex._client._router
-    route_notification = router.route_notification
+    sequencer = _NotificationSequencer(router)
+    router.route_notification = sequencer.route_notification  # type: ignore[method-assign]
+    if sequencer._fail_all is not None:
+        router.fail_all = sequencer.fail_all  # type: ignore[method-assign]
+    return sequencer
 
-    def next_order() -> NotificationOrder:
-        nonlocal last_recorded_at
-        recorded_at = max(time.time_ns() // 1_000, last_recorded_at)
-        last_recorded_at = recorded_at
-        return (recorded_at, next(counter))
 
-    def ordered_route(notification: Notification) -> None:
-        with lock:
-            order_by_id[id(notification)] = next_order()
-        if _preserve_early_turn_completed(router, notification):
-            return
-        route_notification(notification)
+def _bind_submitted_turn_handle(
+    turn: TurnHandle,
+    submission: _TurnSubmission,
+    notification_sequencer: _NotificationSequencer,
+) -> None:
+    """Bind a turn handle to the execution that accepted its user message.
 
-    def notification_order(notification: Notification) -> NotificationOrder:
-        with lock:
-            order = order_by_id.pop(id(notification), None)
-            if order is None:
-                order = next_order()
-        return order
+    When a persisted autonomous goal is active, app-server can return the
+    submission id from ``turn/start``. The matching user-message item's
+    ``clientId`` proves which physical turn accepted this submission; unrelated
+    goal continuations cannot claim the worker merely by starting later.
+    """
+    if not _supports_submission_binding(turn):
+        return
+    router = turn._client._router
 
-    router.route_notification = ordered_route  # type: ignore[method-assign]
-    return notification_order
+    returned_turn_id = turn.id
+    notification_sequencer.register_returned_turn(submission, returned_turn_id)
+    execution_turn_id = submission.wait()
+
+    with router._lock:
+        returned_queue = router._turn_notifications.get(returned_turn_id)
+        execution_queue = router._turn_notifications.get(execution_turn_id)
+        if execution_queue is None:
+            pending = router._pending_turn_notifications.pop(execution_turn_id, None)
+            if pending is None:
+                raise RuntimeError(
+                    f"submitted turn {execution_turn_id!r} has no notification queue"
+                )
+            execution_queue = (
+                returned_queue
+                if returned_queue is not None and returned_queue.empty()
+                else queue.Queue[Any]()
+            )
+            router._turn_notifications[execution_turn_id] = execution_queue
+            for notification in pending:
+                execution_queue.put(notification)
+        if returned_turn_id != execution_turn_id:
+            router._turn_notifications.pop(returned_turn_id, None)
+        turn.id = execution_turn_id
+
+
+def _supports_submission_binding(turn: Any) -> bool:
+    return isinstance(turn, TurnHandle) and isinstance(
+        turn._client._router,
+        MessageRouter,
+    )
 
 
 def _preserve_early_turn_completed(router: Any, notification: Notification) -> bool:
