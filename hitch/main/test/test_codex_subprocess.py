@@ -19,30 +19,35 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
-from unittest.mock import MagicMock, create_autospec, patch
+from unittest.mock import MagicMock, call, create_autospec, patch
 
 from django.conf import settings
 from django.contrib.staticfiles.handlers import StaticFilesHandler
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from openai_codex import ApprovalMode, Codex, Sandbox, Thread
+from openai_codex import ApprovalMode, Codex, Sandbox, Thread, TurnHandle
 from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
     CodexErrorInfo,
+    ErrorNotification,
+    ItemStartedNotification,
     ReasoningEffort,
     ThreadGoal,
     ThreadGoalClearedNotification,
     ThreadGoalStatus,
     ThreadGoalUpdatedNotification,
+    ThreadItem,
     ThreadSource,
     Turn,
     TurnCompletedNotification,
     TurnError,
+    TurnStartedNotification,
     TurnStartParams,
     TurnStatus,
+    UserMessageThreadItem,
 )
 from openai_codex.models import Notification
 from pydantic import BaseModel
@@ -51,6 +56,7 @@ from hitch.main import demo, formatting
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
+    _bind_submitted_turn_handle,
     _forward_goal_notifications,
     _install_notification_sequencer,
     _make_approval_handler,
@@ -120,6 +126,118 @@ def _completed_event(
                     )
                     if error_message
                     else None
+                ),
+            ),
+        ),
+    )
+
+
+def _submitted_message_event(
+    *, thread_id: str, turn_id: str, client_message_id: str
+) -> Notification:
+    return Notification(
+        method="item/started",
+        payload=cast(
+            Any,
+            ItemStartedNotification(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                started_at_ms=1,
+                item=ThreadItem(
+                    root=UserMessageThreadItem(
+                        id=f"user-{turn_id}",
+                        type="userMessage",
+                        client_id=client_message_id,
+                        content=[],
+                    )
+                ),
+            ),
+        ),
+    )
+
+
+def _turn_started_event(*, thread_id: str, turn_id: str) -> Notification:
+    return Notification(
+        method="turn/started",
+        payload=cast(
+            Any,
+            TurnStartedNotification(
+                thread_id=thread_id,
+                turn=Turn(
+                    id=turn_id,
+                    items=[],
+                    status=TurnStatus.in_progress,
+                ),
+            ),
+        ),
+    )
+
+
+def _turn_completed_event(
+    *,
+    thread_id: str,
+    turn_id: str,
+    status: TurnStatus = TurnStatus.completed,
+) -> Notification:
+    return Notification(
+        method="turn/completed",
+        payload=cast(
+            Any,
+            TurnCompletedNotification(
+                thread_id=thread_id,
+                turn=Turn(
+                    id=turn_id,
+                    items=[],
+                    status=status,
+                ),
+            ),
+        ),
+    )
+
+
+def _turn_error_event(
+    *,
+    thread_id: str,
+    turn_id: str,
+    message: str,
+    will_retry: bool,
+) -> Notification:
+    return Notification(
+        method="error",
+        payload=cast(
+            Any,
+            ErrorNotification(
+                error=TurnError(message=message),
+                thread_id=thread_id,
+                turn_id=turn_id,
+                will_retry=will_retry,
+            ),
+        ),
+    )
+
+
+def _goal_updated_event(
+    thread_id: str,
+    status: ThreadGoalStatus,
+    *,
+    turn_id: str | None = None,
+) -> Notification:
+    return Notification(
+        method=codex_events.GOAL_UPDATED_METHOD,
+        payload=cast(
+            Any,
+            ThreadGoalUpdatedNotification(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                goal=ThreadGoal(
+                    thread_id=thread_id,
+                    objective="persisted goal",
+                    status=status,
+                    token_budget=None,
+                    tokens_used=1,
+                    time_used_seconds=1,
+                    created_at=1,
+                    updated_at=2,
                 ),
             ),
         ),
@@ -6710,6 +6828,732 @@ class GoalNotificationForwarderTests(TestCase):
         self.assertEqual(queue.qsize(), 1)
         self.assertIs(queue.get_nowait(), completed)
 
+    def test_binds_submission_to_its_client_message_execution(self) -> None:
+        thread_id = "01a02723-e41b-7321-941b-5080a347b7f8"
+        returned_id = "01a029b8-9d7d-7023-ab9d-d086e1ab2bc9"
+        execution_id = "8dca081c-4203-4e3d-a86f-0f06e0ad31ec"
+        client_message_id = "hitch-instance-9762"
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission(thread_id, client_message_id)
+        router.register_turn(returned_id)
+
+        # A resumed goal continuation can start and finish before this
+        # submission is processed. It does not carry our client message id and
+        # therefore cannot claim this worker.
+        stale_started = Notification(
+            method="turn/started",
+            payload=cast(
+                Any,
+                TurnStartedNotification(
+                    thread_id=thread_id,
+                    turn=Turn(
+                        id="stale-goal-turn",
+                        items=[],
+                        status=TurnStatus.in_progress,
+                    ),
+                ),
+            ),
+        )
+        stale_completed = Notification(
+            method="turn/completed",
+            payload=cast(
+                Any,
+                TurnCompletedNotification(
+                    thread_id=thread_id,
+                    turn=Turn(
+                        id="stale-goal-turn",
+                        items=[],
+                        status=TurnStatus.completed,
+                    ),
+                ),
+            ),
+        )
+        router.route_notification(stale_started)
+        router.route_notification(stale_completed)
+        self.assertIsNone(submission._turn_id)
+
+        started = Notification(
+            method="turn/started",
+            payload=cast(
+                Any,
+                TurnStartedNotification(
+                    thread_id=thread_id,
+                    turn=Turn(
+                        id=execution_id,
+                        items=[],
+                        status=TurnStatus.in_progress,
+                    ),
+                ),
+            ),
+        )
+        submitted_message = _submitted_message_event(
+            thread_id=thread_id,
+            turn_id=execution_id,
+            client_message_id=client_message_id,
+        )
+        completed = Notification(
+            method="turn/completed",
+            payload=cast(
+                Any,
+                TurnCompletedNotification(
+                    thread_id=thread_id,
+                    turn=Turn(
+                        id=execution_id,
+                        items=[],
+                        status=TurnStatus.completed,
+                    ),
+                ),
+            ),
+        )
+        router.route_notification(started)
+        router.route_notification(submitted_message)
+        router.route_notification(completed)
+        client = SimpleNamespace(
+            _router=router,
+            register_turn_notifications=router.register_turn,
+            next_turn_notification=router.next_turn_notification,
+            unregister_turn_notifications=router.unregister_turn,
+        )
+        turn = TurnHandle(cast(Any, client), thread_id, returned_id)
+
+        _bind_submitted_turn_handle(turn, submission, sequencer)
+        sequencer.finish_submission(submission)
+
+        self.assertEqual(turn.id, execution_id)
+        self.assertIn(execution_id, router._turn_notifications)
+        self.assertEqual(list(turn.stream()), [started, submitted_message, completed])
+
+    def test_bound_queue_surfaces_transport_failure_before_stream(self) -> None:
+        thread_id = "thread-1"
+        returned_id = "submission-1"
+        execution_id = "execution-1"
+        client_message_id = "client-1"
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission(thread_id, client_message_id)
+        router.register_turn(returned_id)
+        submitted_message = _submitted_message_event(
+            thread_id=thread_id,
+            turn_id=execution_id,
+            client_message_id=client_message_id,
+        )
+        router.route_notification(submitted_message)
+        client = SimpleNamespace(
+            _router=router,
+            register_turn_notifications=router.register_turn,
+            next_turn_notification=router.next_turn_notification,
+            unregister_turn_notifications=router.unregister_turn,
+        )
+        turn = TurnHandle(cast(Any, client), thread_id, returned_id)
+        _bind_submitted_turn_handle(turn, submission, sequencer)
+        sequencer.finish_submission(submission)
+        transport_error = RuntimeError("transport closed after reconciliation")
+
+        router.fail_all(transport_error)
+
+        stream = turn.stream()
+        self.assertIs(next(stream), submitted_message)
+        with self.assertRaisesRegex(RuntimeError, "transport closed"):
+            next(stream)
+
+    def test_submission_wait_is_woken_by_transport_failure(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        router.register_turn("submission-1")
+        client = SimpleNamespace(_router=router)
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        transport_error = RuntimeError("transport closed while queued")
+
+        router.fail_all(transport_error)
+
+        with self.assertRaisesRegex(RuntimeError, "transport closed while queued"):
+            _bind_submitted_turn_handle(turn, submission, sequencer)
+
+    def test_returned_submission_terminal_notification_wakes_waiter(self) -> None:
+        notifications = (
+            (
+                _turn_error_event(
+                    thread_id="thread-1",
+                    turn_id="submission-1",
+                    message="input rejected",
+                    will_retry=False,
+                ),
+                "rejected.*input rejected",
+            ),
+            (
+                _turn_completed_event(
+                    thread_id="thread-1", turn_id="submission-1"
+                ),
+                "completed before",
+            ),
+        )
+
+        for notification, expected in notifications:
+            for arrives_early in (False, True):
+                with self.subTest(
+                    method=notification.method,
+                    arrives_early=arrives_early,
+                ):
+                    router = MessageRouter()
+                    codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+                    sequencer = _install_notification_sequencer(cast(Any, codex))
+                    submission = sequencer.begin_submission(
+                        "thread-1", "client-1"
+                    )
+                    sequencer.send_submission(lambda: None)
+                    if arrives_early:
+                        router.route_notification(notification)
+                    sequencer.register_returned_turn(submission, "submission-1")
+                    if not arrives_early:
+                        router.route_notification(notification)
+
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        submission.wait()
+
+    def test_retrying_returned_submission_error_keeps_waiting(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        sequencer.register_returned_turn(submission, "submission-1")
+
+        router.route_notification(
+            _turn_error_event(
+                thread_id="thread-1",
+                turn_id="submission-1",
+                message="retrying",
+                will_retry=True,
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="execution-1",
+                client_message_id="client-1",
+            )
+        )
+
+        self.assertEqual(submission.wait(), "execution-1")
+
+    def test_submission_cancellation_does_not_bind_returned_pseudo_id(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        router.register_turn("submission-1")
+        client = SimpleNamespace(_router=router)
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        failures: list[BaseException] = []
+
+        def bind() -> None:
+            try:
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        with patch.object(codex_worker_module, "_cancel_requested", True):
+            waiter = threading.Thread(target=bind)
+            waiter.start()
+            waiter.join(timeout=0.01)
+            self.assertTrue(waiter.is_alive())
+            router.route_notification(
+                _turn_completed_event(
+                    thread_id="thread-1", turn_id="submission-1"
+                )
+            )
+            waiter.join(timeout=1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertRegex(str(failures[0]), "completed before")
+        self.assertEqual(turn.id, "submission-1")
+
+    def test_cancelled_submission_tracks_goal_rollover_until_acceptance(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        stale_started = _turn_started_event(
+            thread_id="thread-1", turn_id="persisted-goal-turn"
+        )
+        router.route_notification(stale_started)
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        router.register_turn("submission-1")
+        stale_interrupted = threading.Event()
+        accepting_interrupted = threading.Event()
+
+        def observe_interrupt(_thread_id: str, turn_id: str) -> None:
+            if turn_id == "persisted-goal-turn":
+                stale_interrupted.set()
+            if turn_id == "accepting-turn":
+                accepting_interrupted.set()
+
+        interrupt = MagicMock()
+        interrupt.side_effect = observe_interrupt
+        client = SimpleNamespace(
+            _router=router,
+            register_turn_notifications=router.register_turn,
+            next_turn_notification=router.next_turn_notification,
+            unregister_turn_notifications=router.unregister_turn,
+            turn_interrupt=interrupt,
+        )
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        failures: list[BaseException] = []
+
+        def bind() -> None:
+            try:
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        with patch.object(codex_worker_module, "_cancel_requested", True):
+            forwarder = codex_worker_module._start_interrupt_forwarder(
+                turn,
+                target_turn_ids=lambda: sequencer.interrupt_turn_ids(submission),
+            )
+            try:
+                waiter = threading.Thread(target=bind)
+                waiter.start()
+                self.assertTrue(stale_interrupted.wait(timeout=1))
+
+                stale_completed = _turn_completed_event(
+                    thread_id="thread-1", turn_id="persisted-goal-turn"
+                )
+                accepting_started = _turn_started_event(
+                    thread_id="thread-1", turn_id="accepting-turn"
+                )
+                submitted = _submitted_message_event(
+                    thread_id="thread-1",
+                    turn_id="accepting-turn",
+                    client_message_id="client-1",
+                )
+                router.route_notification(stale_completed)
+                router.route_notification(accepting_started)
+                self.assertTrue(accepting_interrupted.wait(timeout=1))
+                router.route_notification(submitted)
+                waiter.join(timeout=1)
+            finally:
+                codex_worker_module._stop_interrupt_forwarder(forwarder)
+
+        sequencer.finish_submission(submission)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(turn.id, "accepting-turn")
+        self.assertEqual(
+            interrupt.call_args_list,
+            [
+                call("thread-1", "persisted-goal-turn"),
+                call("thread-1", "accepting-turn"),
+            ],
+        )
+
+        completed = _turn_completed_event(
+            thread_id="thread-1",
+            turn_id="accepting-turn",
+            status=TurnStatus.interrupted,
+        )
+        router.route_notification(completed)
+        self.assertEqual(
+            list(turn.stream()),
+            [accepting_started, submitted, completed],
+        )
+
+    def test_interrupt_targets_prefer_bound_completed_turn(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        router.register_turn("submission-1")
+        started = _turn_started_event(
+            thread_id="thread-1", turn_id="execution-1"
+        )
+        submitted = _submitted_message_event(
+            thread_id="thread-1",
+            turn_id="execution-1",
+            client_message_id="client-1",
+        )
+        completed = _turn_completed_event(
+            thread_id="thread-1", turn_id="execution-1"
+        )
+        router.route_notification(started)
+        router.route_notification(submitted)
+        router.route_notification(completed)
+        client = SimpleNamespace(
+            _router=router,
+            register_turn_notifications=router.register_turn,
+            next_turn_notification=router.next_turn_notification,
+            unregister_turn_notifications=router.unregister_turn,
+        )
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+
+        self.assertEqual(
+            sequencer.interrupt_turn_ids(submission),
+            ("execution-1",),
+        )
+        _bind_submitted_turn_handle(turn, submission, sequencer)
+        sequencer.finish_submission(submission)
+
+        self.assertEqual(turn.id, "execution-1")
+        self.assertEqual(list(turn.stream()), [started, submitted, completed])
+
+    def test_terminal_goal_outcomes_wait_for_submission_terminal(self) -> None:
+        outcomes = [
+            (
+                "cleared",
+                Notification(
+                    method=codex_events.GOAL_CLEARED_METHOD,
+                    payload=cast(
+                        Any,
+                        ThreadGoalClearedNotification(thread_id="thread-1"),
+                    ),
+                ),
+            ),
+            *[
+                (status.value, _goal_updated_event("thread-1", status))
+                for status in (
+                    ThreadGoalStatus.paused,
+                    ThreadGoalStatus.blocked,
+                    ThreadGoalStatus.usage_limited,
+                    ThreadGoalStatus.budget_limited,
+                    ThreadGoalStatus.complete,
+                )
+            ],
+        ]
+
+        for outcome, notification in outcomes:
+            with self.subTest(outcome=outcome):
+                router = MessageRouter()
+                codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+                sequencer = _install_notification_sequencer(cast(Any, codex))
+                router.route_notification(
+                    _turn_started_event(
+                        thread_id="thread-1", turn_id="persisted-goal-turn"
+                    )
+                )
+                submission = sequencer.begin_submission("thread-1", "client-1")
+                sequencer.send_submission(lambda: None)
+                sequencer.register_returned_turn(submission, "submission-1")
+
+                router.route_notification(notification)
+
+                self.assertFalse(submission._wakeup.is_set())
+                router.route_notification(
+                    _turn_completed_event(
+                        thread_id="thread-1", turn_id="persisted-goal-turn"
+                    )
+                )
+                self.assertFalse(submission._wakeup.is_set())
+                router.route_notification(
+                    _turn_completed_event(
+                        thread_id="thread-1", turn_id="submission-1"
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "completed before"):
+                    submission.wait()
+
+    def test_idle_goal_clear_waits_for_submission_terminal(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        sequencer.register_returned_turn(submission, "submission-1")
+
+        router.route_notification(
+            Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(
+                    Any,
+                    ThreadGoalClearedNotification(thread_id="thread-1"),
+                ),
+            )
+        )
+
+        self.assertFalse(submission._wakeup.is_set())
+        router.route_notification(
+            _turn_completed_event(
+                thread_id="thread-1", turn_id="submission-1"
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "completed before"):
+            submission.wait()
+
+    def test_idle_goal_clear_cannot_overtake_matching_message(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        router.register_turn("submission-1")
+        client = SimpleNamespace(_router=router)
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        failures: list[BaseException] = []
+
+        def bind() -> None:
+            try:
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        waiter = threading.Thread(target=bind)
+        waiter.start()
+        waiter.join(timeout=0.01)
+        self.assertTrue(waiter.is_alive())
+
+        router.route_notification(
+            Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(
+                    Any,
+                    ThreadGoalClearedNotification(thread_id="thread-1"),
+                ),
+            )
+        )
+        waiter.join(timeout=0.01)
+        self.assertTrue(waiter.is_alive())
+
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="accepting-turn",
+                client_message_id="client-1",
+            )
+        )
+        waiter.join(timeout=1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(turn.id, "accepting-turn")
+
+    def test_terminal_goal_after_physical_completion_waits_for_submission(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        router.route_notification(
+            _turn_started_event(
+                thread_id="thread-1", turn_id="persisted-goal-turn"
+            )
+        )
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        sequencer.register_returned_turn(submission, "submission-1")
+
+        router.route_notification(
+            _turn_completed_event(
+                thread_id="thread-1", turn_id="persisted-goal-turn"
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+        router.route_notification(
+            _goal_updated_event(
+                "thread-1",
+                ThreadGoalStatus.complete,
+                turn_id="persisted-goal-turn",
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+        router.route_notification(
+            _turn_completed_event(
+                thread_id="thread-1", turn_id="submission-1"
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "completed before"):
+            submission.wait()
+
+    def test_matching_message_overrides_completed_goal_boundary(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        router.route_notification(
+            _turn_started_event(
+                thread_id="thread-1", turn_id="persisted-goal-turn"
+            )
+        )
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+        sequencer.register_returned_turn(submission, "submission-1")
+
+        router.route_notification(
+            _goal_updated_event(
+                "thread-1",
+                ThreadGoalStatus.complete,
+                turn_id="persisted-goal-turn",
+            )
+        )
+        router.route_notification(
+            _turn_completed_event(
+                thread_id="thread-1", turn_id="persisted-goal-turn"
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+
+        router.route_notification(
+            _turn_started_event(thread_id="thread-1", turn_id="accepting-turn")
+        )
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="accepting-turn",
+                client_message_id="client-1",
+            )
+        )
+
+        self.assertEqual(submission.wait(), "accepting-turn")
+
+    def test_goal_reactivation_does_not_resolve_submission(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequencer.send_submission(lambda: None)
+
+        router.route_notification(
+            _goal_updated_event(
+                "thread-1",
+                ThreadGoalStatus.blocked,
+            )
+        )
+        router.route_notification(
+            _goal_updated_event(
+                "thread-1",
+                ThreadGoalStatus.active,
+            )
+        )
+        router.register_turn("submission-1")
+        client = SimpleNamespace(_router=router)
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        failures: list[BaseException] = []
+
+        def bind() -> None:
+            try:
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        waiter = threading.Thread(target=bind)
+        waiter.start()
+        waiter.join(timeout=0.01)
+        self.assertTrue(waiter.is_alive())
+
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="accepting-turn",
+                client_message_id="client-1",
+            )
+        )
+        waiter.join(timeout=1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(turn.id, "accepting-turn")
+
+    def test_goal_notifications_do_not_resolve_submission(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        router.route_notification(
+            _turn_started_event(thread_id="thread-1", turn_id="execution-1")
+        )
+        submission = sequencer.begin_submission("thread-1", "client-1")
+
+        router.route_notification(
+            _goal_updated_event("thread-1", ThreadGoalStatus.active)
+        )
+        router.route_notification(
+            Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(
+                    Any,
+                    ThreadGoalClearedNotification(thread_id="other-thread"),
+                ),
+            )
+        )
+        router.route_notification(
+            Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(
+                    Any,
+                    ThreadGoalClearedNotification(thread_id="thread-1"),
+                ),
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+
+        sequencer.send_submission(lambda: None)
+        router.route_notification(
+            Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(
+                    Any,
+                    ThreadGoalClearedNotification(thread_id="thread-1"),
+                ),
+            )
+        )
+        self.assertFalse(submission._wakeup.is_set())
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="execution-1",
+                client_message_id="client-1",
+            )
+        )
+        router.route_notification(
+            _turn_completed_event(thread_id="thread-1", turn_id="execution-1")
+        )
+
+        self.assertEqual(submission.wait(), "execution-1")
+
+    def test_submission_wait_ignores_other_turns_until_its_message_arrives(self) -> None:
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        sequencer = _install_notification_sequencer(cast(Any, codex))
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        router.register_turn("submission-1")
+        client = SimpleNamespace(_router=router)
+        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
+        failures: list[BaseException] = []
+
+        def bind() -> None:
+            try:
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        waiter = threading.Thread(target=bind)
+        waiter.start()
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="other-execution",
+                client_message_id="other-client",
+            )
+        )
+        waiter.join(timeout=0.01)
+        self.assertTrue(waiter.is_alive())
+
+        router.route_notification(
+            _submitted_message_event(
+                thread_id="thread-1",
+                turn_id="owned-execution",
+                client_message_id="client-1",
+            )
+        )
+        waiter.join(timeout=1)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(turn.id, "owned-execution")
+
 
 class _BrokenStderr:
     def write(self, _value: str) -> int:
@@ -6920,8 +7764,13 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
 
+    @patch("hitch.main.management.commands.codex_worker._bind_submitted_turn_handle")
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_qa_worker_uses_native_codex_review(self, mock_codex: MagicMock) -> None:
+    def test_qa_worker_uses_native_codex_review(
+        self,
+        mock_codex: MagicMock,
+        mock_bind_submitted_turn_handle: MagicMock,
+    ) -> None:
         codex_ctx = mock_codex.return_value.__enter__.return_value
         codex_ctx.thread_resume.return_value = SimpleNamespace(
             id="thread-1", turn=MagicMock()
@@ -6982,6 +7831,7 @@ class CodexWorkerCommandTests(TestCase):
                 worker_events = [json.loads(line) for line in fh]
 
         codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        mock_bind_submitted_turn_handle.assert_not_called()
         codex_ctx.thread_resume.assert_called_once_with(
             "thread-1",
             approval_mode=ApprovalMode.auto_review,
@@ -7037,6 +7887,72 @@ class CodexWorkerCommandTests(TestCase):
             client.turn_steer.call_args.args[:2],
             ("parent-thread", "review-turn-1"),
         )
+
+    def test_ordinary_typed_start_injects_client_message_id(self) -> None:
+        client = MagicMock()
+        client.turn_start.return_value = SimpleNamespace(
+            turn=SimpleNamespace(id="turn-1")
+        )
+        codex = cast(Codex, SimpleNamespace(_client=client))
+        thread = Thread(cast(Any, client), "thread-1")
+
+        handle = codex_worker_module._start_turn(
+            codex,
+            thread,
+            prompt="hello",
+            input_image_paths=None,
+            model=None,
+            effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            collaboration_mode=None,
+            plan_mode=False,
+            output_schema=None,
+            client_user_message_id="hitch-instance-42",
+        )
+
+        params = client.turn_start.call_args.kwargs["params"]
+        self.assertIsInstance(params, TurnStartParams)
+        self.assertEqual(params.client_user_message_id, "hitch-instance-42")
+        self.assertEqual(handle.id, "turn-1")
+
+    def test_ordinary_start_serializes_submission_write(self) -> None:
+        router = MessageRouter()
+        client = MagicMock(_router=router)
+        codex = cast(Codex, SimpleNamespace(_client=client))
+        thread = Thread(cast(Any, client), "thread-1")
+        sequencer = _install_notification_sequencer(codex)
+        submission = sequencer.begin_submission("thread-1", "client-1")
+        sequenced_during_write: list[bool] = []
+        client._write_message.side_effect = lambda _message: (
+            sequenced_during_write.append(sequencer._lock.locked())
+        )
+
+        def turn_start(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            client._write_message({"method": "turn/start"})
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        client.turn_start.side_effect = turn_start
+
+        handle = codex_worker_module._start_turn(
+            codex,
+            thread,
+            prompt="hello",
+            input_image_paths=None,
+            model=None,
+            effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            collaboration_mode=None,
+            plan_mode=False,
+            output_schema=None,
+            client_user_message_id="client-1",
+            submission=submission,
+            notification_sequencer=sequencer,
+        )
+
+        self.assertEqual(handle.id, "turn-1")
+        self.assertEqual(sequenced_during_write, [True])
 
     def test_native_review_output_fails_closed_without_thread_path(self) -> None:
         client = MagicMock()
@@ -7795,6 +8711,10 @@ class CodexWorkerCommandTests(TestCase):
                 codex_ctx.thread_resume.return_value.turn.assert_not_called()
                 params = captured_params["params"]
                 assert isinstance(params, TurnStartParams)
+                self.assertEqual(
+                    params.client_user_message_id,
+                    f"hitch-instance-{instance.pk}",
+                )
                 wire_input = captured_params["input"]
                 assert isinstance(wire_input, list)
                 assert isinstance(wire_input[0], dict)
@@ -7896,6 +8816,10 @@ class CodexWorkerCommandTests(TestCase):
                 codex_ctx.thread_resume.return_value.turn.assert_not_called()
                 params = captured_params["params"]
                 assert isinstance(params, dict)
+                self.assertEqual(
+                    params["clientUserMessageId"],
+                    f"hitch-instance-{instance.pk}",
+                )
                 wire_input = captured_params["input"]
                 params_input = params["input"]
                 assert isinstance(wire_input, list)
@@ -8773,13 +9697,11 @@ class WorkerCancellationTests(TestCase):
         # Module-level control state persists across tests; reset to a known
         # state so previous tests don't bleed into this one.
         codex_worker_module._cancel_requested = False
-        codex_worker_module._interrupt_wakeup = None
         codex_worker_module._steer_wakeup = None
 
     @override
     def tearDown(self) -> None:
         codex_worker_module._cancel_requested = False
-        codex_worker_module._interrupt_wakeup = None
         codex_worker_module._steer_wakeup = None
 
     def _make_instance(self, raw: str | Path) -> CodexInstance:
@@ -8795,6 +9717,46 @@ class WorkerCancellationTests(TestCase):
         self.assertFalse(codex_worker_module._cancel_requested)
         codex_worker_module._on_sigterm(15, None)
         self.assertTrue(codex_worker_module._cancel_requested)
+
+    def test_actual_sigterm_preserves_submission_correlation(self) -> None:
+        script = """
+import os
+import signal
+import threading
+import django
+
+django.setup()
+from hitch.main.management.commands import codex_worker as worker
+
+worker._cancel_requested = False
+signal.signal(signal.SIGTERM, worker._on_sigterm)
+submission = worker._TurnSubmission("thread-1", "client-1")
+delivery = threading.Timer(
+    0.05,
+    lambda: os.kill(os.getpid(), signal.SIGTERM),
+)
+acceptance = threading.Timer(
+    0.1,
+    lambda: submission.bind("execution-1"),
+)
+delivery.start()
+acceptance.start()
+if submission.wait() != "execution-1":
+    raise AssertionError("SIGTERM changed submission ownership")
+delivery.join()
+acceptance.join()
+"""
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            check=False,
+            env=os.environ.copy(),
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_sigusr1_handler_wakes_control_forwarder(self) -> None:
         wakeup = threading.Event()
@@ -8824,7 +9786,6 @@ class WorkerCancellationTests(TestCase):
             codex_worker_module._stop_interrupt_forwarder(forwarder)
 
         turn.interrupt.assert_called_once_with()
-        self.assertIsNone(codex_worker_module._interrupt_wakeup)
 
     def test_interrupt_is_sent_once_across_stream_and_forwarder(self) -> None:
         turn = MagicMock()
@@ -8835,7 +9796,8 @@ class WorkerCancellationTests(TestCase):
             codex_worker_module._on_sigterm(signal.SIGTERM, None)
             codex_worker_module._forward_interrupt_if_requested(
                 turn,
-                sent=forwarder.sent,
+                target_turn_ids=forwarder.target_turn_ids,
+                sent_turn_ids=forwarder.sent_turn_ids,
                 send_lock=forwarder.send_lock,
             )
             self.assertTrue(interrupted.wait(timeout=1))
@@ -8846,14 +9808,14 @@ class WorkerCancellationTests(TestCase):
 
     def test_interrupt_is_not_resent_when_competing_caller_claims_send(self) -> None:
         turn = MagicMock()
-        sent = threading.Event()
+        sent_turn_ids: set[str] = set()
         send_lock = MagicMock()
-        send_lock.__enter__.side_effect = sent.set
+        send_lock.__enter__.side_effect = lambda: sent_turn_ids.add("")
         codex_worker_module._cancel_requested = True
 
         forwarded = codex_worker_module._forward_interrupt_if_requested(
             turn,
-            sent=sent,
+            sent_turn_ids=sent_turn_ids,
             send_lock=send_lock,
         )
 
@@ -9289,7 +10251,6 @@ class WorkerCancellationTests(TestCase):
                 call_command("codex_worker", "--instance-id", str(instance.pk))
 
         stop_interrupt.assert_called_once()
-        self.assertIsNone(codex_worker_module._interrupt_wakeup)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_interrupt_fires_when_flag_set_during_stream(
