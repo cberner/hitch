@@ -111,6 +111,24 @@ _QA_DESIGN_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_QA_COMPREHENSIVE_REVIEW_REQUEST = (
+    "Review the complete current code changes in one comprehensive pass and "
+    "provide prioritized, actionable findings for every concrete defect you can "
+    "identify. Inspect "
+    "every changed area and relevant surrounding code before returning; do not "
+    "stop after the first valid finding or a small sample of issues. When one "
+    "defect suggests a broader invariant, check sibling call sites and tests for "
+    "the same class of problem."
+)
+_QA_REMEDIATION_GUIDANCE = (
+    "Treat the findings in the current QA feedback as one remediation batch. Fix "
+    "every defect in the current feedback, then inspect related changed paths and "
+    "tests for sibling instances of each issue class. Prefer one coherent "
+    "root-cause correction over serial special cases. Add or update focused "
+    "regression coverage, run the relevant checks, and self-review the complete "
+    "diff for the same issue classes before finishing this turn."
+)
+
 
 @dataclass(frozen=True)
 class QaReviewHandoff:
@@ -409,9 +427,8 @@ def _qa_prompt(
             else "the exact validated tracked and untracked worktree patch"
         )
         return (
-            "Review the complete current code changes and provide prioritized, "
-            "actionable findings. Hitch already validated that the reviewer diff "
-            "is complete and representable.\n\n"
+            f"{_QA_COMPREHENSIVE_REVIEW_REQUEST} Hitch already validated that "
+            "the reviewer diff is complete and representable.\n\n"
             f"Repository cwd: {cwd}\n\n"
             f"Review scope: {review_scope}.\n\n"
             f"Validated diff size: {len(diff):,} characters / {total_bytes:,} UTF-8 "
@@ -431,13 +448,20 @@ def _qa_prompt(
 
 def _inline_qa_prompt(cwd: str, diff: str) -> str:
     return (
-        "Review the following current code changes and provide prioritized, "
-        "actionable findings.\n\n"
+        f"{_QA_COMPREHENSIVE_REVIEW_REQUEST}\n\n"
         f"Repository cwd: {cwd}\n\n"
         "Proposed diff:\n"
         "```diff\n"
         f"{diff}\n"
         "```"
+    )
+
+
+def _qa_feedback_prompt(feedback: str) -> str:
+    return (
+        "Feedback from Hitch QA agent:\n\n"
+        f"{feedback}\n\n"
+        f"{_QA_REMEDIATION_GUIDANCE}"
     )
 
 
@@ -589,11 +613,14 @@ def _qa_design_synthesis_feedback_prompt(
         f"Recurring files: {files or 'none detected'}\n\n"
         "Prior related QA feedback:\n"
         f"{evidence}\n\n"
+        "Use the prior feedback only as evidence for identifying the shared "
+        "invariant; do not treat its findings as current remediation work.\n\n"
         "Current QA feedback:\n\n"
         f"{feedback}\n\n"
         "First identify the shared invariant, ownership boundary, or lifecycle "
         "rule that keeps breaking. Then implement the smallest coherent design "
         "change that makes that rule explicit and removes the need for another "
         "narrow fixup. Keep the diff focused, preserve existing behavior that is "
-        "not implicated by the recurring feedback, and run the relevant tests."
+        "not implicated by the recurring feedback.\n\n"
+        f"{_QA_REMEDIATION_GUIDANCE}"
     )
