@@ -29,6 +29,14 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-history-preview`: Large sessions initially render a bounded preview of
   recent persisted user and agent messages, including read-only system and
   autonomous-goal logs. Scrolling upward loads older preview pages.
+- `ST-history-active-fallback`: If an active large-session worker's event log
+  has not claimed its original user item, persisted messages remain visible in
+  both preview and full-history renders. The rollout owns transcript rendering
+  for that page lifecycle; SSE still replays the complete worker log for goal,
+  plan, approval, and input state, but its transcript items remain hidden to
+  avoid cross-source duplication. Older-history fragments and specialized live
+  roots, including the demo-agent view, inherit that same owner rather than
+  independently re-detecting it.
 - `ST-history-full`: A visible up-arrow reloads the canonical full transcript
   and positions the reader at its beginning, including while a worker is
   active. Activity, synthesized rows, and oversized message bodies remain

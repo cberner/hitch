@@ -88,12 +88,14 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
+    _active_stream_owns_turn,
     _active_worker_status_text,
     _apply_qa_approval_messages,
     _apply_system_authors,
     _demo_agent_prompts,
     _display_title,
     _entries_for_with_source,
+    _entries_include_active_turn,
     _filter_demo_agent_entries,
     _latest_user_turn_failure,
     _pending_user_author,
@@ -220,6 +222,10 @@ _SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT = "hitch.session-intermediate.demo-conte
 _SESSION_HISTORY_MIN_BYTES = 2 * 1024 * 1024
 
 _SESSION_HISTORY_MESSAGE_TARGET = 40
+
+_ACTIVE_TRANSCRIPT_OWNER_STREAM = "stream"
+
+_ACTIVE_TRANSCRIPT_OWNER_ROLLOUT = "rollout"
 
 _INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
 
@@ -792,21 +798,50 @@ def _render_session_detail(
         stage_context = dict(stage.as_context())
         if stage_refreshing:
             stage_context["refreshing"] = True
-    show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
         active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
     )
     # While a worker is running, drop the entries that belong to its
-    # in-progress turn — the SSE stream replays them from byte 0 of the
-    # events file, so leaving the rollout-rendered copy in place would
-    # double up every entry in the live DOM. The page reload on stream end
-    # restores the canonical view.
+    # in-progress turn when SSE has claimed that turn. A worker kept alive
+    # across a deploy can lack the user item in its event log even while its
+    # rollout advances; that rollout remains the only available transcript.
+    rollout_history_can_own_turn = history_page is not None or full_history_requested
+    active_stream_owns_turn = bool(
+        not rollout_history_can_own_turn
+        or _active_stream_owns_turn(active_instance)
+    )
+    rollout_owns_active_turn = bool(
+        rollout_history_can_own_turn
+        and active_instance is not None
+        and not active_stream_owns_turn
+        and (
+            bool(history_page is not None and history_page.active_turn_unresolved)
+            or _entries_include_active_turn(entries, active_instance)
+        )
+    )
+    # Rollout and worker event files are independently flushed, so there is no
+    # lossless shared byte cursor between them. In fallback mode the rollout is
+    # the transcript source for this page lifecycle; SSE still replays from the
+    # beginning for controls and state, while the live root hides its transcript
+    # items to prevent a second rendering of the same turn.
+    show_active_worker_transcript = bool(
+        _show_active_worker_transcript(active_instance)
+        and not rollout_owns_active_turn
+    )
+    active_transcript_owner = ""
+    if active_instance is not None:
+        active_transcript_owner = (
+            _ACTIVE_TRANSCRIPT_OWNER_ROLLOUT
+            if rollout_owns_active_turn
+            else _ACTIVE_TRANSCRIPT_OWNER_STREAM
+        )
     entries = _trim_in_progress_turn(
         entries,
         active_instance,
         active_turn_unresolved=bool(
             history_page is not None and history_page.active_turn_unresolved
         ),
+        active_stream_owns_turn=active_stream_owns_turn,
     )
     plan_mode_state = _thread_plan_mode_state(
         session_id,
@@ -959,6 +994,7 @@ def _render_session_detail(
                         and demo_entries_run_id is not None
                         else ""
                     ),
+                    active_transcript_owner=active_transcript_owner,
                 )
                 if history_page is not None and history_page.has_older
                 else ""
@@ -987,7 +1023,9 @@ def _render_session_detail(
             # connect can't divert the live view away from the worker
             # the Stop button is wired to.
             "stream_url": _stream_url_for(
-                session_id, active_instance, active_system_workflow
+                session_id,
+                active_instance,
+                active_system_workflow,
             ),
             # The JS swaps the trailing ``0`` for the real ApprovalRequest
             # pk on each POST. Templating the URL server-side (rather than
@@ -1002,6 +1040,7 @@ def _render_session_detail(
             "active_worker": active_instance is not None,
             "active_demo_worker": active_demo_worker,
             "show_active_worker_transcript": show_active_worker_transcript,
+            "rollout_owns_active_turn": rollout_owns_active_turn,
             "active_system_workflow": active_system_workflow,
             "workflow_composer_label": _workflow_composer_label(active_system_workflow),
             "workflow_accepts_steering": workflow_accepts_steering,
@@ -1022,7 +1061,11 @@ def _render_session_detail(
             # The in-progress turn is trimmed from ``entries`` above, so the
             # user wouldn't see their own message at all without a pending
             # bubble while the stream catches up.
-            "pending_user_prompt": _pending_user_prompt(active_instance),
+            "pending_user_prompt": (
+                ""
+                if rollout_owns_active_turn
+                else _pending_user_prompt(active_instance)
+            ),
             "pending_user_author": _pending_user_author(active_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance),
             "queued_workflow_user_messages": _queued_workflow_user_messages(
@@ -1074,6 +1117,7 @@ def _session_history_url(
     partial_record_end: int | None = None,
     newer_turn_continues: bool = False,
     demo_context: str = "",
+    active_transcript_owner: str = "",
 ) -> str:
     params: dict[str, str | int] = {"before": before_offset}
     if partial_record_end is not None:
@@ -1082,6 +1126,8 @@ def _session_history_url(
         params["newer_turn"] = "continued"
     if demo_context:
         params["demo_context"] = demo_context
+    if active_transcript_owner:
+        params["transcript_owner"] = active_transcript_owner
     return "{}?{}".format(
         reverse("session_history", kwargs={"session_id": session_id}),
         urlencode(params),
@@ -1643,15 +1689,14 @@ def _stream_url_for(
     workflow_id = active_workflow.pk if active_workflow is not None else None
     steering_revision = streaming.workflow_steering_revision(active_workflow)
     demo_token = streaming.demo_stream_token(session_id)
-    qs = urlencode(
-        {
-            "baseline": str(baseline_id) if baseline_id is not None else "",
-            "active": str(active_id) if active_id is not None else "",
-            "workflow": str(workflow_id) if workflow_id is not None else "",
-            "steering": str(steering_revision) if workflow_id is not None else "",
-            "demo": demo_token,
-        }
-    )
+    query = {
+        "baseline": str(baseline_id) if baseline_id is not None else "",
+        "active": str(active_id) if active_id is not None else "",
+        "workflow": str(workflow_id) if workflow_id is not None else "",
+        "steering": str(steering_revision) if workflow_id is not None else "",
+        "demo": demo_token,
+    }
+    qs = urlencode(query)
     return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"
 
 def _safe_next_url(request: HttpRequest) -> str:

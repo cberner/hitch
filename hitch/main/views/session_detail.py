@@ -26,6 +26,7 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
+    _active_stream_owns_turn,
     _apply_qa_approval_messages,
     _apply_system_authors,
     _demo_agent_prompts,
@@ -73,6 +74,24 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
     )
     active_instance = _active_instance_for(session_id)
     active_user_identity = _active_history_user_identity(active_instance)
+    # The parent page selects one transcript source for its whole lifecycle.
+    # Fragments inherit that choice; only direct or legacy fragment URLs need
+    # to detect ownership from the current worker state.
+    raw_transcript_owner = request.GET.get("transcript_owner", "")
+    if raw_transcript_owner == common._ACTIVE_TRANSCRIPT_OWNER_STREAM:
+        active_stream_owns_turn = True
+        active_transcript_owner = raw_transcript_owner
+    elif raw_transcript_owner == common._ACTIVE_TRANSCRIPT_OWNER_ROLLOUT:
+        active_stream_owns_turn = False
+        active_transcript_owner = raw_transcript_owner
+    else:
+        active_stream_owns_turn = _active_stream_owns_turn(active_instance)
+        if active_instance is None:
+            active_transcript_owner = ""
+        elif active_stream_owns_turn:
+            active_transcript_owner = common._ACTIVE_TRANSCRIPT_OWNER_STREAM
+        else:
+            active_transcript_owner = common._ACTIVE_TRANSCRIPT_OWNER_ROLLOUT
     page = rollout.session_history_page(
         rollout_state.path,
         before_offset=before_offset,
@@ -106,6 +125,7 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         entries,
         active_instance,
         active_turn_unresolved=page.active_turn_unresolved,
+        active_stream_owns_turn=active_stream_owns_turn,
     )
     response = render(
         request,
@@ -123,6 +143,7 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
                         else newer_turn_continues
                     ),
                     demo_context=raw_demo_context if show_demo_entries else "",
+                    active_transcript_owner=active_transcript_owner,
                 )
                 if page.has_older
                 else ""

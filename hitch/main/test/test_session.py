@@ -1252,7 +1252,7 @@ class SessionViewTests(TestCase):
         html = response.content.decode()
         self.assertIn("Demo setup command approval requested.", html)
         self.assertIn(
-            "detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS\n"
+            "detail.textContent = SANITIZE_LIVE_DETAILS\n"
             "                    ? sanitizedApprovalDetail(payload.method, payload.params)",
             html,
         )
@@ -1261,6 +1261,55 @@ class SessionViewTests(TestCase):
             "                if (HIDE_LIVE_TRANSCRIPT) return;",
             html,
         )
+
+    @patch("hitch.main.views.common.Codex")
+    def test_active_demo_worker_hides_stream_when_rollout_owns_turn(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo"
+        thread = _thread(
+            [_turn([_user_message(prompt), _agent_message("Demo is ready")])]
+        )
+        _patch_thread(self, mock_codex, thread)
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            started_at=datetime(2025, 1, 5, tzinfo=UTC)
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "thread-1"}),
+            {"run_id": str(run.pk), "history": "all"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Demo is ready")
+        self.assertTrue(response.context["rollout_owns_active_turn"])
+        self.assertContains(response, 'data-hide-transcript="true"', count=1)
+        self.assertContains(response, 'data-hide-user-message="true"', count=1)
 
     @patch("hitch.main.views.common.Codex")
     def test_active_demo_worker_sanitizes_sensitive_live_details(

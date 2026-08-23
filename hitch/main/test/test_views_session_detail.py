@@ -203,6 +203,148 @@ class SessionDetailFastPathTests(TestCase):
         self.assertNotContains(full, 'class="jump-latest history-all"')
         mock_codex.assert_not_called()
 
+    @patch.object(rollout_module, "_HISTORY_SCAN_MAX_RECORDS", 2)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_large_active_session_keeps_rollout_when_stream_never_claimed_turn(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        active_started = datetime(2025, 1, 5, 12, tzinfo=UTC)
+        lines = [
+            _rollout_line(
+                "event_msg",
+                {"type": "user_message", "message": "Queued active prompt"},
+                timestamp="2025-01-05T12:00:01Z",
+            ),
+            *[
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": f"Persisted active reply {index}",
+                    },
+                    timestamp=f"2025-01-05T12:00:0{index + 2}Z",
+                )
+                for index in range(4)
+            ],
+        ]
+        rollout_path = _make_rollout(self, lines)
+        events_path = rollout_path.with_name("events.jsonl")
+        events_path.write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in (
+                    {
+                        "method": "thread/goal/updated",
+                        "payload": {"goal": {"objective": "Keep proving"}},
+                    },
+                    {
+                        "method": "turn/plan/updated",
+                        "payload": {"steps": [{"step": "Check the ledger"}]},
+                    },
+                    {
+                        "method": "approval/requested",
+                        "payload": {"id": 17, "method": "requestApproval"},
+                    },
+                    {
+                        "method": "input/requested",
+                        "payload": {"id": 23, "method": "requestUserInput"},
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        SessionMetadata.objects.create(
+            thread_id="paged-unclaimed-active",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Paged unclaimed active",
+            codex_created_at=active_started,
+            codex_updated_at=active_started,
+        )
+        active = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="paged-unclaimed-active",
+            cwd="/repo",
+            prompt="Queued active prompt",
+            events_path=str(events_path),
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        CodexInstance.objects.filter(pk=active.pk).update(started_at=active_started)
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse(
+                    "session", kwargs={"session_id": "paged-unclaimed-active"}
+                )
+            )
+            full = self.client.get(
+                reverse(
+                    "session", kwargs={"session_id": "paged-unclaimed-active"}
+                ),
+                {"history": "all"},
+            )
+            rollout_next_url = response.context["history_next_url"]
+            with patch(
+                "hitch.main.views.session_detail._active_stream_owns_turn",
+                return_value=True,
+            ) as fragment_owner:
+                rollout_older = self.client.get(rollout_next_url)
+            with patch(
+                "hitch.main.views.common._active_stream_owns_turn",
+                return_value=True,
+            ):
+                stream_response = self.client.get(
+                    reverse(
+                        "session", kwargs={"session_id": "paged-unclaimed-active"}
+                    )
+                )
+            stream_next_url = stream_response.context["history_next_url"]
+            with patch(
+                "hitch.main.views.session_detail._active_stream_owns_turn",
+                return_value=False,
+            ) as stream_fragment_owner:
+                stream_older = self.client.get(stream_next_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Persisted active reply 3")
+        self.assertTrue(response.context["entries"])
+        self.assertEqual(response.context["pending_user_prompt"], "")
+        self.assertNotContains(response, "Queued active prompt")
+        self.assertFalse(response.context["show_active_worker_transcript"])
+        self.assertContains(response, 'data-hide-transcript="true"')
+        self.assertContains(response, 'data-sanitize-live-details="false"')
+        self.assertNotIn("transcript_after", response.context["stream_url"])
+        self.assertIn("transcript_owner=rollout", rollout_next_url)
+        self.assertEqual(rollout_older.status_code, 200)
+        self.assertContains(rollout_older, "Persisted active reply 1")
+        self.assertIn(
+            "transcript_owner=rollout", rollout_older.context["history_next_url"]
+        )
+        fragment_owner.assert_not_called()
+        self.assertIn("transcript_owner=stream", stream_next_url)
+        self.assertEqual(stream_older.status_code, 200)
+        self.assertNotContains(stream_older, "Persisted active reply 1")
+        stream_fragment_owner.assert_not_called()
+        self.assertEqual(full.status_code, 200)
+        self.assertContains(full, "Queued active prompt")
+        self.assertContains(full, "Persisted active reply 3")
+        self.assertEqual(full.context["pending_user_prompt"], "")
+        self.assertFalse(full.context["show_active_worker_transcript"])
+        self.assertContains(full, 'data-hide-transcript="true"')
+        self.assertContains(full, 'data-sanitize-live-details="false"')
+        self.assertNotIn("transcript_after", full.context["stream_url"])
+
+        with patch("hitch.main.runtime.streaming._is_done", return_value=True):
+            stream_body = b"".join(streaming.stream_for_instance(active))
+        self.assertIn(b"thread/goal/updated", stream_body)
+        self.assertIn(b"turn/plan/updated", stream_body)
+        self.assertIn(b"approval/requested", stream_body)
+        self.assertIn(b"input/requested", stream_body)
+        mock_codex.assert_not_called()
+
     @patch.object(rollout_module, "_HISTORY_SCAN_MAX_BYTES", 64)
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")
@@ -3324,6 +3466,146 @@ class ActiveTurnTrimTests(TestCase):
             ),
             [],
         )
+
+    def test_unresolved_active_page_stays_when_stream_has_no_user_item(self) -> None:
+        active = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="active prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        entries = [{"kind": "agent", "text": "persisted active reply"}]
+
+        self.assertEqual(
+            session_entry_display._trim_in_progress_turn(
+                entries,
+                active,
+                active_turn_unresolved=True,
+                active_stream_owns_turn=False,
+            ),
+            entries,
+        )
+
+    def test_active_stream_ownership_requires_a_user_message_item(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps({"method": "thread/goal/updated", "payload": {}}) + "\n",
+                encoding="utf-8",
+            )
+            active = CodexInstance.objects.create(
+                pid=1,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="active prompt",
+                events_path=str(events_path),
+                status=CodexInstance.STATUS_RUNNING,
+            )
+
+            self.assertTrue(session_entry_display._active_stream_owns_turn(active))
+
+            CodexInstance.objects.filter(pk=active.pk).update(
+                started_at=datetime(2025, 1, 5, tzinfo=UTC)
+            )
+            active.refresh_from_db()
+            self.assertFalse(session_entry_display._active_stream_owns_turn(active))
+
+            with events_path.open("a", encoding="utf-8") as events:
+                events.write(
+                    json.dumps(
+                        {
+                            "method": "item/started",
+                            "payload": {
+                                "item": {
+                                    "type": "userMessage",
+                                    "clientId": f"hitch-instance-{active.pk}",
+                                    "content": [
+                                        {"type": "text", "text": "active prompt"}
+                                    ],
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            self.assertTrue(session_entry_display._active_stream_owns_turn(active))
+
+    def test_active_stream_ownership_does_not_treat_later_steer_as_original(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/started",
+                        "payload": {
+                            "item": {
+                                "type": "userMessage",
+                                "clientId": None,
+                                "content": [
+                                    {"type": "text", "text": "later steer"}
+                                ],
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            active = CodexInstance.objects.create(
+                pid=1,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="missing original prompt",
+                events_path=str(events_path),
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            CodexInstance.objects.filter(pk=active.pk).update(
+                started_at=datetime(2025, 1, 5, tzinfo=UTC)
+            )
+            active.refresh_from_db()
+
+            self.assertFalse(session_entry_display._active_stream_owns_turn(active))
+
+    def test_active_stream_ownership_supports_matching_legacy_original(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/started",
+                        "payload": {
+                            "item": {
+                                "type": "userMessage",
+                                "clientId": None,
+                                "content": [
+                                    {"type": "text", "text": "legacy prompt"}
+                                ],
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            active = CodexInstance.objects.create(
+                pid=1,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="legacy prompt",
+                events_path=str(events_path),
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            CodexInstance.objects.filter(pk=active.pk).update(
+                started_at=datetime(2025, 1, 5, tzinfo=UTC)
+            )
+            active.refresh_from_db()
+
+            self.assertTrue(session_entry_display._active_stream_owns_turn(active))
 
     def test_explicit_inactive_marker_prevents_repeated_prompt_trim(self) -> None:
         active = CodexInstance.objects.create(
