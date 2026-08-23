@@ -8,12 +8,16 @@ helpers the detail page and SSE view consume.
 
 from __future__ import annotations
 
+import json
 import logging
+import mmap
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from django.db.models.functions import Coalesce
+from django.utils import timezone
 
 from hitch.main import demo
 from hitch.main.formatting import render_markdown
@@ -56,6 +60,7 @@ def _trim_in_progress_turn(
     active: CodexInstance | None,
     *,
     active_turn_unresolved: bool = False,
+    active_stream_owns_turn: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop the in-progress turn's entries from the tail of ``entries``.
 
@@ -69,16 +74,66 @@ def _trim_in_progress_turn(
     The in-progress turn is identified by the most recent user-message entry
     whose text matches the active worker's original prompt plus its initial
     image markers. Mid-turn steer images live in the attachment ledger but do
-    not change this identity; anything from the original user message onward
-    is owned by the stream until the turn ends.
+    not change this identity. When the rollout is the page's fallback transcript
+    owner, preserve these entries instead of trimming them for SSE replay.
     """
+    if active is not None and not active_stream_owns_turn:
+        return entries
     if active_turn_unresolved and active is not None:
         return []
+    active_turn_start = _active_turn_start_index(entries, active)
+    if active_turn_start is not None:
+        return entries[:active_turn_start]
+    return entries
+
+
+_STREAM_USER_MESSAGE_MARKERS = (
+    b'"type": "userMessage"',
+    b'"type":"userMessage"',
+)
+_ACTIVE_STREAM_CLAIM_GRACE = timedelta(seconds=30)
+
+
+def _active_stream_owns_turn(active: CodexInstance | None) -> bool:
+    """Return whether SSE replay owns or is still claiming the active turn.
+
+    A newly started worker gets a short grace period for its first user event
+    to arrive. After that, only the original user item claims transcript
+    ownership; later steering messages do not.
+    """
+    if active is None:
+        return False
+    if active.events_path:
+        try:
+            with (
+                Path(active.events_path).open("rb") as fh,
+                mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as contents,
+            ):
+                if _event_log_contains_original_user(contents, active):
+                    return True
+        except (OSError, ValueError):
+            pass
+    return bool(
+        active.started_at
+        and active.started_at > timezone.now() - _ACTIVE_STREAM_CLAIM_GRACE
+    )
+
+
+def _entries_include_active_turn(
+    entries: list[dict[str, Any]], active: CodexInstance | None
+) -> bool:
+    """Return whether rollout-rendered entries contain the active boundary."""
+    return _active_turn_start_index(entries, active) is not None
+
+
+def _active_turn_start_index(
+    entries: list[dict[str, Any]], active: CodexInstance | None
+) -> int | None:
     active_text = _active_user_message_text(active)
     if not active_text:
-        return entries
-    for i in range(len(entries) - 1, -1, -1):
-        entry = entries[i]
+        return None
+    for index in range(len(entries) - 1, -1, -1):
+        entry = entries[index]
         active_marker = entry.get("_hitch_active_user")
         if entry.get("kind") == "user" and (
             active_marker is True
@@ -87,8 +142,91 @@ def _trim_in_progress_turn(
                 and entry.get("text") == active_text
             )
         ):
-            return entries[:i]
-    return entries
+            return index
+    return None
+
+
+def _event_log_contains_original_user(
+    contents: mmap.mmap, active: CodexInstance
+) -> bool:
+    """Identify this worker's submitted user item, not a later steer."""
+    expected_client_id = f"hitch-instance-{active.pk}"
+    first_user_item: dict[str, Any] | None = None
+    cursor = 0
+    while True:
+        positions = [
+            position
+            for marker in _STREAM_USER_MESSAGE_MARKERS
+            if (position := contents.find(marker, cursor)) >= 0
+        ]
+        if not positions:
+            break
+        position = min(positions)
+        cursor = position + 1
+        line_start = contents.rfind(b"\n", 0, position) + 1
+        line_end = contents.find(b"\n", position)
+        if line_end < 0:
+            line_end = len(contents)
+        try:
+            event = json.loads(contents[line_start:line_end])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        item = _event_user_item(event)
+        if item is None:
+            continue
+        if first_user_item is None:
+            first_user_item = item
+        client_id = item.get("clientId", item.get("client_id"))
+        if client_id == expected_client_id:
+            return True
+
+    if first_user_item is None:
+        return False
+    client_id = first_user_item.get("clientId", first_user_item.get("client_id"))
+    return client_id is None and _event_user_message_text(first_user_item) == (
+        _active_user_message_text(active)
+    )
+
+
+def _event_user_item(event: Any) -> dict[str, Any] | None:
+    if not isinstance(event, dict) or event.get("method") not in {
+        "item/started",
+        "item/completed",
+    }:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "userMessage":
+        return None
+    return item
+
+
+def _event_user_message_text(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for value in content:
+        if not isinstance(value, dict):
+            continue
+        item_type = value.get("type")
+        if item_type == "text":
+            text = value.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        elif item_type == "mention":
+            name = value.get("name")
+            if isinstance(name, str):
+                parts.append(f"@{name}")
+        elif item_type == "skill":
+            name = value.get("name")
+            if isinstance(name, str):
+                parts.append(f"/{name}")
+        elif item_type in {"image", "localImage"}:
+            parts.append("[image]")
+    return "\n".join(parts)
 
 
 def _show_active_worker_transcript(active: CodexInstance | None) -> bool:

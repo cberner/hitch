@@ -252,7 +252,7 @@
                 <div class="entry"
                      data-live-root
                      data-active-author="{{ pending_user_author }}"
-                     data-hide-transcript="false"
+                     data-hide-transcript="{{ rollout_owns_active_turn|yesno:'true,false' }}"
                      data-hide-user-message="true"
                      data-sanitize-live-details="true"
                      data-read-only="{{ read_only|yesno:'true,false' }}"

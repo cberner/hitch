@@ -1849,7 +1849,7 @@
                 box.appendChild(header);
                 const detail = document.createElement("div");
                 detail.className = "approval-detail";
-                detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS
+                detail.textContent = SANITIZE_LIVE_DETAILS
                     ? sanitizedApprovalDetail(payload.method, payload.params)
                     : approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
