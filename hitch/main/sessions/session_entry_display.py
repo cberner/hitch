@@ -119,6 +119,40 @@ def _entries_include_active_turn(
     return _active_turn_start_index(entries, active) is not None
 
 
+def _active_turn_entries(
+    entries: list[dict[str, Any]],
+    active: CodexInstance | None,
+    *,
+    active_turn_unresolved: bool = False,
+) -> list[dict[str, Any]]:
+    """Return the rollout entries owned by the active turn on this page."""
+    if active is None:
+        return []
+    active_turn_start = _active_turn_start_index(entries, active)
+    if active_turn_start is not None:
+        return entries[active_turn_start:]
+    return entries if active_turn_unresolved else []
+
+
+def _mark_active_history_user_entries(
+    entries: list[dict[str, Any]], active: CodexInstance | None
+) -> None:
+    """Mark the current active user boundary using prompt and timestamp."""
+    identity = _active_history_user_identity(active)
+    if identity is None:
+        return
+    for entry in entries:
+        if entry.get("kind") != "user":
+            continue
+        timestamp = entry.get("timestamp")
+        entry["_hitch_active_user"] = bool(
+            isinstance(timestamp, int | float)
+            and not isinstance(timestamp, bool)
+            and timestamp >= identity.started_at
+            and entry.get("text") == identity.text
+        )
+
+
 def _active_turn_start_index(
     entries: list[dict[str, Any]], active: CodexInstance | None
 ) -> int | None:

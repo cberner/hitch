@@ -192,7 +192,7 @@ def session_history_page(
         next_partial_record_end = None
         leading_user_text = None
         active_boundary_found = False
-        selected_after_active_start = False
+        scanned_after_active_start = False
         active_turn_unresolved = False
         scanned_start = end_offset
         encoded_hidden_prompts = tuple(
@@ -217,6 +217,13 @@ def session_history_page(
                     start=1,
                 ):
                     scanned_start = offset
+                    if active_user_identity is not None:
+                        record_timestamp = _history_record_timestamp(raw)
+                        scanned_after_active_start = (
+                            scanned_after_active_start
+                            or record_timestamp is not None
+                            and record_timestamp >= active_user_identity.started_at
+                        )
                     entry = _history_message_record(
                         raw,
                         oversized=oversized,
@@ -239,14 +246,6 @@ def session_history_page(
                         if len(selected) < message_target or active_boundary:
                             selected.append(entry)
                             start_offset = offset
-                            if active_user_identity is not None:
-                                event_timestamp = _history_record_timestamp(raw)
-                                selected_after_active_start = (
-                                    selected_after_active_start
-                                    or event_timestamp is not None
-                                    and event_timestamp
-                                    >= active_user_identity.started_at
-                                )
                             if payload.get("type") != "user_message":
                                 leading_user_text = None
                         if payload.get("type") == "user_message":
@@ -267,7 +266,7 @@ def session_history_page(
                     ):
                         active_turn_unresolved = (
                             active_user_identity is not None
-                            and selected_after_active_start
+                            and scanned_after_active_start
                             and not active_boundary_found
                         )
                         if not selected:

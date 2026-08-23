@@ -345,6 +345,144 @@ class SessionDetailFastPathTests(TestCase):
         self.assertIn(b"input/requested", stream_body)
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_full_history_does_not_claim_older_repeated_prompt(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        prompt = "Repeat this prompt"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": prompt},
+                    timestamp="2025-01-05T11:00:00Z",
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Older reply"},
+                    timestamp="2025-01-05T11:00:01Z",
+                ),
+            ],
+        )
+        events_path = rollout_path.with_suffix(".events.jsonl")
+        events_path.touch()
+        active_started = datetime(2025, 1, 5, 12, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="repeated-full-history",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_created_at=active_started,
+            codex_updated_at=active_started,
+        )
+        active = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="repeated-full-history",
+            cwd="/repo",
+            prompt=prompt,
+            events_path=str(events_path),
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        CodexInstance.objects.filter(pk=active.pk).update(started_at=active_started)
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse(
+                    "session", kwargs={"session_id": "repeated-full-history"}
+                ),
+                {"history": "all"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["rollout_owns_active_turn"])
+        self.assertEqual(response.context["pending_user_prompt"], prompt)
+        self.assertTrue(response.context["show_active_worker_transcript"])
+        self.assertContains(response, "Older reply")
+        self.assertContains(response, 'data-hide-transcript="false"')
+        user_entries = [
+            entry
+            for entry in response.context["entries"]
+            if entry.get("kind") == "user"
+        ]
+        self.assertEqual(user_entries[0]["_hitch_active_user"], False)
+        mock_codex.assert_not_called()
+
+    @patch.object(rollout_module, "_HISTORY_SCAN_MAX_RECORDS", 2)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_empty_active_preview_preserves_rollout_owner(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        active_started = datetime(2025, 1, 5, 12, tzinfo=UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Active prompt"},
+                    timestamp="2025-01-05T12:00:01Z",
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Active reply"},
+                    timestamp="2025-01-05T12:00:02Z",
+                ),
+                *[
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call_output",
+                            "call_id": f"call-{index}",
+                            "output": "done",
+                        },
+                        timestamp=f"2025-01-05T12:00:0{index + 3}Z",
+                    )
+                    for index in range(4)
+                ],
+            ],
+        )
+        events_path = rollout_path.with_suffix(".events.jsonl")
+        events_path.touch()
+        SessionMetadata.objects.create(
+            thread_id="empty-active-preview",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_created_at=active_started,
+            codex_updated_at=active_started,
+        )
+        active = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="empty-active-preview",
+            cwd="/repo",
+            prompt="Active prompt",
+            events_path=str(events_path),
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        CodexInstance.objects.filter(pk=active.pk).update(started_at=active_started)
+
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "empty-active-preview"})
+            )
+            next_url = response.context["history_next_url"]
+            for _ in range(3):
+                older = self.client.get(next_url)
+                if b"Active reply" in older.content:
+                    break
+                next_url = older.context["history_next_url"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["entries"])
+        self.assertTrue(response.context["rollout_owns_active_turn"])
+        self.assertIn("transcript_owner=rollout", response.context["history_next_url"])
+        self.assertContains(response, 'data-hide-transcript="true"')
+        self.assertEqual(older.status_code, 200)
+        self.assertContains(older, "Active prompt")
+        self.assertContains(older, "Active reply")
+        mock_codex.assert_not_called()
+
     @patch.object(rollout_module, "_HISTORY_SCAN_MAX_BYTES", 64)
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")

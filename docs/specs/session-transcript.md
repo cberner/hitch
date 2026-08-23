@@ -36,7 +36,8 @@ space used by repetitive reasoning, command, and web-search activity.
   plan, approval, and input state, but its transcript items remain hidden to
   avoid cross-source duplication. Older-history fragments and specialized live
   roots, including the demo-agent view, inherit that same owner rather than
-  independently re-detecting it.
+  independently re-detecting it; a selected demo-agent panel renders the
+  rollout-owned active entries next to its hidden live transcript root.
 - `ST-history-full`: A visible up-arrow reloads the canonical full transcript
   and positions the reader at its beginning, including while a worker is
   active. Activity, synthesized rows, and oversized message bodies remain
