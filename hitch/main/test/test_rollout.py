@@ -395,6 +395,45 @@ class SessionHistoryPageTests(TestCase):
         assert page is not None
         self.assertTrue(page.active_turn_unresolved)
 
+    def test_marks_empty_post_start_page_unresolved_at_scan_cap(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Active prompt"},
+                ),
+                *[
+                    _line(
+                        "response_item",
+                        {
+                            "type": "function_call_output",
+                            "call_id": f"call-{index}",
+                            "output": "done",
+                        },
+                    )
+                    for index in range(4)
+                ],
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        with patch.object(rollout, "_HISTORY_SCAN_MAX_RECORDS", 2):
+            page = rollout.session_history_page(
+                path,
+                message_target=2,
+                active_user_identity=rollout.SessionHistoryUserIdentity(
+                    text="Active prompt",
+                    prompt="Active prompt",
+                    started_at=1736078400,
+                ),
+            )
+
+        self.assertIsNotNone(page)
+        assert page is not None
+        self.assertFalse(page.flat_entries)
+        self.assertTrue(page.has_older)
+        self.assertTrue(page.active_turn_unresolved)
+
     def test_matches_delayed_oversized_active_prompt_but_not_older_repeat(
         self,
     ) -> None:

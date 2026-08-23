@@ -89,6 +89,7 @@ from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
+    _active_turn_entries,
     _active_worker_status_text,
     _apply_qa_approval_messages,
     _apply_system_authors,
@@ -98,6 +99,7 @@ from hitch.main.sessions.session_entry_display import (
     _entries_include_active_turn,
     _filter_demo_agent_entries,
     _latest_user_turn_failure,
+    _mark_active_history_user_entries,
     _pending_user_author,
     _pending_user_prompt,
     _pending_user_timestamp,
@@ -636,6 +638,8 @@ def _render_session_detail(
     else:
         entries = _apply_system_authors(raw_entries, session_id)
         entries = _apply_qa_approval_messages(entries, session_id)
+        if full_history_requested:
+            _mark_active_history_user_entries(entries, active_instance)
     if hide_demo_agent_entries:
         entries = _filter_demo_agent_entries(
             entries,
@@ -819,6 +823,9 @@ def _render_session_detail(
             or _entries_include_active_turn(entries, active_instance)
         )
     )
+    active_turn_unresolved = bool(
+        history_page is not None and history_page.active_turn_unresolved
+    )
     # Rollout and worker event files are independently flushed, so there is no
     # lossless shared byte cursor between them. In fallback mode the rollout is
     # the transcript source for this page lifecycle; SSE still replays from the
@@ -835,12 +842,19 @@ def _render_session_detail(
             if rollout_owns_active_turn
             else _ACTIVE_TRANSCRIPT_OWNER_STREAM
         )
+    demo_rollout_entries = (
+        _active_turn_entries(
+            entries,
+            active_instance,
+            active_turn_unresolved=active_turn_unresolved,
+        )
+        if active_demo_worker and rollout_owns_active_turn
+        else []
+    )
     entries = _trim_in_progress_turn(
         entries,
         active_instance,
-        active_turn_unresolved=bool(
-            history_page is not None and history_page.active_turn_unresolved
-        ),
+        active_turn_unresolved=active_turn_unresolved,
         active_stream_owns_turn=active_stream_owns_turn,
     )
     plan_mode_state = _thread_plan_mode_state(
@@ -1039,6 +1053,7 @@ def _render_session_detail(
             ),
             "active_worker": active_instance is not None,
             "active_demo_worker": active_demo_worker,
+            "demo_rollout_entries": demo_rollout_entries,
             "show_active_worker_transcript": show_active_worker_transcript,
             "rollout_owns_active_turn": rollout_owns_active_turn,
             "active_system_workflow": active_system_workflow,

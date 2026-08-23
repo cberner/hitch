@@ -1267,8 +1267,14 @@ class SessionViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         prompt = "Start an interactive web demo"
+        started_at = datetime(2025, 1, 5, tzinfo=UTC)
         thread = _thread(
-            [_turn([_user_message(prompt), _agent_message("Demo is ready")])]
+            [
+                _turn(
+                    [_user_message(prompt), _agent_message("Demo is ready")],
+                    started_at=int(started_at.timestamp()),
+                )
+            ]
         )
         _patch_thread(self, mock_codex, thread)
         workflow = SystemWorkflow.objects.create(
@@ -1290,7 +1296,7 @@ class SessionViewTests(TestCase):
             display_author=demo.DEMO_DISPLAY_AUTHOR,
         )
         CodexInstance.objects.filter(pk=instance.pk).update(
-            started_at=datetime(2025, 1, 5, tzinfo=UTC)
+            started_at=started_at
         )
         run = SystemAgentRun.objects.create(
             workflow=workflow,
@@ -1308,6 +1314,18 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Demo is ready")
         self.assertTrue(response.context["rollout_owns_active_turn"])
+        self.assertEqual(
+            [
+                entry["text"]
+                for entry in response.context["demo_rollout_entries"]
+                if entry.get("kind") == "agent"
+            ],
+            ["Demo is ready"],
+        )
+        demo_panel = response.content.decode().split(
+            'id="session-panel-demo-agent"', 1
+        )[1]
+        self.assertIn("Demo is ready", demo_panel)
         self.assertContains(response, 'data-hide-transcript="true"', count=1)
         self.assertContains(response, 'data-hide-user-message="true"', count=1)
 

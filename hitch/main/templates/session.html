@@ -249,6 +249,9 @@
                     </div>
                 </details>
                 {% endif %}
+                {% if demo_rollout_entries %}
+                {% include "_session_entries.html" with entries=demo_rollout_entries %}
+                {% endif %}
                 <div class="entry"
                      data-live-root
                      data-active-author="{{ pending_user_author }}"
