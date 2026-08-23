@@ -490,6 +490,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertNotIn("output_schema", kwargs)
         self.assertIn("provide prioritized, actionable findings", kwargs["prompt"])
+        self.assertIn("one comprehensive pass", kwargs["prompt"])
+        self.assertIn("do not stop after the first valid finding", kwargs["prompt"])
         self.assertNotIn("Apply the same review standards as Codex", kwargs["prompt"])
         self.assertNotIn("manual QA", kwargs["prompt"])
         self.assertNotIn("No qualifying findings.", kwargs["prompt"])
@@ -3833,6 +3835,12 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(kwargs["user_message_index"], 2)
         self.assertIn("Feedback from Hitch QA agent", kwargs["prompt"])
+        self.assertIn(
+            "findings in the current QA feedback as one remediation batch",
+            kwargs["prompt"],
+        )
+        self.assertIn("sibling instances of each issue class", kwargs["prompt"])
+        self.assertIn("self-review the complete diff", kwargs["prompt"])
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, "feedback_running")
         self.assertEqual(workflow.iteration, 1)
@@ -4382,6 +4390,9 @@ class SpecCriticWorkflowTests(TestCase):
                     "QA Design Synthesis Gate",
                     "pause and simplify",
                     "Prior related QA feedback",
+                    "prior feedback only as evidence",
+                    "do not treat its findings as current remediation work",
+                    "sibling instances of each issue class",
                 ),
             ),
             _DesignGateCase(

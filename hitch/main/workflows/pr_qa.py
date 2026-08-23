@@ -112,6 +112,7 @@ from hitch.main.workflows.qa_prompts import (
     _cleanup_qa_handoff,
     _maybe_build_qa_design_synthesis_gate,
     _qa_design_synthesis_feedback_prompt,
+    _qa_feedback_prompt,
     _qa_handoff_path,
     _qa_review_handoff,
     _qa_review_revision,
@@ -2945,7 +2946,7 @@ def _spawn_qa_feedback_turn(
         prompt=(
             _qa_design_synthesis_feedback_prompt(feedback, synthesis_gate)
             if synthesis_gate is not None
-            else f"Feedback from Hitch QA agent:\n\n{feedback}"
+            else _qa_feedback_prompt(feedback)
         ),
         purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
         display_author=system_agents.QA_DISPLAY_AUTHOR,
