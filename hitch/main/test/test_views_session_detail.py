@@ -3571,6 +3571,42 @@ class ActiveTurnTrimTests(TestCase):
 
             self.assertFalse(session_entry_display._active_stream_owns_turn(active))
 
+    def test_event_log_ownership_scans_steers_from_single_pass_iterable(
+        self,
+    ) -> None:
+        active = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="missing original prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        lines = (
+            (
+                json.dumps(
+                    {
+                        "method": "item/started",
+                        "payload": {
+                            "item": {
+                                "type": "userMessage",
+                                "clientId": f"steer-{index}",
+                                "content": [
+                                    {"type": "text", "text": f"later steer {index}"}
+                                ],
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            ).encode()
+            for index in range(100)
+        )
+
+        self.assertFalse(
+            session_entry_display._event_log_contains_original_user(lines, active)
+        )
+
     def test_active_stream_ownership_supports_matching_legacy_original(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = Path(raw) / "events.jsonl"

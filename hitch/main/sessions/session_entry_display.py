@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-import mmap
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -87,10 +86,7 @@ def _trim_in_progress_turn(
     return entries
 
 
-_STREAM_USER_MESSAGE_MARKERS = (
-    b'"type": "userMessage"',
-    b'"type":"userMessage"',
-)
+_STREAM_USER_MESSAGE_MARKER = b'"userMessage"'
 _ACTIVE_STREAM_CLAIM_GRACE = timedelta(seconds=30)
 
 
@@ -105,13 +101,10 @@ def _active_stream_owns_turn(active: CodexInstance | None) -> bool:
         return False
     if active.events_path:
         try:
-            with (
-                Path(active.events_path).open("rb") as fh,
-                mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as contents,
-            ):
-                if _event_log_contains_original_user(contents, active):
+            with Path(active.events_path).open("rb") as events:
+                if _event_log_contains_original_user(events, active):
                     return True
-        except (OSError, ValueError):
+        except OSError:
             pass
     return bool(
         active.started_at
@@ -147,28 +140,16 @@ def _active_turn_start_index(
 
 
 def _event_log_contains_original_user(
-    contents: mmap.mmap, active: CodexInstance
+    lines: Iterable[bytes], active: CodexInstance
 ) -> bool:
     """Identify this worker's submitted user item, not a later steer."""
     expected_client_id = f"hitch-instance-{active.pk}"
     first_user_item: dict[str, Any] | None = None
-    cursor = 0
-    while True:
-        positions = [
-            position
-            for marker in _STREAM_USER_MESSAGE_MARKERS
-            if (position := contents.find(marker, cursor)) >= 0
-        ]
-        if not positions:
-            break
-        position = min(positions)
-        cursor = position + 1
-        line_start = contents.rfind(b"\n", 0, position) + 1
-        line_end = contents.find(b"\n", position)
-        if line_end < 0:
-            line_end = len(contents)
+    for line in lines:
+        if _STREAM_USER_MESSAGE_MARKER not in line:
+            continue
         try:
-            event = json.loads(contents[line_start:line_end])
+            event = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         item = _event_user_item(event)
