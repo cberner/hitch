@@ -84,6 +84,32 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("File preview truncated", preview.files[0].lines[-1].html)
 
+    def test_reviewer_diff_rejects_tracked_change_above_handoff_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            tracked = repo / "large.txt"
+            tracked.write_text("initial\n")
+            _git(repo, "add", tracked.name)
+            _git(repo, "commit", "-m", "initial")
+            tracked.write_text("x" * (diffs_module.REVIEWER_DIFF_MAX_BYTES + 1))
+
+            with self.assertRaisesRegex(
+                IncompleteDiffError, "reviewer handoff limit"
+            ):
+                build_worktree_diff_text(str(repo))
+
+    def test_reviewer_diff_handoff_limit_counts_utf8_bytes(self) -> None:
+        with (
+            patch.object(diffs_module, "REVIEWER_DIFF_MAX_BYTES", 10),
+            patch(
+                "hitch.main.diffs._strict_worktree_diff_text",
+                return_value="☃" * 4,
+            ),
+            self.assertRaisesRegex(IncompleteDiffError, "10-byte reviewer"),
+        ):
+            build_worktree_diff_text("/repo")
+
     def test_session_preview_bounds_rendered_diff_lines(self) -> None:
         changed_line_count = diffs_module._MAX_DIFF_PREVIEW_LINES + 50
         changed_lines = "\n".join(
