@@ -110,6 +110,19 @@ class WorktreeDiffTests(SimpleTestCase):
         ):
             build_worktree_diff_text("/repo")
 
+    def test_session_preview_bounds_raw_diff_characters(self) -> None:
+        raw_diff = "x" * (diffs_module._MAX_DIFF_PREVIEW_CHARS + 1)
+        with (
+            patch("hitch.main.diffs._worktree_diff_text", return_value=raw_diff),
+            patch("hitch.main.diffs._parse_unified_diff") as parse_diff,
+        ):
+            build_worktree_diff("/repo")
+
+        parse_diff.assert_called_once_with(
+            raw_diff[: diffs_module._MAX_DIFF_PREVIEW_CHARS],
+            truncated=True,
+        )
+
     def test_session_preview_bounds_rendered_diff_lines(self) -> None:
         changed_line_count = diffs_module._MAX_DIFF_PREVIEW_LINES + 50
         changed_lines = "\n".join(
