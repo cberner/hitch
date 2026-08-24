@@ -3856,10 +3856,17 @@ class SpecCriticWorkflowTests(TestCase):
             hitch_home = root / "hitch-home"
             _init_test_repo(repo, initial_branch="main", configure_user=True)
             marker = "untracked-large-review-marker"
-            (repo / "new-feature.txt").write_text(
-                f"{marker}\n" + ("x" * 101_000) + "\n"
-            )
+            for index in range(3):
+                (repo / f"new-feature-{index}.txt").write_text(
+                    f"{marker}-{index}\n" + ("x" * 180_000) + "\n"
+                )
             expected_diff = diffs.build_worktree_diff_text(str(repo))
+            self.assertGreater(
+                len(expected_diff), diffs._MAX_DIFF_PREVIEW_CHARS
+            )
+            self.assertLess(
+                len(expected_diff.encode()), diffs.REVIEWER_DIFF_MAX_BYTES
+            )
             object_state = _git(repo, "count-objects", "-v")
 
             def spawn(**kwargs: Any) -> CodexInstance:
@@ -4053,6 +4060,26 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff.ref, "")
         self.assertEqual(handoff.embedded_diff_chars, len(diff))
         self.assertIn(marker, handoff.prompt)
+
+    def test_qa_handoff_rejects_aggregate_over_limit_before_prompt_or_files(
+        self,
+    ) -> None:
+        with (
+            patch.object(diffs, "REVIEWER_DIFF_MAX_BYTES", 10),
+            patch.object(qa_prompts, "_inline_qa_prompt") as mock_inline,
+            patch.object(qa_prompts, "_write_qa_handoff_chunks") as mock_write,
+            self.assertRaisesRegex(diffs.IncompleteDiffError, "10-byte reviewer"),
+        ):
+            qa_prompts._qa_review_handoff(
+                "/repo",
+                "x" * 11,
+                workflow_id=1,
+                review_revision=0,
+                workflow_iteration=0,
+            )
+
+        mock_inline.assert_not_called()
+        mock_write.assert_not_called()
 
     @patch(
         "hitch.main.workflows.pr_qa.codex_pool.spawn_new_session",

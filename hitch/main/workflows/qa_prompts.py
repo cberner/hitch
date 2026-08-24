@@ -22,6 +22,7 @@ from typing import Any
 
 from django.conf import settings
 
+from hitch.main.diffs import validate_reviewer_diff_size
 from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
 from hitch.main.workflows.agent_io import _parse_qa_output
 from hitch.main.workflows.workflow_state import _state_int
@@ -149,6 +150,7 @@ def _qa_review_handoff(
     workflow_iteration: int,
     target_branch: str = "",
 ) -> QaReviewHandoff:
+    validate_reviewer_diff_size(diff_text)
     if len(diff_text) <= _QA_INLINE_DIFF_MAX_CHARS:
         return QaReviewHandoff(
             prompt=_inline_qa_prompt(cwd, diff_text),

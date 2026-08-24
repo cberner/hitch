@@ -21,7 +21,10 @@ from .git_support import GitCommandError, run_git
 DiffLineKind = Literal["add", "remove", "context", "hunk", "meta"]
 
 _GIT_TIMEOUT_SECONDS = 3
-_MAX_DIFF_CHARS = 500_000
+_MAX_DIFF_PREVIEW_CHARS = 500_000
+# Larger reviewer diffs use chunked handoffs, but their aggregate resource use
+# must remain bounded independently from the smaller rendered preview.
+REVIEWER_DIFF_MAX_BYTES = 2 * 1024 * 1024
 # Highlighting and table markup can expand raw diff lines several-fold.
 _MAX_DIFF_PREVIEW_LINES = 1_000
 _MAX_UNTRACKED_FILES = 25
@@ -109,9 +112,9 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     state instead of blocking the session page render.
     """
     text = _worktree_diff_text(cwd)
-    truncated = len(text) > _MAX_DIFF_CHARS
+    truncated = len(text) > _MAX_DIFF_PREVIEW_CHARS
     if truncated:
-        text = text[:_MAX_DIFF_CHARS]
+        text = text[:_MAX_DIFF_PREVIEW_CHARS]
     lines = _split_diff_lines(text)
     if len(lines) > _MAX_DIFF_PREVIEW_LINES:
         lines = lines[:_MAX_DIFF_PREVIEW_LINES]
@@ -123,14 +126,22 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
 def build_worktree_diff_text(cwd: str | None) -> str:
     """Return a complete reviewer diff, or raise when it cannot be represented."""
     text = _strict_worktree_diff_text(cwd)
+    validate_reviewer_diff_size(text)
     for line in text.split("\n"):
         if line.startswith("Binary files ") and line.endswith(" differ"):
             raise IncompleteDiffError(
                 "tracked binary changes cannot be represented in the reviewer diff"
             )
-    if len(text) > _MAX_DIFF_CHARS:
-        raise IncompleteDiffError("worktree diff exceeds the reviewer size limit")
     return text
+
+
+def validate_reviewer_diff_size(text: str) -> None:
+    """Reject reviewer text that would exceed the aggregate handoff budget."""
+    if (
+        len(text) > REVIEWER_DIFF_MAX_BYTES
+        or len(text.encode()) > REVIEWER_DIFF_MAX_BYTES
+    ):
+        _raise_reviewer_diff_too_large()
 
 
 def _has_dirty_gitlink_section(
@@ -228,6 +239,8 @@ def _strict_tracked_diff(repo: Path) -> str:
     result = _strict_git_result(
         repo, ["-c", "core.quotePath=true", *_DIFF_ARGS, diff_base, "--"]
     )
+    if len(result.stdout) > REVIEWER_DIFF_MAX_BYTES:
+        _raise_reviewer_diff_too_large()
     if b"\0" in result.stdout:
         raise IncompleteDiffError(
             "tracked NUL-bearing changes cannot be represented in the reviewer diff"
@@ -246,6 +259,13 @@ def _strict_tracked_diff(repo: Path) -> str:
             "dirty submodule changes cannot be represented in the reviewer diff"
         )
     return text
+
+
+def _raise_reviewer_diff_too_large() -> None:
+    raise IncompleteDiffError(
+        "worktree diff exceeds the "
+        f"{REVIEWER_DIFF_MAX_BYTES:,}-byte reviewer handoff limit"
+    )
 
 
 def _strict_gitlink_diff_metadata(
