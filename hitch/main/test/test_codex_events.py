@@ -23,6 +23,51 @@ def _event(
     return json.dumps(event)
 
 
+class PruneDiffEventsTests(SimpleTestCase):
+    def test_removes_diff_events_and_preserves_other_records(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                "\n".join(
+                    [
+                        _event("item/started", {"id": "item-1"}),
+                        _event(
+                            codex_events.TURN_DIFF_UPDATED_METHOD,
+                            {"diff": "large diff"},
+                        ),
+                        _event("turn/completed", {"status": "completed"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            events_path.chmod(0o600)
+
+            freed = codex_events.prune_diff_events(events_path)
+            compacted = events_path.read_text(encoding="utf-8")
+            compacted_mode = events_path.stat().st_mode & 0o777
+            temporary_files = list(Path(raw).glob("*.compact"))
+
+        self.assertGreater(freed, 0)
+        self.assertNotIn("turn/diff/updated", compacted)
+        self.assertNotIn("large diff", compacted)
+        self.assertIn("item/started", compacted)
+        self.assertIn("turn/completed", compacted)
+        self.assertEqual(compacted_mode, 0o600)
+        self.assertEqual(temporary_files, [])
+
+    def test_noop_keeps_log_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            original = _event("turn/completed", {"status": "completed"}) + "\n"
+            events_path.write_text(original, encoding="utf-8")
+
+            freed = codex_events.prune_diff_events(events_path)
+
+            self.assertEqual(freed, 0)
+            self.assertEqual(events_path.read_text(encoding="utf-8"), original)
+
+
 class LatestGoalFromEventPathsTests(SimpleTestCase):
     def test_applies_updates_and_clears_in_event_order(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
