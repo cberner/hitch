@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,11 @@ GOAL_METHODS = frozenset({GOAL_CLEARED_METHOD, GOAL_UPDATED_METHOD})
 TASK_PLAN_UPDATED_METHOD = "turn/plan/updated"
 ITEM_COMPLETED_METHOD = "item/completed"
 NATIVE_REVIEW_COMPLETED_METHOD = "hitch/nativeReview/completed"
+TURN_DIFF_UPDATED_METHOD = "turn/diff/updated"
+
+_TURN_DIFF_EVENT_LINE_RE = re.compile(
+    rb'^\s*\{\s*"method"\s*:\s*"turn/diff/updated"(?:\s*[,}])'
+)
 
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
@@ -60,6 +67,33 @@ def append_event(path: str | Path, method: str, payload: dict[str, Any]) -> None
     event = {"method": method, "payload": payload}
     with Path(path).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
+
+
+def prune_diff_events(events_path: str | Path) -> int:
+    """Atomically remove obsolete full-diff notifications from a finished log."""
+    path = Path(events_path)
+    temporary_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.compact"
+    )
+    original_stat = path.stat()
+    original_size = original_stat.st_size
+    removed = False
+    try:
+        with path.open("rb") as source, temporary_path.open("wb") as destination:
+            os.fchmod(destination.fileno(), original_stat.st_mode & 0o7777)
+            for line in source:
+                if _TURN_DIFF_EVENT_LINE_RE.match(line):
+                    removed = True
+                    continue
+                destination.write(line)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if not removed:
+            return 0
+        os.replace(temporary_path, path)
+        return max(0, original_size - path.stat().st_size)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)

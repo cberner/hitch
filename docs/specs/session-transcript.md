@@ -23,6 +23,11 @@ space used by repetitive reasoning, command, and web-search activity.
   when the same agent, plan, or reasoning item has a completed snapshot in the
   replay window. Deltas for incomplete items remain available so reconnecting
   clients can recover their current text.
+- `ST-bounded-diff-spool`: Live worker event logs omit cumulative
+  `turn/diff/updated` snapshots because the active page does not expose a diff
+  preview. After the turn, the page reload builds its stable preview directly
+  from the worktree. Disk-pressure cleanup removes these obsolete snapshots
+  from oversized logs created by older Hitch versions.
 - `ST-live-detail-authority`: When a live session requires detail sanitization,
   every tool-detail snapshot and delta is rendered through the same policy.
   Sensitive command, file, and reasoning details use safe placeholders.

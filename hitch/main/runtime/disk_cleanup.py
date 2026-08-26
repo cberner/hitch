@@ -1,4 +1,4 @@
-"""Best-effort cleanup for Hitch-managed worktrees when ~/.hitch grows too large."""
+"""Best-effort cleanup for Hitch-managed data when ~/.hitch grows too large."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.runtime import codex_events
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT = 20.0
 ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=1)
+LEGACY_DIFF_EVENT_COMPACTION_MIN_BYTES = 512 * 1024 * 1024
 _WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 _PROPOSAL_SESSION_ID_FIELDS = (
@@ -73,7 +75,7 @@ def run_finished_session_disk_cleanup() -> None:
 
 
 def cleanup_hitch_disk_usage_if_needed() -> int:
-    """Delete enough eligible worktrees to bring ``~/.hitch`` under the limit."""
+    """Prune obsolete events and worktrees to bring ``~/.hitch`` under the limit."""
     hitch_home = _hitch_home_dir()
     usage_path = _existing_disk_usage_path(hitch_home)
     try:
@@ -92,6 +94,12 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
     used_bytes = _directory_size(hitch_home)
     if used_bytes <= limit_bytes:
         return 0
+    pruned_event_bytes = _prune_oversized_finished_event_logs()
+    if pruned_event_bytes:
+        used_bytes = max(0, used_bytes - pruned_event_bytes)
+        invalidate_hitch_home_disk_usage()
+        if used_bytes <= limit_bytes:
+            return 0
 
     cleaned = 0
     candidates = _cleanup_candidates(now=timezone.now())
@@ -128,6 +136,40 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
         cleaned += 1
         successful_bytes += usage_bytes
     return cleaned
+
+
+def _prune_oversized_finished_event_logs() -> int:
+    configured_events_dir = getattr(settings, "CODEX_EVENTS_DIR", None)
+    if not configured_events_dir:
+        return 0
+    events_dir = Path(configured_events_dir).resolve()
+    total_freed = 0
+    paths = (
+        CodexInstance.objects.exclude(status__in=CodexInstance.ACTIVE_STATUSES)
+        .exclude(events_path="")
+        .values_list("events_path", flat=True)
+    )
+    for raw_path in paths.iterator():
+        try:
+            path = Path(raw_path).resolve()
+            if not path.is_relative_to(events_dir):
+                continue
+            if path.stat().st_size < LEGACY_DIFF_EVENT_COMPACTION_MIN_BYTES:
+                continue
+            total_freed += codex_events.prune_diff_events(path)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError):
+            logger.exception(
+                "failed to compact obsolete diff events in %s",
+                raw_path,
+            )
+    if total_freed:
+        logger.info(
+            "compacted obsolete diff events, freeing %s bytes",
+            total_freed,
+        )
+    return total_freed
 
 
 @dataclass(frozen=True)

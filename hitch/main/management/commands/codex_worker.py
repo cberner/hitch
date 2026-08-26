@@ -92,6 +92,7 @@ from hitch.main.runtime.app_server_pool import open_codex_resumed
 from hitch.main.runtime.codex_events import (
     GOAL_METHODS,
     NATIVE_REVIEW_COMPLETED_METHOD,
+    TURN_DIFF_UPDATED_METHOD,
 )
 from hitch.main.runtime.codex_pool import (
     WorkerSqliteHome,
@@ -561,6 +562,12 @@ def _run_turn(
 
     def _write_notification(event: Notification) -> None:
         recorded_at, event_seq = notification_order(event)
+        # The active session UI intentionally does not render diffs and rebuilds
+        # its stable preview from the worktree after the turn. Codex sends each
+        # update as a complete cumulative snapshot, so persisting these unused
+        # notifications makes event logs grow quadratically with edit volume.
+        if event.method == TURN_DIFF_UPDATED_METHOD:
+            return
         _write_event(
             event.method,
             event.payload,

@@ -226,6 +226,105 @@ class DiskCleanupTests(TestCase):
         mock_size.assert_not_called()
         mock_cleanup.assert_not_called()
 
+    def test_prunes_only_oversized_finished_event_logs_in_managed_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            events_dir = root / "events"
+            events_dir.mkdir()
+            completed_path = events_dir / "completed.jsonl"
+            active_path = events_dir / "active.jsonl"
+            outside_path = root / "outside.jsonl"
+            diff_event = (
+                '{"method": "turn/diff/updated", '
+                '"payload": {"diff": "large"}}\n'
+            )
+            terminal_event = '{"method": "turn/completed", "payload": {}}\n'
+            for path in (completed_path, active_path, outside_path):
+                path.write_text(diff_event + terminal_event, encoding="utf-8")
+            CodexInstance.objects.create(
+                pid=1,
+                thread_id="completed",
+                cwd="/repo",
+                events_path=str(completed_path),
+                status=CodexInstance.STATUS_COMPLETED,
+            )
+            CodexInstance.objects.create(
+                pid=2,
+                thread_id="active",
+                cwd="/repo",
+                events_path=str(active_path),
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            CodexInstance.objects.create(
+                pid=3,
+                thread_id="outside",
+                cwd="/repo",
+                events_path=str(outside_path),
+                status=CodexInstance.STATUS_COMPLETED,
+            )
+
+            with (
+                override_settings(CODEX_EVENTS_DIR=events_dir),
+                patch.object(
+                    disk_cleanup,
+                    "LEGACY_DIFF_EVENT_COMPACTION_MIN_BYTES",
+                    1,
+                ),
+            ):
+                freed = disk_cleanup._prune_oversized_finished_event_logs()
+
+            completed = completed_path.read_text(encoding="utf-8")
+            active = active_path.read_text(encoding="utf-8")
+            outside = outside_path.read_text(encoding="utf-8")
+
+        self.assertGreater(freed, 0)
+        self.assertNotIn("turn/diff/updated", completed)
+        self.assertIn("turn/completed", completed)
+        self.assertIn("turn/diff/updated", active)
+        self.assertIn("turn/diff/updated", outside)
+
+    def test_event_compaction_can_avoid_worktree_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            hitch_home = root / ".hitch"
+            managed = root / "managed"
+            hitch_home.mkdir()
+            managed.mkdir()
+            with (
+                override_settings(
+                    HITCH_HOME_DIR=hitch_home,
+                    HITCH_WORKTREES_DIR=managed,
+                    HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
+                ),
+                patch(
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
+                    return_value=SimpleNamespace(total=1000, used=1000),
+                ),
+                patch(
+                    "hitch.main.runtime.disk_cleanup._directory_size",
+                    return_value=300,
+                ),
+                patch(
+                    "hitch.main.runtime.disk_cleanup."
+                    "_prune_oversized_finished_event_logs",
+                    return_value=150,
+                ) as mock_prune,
+                patch(
+                    "hitch.main.runtime.disk_cleanup."
+                    "invalidate_hitch_home_disk_usage"
+                ) as mock_invalidate,
+                patch(
+                    "hitch.main.runtime.disk_cleanup."
+                    "cleanup_managed_worktree_path"
+                ) as mock_cleanup,
+            ):
+                cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
+
+        self.assertEqual(cleaned, 0)
+        mock_prune.assert_called_once_with()
+        mock_invalidate.assert_called_once_with()
+        mock_cleanup.assert_not_called()
+
     def test_noop_removal_counts_only_successful_planned_deletions(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,

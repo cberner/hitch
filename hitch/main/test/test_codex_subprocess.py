@@ -8000,6 +8000,40 @@ class CodexWorkerCommandTests(TestCase):
         thread.turn.assert_called_once()
         codex_ctx._client.request.assert_not_called()
 
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_diff_updates_are_not_persisted(self, mock_codex: MagicMock) -> None:
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        thread = MagicMock()
+        thread.turn.return_value = SimpleNamespace(
+            id="turn-1",
+            stream=lambda: iter(
+                [
+                    SimpleNamespace(
+                        method=codex_events.TURN_DIFF_UPDATED_METHOD,
+                        payload={"diff": "old diff"},
+                    ),
+                    SimpleNamespace(
+                        method=codex_events.TURN_DIFF_UPDATED_METHOD,
+                        payload={"diff": "latest diff"},
+                    ),
+                    _completed_event("turn-1", TurnStatus.completed),
+                ]
+            ),
+        )
+        codex_ctx.thread_resume.return_value = thread
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+            events_text = Path(instance.events_path).read_text(encoding="utf-8")
+            methods = [
+                json.loads(line)["method"] for line in events_text.splitlines()
+            ]
+
+        self.assertNotIn(codex_events.TURN_DIFF_UPDATED_METHOD, methods)
+        self.assertNotIn("old diff", events_text)
+        self.assertNotIn("latest diff", events_text)
+
     @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
     def test_worker_completed_save_does_not_resurrect_parent_forced_stop(
