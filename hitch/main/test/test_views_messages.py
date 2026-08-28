@@ -945,14 +945,14 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
         )
 
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_prompt")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_archived_qa_follow_up_owns_unarchive_through_workflow_start(
         self,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
-        mock_spawn_qa: MagicMock,
+        mock_spawn_review_prompt: MagicMock,
     ) -> None:
         rollout_path = self._make_rollout(
             [
@@ -991,7 +991,8 @@ class SendMessageViewTests(TestCase):
             main_thread_id="abc",
         )
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        mock_spawn_qa.assert_called_once_with(
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        mock_spawn_review_prompt.assert_called_once_with(
             workflow, lifecycle_lock_held=True
         )
         mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
@@ -2439,6 +2440,17 @@ class SendMessageViewTests(TestCase):
             (
                 "qa menu",
                 {"prompt": _QA_PROMPT},
+                None,
+                None,
+                {"open_pr_on_lgtm": False},
+            ),
+            (
+                "legacy qa menu alias",
+                {
+                    "prompt": (
+                        "Run the QA agent on the current diff and fix anything it finds"
+                    )
+                },
                 None,
                 None,
                 {"open_pr_on_lgtm": False},

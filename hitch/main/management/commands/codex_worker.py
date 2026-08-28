@@ -107,6 +107,7 @@ from hitch.main.runtime.codex_pool import (
     resolve_dangling_requests_for_instance,
     worker_log_io_enabled,
 )
+from hitch.main.runtime.codex_review import reviewer_config_overrides
 from hitch.main.runtime.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
@@ -526,10 +527,14 @@ def _run_turn(
     os.environ["HITCH_MANAGE_PY"] = str(manage_py)
     os.environ["HITCH_MANAGE_COMMAND"] = "uv"
     os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
+    reviewer_enabled = instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES
     config = app_server_config(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
+        additional_config_overrides=(
+            reviewer_config_overrides() if reviewer_enabled else ()
+        ),
     )
     normalized_effort = reasoning_effort.strip() if reasoning_effort else None
     effort = ReasoningEffort(normalized_effort) if normalized_effort else None

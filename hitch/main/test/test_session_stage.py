@@ -46,6 +46,27 @@ class SessionStageTests(SimpleTestCase):
             session_stage.derive_stage(workflow=workflow), session_stage.BLOCKED
         )
 
+    def test_qa_guidance_turn_uses_qa_stage_instead_of_pr_stage(self) -> None:
+        workflow = SystemWorkflow(
+            kind=SystemWorkflow.KIND_PR_QA,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+            },
+        )
+
+        self.assertEqual(
+            session_stage.derive_stage(workflow=workflow),
+            session_stage.QA,
+        )
+        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
+        self.assertEqual(
+            session_stage.derive_stage(workflow=workflow),
+            session_stage.PR,
+        )
+
     def test_approval_declined_after_plan_stays_plan_stage(self) -> None:
         stage = session_stage.derive_stage(
             entries=[

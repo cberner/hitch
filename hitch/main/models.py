@@ -553,6 +553,11 @@ class CodexInstance(models.Model):
     PURPOSE_USER = "user"
     PURPOSE_SYSTEM_AGENT = "system_agent"
     PURPOSE_SYSTEM_FEEDBACK = "system_feedback"
+    # These turns run on a user-visible coding thread and may use Hitch's
+    # trusted coding capabilities. Hidden system agents must remain excluded.
+    VISIBLE_CODING_PURPOSES: ClassVar[frozenset[str]] = frozenset(
+        {PURPOSE_USER, PURPOSE_SYSTEM_FEEDBACK}
+    )
 
     PURPOSE_CHOICES = (
         (PURPOSE_USER, "user"),

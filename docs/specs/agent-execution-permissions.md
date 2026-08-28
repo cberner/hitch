@@ -14,7 +14,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Approval mode: How Hitch resolves Codex escalation requests.
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
-- System session: A Hitch-owned background session for workflows such as Autonomous Goals, QA, PR monitoring, or Spec Critic.
+- System session: A Hitch-owned background session for workflows such as Autonomous Goals, PR monitoring, or Spec Critic.
 - Separate worktree: A git worktree distinct from the associated user session's active checkout.
 
 ## 2. Goals and Non-Goals

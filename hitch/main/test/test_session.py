@@ -4969,6 +4969,44 @@ class SessionViewActiveWorkerTests(TestCase):
             body.index("QA agent approved the diff and merged it into main."),
         )
 
+    @patch("hitch.main.views.common.Codex")
+    def test_review_guidance_local_merge_surfaces_without_qa_run(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([_turn([_user_message("Review it"), _agent_message("Done")])]),
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
+            state={
+                "next_user_message_index": 1,
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+                "auto_merge_result": {
+                    "branch": "main",
+                    "commit_sha": "def456",
+                    "target_worktree": "/tmp/demo",
+                    "changed": True,
+                },
+            },
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Review workflow")
+        self.assertContains(response, "Hitch merged the session changes into main.")
+        self.assertContains(response, "Commit: def456")
+        self.assertNotContains(response, "QA agent approved the diff")
+
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(
@@ -5126,7 +5164,7 @@ class SessionViewActiveWorkerTests(TestCase):
         )
         self.assertContains(
             response,
-            "Run the QA agent on the current diff and fix anything it finds",
+            "Ask the coding agent to inspect the changes and optionally use a reviewer subagent",
         )
         self.assertContains(response, "syncNextMessageConfig")
         self.assertContains(response, 'parsePlanCommand() !== null')

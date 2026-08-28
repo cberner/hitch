@@ -1,12 +1,10 @@
-"""The PR-QA workflow: review loop, PR opening, and followup monitoring.
+"""Optional coding-agent review, PR opening, and followup monitoring.
 
-State machine: qa_running -> feedback_running (iterating) -> qa_approved or
-pr_prompt_running -> pr_monitoring <-> pr_feedback_running -> pr_ready /
-pr_closed / pr_no_changes, with user-steering pauses, local-branch merges
-instead of PRs, gh-backed handoff refreshes, and backoff-driven monitor
-polling. Both the QA phases and the followup monitor run in the same
-KIND_PR_QA workflow row; the two handlers discriminate on the run's
-agent kind.
+New workflows start with one coding turn that recommends, but does not require,
+the native ``hitch_reviewer`` subagent. PR workflows then publish and monitor
+the PR; QA-only workflows complete or merge to a configured local branch. The
+legacy qa_running/feedback_running handlers remain so workflows already in
+flight during an upgrade can drain safely, but no new workflow enters that loop.
 
 Shared spawn/transition/blocking helpers stay in ``system_agents`` and are
 reached through the module object so test patches on that namespace keep
@@ -28,8 +26,10 @@ from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main.local_merges import (
+    REVIEW_GUIDANCE_LOCAL_MERGE,
     LocalBranchMergeError,
     LocalBranchMergeResult,
+    build_auto_merge_review_patch,
     merge_worktree_diff_to_branch,
 )
 from hitch.main.models import (
@@ -42,6 +42,7 @@ from hitch.main.models import (
 from hitch.main.runtime import codex_events, codex_pool, rate_limit
 from hitch.main.runtime.sdk_values import positive_int, string_from_any, truncate_for_prompt
 from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions.review_prompts import optional_review_prompt
 from hitch.main.workflows import engine, system_agents
 from hitch.main.workflows.agent_io import (
     _parse_codex_review_output,
@@ -151,7 +152,7 @@ def start_pr_qa_workflow(
     pr_title: str = "",
     lifecycle_lock_held: bool = False,
 ) -> SystemWorkflow:
-    """Start a QA workflow before optionally running the work-agent PR prompt."""
+    """Start one coding turn with optional review guidance before handoff."""
     auto_merge_branch = auto_merge_branch.strip()
     pr_title = " ".join(pr_title.split())
     open_pr_on_lgtm = open_pr_on_lgtm and not auto_merge_branch
@@ -167,14 +168,17 @@ def start_pr_qa_workflow(
                 main_thread_id=main_thread_id,
                 cwd=cwd,
                 status=SystemWorkflow.STATUS_RUNNING,
-                step=system_agents.STEP_QA_RUNNING,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
                 max_iterations=(
                     system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS
                     if open_pr_on_lgtm
-                    else system_agents.QA_WORKFLOW_MAX_ITERATIONS
+                    else 1
                 ),
                 state={
-                    "pr_prompt": system_agents.PR_SLASH_PROMPT,
+                    "pr_prompt": optional_review_prompt(
+                        prepare_pull_request=open_pr_on_lgtm,
+                        auto_merge_branch=auto_merge_branch,
+                    ),
                     "sandbox_policy": sandbox_policy or "",
                     "approval_mode": approval_mode or "",
                     "model": model or "",
@@ -183,6 +187,7 @@ def start_pr_qa_workflow(
                     "enable_memories": enable_memories,
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
+                    system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
                     "open_pr_on_lgtm": open_pr_on_lgtm,
                     "auto_merge_branch": auto_merge_branch,
                     "pr_title": pr_title,
@@ -198,16 +203,13 @@ def start_pr_qa_workflow(
             raise
         return existing_workflow
 
-    try:
-        _spawn_pr_qa_run(
-            workflow, lifecycle_lock_held=lifecycle_lock_held
-        )
-    except Exception as exc:
-        _block_pr_step_if_owned(
-            workflow,
-            expected_step=system_agents.STEP_QA_RUNNING,
-            error=f"failed to start QA agent: {exc!r}",
-        )
+    _run_pr_step_action_if_owned(
+        workflow,
+        system_agents.STEP_PR_PROMPT_RUNNING,
+        lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
+        failure="failed to start coding review prompt",
+        lifecycle_lock_held=lifecycle_lock_held,
+    )
     return workflow
 
 
@@ -538,6 +540,7 @@ _PR_QA_STATE_KEYS = frozenset(
         "qa_approval_insert_index",
         "qa_design_synthesis_gate",
         "qa_review_revision",
+        system_agents.REVIEW_GUIDANCE_STATE_KEY,
         _USER_STEERING_PROMPT_STATE_KEY,
         _USER_STEERING_RESUME_STEP_STATE_KEY,
         _USER_STEERING_MESSAGE_INDEX_STATE_KEY,
@@ -688,12 +691,17 @@ def _recover_or_block_zombie_workflow_turn(workflow: SystemWorkflow) -> None:
 
 
 def _recover_pr_prompt_turn(workflow: SystemWorkflow) -> None:
-    """Give durable steering precedence over restarting PR preparation."""
+    """Give durable steering precedence over restarting visible guidance."""
+    failure = (
+        "failed to restart review guidance after its spawn handler died"
+        if system_agents.is_review_guidance_only_workflow(workflow)
+        else "failed to restart PR prompt after its spawn handler died"
+    )
     _run_pr_step_action_if_owned(
         workflow,
         system_agents.STEP_PR_PROMPT_RUNNING,
         lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
-        failure="failed to restart PR prompt after its spawn handler died",
+        failure=failure,
     )
 
 
@@ -722,7 +730,9 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
         and system_agents._instance_interrupt_requested(instance)
     ):
         if workflow.is_active:
-            system_agents._block_workflow(workflow, "QA workflow stopped by user")
+            system_agents._block_workflow(
+                workflow, system_agents._workflow_stopped_error(workflow)
+            )
         return
     if workflow.step in {
         system_agents.STEP_FEEDBACK_RUNNING,
@@ -1281,11 +1291,16 @@ def _handle_user_steering_finished(
         _start_user_steering_if_ready(workflow)
         return
     if next_step == system_agents.STEP_PR_PROMPT_RUNNING:
+        failure = (
+            "failed to restart review guidance"
+            if system_agents.is_review_guidance_only_workflow(workflow)
+            else "failed to restart PR preparation"
+        )
         _run_pr_step_action_if_owned(
             workflow,
             next_step,
             lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
-            failure="failed to restart PR preparation",
+            failure=failure,
         )
         return
     try:
@@ -1368,11 +1383,19 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     ):
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
+        prompt_kind = (
+            "review"
+            if system_agents.is_review_guidance_only_workflow(workflow)
+            else "PR"
+        )
         _block_pr_step_if_owned(
             workflow,
             expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-            error=f"PR prompt worker failed: {instance.error}",
+            error=f"{prompt_kind} prompt worker failed: {instance.error}",
         )
+        return
+    if system_agents.is_review_guidance_only_workflow(workflow):
+        _complete_review_prompt_result(workflow, instance)
         return
     worker_snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
     if not _claim_pr_publication(
@@ -1471,6 +1494,138 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         workflow,
         snapshot=snapshot,
         hitch_handoff_snapshot=hitch_handoff_snapshot,
+    )
+
+
+def _complete_review_prompt_result(
+    workflow: SystemWorkflow, instance: CodexInstance
+) -> None:
+    auto_merge_branch = _state_string(workflow, "auto_merge_branch")
+    if auto_merge_branch:
+        _complete_local_branch_merge_after_review_prompt(
+            workflow,
+            instance,
+            auto_merge_branch,
+        )
+        return
+
+    def _complete(locked: SystemWorkflow) -> bool:
+        system_agents._complete_workflow(locked, system_agents.STEP_QA_APPROVED)
+        return True
+
+    completed = engine.claim_workflow_transition(
+        workflow,
+        _complete,
+        expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        guard=lambda locked: (
+            _instance_owns_workflow_turn(
+                locked,
+                instance,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
+            )
+            and _steering_inbox_is_empty(locked)
+        ),
+    )
+    if completed is None:
+        _start_queued_user_steering(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        )
+
+
+def _complete_local_branch_merge_after_review_prompt(
+    workflow: SystemWorkflow,
+    instance: CodexInstance,
+    branch: str,
+) -> None:
+    if not _claim_pr_publication(
+        workflow,
+        instance,
+        expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+    ):
+        _start_queued_user_steering(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        )
+        return
+
+    try:
+        with session_lifecycle.hold(workflow.main_thread_id):
+            workflow.refresh_from_db()
+            if (
+                not workflow.is_active
+                or workflow.step != system_agents.STEP_PR_PROMPT_RUNNING
+                or workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
+                != instance.pk
+            ):
+                return
+            review_patch = build_auto_merge_review_patch(workflow.cwd, branch)
+            result = merge_worktree_diff_to_branch(
+                workflow.cwd,
+                branch,
+                review_patch.patch,
+                review_patch.target_sha,
+                review_patch.source_tree_sha,
+                provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
+            )
+
+            def _record_merged(locked: SystemWorkflow) -> bool:
+                locked.state = {
+                    **locked.state,
+                    system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: (
+                        review_patch.patch
+                    ),
+                    system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: (
+                        review_patch.target_sha
+                    ),
+                    system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY: (
+                        review_patch.base_sha
+                    ),
+                    system_agents.AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY: (
+                        review_patch.source_tree_sha
+                    ),
+                    "auto_merge_result": _local_branch_merge_result_dict(result),
+                }
+                locked.state.pop(_PR_PUBLICATION_INSTANCE_STATE_KEY, None)
+                system_agents._complete_workflow(
+                    locked,
+                    system_agents.STEP_LOCAL_BRANCH_MERGED,
+                )
+                return True
+
+            engine.claim_workflow_transition(
+                workflow,
+                _record_merged,
+                expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+                guard=lambda locked: (
+                    locked.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
+                    == instance.pk
+                ),
+            )
+    except LocalBranchMergeError as exc:
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            error=f"auto merge to local branch failed: {exc}",
+            instance=instance,
+        )
+        system_agents._record_auto_merge_result_for_proposals(
+            workflow,
+            {
+                "auto_merge_status": "failed",
+                "auto_merge_branch": branch,
+                "auto_merge_error": str(exc),
+            },
+        )
+        return
+
+    system_agents._record_auto_merge_result_for_proposals(
+        workflow,
+        {
+            "auto_merge_status": "merged" if result.changed else "already_applied",
+            "auto_merge_branch": result.branch,
+            "auto_merge_commit_sha": result.commit_sha,
+        },
     )
 
 
@@ -3373,6 +3528,13 @@ def _user_steering_developer_instructions(workflow: SystemWorkflow) -> str:
         != system_agents.STEP_PR_PROMPT_RUNNING
     ):
         return ""
+    if system_agents.is_review_guidance_only_workflow(workflow):
+        return (
+            "Review-guidance continuation requirements: implement the user's "
+            "request and run the relevant checks. Do not prepare, push, or open "
+            "a pull request. Hitch will resume the optional review guidance after "
+            "this turn."
+        )
     handoff = _pr_handoff_from_workflow(workflow)
     branch_instructions = (
         "Re-check whether the active PR and its head branch still exist before "

@@ -141,7 +141,7 @@ def _running_workflow_stage(
         return None
     if terminal_stage := _terminal_pr_stage(pr_snapshot):
         return terminal_stage
-    return _stage_for_workflow_step(workflow.step)
+    return _stage_for_workflow(workflow)
 
 
 def _workflow_stage(
@@ -153,7 +153,7 @@ def _workflow_stage(
         return BLOCKED
     if terminal_stage := _terminal_pr_stage(pr_snapshot):
         return terminal_stage
-    if step_stage := _stage_for_workflow_step(workflow.step):
+    if step_stage := _stage_for_workflow(workflow):
         return step_stage
     if _has_pr_identity(pr_snapshot):
         return PR
@@ -162,6 +162,15 @@ def _workflow_stage(
 
 def _stage_for_workflow_step(step: str) -> SessionStage | None:
     return _STAGE_BY_WORKFLOW_STEP.get(step)
+
+
+def _stage_for_workflow(workflow: SystemWorkflow) -> SessionStage | None:
+    if (
+        workflow.step == system_agents.STEP_PR_PROMPT_RUNNING
+        and system_agents.is_review_guidance_only_workflow(workflow)
+    ):
+        return QA
+    return _stage_for_workflow_step(workflow.step)
 
 
 def _select_pr_snapshot(

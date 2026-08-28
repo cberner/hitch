@@ -58,6 +58,12 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-creation`: Users can create, edit, delete, and manually run project-scoped AGs.
 - `AG-config`: Each AG stores goal text, autonomy, ambition, confidence threshold,
   web search, auto-QA, auto-proposal, stack depth, and optional token budget.
+- `AG-auto-qa-guidance`: When an accepted AG session has Auto-QA enabled, its
+  completed implementation turn starts one normal coding turn that recommends
+  the optional native `hitch_reviewer` subagent. Hitch registers the role in
+  the promoted coding worker's app-server configuration before resuming the
+  candidate; it does not require delegation or start a hidden QA
+  verdict-and-repair loop.
 - `AG-stack-default`: If stack depth is unset, the effective stack depth is `1`.
 - `AG-stack-depth-range`: Supported stack depth values are integers from `1`
   through `100`. Hitch must reject stack depth values above `100`.
