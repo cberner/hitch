@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% load static %}
 {% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">{% endblock %}
 {% block title %}HITCH — {{ display_title }}{% endblock %}
 {% block head %}
+    <link rel="stylesheet" href="{% static 'vendor/katex/katex.min.css' %}">
     <style>
         {% include "_session_styles.html" %}
     </style>
@@ -476,6 +478,9 @@
     </form>
     {% endif %}
 
+    <script src="{% static 'vendor/katex/katex.min.js' %}"></script>
+    <script src="{% static 'vendor/katex/contrib/auto-render.min.js' %}"></script>
+    <script src="{% static 'session_math.js' %}"></script>
     {% include "_session_script.html" %}
     {% include "_stage_refresh_script.html" %}
 {% endblock %}

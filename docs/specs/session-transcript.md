@@ -31,6 +31,15 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-live-detail-authority`: When a live session requires detail sanitization,
   every tool-detail snapshot and delta is rendered through the same policy.
   Sensitive command, file, and reasoning details use safe placeholders.
+- `ST-agent-math`: Agent and Thinking messages render TeX enclosed by explicit
+  `\(...\)`, `\[...\]`, or `$$...$$` delimiters as mathematical notation.
+  Rendering applies consistently to persisted history, lazily loaded entries,
+  and a live agent message once that message is complete. A separate response
+  metadata field is not required.
+- `ST-math-safety`: Math is rendered only outside code elements. Single dollar
+  signs remain prose because they are ambiguous, malformed TeX remains visible
+  as its source, and the renderer does not trust TeX commands that request
+  external resources or unsafe HTML.
 - `ST-history-preview`: Large sessions initially render a bounded preview of
   recent persisted user and agent messages, including read-only system and
   autonomous-goal logs. Scrolling upward loads older preview pages.
@@ -53,3 +62,5 @@ space used by repetitive reasoning, command, and web-search activity.
 - A reader can scan every Thinking message without opening a toggle.
 - Long consecutive runs of reasoning, commands, and web searches occupy one
   message row plus a compact toggle until expanded.
+- Explicitly delimited mathematical notation is readable without exposing TeX
+  control sequences, including in Thinking messages from long-running turns.

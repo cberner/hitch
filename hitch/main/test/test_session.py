@@ -3392,6 +3392,39 @@ class FinalAgentMarkdownTests(TestCase):
         self.assertContains(response, '<div class="body markdown">', html=False)
 
     @patch("hitch.main.views.common.Codex")
+    def test_agent_math_source_and_local_renderer_reach_session_page(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(r"Do not render my \(x\)."),
+                        _agent_message(
+                            r"The error is \(4\varepsilon / \log u\).",
+                            phase="commentary",
+                        ),
+                        _agent_message(
+                            "# Result\n\n" r"\[S(N) \ge 11M(N)\]",
+                            phase="final_answer",
+                        ),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, r"The error is \(4\varepsilon / \log u\).")
+        self.assertContains(response, r"\[S(N) \ge 11M(N)\]")
+        self.assertContains(response, "/static/vendor/katex/katex.min.css")
+        self.assertContains(response, "/static/vendor/katex/katex.min.js")
+        self.assertContains(response, "/static/vendor/katex/contrib/auto-render.min.js")
+        self.assertContains(response, "/static/session_math.js")
+
+    @patch("hitch.main.views.common.Codex")
     def test_plain_final_agent_is_not_treated_as_markdown(
         self, mock_codex: MagicMock
     ) -> None:
