@@ -7,6 +7,10 @@ heading, multi-item list, explicit ``[label](http(s)://...)`` link, or a
 table delimiter row) so agent replies that merely contain a stray asterisk
 or backtick are not reformatted.
 
+Explicit TeX regions are protected while Markdown is rendered. CommonMark
+otherwise consumes the backslashes in ``\\(...\\)`` and ``\\[...\\]`` as
+punctuation escapes before the browser-side math renderer can see them.
+
 The CommonMark renderer is configured with ``html=False`` because the
 ``commonmark`` preset enables raw HTML by default; without that override the
 agent could inject ``<script>`` tags into the page. markdown-it-py's built-in
@@ -24,6 +28,7 @@ clickable link instead.
 """
 
 import re
+from html import escape as escape_html
 from urllib.parse import unquote
 
 from django.utils.safestring import SafeString, mark_safe
@@ -76,6 +81,10 @@ _MARKDOWN_LINK = re.compile(r"\[[^\]\n]+\]\((?:https?://|mailto:)[^\s)]+\)")
 # *candidate* -- see ``_has_table`` for why detection ultimately defers to the
 # renderer rather than validating the row precisely here.
 _TABLE_DELIMITER_CHARS = frozenset("|:- \t")
+# KaTeX auto-render uses these same unambiguous delimiters. Protecting the
+# complete region also keeps CommonMark from consuming punctuation escapes
+# inside the TeX source (for example ``\\{`` or ``\\_``).
+_EXPLICIT_TEX = re.compile(r"\\\(.+?\\\)|\\\[.+?\\\]|\$\$.+?\$\$", re.DOTALL)
 
 
 def looks_like_markdown(text: str) -> bool:
@@ -172,8 +181,26 @@ def render_markdown(text: str) -> SafeString:
     Raw HTML in the input is escaped, ``javascript:`` URLs are stripped, so
     agent-supplied content can't inject script or click-handler payloads.
     """
-    html: str = _RENDERER.render(text)
+    protected_text, tex_regions = _protect_explicit_tex(text)
+    html: str = _RENDERER.render(protected_text)
+    for placeholder, source in tex_regions:
+        html = html.replace(placeholder, escape_html(source, quote=False))
     return mark_safe(html)
+
+
+def _protect_explicit_tex(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Replace explicit TeX regions with Markdown-stable placeholders."""
+    regions: list[tuple[str, str]] = []
+    prefix = "HITCHTEXSEGMENT"
+    while prefix in text:
+        prefix += "X"
+
+    def protect(match: re.Match[str]) -> str:
+        placeholder = f"{prefix}{len(regions)}END"
+        regions.append((placeholder, match.group(0)))
+        return placeholder
+
+    return _EXPLICIT_TEX.sub(protect, text), regions
 
 _TOKEN_UNITS = (
     (1_000_000_000, "B"),

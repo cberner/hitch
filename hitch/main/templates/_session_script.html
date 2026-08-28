@@ -20,6 +20,11 @@
             function formatTimestamps(root) {
                 for (const el of root.querySelectorAll("time[data-ts]")) formatTimestampElement(el);
             }
+            function renderSessionMath(root) {
+                if (window.hitchMath && typeof window.hitchMath.render === "function") {
+                    window.hitchMath.render(root);
+                }
+            }
             formatTimestamps(document);
             document.addEventListener("click", (event) => {
                 if (!(event.target instanceof Element)) return;
@@ -54,6 +59,7 @@
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     body.innerHTML = await response.text();
                     formatTimestamps(body);
+                    renderSessionMath(body);
                     const latest = details.parentElement
                         ? details.parentElement.querySelector("[data-intermediate-latest]")
                         : null;
@@ -213,6 +219,7 @@
             function messageCopyText(message) {
                 const body = message.querySelector(".body");
                 if (!body) return "";
+                if (body.dataset.copyText) return body.dataset.copyText.trimEnd();
                 return (body.innerText || body.textContent || "").trimEnd();
             }
 
@@ -965,6 +972,7 @@
                         const page = documentFragment.querySelector("[data-history-page]");
                         if (!page) throw new Error("history response was invalid");
                         formatTimestamps(page);
+                        renderSessionMath(page);
                         const nextUrl = page.dataset.nextUrl || "";
                         const entries = document.createDocumentFragment();
                         while (page.firstChild) entries.appendChild(page.firstChild);
@@ -1732,6 +1740,7 @@
                         const role = entry.node.querySelector(".role");
                         if (role) role.textContent = "Agent (thinking)";
                     }
+                    renderSessionMath(entry.message);
                     followRenderedContent();
                     return;
                 }

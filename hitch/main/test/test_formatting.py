@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from django.test import SimpleTestCase
 
 from hitch.main.formatting import looks_like_markdown, render_markdown
@@ -172,6 +174,25 @@ class RenderMarkdownTests(SimpleTestCase):
             '<a href="https://example.com/deployment">deployment guide</a>', html
         )
 
+    def test_markdown_preserves_explicit_tex_for_client_rendering(self) -> None:
+        html = render_markdown(
+            "# Bound\n\n"
+            "Inline \\(x_1 \\in \\{1, 2\\}\\), display "
+            "\\[x_1 < y & z\\], and $$z_2 > 0$$."
+        )
+
+        self.assertIn(r"\(x_1 \in \{1, 2\}\)", html)
+        self.assertIn(r"\[x_1 &lt; y &amp; z\]", html)
+        self.assertIn("$$z_2 &gt; 0$$", html)
+
+    def test_tex_protection_does_not_restore_unsafe_html(self) -> None:
+        html = render_markdown(
+            r"# Bound" "\n\n" r"\(\text{<img src=x onerror=alert(1)>}\)"
+        )
+
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
+
     def test_rendering_cases(self) -> None:
         cases: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
             ("heading renders as h1", "# Title", ("<h1>Title</h1>",), ()),
@@ -270,3 +291,85 @@ class RenderMarkdownTests(SimpleTestCase):
                     self.assertIn(snippet, html)
                 for snippet in expected_absent:
                     self.assertNotIn(snippet, html)
+
+
+class SessionMathBrowserTests(SimpleTestCase):
+    def test_renders_explicit_agent_math_only_after_message_completion(self) -> None:
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        static_root = Path(__file__).resolve().parent.parent / "static"
+        html = r"""<!doctype html>
+            <div class="message thinking"><div class="body">
+                Inline \(x^2 + \varepsilon\).
+                <code>Literal \(not_math\)</code>
+            </div></div>
+            <div class="message agent"><div class="body">
+                Display \[\sum_{n=1}^{\infty} n^{-2}\].
+            </div></div>
+            <div class="message agent"><div class="body">Cost $5 only.</div></div>
+            <div class="message agent malformed"><div class="body">
+                Bad \(\definitelyUnknownCommand{x}\).
+            </div></div>
+            <div class="message agent untrusted"><div class="body">
+                Link \(\href{https://attacker.example}{x}\).
+            </div></div>
+            <div class="message user"><div class="body">User \(x\).</div></div>
+            <div class="message agent streaming"><div class="body">Live \(y\).</div></div>
+        """
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html, wait_until="load")
+                page.add_style_tag(
+                    path=str(static_root / "vendor" / "katex" / "katex.min.css")
+                )
+                page.add_script_tag(
+                    path=str(static_root / "vendor" / "katex" / "katex.min.js")
+                )
+                page.add_script_tag(
+                    path=str(
+                        static_root
+                        / "vendor"
+                        / "katex"
+                        / "contrib"
+                        / "auto-render.min.js"
+                    )
+                )
+                page.add_script_tag(path=str(static_root / "session_math.js"))
+
+                self.assertEqual(page.locator(".message.thinking .katex").count(), 1)
+                self.assertEqual(page.locator(".message.agent .katex-display").count(), 1)
+                self.assertEqual(page.locator("code .katex").count(), 0)
+                self.assertEqual(page.locator(".message.malformed .katex").count(), 0)
+                self.assertIn(
+                    r"\definitelyUnknownCommand",
+                    page.locator(".message.malformed").inner_text(),
+                )
+                self.assertEqual(page.locator(".message.untrusted a").count(), 0)
+                self.assertEqual(page.locator(".message.user .katex").count(), 0)
+                self.assertEqual(page.locator(".message.streaming .katex").count(), 0)
+                self.assertIn(
+                    r"Inline \(x^2 + \varepsilon\).",
+                    page.locator(".message.thinking .body").get_attribute(
+                        "data-copy-text"
+                    )
+                    or "",
+                )
+
+                page.locator(".message.streaming").evaluate(
+                    "(message) => message.classList.remove('streaming')"
+                )
+                page.evaluate("window.hitchMath.render(document)")
+                self.assertEqual(page.locator(".message.agent .katex").count(), 3)
+                self.assertNotIn("katex", page.locator("body").inner_text().lower())
+            finally:
+                browser.close()
