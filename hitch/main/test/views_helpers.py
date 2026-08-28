@@ -54,7 +54,9 @@ _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
     "Rebase on the default branch, clean it up, and then open a PR"
 )
-_QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
+_QA_PROMPT = (
+    "Ask the coding agent to inspect the changes and optionally use a reviewer subagent"
+)
 
 
 class _FailingUploadWriter:

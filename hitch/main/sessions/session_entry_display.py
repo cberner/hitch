@@ -580,10 +580,19 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         if not isinstance(next_user_message_index, int):
             continue
         run = _approved_qa_run(workflow)
-        if run is None:
+        review_merge = (
+            workflow.step == system_agents.STEP_LOCAL_BRANCH_MERGED
+            and run is None
+            and system_agents.is_review_guidance_only_workflow(workflow)
+        )
+        if run is None and not review_merge:
             continue
-        feedback = _qa_feedback_text(workflow, run)
-        text = _qa_approval_text(workflow)
+        feedback = _qa_feedback_text(workflow, run) if run is not None else ""
+        text = (
+            _review_merge_result_text(workflow)
+            if review_merge
+            else _qa_approval_text(workflow)
+        )
         if feedback:
             text = f"{text}\n\n{feedback}"
         if workflow.step in {
@@ -606,7 +615,11 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         # findings and must reach the user formatted even for one finding.
         yield insert_index, {
             "kind": "agent",
-            "display_author": system_agents.QA_DISPLAY_AUTHOR,
+            "display_author": (
+                system_agents.REVIEW_WORKFLOW_DISPLAY_AUTHOR
+                if review_merge
+                else system_agents.QA_DISPLAY_AUTHOR
+            ),
             "text": text,
             "html": render_markdown(text),
             "timestamp": int(workflow.updated_at.timestamp()),
@@ -628,6 +641,24 @@ def _qa_approval_text(workflow: SystemWorkflow) -> str:
     if changed is False:
         action = "found it already applied to"
     text = f"QA agent approved the diff and {action} {branch.strip()}."
+    if isinstance(commit_sha, str) and commit_sha.strip():
+        text = f"{text}\n\nCommit: {commit_sha.strip()}"
+    return text
+
+
+def _review_merge_result_text(workflow: SystemWorkflow) -> str:
+    result = workflow.state.get("auto_merge_result")
+    if not isinstance(result, dict):
+        return "Hitch merged the session changes into the configured local branch."
+    branch = result.get("branch")
+    commit_sha = result.get("commit_sha")
+    changed = result.get("changed")
+    if not isinstance(branch, str) or not branch.strip():
+        return "Hitch merged the session changes into the configured local branch."
+    if changed is False:
+        text = f"Hitch found the session changes already applied to {branch.strip()}."
+    else:
+        text = f"Hitch merged the session changes into {branch.strip()}."
     if isinstance(commit_sha, str) and commit_sha.strip():
         text = f"{text}\n\nCommit: {commit_sha.strip()}"
     return text

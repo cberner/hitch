@@ -42,6 +42,7 @@ _PR_PROMPT_ALIASES = frozenset(
 )
 _PR_WORKFLOW_PROMPT_PREFIXES = (
     "Hitch QA agent could not complete the PR workflow.",
+    "Hitch review workflow could not complete.",
     "Hitch PR workflow could not complete.",
     "Hitch PR monitor found follow-up work on the active PR.",
 )

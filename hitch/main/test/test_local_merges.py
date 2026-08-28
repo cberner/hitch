@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.test import SimpleTestCase
 
 from hitch.main.local_merges import (
+    REVIEW_GUIDANCE_LOCAL_MERGE,
     LocalBranchMergeError,
     LocalBranchMergeResult,
     _auto_merge_source_base_ref,
@@ -76,6 +77,60 @@ class LocalMergeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "show", "main:README.md"), "hello\napproved"
             )
+
+    def test_review_guidance_merge_uses_neutral_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\nguided\n")
+            review = build_auto_merge_review_patch(session, "main")
+
+            result = merge_worktree_diff_to_branch(
+                session,
+                "main",
+                review.patch,
+                review.target_sha,
+                review.source_tree_sha,
+                provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
+            )
+
+            self.assertEqual(
+                _git(repo, "show", "-s", "--format=%s", result.commit_sha),
+                "Apply Hitch session diff",
+            )
+            self.assertNotIn(
+                "QA-approved",
+                _git(repo, "show", "-s", "--format=%B", result.commit_sha),
+            )
+
+    def test_review_guidance_merge_failure_does_not_claim_qa(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\nguided\n")
+            review = build_auto_merge_review_patch(session, "main")
+            (repo / "target.txt").write_text("advanced\n")
+            _git(repo, "add", "target.txt")
+            _git(repo, "commit", "-m", "advance target")
+
+            with self.assertRaises(LocalBranchMergeError) as raised:
+                merge_worktree_diff_to_branch(
+                    session,
+                    "main",
+                    review.patch,
+                    review.target_sha,
+                    review.source_tree_sha,
+                    provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
+                )
+
+            self.assertIn("restart review guidance", str(raised.exception))
+            self.assertNotIn("QA", str(raised.exception))
 
     def test_merge_worktree_diff_rejects_dirty_source_as_target_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -648,6 +703,17 @@ class LocalMergeTests(SimpleTestCase):
                     "main",
                     reviewed_patch,
                     _git(repo, "rev-parse", "main"),
+                )
+
+            with self.assertRaisesRegex(
+                LocalBranchMergeError, "captured diff is incomplete"
+            ):
+                merge_worktree_diff_to_branch(
+                    session,
+                    "main",
+                    reviewed_patch,
+                    _git(repo, "rev-parse", "main"),
+                    provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
                 )
 
             with self.assertRaises(subprocess.CalledProcessError):

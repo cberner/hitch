@@ -36,6 +36,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main import demo, diffs
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
+    REVIEW_GUIDANCE_LOCAL_MERGE,
     AutoMergeReviewPatch,
     LocalBranchMergeError,
     LocalBranchMergeResult,
@@ -389,17 +390,17 @@ class PrQaWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
     @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_prompt")
     def test_initial_spawn_failure_cannot_overwrite_concurrent_stop(
         self,
-        mock_spawn_qa: MagicMock,
+        mock_spawn_review_prompt: MagicMock,
         mock_spawn_monitor: MagicMock,
         mock_surface_failure: MagicMock,
     ) -> None:
         cases: tuple[tuple[str, MagicMock, Callable[[], SystemWorkflow]], ...] = (
             (
                 "qa-thread",
-                mock_spawn_qa,
+                mock_spawn_review_prompt,
                 lambda: pr_qa.start_pr_qa_workflow(
                     main_thread_id="qa-thread",
                     cwd="/repo",
@@ -425,8 +426,9 @@ class PrQaWorkflowTests(TestCase):
                     workflow: SystemWorkflow, **_kwargs: object
                 ) -> None:
                     self.assertTrue(
-                        system_agents.stop_active_workflow(
-                            workflow.main_thread_id
+                        system_agents._block_workflow(
+                            workflow,
+                            "QA workflow stopped by user",
                         )
                     )
                     raise RuntimeError("spawn failed after Stop")
@@ -446,15 +448,11 @@ class PrQaWorkflowTests(TestCase):
 
         self.assertEqual(mock_surface_failure.call_count, 2)
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_pr_qa_workflow_starts_hidden_subagent_thread(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_pr_qa_workflow_starts_coding_turn_with_optional_review(
+        self, mock_spawn: MagicMock
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
         workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
@@ -469,15 +467,15 @@ class PrQaWorkflowTests(TestCase):
             initial_user_message_index=2,
         )
 
-        self.assertEqual(workflow.step, "qa_running")
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertEqual(
             workflow.max_iterations, system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS
         )
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["thread_source"], ThreadSource.subagent)
-        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
-        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_USER)
+        self.assertEqual(kwargs["approval_mode"], "prompt_user")
         self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
         self.assertEqual(kwargs["model"], "gpt-5.4")
         self.assertEqual(kwargs["reasoning_effort"], "high")
@@ -486,48 +484,33 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(workflow.state["web_search_mode"], "live")
         self.assertEqual(kwargs["workflow_id"], workflow.pk)
-        self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertNotIn("output_schema", kwargs)
-        self.assertIn("provide prioritized, actionable findings", kwargs["prompt"])
-        self.assertIn("one comprehensive pass", kwargs["prompt"])
-        self.assertIn("do not stop after the first valid finding", kwargs["prompt"])
-        self.assertNotIn("Apply the same review standards as Codex", kwargs["prompt"])
-        self.assertNotIn("manual QA", kwargs["prompt"])
-        self.assertNotIn("No qualifying findings.", kwargs["prompt"])
-        self.assertIn("diff --git", kwargs["prompt"])
+        self.assertEqual(kwargs["user_message_index"], 2)
+        self.assertIn("`hitch_reviewer`", kwargs["prompt"])
+        self.assertIn("`spawn_agent`", kwargs["prompt"])
+        self.assertIn("recommended, but not required", kwargs["prompt"])
+        self.assertIn("commit the final changes", kwargs["prompt"])
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
 
-        run = SystemAgentRun.objects.get(workflow=workflow)
-        self.assertEqual(run.thread_id, "qa-thread")
-
-    @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_pr_qa_blocks_before_spawn_when_untracked_files_are_omitted(
-        self, mock_spawn: MagicMock, mock_surface_failure: MagicMock
+    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_pr_qa_start_leaves_diff_review_to_optional_subagent(
+        self, mock_spawn: MagicMock, mock_diff: MagicMock
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            _git(repo, "init")
-            for index in range(diffs._MAX_UNTRACKED_FILES + 1):
-                (repo / f"new-{index}.txt").write_text(f"change {index}\n")
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
-            workflow = pr_qa.start_pr_qa_workflow(
-                main_thread_id="main-thread",
-                cwd=str(repo),
-                sandbox_policy=None,
-                approval_mode="auto_review",
-            )
+        workflow = pr_qa.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn(
-            f"more than {diffs._MAX_UNTRACKED_FILES} untracked files",
-            workflow.state["error"],
-        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
-        mock_spawn.assert_not_called()
-        mock_surface_failure.assert_called_once()
+        mock_diff.assert_not_called()
+        mock_spawn.assert_called_once()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
@@ -657,6 +640,52 @@ class PrQaWorkflowTests(TestCase):
         )
         self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
         self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_qa_only_guidance_failure_is_surfaced_as_review_failure(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "next_user_message_index": 1,
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+            },
+        )
+
+        system_agents._surface_workflow_failure(
+            workflow,
+            "review prompt worker failed: model unavailable",
+        )
+
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(
+            kwargs["display_author"],
+            system_agents.REVIEW_WORKFLOW_DISPLAY_AUTHOR,
+        )
+        self.assertIn("Hitch review workflow could not complete.", kwargs["prompt"])
+        self.assertIn("review workflow needs attention", kwargs["prompt"])
+        self.assertNotIn("Hitch QA agent", kwargs["prompt"])
+        self.assertNotIn("Hitch PR workflow", kwargs["prompt"])
+        self.assertEqual(
+            system_agents._workflow_stopped_error(workflow),
+            "Review workflow stopped by user",
+        )
+        workflow.state["open_pr_on_lgtm"] = True
+        self.assertEqual(
+            system_agents._workflow_stopped_error(workflow),
+            "PR workflow stopped by user",
+        )
+        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
+        self.assertEqual(
+            system_agents._workflow_stopped_error(workflow),
+            "QA workflow stopped by user",
+        )
 
     def _stale_qa_running_workflow(self, **state: Any) -> SystemWorkflow:
         workflow = SystemWorkflow.objects.create(
@@ -2810,15 +2839,11 @@ class SpecCriticWorkflowTests(TestCase):
             ["success", "pending", "failure", None],
         )
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_qa_only_workflow_uses_ten_iteration_limit(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_qa_only_workflow_runs_one_optional_review_turn(
+        self, mock_spawn: MagicMock
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
         workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
@@ -2828,27 +2853,56 @@ class SpecCriticWorkflowTests(TestCase):
             open_pr_on_lgtm=False,
         )
 
-        self.assertEqual(system_agents.QA_WORKFLOW_MAX_ITERATIONS, 10)
-        self.assertEqual(
-            workflow.max_iterations, system_agents.QA_WORKFLOW_MAX_ITERATIONS
+        self.assertEqual(workflow.max_iterations, 1)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        self.assertTrue(
+            workflow.state[system_agents.REVIEW_GUIDANCE_STATE_KEY]
         )
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("`hitch_reviewer`", prompt)
+        self.assertIn("`spawn_agent`", prompt)
+        self.assertIn("recommended, but not required", prompt)
+        self.assertNotIn(system_agents.PR_SLASH_PROMPT, prompt)
 
     @patch(
-        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
+        "hitch.main.workflows.pr_qa.build_auto_merge_review_patch",
         return_value=AutoMergeReviewPatch(
             patch="diff --git",
             target_sha="base123",
             base_sha="session-base123",
+            source_tree_sha="tree123",
         ),
     )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_local_auto_merge_workflow_stores_reviewed_diff(
-        self, mock_spawn: MagicMock, mock_patch: MagicMock
+    @patch(
+        "hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch",
+        return_value=LocalBranchMergeResult(
+            branch="main",
+            commit_sha="merge123",
+            target_worktree="/repo",
+            changed=True,
+        ),
+    )
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_local_auto_merge_builds_and_merges_patch_after_coding_turn(
+        self,
+        mock_spawn: MagicMock,
+        mock_merge: MagicMock,
+        mock_patch: MagicMock,
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        spawned: list[CodexInstance] = []
+
+        def spawn(**kwargs: Any) -> CodexInstance:
+            instance = _instance(
+                thread_id=kwargs["thread_id"],
+                prompt=kwargs["prompt"],
+                purpose=kwargs["purpose"],
+                workflow_id=kwargs["workflow_id"],
+                user_message_index=kwargs["user_message_index"],
+            )
+            spawned.append(instance)
+            return instance
+
+        mock_spawn.side_effect = spawn
 
         workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
@@ -2858,8 +2912,21 @@ class SpecCriticWorkflowTests(TestCase):
             auto_merge_branch="main",
         )
 
+        mock_patch.assert_not_called()
+        self.assertIn("local branch `main`", spawned[0].prompt)
+        system_agents.on_codex_instance_finished(spawned[0])
+
         workflow.refresh_from_db()
         mock_patch.assert_called_once_with("/repo", "main")
+        mock_merge.assert_called_once_with(
+            "/repo",
+            "main",
+            "diff --git",
+            "base123",
+            "tree123",
+            provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
+        )
+        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
         self.assertEqual(
             workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
             "diff --git",
@@ -2874,13 +2941,31 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
+        "hitch.main.workflows.pr_qa.build_auto_merge_review_patch",
         side_effect=LocalBranchMergeError("no merge base"),
     )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_local_auto_merge_workflow_blocks_without_strict_patch(
-        self, mock_spawn: MagicMock, _mock_patch: MagicMock
+    @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_local_auto_merge_workflow_blocks_when_final_patch_is_invalid(
+        self,
+        mock_spawn: MagicMock,
+        _mock_surface: MagicMock,
+        _mock_patch: MagicMock,
     ) -> None:
+        spawned: list[CodexInstance] = []
+
+        def spawn(**kwargs: Any) -> CodexInstance:
+            instance = _instance(
+                thread_id=kwargs["thread_id"],
+                prompt=kwargs["prompt"],
+                purpose=kwargs["purpose"],
+                workflow_id=kwargs["workflow_id"],
+                user_message_index=kwargs["user_message_index"],
+            )
+            spawned.append(instance)
+            return instance
+
+        mock_spawn.side_effect = spawn
         workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
@@ -2889,7 +2974,8 @@ class SpecCriticWorkflowTests(TestCase):
             auto_merge_branch="main",
         )
 
-        mock_spawn.assert_not_called()
+        system_agents.on_codex_instance_finished(spawned[0])
+
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertIn("no merge base", workflow.state["error"])
@@ -2981,15 +3067,11 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow, existing)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_auto_pr_starts_workflow_after_completed_user_implementation_turn(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+        self, mock_spawn: MagicMock
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
         instance = _instance(
             thread_id="main-thread",
             auto_pr_enabled=True,
@@ -3015,18 +3097,22 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["reasoning_effort"], "high")
         self.assertEqual(workflow.state["developer_instructions"], "Use repo conventions.")
         self.assertTrue(workflow.state["enable_memories"])
-        self.assertEqual(workflow.state["next_user_message_index"], 3)
+        self.assertEqual(workflow.state["next_user_message_index"], 4)
         mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_USER)
+        self.assertEqual(kwargs["user_message_index"], 3)
+        self.assertEqual(kwargs["approval_mode"], "approve_all")
+        self.assertIn("`hitch_reviewer`", kwargs["prompt"])
+        self.assertIn("recommended, but not required", kwargs["prompt"])
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_auto_pr_uses_accepted_proposal_title_for_pr_title(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+        self, mock_spawn: MagicMock
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
         project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
@@ -3238,15 +3324,11 @@ class SpecCriticWorkflowTests(TestCase):
             open_pr_on_lgtm=False,
         )
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_qa_hidden_qa_worker_uses_system_agent_approval_mode(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_auto_qa_starts_coding_turn_with_optional_review_guidance(
+        self, mock_spawn: MagicMock
     ) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
         instance = _instance(
             thread_id="main-thread",
             auto_qa_enabled=True,
@@ -3264,14 +3346,18 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(workflow.state["open_pr_on_lgtm"])
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_USER)
+        self.assertEqual(kwargs["approval_mode"], "approve_all")
         self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
+        self.assertIn("`hitch_reviewer`", kwargs["prompt"])
+        self.assertIn("recommended, but not required", kwargs["prompt"])
+        self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    def test_auto_qa_does_not_start_when_approval_requires_visible_control(
+    def test_auto_qa_starts_under_user_approval_modes(
         self, mock_start: MagicMock
     ) -> None:
-        for approval_mode in system_agents.AUTO_REVIEW_BLOCKED_APPROVAL_MODES:
+        for approval_mode in ("deny_all", "prompt_user"):
             with self.subTest(approval_mode=approval_mode):
                 instance = _instance(
                     thread_id=f"main-thread-{approval_mode}",
@@ -3282,19 +3368,20 @@ class SpecCriticWorkflowTests(TestCase):
                 system_agents.on_codex_instance_finished(instance)
 
                 instance.refresh_from_db()
-                self.assertIsNone(instance.auto_qa_triggered_at)
-        mock_start.assert_not_called()
+                self.assertIsNotNone(instance.auto_qa_triggered_at)
+                self.assertEqual(
+                    mock_start.call_args.kwargs["approval_mode"], approval_mode
+                )
+                self.assertFalse(
+                    mock_start.call_args.kwargs["open_pr_on_lgtm"]
+                )
+        self.assertEqual(mock_start.call_count, 2)
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    def test_auto_pr_does_not_start_when_approval_requires_visible_control(
+    def test_auto_pr_starts_under_user_approval_modes(
         self, mock_start: MagicMock
     ) -> None:
-        # Auto-PR's post-QA work-agent and PR-prompt turns reuse the user's
-        # approval_mode (via _spawn_workflow_turn). Under prompt_user/deny_all
-        # those turns would either stall waiting for the user or have every
-        # action auto-denied, so the workflow must refuse to start the same
-        # way auto-QA does instead of leaving the user with a stuck PR.
-        for approval_mode in system_agents.AUTO_REVIEW_BLOCKED_APPROVAL_MODES:
+        for approval_mode in ("deny_all", "prompt_user"):
             with self.subTest(approval_mode=approval_mode):
                 instance = _instance(
                     thread_id=f"main-thread-pr-{approval_mode}",
@@ -3305,8 +3392,11 @@ class SpecCriticWorkflowTests(TestCase):
                 system_agents.on_codex_instance_finished(instance)
 
                 instance.refresh_from_db()
-                self.assertIsNone(instance.auto_pr_triggered_at)
-        mock_start.assert_not_called()
+                self.assertIsNotNone(instance.auto_pr_triggered_at)
+                self.assertEqual(
+                    mock_start.call_args.kwargs["approval_mode"], approval_mode
+                )
+        self.assertEqual(mock_start.call_count, 2)
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_takes_precedence_over_auto_qa(self, mock_start: MagicMock) -> None:
@@ -3847,7 +3937,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 3)
 
     @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    def test_large_worktree_qa_handoff_preserves_exact_untracked_diff(
+    def test_legacy_large_worktree_qa_handoff_preserves_exact_untracked_diff(
         self, mock_spawn: MagicMock
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3889,13 +3979,21 @@ class SpecCriticWorkflowTests(TestCase):
                     return_value=raw,
                 ),
             ):
-                workflow = pr_qa.start_pr_qa_workflow(
+                workflow = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
                     main_thread_id="large-worktree-main",
                     cwd=str(repo),
-                    sandbox_policy="workspaceWrite",
-                    approval_mode="auto_review",
-                    open_pr_on_lgtm=False,
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                    max_iterations=1,
+                    state={
+                        "sandbox_policy": "workspaceWrite",
+                        "approval_mode": "auto_review",
+                        "next_user_message_index": 0,
+                        "open_pr_on_lgtm": False,
+                    },
                 )
+                pr_qa._spawn_pr_qa_run(workflow)
 
                 run = workflow.agent_runs.select_related("instance").get()
                 handoff_ref = run.input["qa_handoff_ref"]
@@ -3962,7 +4060,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIs(run.input["qa_handoff_cleaned"], True)
 
     @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    def test_large_auto_merge_qa_handoff_preserves_exact_committed_diff(
+    def test_legacy_large_auto_merge_qa_handoff_preserves_exact_committed_diff(
         self, mock_spawn: MagicMock
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -4000,13 +4098,22 @@ class SpecCriticWorkflowTests(TestCase):
                     return_value=raw,
                 ),
             ):
-                workflow = pr_qa.start_pr_qa_workflow(
+                workflow = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
                     main_thread_id="large-auto-merge-main",
                     cwd=str(session),
-                    sandbox_policy="workspaceWrite",
-                    approval_mode="auto_review",
-                    auto_merge_branch="main",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=system_agents.STEP_QA_RUNNING,
+                    max_iterations=1,
+                    state={
+                        "sandbox_policy": "workspaceWrite",
+                        "approval_mode": "auto_review",
+                        "next_user_message_index": 0,
+                        "open_pr_on_lgtm": False,
+                        "auto_merge_branch": "main",
+                    },
                 )
+                pr_qa._spawn_pr_qa_run(workflow)
                 workflow.refresh_from_db()
                 run = workflow.agent_runs.select_related("instance").get()
                 reviewed_diff = workflow.state[
@@ -12994,6 +13101,32 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Re-check whether the active PR", published)
         self.assertIn("create a fresh branch from current master", published)
         self.assertNotIn("has not published a PR", published)
+
+    def test_review_guidance_steering_instructions_do_not_leak_pr_semantics(
+        self,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+                "user_steering_resume_step": (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+            },
+        )
+
+        instructions = pr_qa._user_steering_developer_instructions(workflow)
+
+        self.assertIn("Review-guidance continuation", instructions)
+        self.assertIn("optional review guidance", instructions)
+        self.assertIn("Do not prepare, push, or open a pull request", instructions)
+        self.assertNotIn("commit all resulting changes", instructions)
+        self.assertNotIn("PR preparation phase", instructions)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
@@ -23390,10 +23523,9 @@ class AutonomousGoalWorkflowTests(TestCase):
 
 
 class AutoReviewIntentionallySkippedTests(TestCase):
-    def test_blocked_approval_mode_is_skipped(self) -> None:
-        # A visible-approval mode means auto-review declines by design.
+    def test_user_approval_mode_is_not_skipped(self) -> None:
         instance = _instance(approval_mode="prompt_user", auto_pr_enabled=True)
-        self.assertTrue(system_agents.auto_review_intentionally_skipped(instance))
+        self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
 
     def test_plain_completed_turn_is_not_skipped(self) -> None:
         # auto_review mode, no pending proposed plan -> would fire, not skipped.

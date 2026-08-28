@@ -684,6 +684,8 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow.step == system_agents.STEP_FEEDBACK_RUNNING:
         return "QA feedback agent is fixing feedback..."
     if workflow.step == system_agents.STEP_PR_PROMPT_RUNNING:
+        if system_agents.is_review_guidance_only_workflow(workflow):
+            return "Coding agent is reviewing the changes..."
         return "PR agent is opening and following up..."
     if workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING:
         return "PR follow-up agent is fixing feedback..."

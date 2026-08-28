@@ -84,6 +84,7 @@ AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 QA_DISPLAY_AUTHOR = "QA agent"
+REVIEW_WORKFLOW_DISPLAY_AUTHOR = "Review workflow"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
@@ -100,17 +101,12 @@ AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 QA_SLASH_DISPLAY_PROMPT = (
+    "Ask the coding agent to inspect the changes and optionally use a reviewer subagent"
+)
+QA_SLASH_LEGACY_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
-# Auto-review workflows (auto-QA and auto-PR) start without an explicit
-# user action and spawn hidden QA subagents pinned to ``auto_review``.
-# Bypassing the user's approval-control intent that way is only acceptable
-# when the source turn itself runs under a non-interactive mode; with
-# ``prompt_user`` or ``deny_all`` the user has asked to gate every action,
-# and the follow-up PR-prompt turn would also stall (prompt_user) or have
-# every action denied (deny_all), so refuse to start either workflow.
-AUTO_REVIEW_BLOCKED_APPROVAL_MODES = frozenset({"deny_all", "prompt_user"})
 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 QA_WORKFLOW_MAX_ITERATIONS = 10
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
@@ -171,7 +167,9 @@ _ARCHIVED_FROM_BLOCKED_STATE_KEY = "archived_from_blocked"
 # agree on what "stale" means.
 STALE_BLOCKED_AGE = timedelta(days=7)
 _WORKFLOW_FAILURE_OWNER_QA = "qa"
+_WORKFLOW_FAILURE_OWNER_REVIEW = "review"
 _WORKFLOW_FAILURE_OWNER_PR = "pr"
+REVIEW_GUIDANCE_STATE_KEY = "review_guidance"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # A Spec Critic classification runs in an in-process daemon thread, so it is
 # lost if the web process restarts mid-flight. Reconciliation re-arms a
@@ -935,7 +933,7 @@ def stop_active_workflow(
                 workflow.state = dict(workflow.state)
                 workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
                 workflow.save(update_fields=["state", "updated_at"])
-                _block_workflow(workflow, "QA workflow stopped by user")
+                _block_workflow(workflow, _workflow_stopped_error(workflow))
                 return True
             if (
                 workflow.kind == SystemWorkflow.KIND_PR_QA
@@ -952,7 +950,7 @@ def stop_active_workflow(
                     or workflow.steering_messages.exists()
                 )
             ):
-                _block_workflow(workflow, "QA workflow stopped by user")
+                _block_workflow(workflow, _workflow_stopped_error(workflow))
                 return True
             if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
                 error = "Spec Critic workflow stopped by user"
@@ -1000,7 +998,7 @@ def stop_active_workflow(
                 # A launch has not published a safe signal target yet. Keep
                 # the workflow active so the next Stop can retry it.
                 return False
-            error = "QA workflow stopped by user"
+            error = _workflow_stopped_error(workflow)
             # Retire signalable runs before their asynchronous finish callbacks
             # can advance the workflow. If any worker cannot be signaled, put
             # only that run back and keep the workflow active so Stop remains
@@ -1133,7 +1131,7 @@ def _settle_requested_pr_qa_stop(instance: CodexInstance) -> bool:
             status__in=CodexInstance.ACTIVE_STATUSES,
         ).exists():
             return True
-        error = "QA workflow stopped by user"
+        error = _workflow_stopped_error(workflow)
         with transaction.atomic():
             remaining_runs = list(
                 workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING)
@@ -1214,12 +1212,6 @@ def _maybe_start_auto_review_workflow(
         or instance.plan_mode
         or instance.status != CodexInstance.STATUS_COMPLETED
     ):
-        return
-    # The post-QA work-agent and PR-prompt turns reuse the instance's
-    # approval_mode (see _spawn_workflow_turn), so prompt_user/deny_all would
-    # stall the workflow or have every action auto-denied regardless of which
-    # automation triggered it.
-    if _auto_review_requires_visible_approval(instance):
         return
     if _completed_turn_has_pending_proposed_plan(instance):
         return
@@ -1325,14 +1317,11 @@ def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
     """Whether auto-PR/QA would decline for this completed turn by design.
 
     ``_maybe_start_auto_review_workflow`` returns without claiming a trigger when
-    the turn needs visible approval or ends with a pending proposed plan, so the
-    null ``auto_pr_triggered_at`` / ``auto_qa_triggered_at`` are expected rather
-    than a dropped follow-up. The orphan reaper uses this so it does not rewrite
-    such an intentionally-skipped (but successful) turn as failed.
+    the turn ends with a pending proposed plan, so a null trigger timestamp is
+    expected rather than a dropped follow-up. The orphan reaper uses this so it
+    does not rewrite such an intentionally-skipped successful turn as failed.
     """
-    return _auto_review_requires_visible_approval(
-        instance
-    ) or _completed_turn_has_pending_proposed_plan(instance)
+    return _completed_turn_has_pending_proposed_plan(instance)
 
 
 def auto_review_waits_for_unarchive(instance: CodexInstance) -> bool:
@@ -1341,12 +1330,6 @@ def auto_review_waits_for_unarchive(instance: CodexInstance) -> bool:
         thread_id=instance.thread_id,
         codex_archived=True,
     ).exists()
-
-
-def _auto_review_requires_visible_approval(instance: CodexInstance) -> bool:
-    return (
-        instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE
-    ) in AUTO_REVIEW_BLOCKED_APPROVAL_MODES
 
 
 def _completed_turn_has_pending_proposed_plan(instance: CodexInstance) -> bool:
@@ -1794,12 +1777,18 @@ def _spawn_workflow_failure_turn(
     workflow: SystemWorkflow, error: str
 ) -> CodexInstance:
     headline, display_author = _workflow_failure_turn_context(workflow, error)
+    workflow_label = (
+        "review workflow"
+        if _workflow_failure_owner(workflow, error)
+        == _WORKFLOW_FAILURE_OWNER_REVIEW
+        else "PR workflow"
+    )
     return _spawn_workflow_turn(
         workflow,
         prompt=(
             f"{headline}\n\n"
             f"Status: {error}\n\n"
-            "Tell the user the PR workflow needs attention before continuing."
+            f"Tell the user the {workflow_label} needs attention before continuing."
         ),
         purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
         display_author=display_author,
@@ -1809,21 +1798,48 @@ def _spawn_workflow_failure_turn(
 def _workflow_failure_turn_context(
     workflow: SystemWorkflow, error: str
 ) -> tuple[str, str]:
-    if _workflow_failure_owner(workflow, error) == _WORKFLOW_FAILURE_OWNER_QA:
+    owner = _workflow_failure_owner(workflow, error)
+    if owner == _WORKFLOW_FAILURE_OWNER_QA:
         return "Hitch QA agent could not complete the PR workflow.", QA_DISPLAY_AUTHOR
+    if owner == _WORKFLOW_FAILURE_OWNER_REVIEW:
+        return (
+            "Hitch review workflow could not complete.",
+            REVIEW_WORKFLOW_DISPLAY_AUTHOR,
+        )
     return "Hitch PR workflow could not complete.", PR_WORKFLOW_DISPLAY_AUTHOR
 
 
 def _workflow_failure_owner(workflow: SystemWorkflow, error: str) -> str:
     stored_owner = workflow.state.get(_WORKFLOW_FAILURE_OWNER_STATE_KEY)
-    if stored_owner in {_WORKFLOW_FAILURE_OWNER_QA, _WORKFLOW_FAILURE_OWNER_PR}:
+    if stored_owner in {
+        _WORKFLOW_FAILURE_OWNER_QA,
+        _WORKFLOW_FAILURE_OWNER_REVIEW,
+        _WORKFLOW_FAILURE_OWNER_PR,
+    }:
         return str(stored_owner)
+    if is_review_guidance_only_workflow(workflow):
+        return _WORKFLOW_FAILURE_OWNER_REVIEW
     step_owner = _workflow_failure_owner_for_step(workflow.step)
     if step_owner:
         return step_owner
     if _is_qa_workflow_failure(error):
         return _WORKFLOW_FAILURE_OWNER_QA
     return _WORKFLOW_FAILURE_OWNER_PR
+
+
+def is_review_guidance_only_workflow(workflow: SystemWorkflow) -> bool:
+    return (
+        workflow.state.get("open_pr_on_lgtm", True) is not True
+        and workflow.state.get(REVIEW_GUIDANCE_STATE_KEY) is True
+    )
+
+
+def _workflow_stopped_error(workflow: SystemWorkflow) -> str:
+    if is_review_guidance_only_workflow(workflow):
+        return "Review workflow stopped by user"
+    if workflow.state.get(REVIEW_GUIDANCE_STATE_KEY) is True:
+        return "PR workflow stopped by user"
+    return "QA workflow stopped by user"
 
 
 def _workflow_failure_owner_for_step(step: str) -> str:

@@ -1,4 +1,4 @@
-"""Local git helpers for applying QA-approved session diffs."""
+"""Local git helpers for applying captured session diffs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from .git_support import resolved_path as _resolved_path
 from .sequences import unique_nonempty
 
 _GIT_TIMEOUT_SECONDS = 30
-_AUTO_MERGE_COMMIT_MESSAGE = "Apply QA-approved Hitch session diff"
 _MAX_REVIEW_PATCH_CHARS = 500_000
 _INCOMPLETE_REVIEWED_DIFF_LINES = frozenset(
     (
@@ -49,7 +48,31 @@ _SUBMODULE_REVIEW_PATCH_LINES = frozenset(
 
 
 class LocalBranchMergeError(Exception):
-    """Raised when Hitch cannot merge a QA-approved diff into a local branch."""
+    """Raised when Hitch cannot merge a captured diff into a local branch."""
+
+
+@dataclass(frozen=True)
+class LocalMergeProvenance:
+    """User-facing claims and recovery guidance for one merge workflow."""
+
+    commit_message: str
+    snapshot_name: str
+    source_tree_adjective: str
+    recovery_instruction: str
+
+
+QA_APPROVED_LOCAL_MERGE = LocalMergeProvenance(
+    commit_message="Apply QA-approved Hitch session diff",
+    snapshot_name="QA review",
+    source_tree_adjective="reviewed",
+    recovery_instruction="rerun QA before auto merge",
+)
+REVIEW_GUIDANCE_LOCAL_MERGE = LocalMergeProvenance(
+    commit_message="Apply Hitch session diff",
+    snapshot_name="review guidance",
+    source_tree_adjective="captured",
+    recovery_instruction="restart review guidance before auto merge",
+)
 
 
 @dataclass(frozen=True)
@@ -131,6 +154,7 @@ def _record_auto_merge_source_base(
     *,
     hooks_path: Path,
     reviewed_source_tree_sha: str = "",
+    provenance: LocalMergeProvenance = QA_APPROVED_LOCAL_MERGE,
 ) -> None:
     # The source-session tree is the authority for follow-up deltas; the target
     # branch may also contain unrelated commits that must not become deletions.
@@ -143,7 +167,10 @@ def _record_auto_merge_source_base(
     # legacy reviews that predate the recorded tree.
     if reviewed_source_tree_sha:
         tree_sha = _verified_reviewed_source_tree(
-            source_repo, reviewed_source_tree_sha, hooks_path=hooks_path
+            source_repo,
+            reviewed_source_tree_sha,
+            hooks_path=hooks_path,
+            provenance=provenance,
         )
     else:
         tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
@@ -167,7 +194,11 @@ def _record_auto_merge_source_base(
 
 
 def _verified_reviewed_source_tree(
-    source_repo: Path, reviewed_source_tree_sha: str, *, hooks_path: Path
+    source_repo: Path,
+    reviewed_source_tree_sha: str,
+    *,
+    hooks_path: Path,
+    provenance: LocalMergeProvenance,
 ) -> str:
     reviewed_tree = _run_git(
         source_repo,
@@ -178,7 +209,8 @@ def _verified_reviewed_source_tree(
     tree_sha = reviewed_tree.stdout.strip() if reviewed_tree.returncode == 0 else ""
     if not tree_sha:
         raise LocalBranchMergeError(
-            "reviewed source tree is no longer available; rerun QA before auto merge"
+            f"{provenance.source_tree_adjective} source tree is no longer "
+            f"available; {provenance.recovery_instruction}"
         )
     return tree_sha
 
@@ -273,8 +305,10 @@ def merge_worktree_diff_to_branch(
     reviewed_patch: str,
     reviewed_target_sha: str,
     reviewed_source_tree_sha: str = "",
+    *,
+    provenance: LocalMergeProvenance = QA_APPROVED_LOCAL_MERGE,
 ) -> LocalBranchMergeResult:
-    """Apply the QA-reviewed patch to ``branch`` and commit it."""
+    """Apply a captured patch to ``branch`` and commit it."""
     branch = branch.strip()
     if not branch:
         raise LocalBranchMergeError("target branch is required")
@@ -284,9 +318,10 @@ def merge_worktree_diff_to_branch(
     target_sha = _target_branch_sha(source_repo, target_ref)
     if target_sha != reviewed_target_sha:
         raise LocalBranchMergeError(
-            "target branch changed since QA review; rerun QA before auto merge"
+            f"target branch changed since {provenance.snapshot_name}; "
+            f"{provenance.recovery_instruction}"
         )
-    patch = _validated_reviewed_patch(reviewed_patch)
+    patch = _validated_reviewed_patch(reviewed_patch, provenance=provenance)
 
     with tempfile.TemporaryDirectory(prefix="hitch-local-merge-") as raw_tmp:
         target = Path(raw_tmp) / "target"
@@ -297,7 +332,10 @@ def merge_worktree_diff_to_branch(
             # pruned during the review window: recording any other tree as
             # the next source base would mark post-review edits as merged.
             _verified_reviewed_source_tree(
-                source_repo, reviewed_source_tree_sha, hooks_path=hooks
+                source_repo,
+                reviewed_source_tree_sha,
+                hooks_path=hooks,
+                provenance=provenance,
             )
         checked_out_path = _checked_out_worktree_for_branch(source_repo, branch)
         if checked_out_path is not None and _same_path(checked_out_path, source_repo):
@@ -318,6 +356,7 @@ def merge_worktree_diff_to_branch(
                 target_sha,
                 patch,
                 hooks_path=hooks,
+                commit_message=provenance.commit_message,
             )
             if changed:
                 _fast_forward_target_branch(
@@ -327,6 +366,7 @@ def merge_worktree_diff_to_branch(
                     commit_sha,
                     checked_out_path=checked_out_path,
                     hooks_path=hooks,
+                    provenance=provenance,
                 )
             _record_auto_merge_source_base(
                 source_repo,
@@ -334,6 +374,7 @@ def merge_worktree_diff_to_branch(
                 commit_sha,
                 hooks_path=hooks,
                 reviewed_source_tree_sha=reviewed_source_tree_sha,
+                provenance=provenance,
             )
             return LocalBranchMergeResult(
                 branch=branch,
@@ -346,7 +387,12 @@ def merge_worktree_diff_to_branch(
 
 
 def _commit_patch_in_isolated_worktree(
-    target: Path, target_sha: str, patch: str, *, hooks_path: Path
+    target: Path,
+    target_sha: str,
+    patch: str,
+    *,
+    hooks_path: Path,
+    commit_message: str,
 ) -> tuple[str, bool]:
     if patch.strip():
         _apply_patch_to_index(target, patch, hooks_path=hooks_path)
@@ -364,7 +410,7 @@ def _commit_patch_in_isolated_worktree(
             "-p",
             target_sha,
             "-m",
-            _AUTO_MERGE_COMMIT_MESSAGE,
+            commit_message,
         ],
         hooks_path=hooks_path,
     ).strip()
@@ -617,12 +663,17 @@ def _submodule_head(path: Path, *, hooks_path: Path | None) -> str:
         return ""
 
 
-def _validated_reviewed_patch(reviewed_patch: str) -> str:
+def _validated_reviewed_patch(
+    reviewed_patch: str,
+    *,
+    provenance: LocalMergeProvenance = QA_APPROVED_LOCAL_MERGE,
+) -> str:
     if not reviewed_patch.strip():
         return ""
     if _contains_incomplete_preview_marker(reviewed_patch):
         raise LocalBranchMergeError(
-            "reviewed diff is incomplete; auto merge requires a complete text diff"
+            f"{provenance.source_tree_adjective} diff is incomplete; "
+            "auto merge requires a complete text diff"
         )
     patch = _normalize_patch_text(reviewed_patch)
     _validate_reviewable_patch(patch)
@@ -692,6 +743,7 @@ def _fast_forward_target_branch(
     *,
     checked_out_path: Path | None,
     hooks_path: Path,
+    provenance: LocalMergeProvenance = QA_APPROVED_LOCAL_MERGE,
 ) -> None:
     if checked_out_path is not None:
         # The worktree was matched to the branch at merge start, but the patch
@@ -707,7 +759,7 @@ def _fast_forward_target_branch(
         if head_ref != f"refs/heads/{branch}":
             raise LocalBranchMergeError(
                 f"target branch {branch!r} is no longer checked out in "
-                f"{checked_out_path}; rerun QA before auto merge"
+                f"{checked_out_path}; {provenance.recovery_instruction}"
             )
         _git(
             checked_out_path,

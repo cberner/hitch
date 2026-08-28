@@ -26,12 +26,13 @@ The `hitch.main` app is organized into four packages plus the web layer at
 the top level:
 
 - `runtime/` -- the Codex worker/app-server runtime: `codex_pool` (worker
-  spawning, app-server pooling, reconciliation), `streaming` (SSE),
+  spawning, app-server pooling, reconciliation), `codex_tools` (dynamic Hitch
+  tools), `codex_review` (native reviewer-role registration), `streaming` (SSE),
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
   `disk_cleanup`, `health`, and process/host infrastructure.
 - `workflows/` -- the system-agent workflow engine: `system_agents` (the
-  QA reviewer, PR monitor, autonomous-goal runner, and spec-critic state
-  machines), their prompts, `gh` CLI integration, and PR handoff/stage
+  optional-review handoff, PR monitor, autonomous-goal runner, and spec-critic
+  state machines), their prompts, `gh` CLI integration, and PR handoff/stage
   bookkeeping.
 - `sessions/` -- session-page support: entry/metadata display, settings and
   signed settings cookies, session indexing, stage derivation, and token

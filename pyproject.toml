@@ -47,6 +47,9 @@ plugins = ["mypy_django_plugin.main"]
 [tool.django-stubs]
 django_settings_module = "hitch.settings.dev"
 
+[tool.setuptools.package-data]
+"hitch.main.runtime" = ["*.toml"]
+
 [[tool.mypy.overrides]]
 module = ["*.migrations.*"]
 ignore_errors = true

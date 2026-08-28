@@ -72,6 +72,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
+from hitch.main.runtime.codex_review import REVIEWER_AGENT_NAME
 from hitch.main.workflows import system_agents
 
 
@@ -7744,6 +7745,14 @@ class CodexWorkerCommandTests(TestCase):
                 lines = [json.loads(line) for line in fh]
 
         codex_ctx.thread_resume.assert_called_once_with("thread-1")
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertIn("features.multi_agent=true", config.config_overrides)
+        self.assertTrue(
+            any(
+                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.config_file=")
+                for value in config.config_overrides
+            )
+        )
         self.assertEqual(os.environ["HITCH_THREAD_ID"], "thread-1")
         self.assertEqual(os.environ["HITCH_CWD"], "/repo")
         self.assertEqual(os.environ["HITCH_PROJECT_DIR"], str(Path(settings.BASE_DIR)))
@@ -7842,6 +7851,13 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx._client.request.assert_called_once()
         method, params = codex_ctx._client.request.call_args.args
         self.assertEqual(method, "review/start")
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertFalse(
+            any(
+                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.")
+                for value in config.config_overrides
+            )
+        )
         self.assertEqual(
             params,
             {
@@ -7977,7 +7993,7 @@ class CodexWorkerCommandTests(TestCase):
         log_exception.assert_called_once()
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_qa_feedback_worker_uses_ordinary_coding_turn(
+    def test_visible_system_feedback_worker_registers_native_reviewer(
         self, mock_codex: MagicMock
     ) -> None:
         codex_ctx = mock_codex.return_value.__enter__.return_value
@@ -7999,6 +8015,15 @@ class CodexWorkerCommandTests(TestCase):
 
         thread.turn.assert_called_once()
         codex_ctx._client.request.assert_not_called()
+        codex_ctx.thread_resume.assert_called_once_with("thread-1")
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertIn("features.multi_agent=true", config.config_overrides)
+        self.assertTrue(
+            any(
+                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.config_file=")
+                for value in config.config_overrides
+            )
+        )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_diff_updates_are_not_persisted(self, mock_codex: MagicMock) -> None:
@@ -8229,7 +8254,7 @@ class CodexWorkerCommandTests(TestCase):
             call_command("codex_worker", "--instance-id", str(instance.pk))
 
         config = mock_codex.call_args.kwargs["config"]
-        self.assertEqual(config.config_overrides, ("features.memories=true",))
+        self.assertEqual(config.config_overrides[:1], ("features.memories=true",))
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_web_search_row_sets_app_server_override(
@@ -8245,7 +8270,7 @@ class CodexWorkerCommandTests(TestCase):
 
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(
-            config.config_overrides,
+            config.config_overrides[:2],
             ('features.memories=false', 'web_search="live"'),
         )
 
@@ -8269,7 +8294,7 @@ class CodexWorkerCommandTests(TestCase):
 
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(
-            config.config_overrides,
+            config.config_overrides[:2],
             ('features.memories=false', 'web_search="cached"'),
         )
 
@@ -8311,6 +8336,13 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx.thread_resume.assert_called_once_with(
             "thread-1",
             developer_instructions="Prefer small, typed changes.",
+        )
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertTrue(
+            any(
+                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.description=")
+                for value in config.config_overrides
+            )
         )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
@@ -11275,6 +11307,29 @@ class StreamForInstanceTests(TestCase):
         self.assertEqual(
             streaming.system_workflow_status_text(workflow),
             "QA feedback agent is fixing feedback...",
+        )
+
+    def test_system_workflow_status_text_handles_optional_review_turn(self) -> None:
+        workflow = cast(
+            SystemWorkflow,
+            SimpleNamespace(
+                kind=SystemWorkflow.KIND_PR_QA,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
+                state={
+                    "open_pr_on_lgtm": False,
+                    system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+                },
+            ),
+        )
+
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "Coding agent is reviewing the changes...",
+        )
+        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "PR agent is opening and following up...",
         )
 
     def test_terminates_when_status_flips_to_failed(self) -> None:
