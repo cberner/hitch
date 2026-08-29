@@ -58,17 +58,3 @@
         {% endfor %}
     </select>
 </label>
-<label class="checkbox-label">
-    <span>Auto merge to local branch</span>
-    <input type="hidden" name="auto_merge_to_local_branch" value="false">
-    <input type="checkbox" name="auto_merge_to_local_branch" value="true" data-autonomous-goal-auto-merge>
-</label>
-<label>
-    Local branch
-    <select name="auto_merge_branch" data-autonomous-goal-auto-merge-branch>
-        <option value="">Select branch</option>
-        {% for branch in local_branch_choices %}
-        <option value="{{ branch }}">{{ branch }}</option>
-        {% endfor %}
-    </select>
-</label>

@@ -8,7 +8,6 @@ from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 def optional_review_prompt(
     *,
     prepare_pull_request: bool,
-    auto_merge_branch: str = "",
 ) -> str:
     prompt = (
         "Inspect the complete current changes and improve them as needed. You "
@@ -20,11 +19,6 @@ def optional_review_prompt(
         "Fix every valid issue and request another independent pass only if it "
         "would be useful. Run the relevant tests before finishing."
     )
-    if auto_merge_branch:
-        prompt += (
-            " The completed changes will be merged into local branch "
-            f"`{auto_merge_branch}`, so include that target in any review focus."
-        )
     if prepare_pull_request:
         prompt = f"{prompt}\n\n{PR_SLASH_PROMPT}"
     return prompt

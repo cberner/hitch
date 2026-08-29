@@ -39,8 +39,7 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 
 - AGs do not bypass the Inbox.
 - AGs do not replace normal interactive sessions.
-- AGs do not silently apply work to the user's primary branch unless an explicit
-  auto-merge setting allows it.
+- AGs do not apply work directly to the user's local branches.
 
 ## 3. User Stories
 

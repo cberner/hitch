@@ -84,7 +84,6 @@ STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
 STEP_PR_NO_CHANGES = "pr_no_changes"
 STEP_ARCHIVED = "archived"
-STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
 STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING = "autonomous_goal_history_summarizing"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
@@ -143,10 +142,6 @@ _WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
 _LEGACY_SERVER_OVERLOADED_ERROR = (
     "Selected model is at capacity. Please try a different model."
 )
-AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
-AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
-AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
-AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY = "auto_merge_reviewed_source_tree"
 AUTO_PULL_RESULT_STATE_KEY = "auto_pull_result"
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
 _REMOVED_PR_WORKFLOW_STEPS = frozenset({"pr_monitoring", "pr_feedback_running"})
@@ -813,10 +808,6 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance, *, lifecycle_lock
                 workflow_kwargs["pr_title"] = pr_title
         if automation == "auto_qa":
             workflow_kwargs["open_pr_on_lgtm"] = False
-        auto_merge_branch = instance.auto_merge_branch.strip() if instance.auto_merge_to_local_branch else ""
-        if auto_merge_branch:
-            workflow_kwargs["open_pr_on_lgtm"] = False
-            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         if lifecycle_lock_held:
             workflow_kwargs["lifecycle_lock_held"] = True
         workflow = pr_qa.start_pr_qa_workflow(**workflow_kwargs)
@@ -885,13 +876,7 @@ def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
 
 
 def _auto_pr_watch_unavailable(instance: CodexInstance) -> bool:
-    if (
-        not instance.auto_pr_enabled
-        or (
-            instance.auto_merge_to_local_branch
-            and bool(instance.auto_merge_branch.strip())
-        )
-    ):
+    if not instance.auto_pr_enabled:
         return False
     from hitch.main.sessions.session_resume import thread_has_dynamic_tool
 
@@ -946,28 +931,10 @@ def _record_auto_review_workflow_for_proposals(
             "auto_pr_workflow_id": workflow.pk,
         }
     for proposal in ProposedSession.objects.filter(accepted_session=metadata):
-        updates = dict(base_updates)
-        auto_merge_branch = _state_string(workflow, "auto_merge_branch")
-        if auto_merge_branch:
-            updates["auto_merge_branch"] = auto_merge_branch
-            if workflow.status == SystemWorkflow.STATUS_BLOCKED:
-                updates["auto_merge_status"] = "failed"
-                updates["auto_merge_error"] = _state_string(workflow, "error")
-            else:
-                updates["auto_merge_status"] = "qa_started"
         proposal.outcome_metadata = _proposal_outcome_metadata(
             proposal,
-            updates,
+            base_updates,
         )
-        proposal.save(update_fields=["outcome_metadata", "updated_at"])
-
-
-def _record_auto_merge_result_for_proposals(workflow: SystemWorkflow, updates: dict[str, object]) -> None:
-    metadata = SessionMetadata.objects.filter(thread_id=workflow.main_thread_id).first()
-    if metadata is None:
-        return
-    for proposal in ProposedSession.objects.filter(accepted_session=metadata):
-        proposal.outcome_metadata = _proposal_outcome_metadata(proposal, updates)
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 

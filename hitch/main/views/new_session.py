@@ -21,7 +21,6 @@ from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_me
 from hitch.main.goals.autonomous_goal_run_display import (
     _attach_proposed_session_display_state,
     _auto_review_settings_for_proposed_session,
-    _proposal_metadata,
     _proposed_session_prompt,
 )
 from hitch.main.models import (
@@ -605,12 +604,6 @@ def _finish_candidate_proposal_start(
     auto_qa_enabled: bool,
 ) -> HttpResponse:
     candidate_cwd = candidate_session.cwd
-    auto_merge_to_local_branch, auto_merge_branch = (
-        _auto_merge_to_local_branch_for_proposal(
-            proposed_session,
-            auto_qa_enabled=auto_qa_enabled,
-        )
-    )
     session_project = (
         None
         if target.project_cleared
@@ -628,8 +621,6 @@ def _finish_candidate_proposal_start(
         project_cleared=target.project_cleared,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
         is_hidden_system_session=False,
     )
     candidate_session.refresh_from_db()
@@ -674,12 +665,6 @@ def _start_candidate_proposal_session(
         prompt = _candidate_proposal_continuation_prompt(prompt)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = common._developer_instructions_for_project(settings, project)
-    auto_merge_to_local_branch, auto_merge_branch = (
-        _auto_merge_to_local_branch_for_proposal(
-            proposed_session,
-            auto_qa_enabled=auto_qa_enabled,
-        )
-    )
     sandbox_policy = _effective_sandbox_policy_for_cwd(settings, candidate_cwd)
     approval_mode = _effective_approval_mode_for_session(
         settings,
@@ -725,8 +710,6 @@ def _start_candidate_proposal_session(
                     workflow_kwargs["web_search_mode"] = web_search_mode
                 if qa_activation:
                     workflow_kwargs["open_pr_on_lgtm"] = False
-                if auto_merge_branch and not pr_now_activation:
-                    workflow_kwargs["auto_merge_branch"] = auto_merge_branch
                 if lifecycle_lock_held:
                     workflow_kwargs["lifecycle_lock_held"] = True
                 if pr_now_activation:
@@ -743,8 +726,7 @@ def _start_candidate_proposal_session(
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             raise
         # Persist the proposal-derived auto-review configuration so subsequent
-        # turns in this session keep honoring it. Hardcoding ``False`` here would
-        # silently drop a goal's auto-QA/auto-merge settings after the first turn.
+        # turns in this session keep honoring it.
         response = _finish_candidate_proposal_start(
             request=request,
             proposed_session=proposed_session,
@@ -812,9 +794,6 @@ def _start_candidate_proposal_session(
                         settings,
                     )
                 )
-                if auto_merge_to_local_branch:
-                    spawn_kwargs["auto_merge_to_local_branch"] = True
-                    spawn_kwargs["auto_merge_branch"] = auto_merge_branch
             codex_pool.spawn_turn(**spawn_kwargs)
             input_images_owned = True
     except _RecoverySourceBusyError:
@@ -856,31 +835,6 @@ def _candidate_proposal_continuation_prompt(prompt: str) -> str:
     if not prompt:
         return rebase_instruction
     return f"{rebase_instruction}\n\n{prompt}"
-
-
-def _auto_merge_to_local_branch_for_proposal(
-    proposed_session: ProposedSession,
-    *,
-    auto_qa_enabled: bool,
-) -> tuple[bool, str]:
-    if not auto_qa_enabled:
-        return False, ""
-    metadata = _proposal_metadata(proposed_session)
-    if "auto_merge_to_local_branch" in metadata or "auto_merge_branch" in metadata:
-        enabled = metadata.get("auto_merge_to_local_branch") is True
-        branch = str(metadata.get("auto_merge_branch") or "").strip()
-        if enabled and branch:
-            return True, branch
-        return False, ""
-    if proposed_session.autonomous_goal is None:
-        return False, ""
-    autonomous_goal = proposed_session.autonomous_goal
-    if not autonomous_goal.auto_merge_to_local_branch:
-        return False, ""
-    branch = autonomous_goal.auto_merge_branch.strip()
-    if not branch:
-        return False, ""
-    return True, branch
 
 
 def _proposed_session_for_new_session_page(
@@ -1146,12 +1100,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         proposed_session.autonomous_goal is not None or _proposal_resumes_source_session(proposed_session)
     ):
         auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(proposed_session)
-    auto_merge_to_local_branch = False
-    auto_merge_branch = ""
-    if proposed_session is not None:
-        auto_merge_to_local_branch, auto_merge_branch = _auto_merge_to_local_branch_for_proposal(
-                proposed_session, auto_qa_enabled=auto_qa_enabled
-            )
     web_search_mode, web_search_error = _posted_web_search_override(
         request.POST.get("web_search_mode"),
         default=settings.web_search_mode,
@@ -1228,8 +1176,8 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 assert proposed_session is not None
                 _reset_new_session_proposal_start_claim(proposed_session)
             raise
-        # Only proposal acceptances carry forward auto-review/auto-merge, and
-        # only the settings the proposal itself requested. A bare ``/qa`` or
+        # Only proposal acceptances carry forward auto-review, and only the
+        # settings the proposal itself requested. A bare ``/qa`` or
         # ``/pr`` (no proposal) is a one-off review, and a coding-agent proposal
         # leaves these inputs empty, so in both cases the resolved
         # ``auto_*_enabled`` here are just the user's global/form defaults.
@@ -1242,7 +1190,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         else:
             session_auto_pr_enabled = False
             session_auto_qa_enabled = False
-            auto_merge_to_local_branch, auto_merge_branch = False, ""
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": thread_id,
             "cwd": session_cwd,
@@ -1258,8 +1205,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             workflow_kwargs["web_search_mode"] = web_search_mode
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
-        if auto_merge_branch and not pr_now_activation:
-            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         try:
             if pr_now_activation:
                 pr_qa.start_pr_now_workflow(**workflow_kwargs)
@@ -1280,8 +1225,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             name=thread_name,
             auto_pr_enabled=session_auto_pr_enabled,
             auto_qa_enabled=session_auto_qa_enabled,
-            auto_merge_to_local_branch=auto_merge_to_local_branch,
-            auto_merge_branch=auto_merge_branch,
         )
         _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
         return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
@@ -1333,9 +1276,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_pr_enabled"] = True
     if auto_qa_enabled:
         spawn_kwargs["auto_qa_enabled"] = True
-    if auto_merge_to_local_branch:
-        spawn_kwargs["auto_merge_to_local_branch"] = True
-        spawn_kwargs["auto_merge_branch"] = auto_merge_branch
     input_images_owned = False
     proposal_claimed = False
     if proposed_session is not None:
@@ -1368,8 +1308,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
         codex_path=codex_pool.thread_path_for_instance(instance),
     )
     _finish_new_session_proposal_start_claim(proposed_session, session_metadata)

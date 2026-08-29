@@ -73,7 +73,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
+from hitch.main.repos import default_branch_commit_hash
 from hitch.main.runtime import app_server_pool, codex_events, codex_pool, db, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_from_value
 from hitch.main.runtime.sdk_values import truncate_for_prompt
@@ -543,9 +543,6 @@ class _AutonomousGoalAutoProposalStartSnapshot:
     auto_qa_enabled: bool
     stacked_diff_depth: int
     proposal_budget: int | None
-    auto_merge_to_local_branch: bool
-    auto_merge_branch: str
-    base_ref: str
 
 @dataclass(frozen=True)
 class _AutonomousGoalPostCommitAction:
@@ -563,9 +560,6 @@ def _autonomous_goal_auto_proposal_start_snapshot(
         auto_qa_enabled=autonomous_goal.auto_qa_enabled,
         stacked_diff_depth=autonomous_goal.effective_stacked_diff_depth,
         proposal_budget=autonomous_goal.proposal_budget,
-        auto_merge_to_local_branch=autonomous_goal.auto_merge_to_local_branch,
-        auto_merge_branch=autonomous_goal.auto_merge_branch,
-        base_ref=_autonomous_goal_auto_merge_base_ref(autonomous_goal),
     )
 
 def _autonomous_goal_auto_proposal_snapshot_matches(
@@ -615,17 +609,7 @@ def _autonomous_goal_auto_proposal_base_sha(
 def _autonomous_goal_auto_proposal_base_sha_for_snapshot(
     start_snapshot: _AutonomousGoalAutoProposalStartSnapshot,
 ) -> str | None:
-    if start_snapshot.base_ref:
-        return commit_hash_for_ref(start_snapshot.repo_path, start_snapshot.base_ref)
     return default_branch_commit_hash(start_snapshot.repo_path)
-
-def _autonomous_goal_auto_merge_base_ref(
-    autonomous_goal: AutonomousGoal,
-) -> str:
-    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
-        autonomous_goal
-    )
-    return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
 def _lock_autonomous_goal_queue() -> None:
     """Serialize the global autonomous-goal check/create critical section."""
@@ -1243,8 +1227,6 @@ class _AutonomousGoalHandler(engine.WorkflowHandler):
     # engine-shared turn-config/failure keys live in engine.SHARED_STATE_KEYS).
     state_keys = frozenset(
         {
-            "auto_merge_branch",
-            "auto_merge_to_local_branch",
             "auto_pr_enabled",
             "auto_proposal",
             "auto_qa_enabled",
@@ -1762,10 +1744,6 @@ def _create_autonomous_goal_proposal(
 ) -> ProposedSession:
     auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
     auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
-    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
-        autonomous_goal
-    )
-    auto_merge_to_local_branch = bool(auto_qa_enabled and auto_merge_branch)
     hidden_until_complete = not publish
     return ProposedSession.objects.create(
         project=autonomous_goal.project,
@@ -1797,8 +1775,6 @@ def _create_autonomous_goal_proposal(
             "automation_status": "proposed",
             "auto_pr_enabled": auto_pr_enabled,
             "auto_qa_enabled": auto_qa_enabled,
-            "auto_merge_to_local_branch": auto_merge_to_local_branch,
-            "auto_merge_branch": auto_merge_branch,
             "stacked_diff_depth": _autonomous_goal_workflow_stacked_diff_depth(
                 workflow, autonomous_goal
             ),
@@ -2466,25 +2442,15 @@ def _prepare_autonomous_goal_candidate_cwd(
     if not _state_bool(workflow, _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY):
         return workflow.cwd, None
 
-    auto_merge_ref = _autonomous_goal_auto_merge_worktree_base_ref(
+    base_ref = _autonomous_goal_default_worktree_base_ref(
         workflow, autonomous_goal
     )
-    if auto_merge_ref:
-        managed_worktree = create_worktree_for_session(
-            autonomous_goal.project.repo_path,
-            base_ref=auto_merge_ref,
-            disable_hooks=True,
-        )
-    else:
-        base_ref = _autonomous_goal_default_worktree_base_ref(
-            workflow, autonomous_goal
-        )
-        if not base_ref:
-            raise WorktreeCreationError("project default branch is unavailable")
-        managed_worktree = create_worktree_for_session(
-            autonomous_goal.project.repo_path,
-            base_ref=base_ref,
-        )
+    if not base_ref:
+        raise WorktreeCreationError("project default branch is unavailable")
+    managed_worktree = create_worktree_for_session(
+        autonomous_goal.project.repo_path,
+        base_ref=base_ref,
+    )
     session_cwd = str(managed_worktree.path)
     workflow.state = {
         **workflow.state,
@@ -2504,14 +2470,6 @@ def _autonomous_goal_default_worktree_base_ref(
     if start_sha:
         return start_sha
     return default_branch_commit_hash(autonomous_goal.project.repo_path) or ""
-
-def _autonomous_goal_auto_merge_worktree_base_ref(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> str:
-    auto_merge_ref = _autonomous_goal_auto_merge_base_ref(autonomous_goal)
-    if not auto_merge_ref:
-        return ""
-    return _autonomous_goal_recorded_base_sha(workflow) or auto_merge_ref
 
 def _autonomous_goal_recorded_base_sha(workflow: SystemWorkflow) -> str:
     start_sha = _state_string(workflow, "default_branch_sha")
@@ -2584,8 +2542,6 @@ def _spawn_autonomous_goal_history_summary_run(
             preview=prompt,
             auto_pr_enabled=False,
             auto_qa_enabled=False,
-            auto_merge_to_local_branch=False,
-            auto_merge_branch="",
             codex_path=codex_pool.thread_path_for_instance(instance),
             is_hidden_system_session=True,
         )
@@ -2791,8 +2747,6 @@ def _spawn_autonomous_goal_candidate_run(
         preview=prompt,
         auto_pr_enabled=False,
         auto_qa_enabled=False,
-        auto_merge_to_local_branch=False,
-        auto_merge_branch="",
         codex_path=codex_pool.thread_path_for_instance(instance),
         is_hidden_system_session=True,
     )
@@ -2924,8 +2878,6 @@ def _spawn_autonomous_goal_judge_run(
         preview=prompt,
         auto_pr_enabled=False,
         auto_qa_enabled=False,
-        auto_merge_to_local_branch=False,
-        auto_merge_branch="",
         codex_path=codex_pool.thread_path_for_instance(instance),
         is_hidden_system_session=True,
     )
@@ -2947,17 +2899,6 @@ def _spawn_autonomous_goal_judge_run(
         },
     )
     return run
-
-def _autonomous_goal_auto_merge_branch_for_implementation(
-    autonomous_goal: AutonomousGoal,
-) -> str:
-    if autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR:
-        return ""
-    if not autonomous_goal.auto_qa_enabled:
-        return ""
-    if not autonomous_goal.auto_merge_to_local_branch:
-        return ""
-    return autonomous_goal.auto_merge_branch.strip()
 
 def _record_autonomous_goal_no_proposal(
     autonomous_goal: AutonomousGoal, workflow: SystemWorkflow

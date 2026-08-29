@@ -1004,3 +1004,96 @@ class RemovedFeatureRetirementHelperTests(SimpleTestCase):
             self.assertRaisesRegex(RuntimeError, "remains after removal"),
         ):
             migration_module._cleanup_removed_feature_containers([registration])
+
+
+class LocalBranchMergeRemovalMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0069_remove_demo_and_spec_critic")]
+    migrate_to = [("main", "0070_remove_local_branch_merge")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_removes_configuration_fields_and_stale_metadata(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        Project = old_apps.get_model("main", "Project")
+        AutonomousGoal = old_apps.get_model("main", "AutonomousGoal")
+        CodexInstance = old_apps.get_model("main", "CodexInstance")
+        ProposedSession = old_apps.get_model("main", "ProposedSession")
+        SessionMetadata = old_apps.get_model("main", "SessionMetadata")
+        SystemWorkflow = old_apps.get_model("main", "SystemWorkflow")
+
+        project = Project.objects.create(name="Project", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Goal",
+            goal="Improve the project.",
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        SessionMetadata.objects.create(
+            thread_id="session",
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="session",
+            cwd="/repo",
+            events_path="/dev/null",
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Proposal",
+            outcome_metadata={
+                "keep": "value",
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+                "auto_merge_status": "merged",
+                "auto_merge_commit_sha": "abc123",
+                "auto_merge_error": "old failure",
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            cwd="/repo",
+            step="local_branch_merged",
+            state={
+                "keep": "value",
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+                "auto_merge_result": {"changed": True},
+                "auto_merge_reviewed_diff": "diff",
+                "auto_merge_reviewed_source_tree": "tree",
+                "auto_merge_reviewed_target_sha": "target",
+                "auto_merge_session_base_sha": "base",
+            },
+        )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        for model_name in ("AutonomousGoal", "CodexInstance", "SessionMetadata"):
+            model = new_apps.get_model("main", model_name)
+            for field_name in ("auto_merge_to_local_branch", "auto_merge_branch"):
+                with self.assertRaises(FieldDoesNotExist):
+                    model._meta.get_field(field_name)
+
+        ProposedSession = new_apps.get_model("main", "ProposedSession")
+        SystemWorkflow = new_apps.get_model("main", "SystemWorkflow")
+        self.assertEqual(
+            ProposedSession.objects.get(pk=proposal.pk).outcome_metadata,
+            {"keep": "value"},
+        )
+        migrated_workflow = SystemWorkflow.objects.get(pk=workflow.pk)
+        self.assertEqual(migrated_workflow.state, {"keep": "value"})
+        self.assertEqual(migrated_workflow.step, "review_completed")

@@ -543,8 +543,6 @@
                                     data-proposal-budget="{{ goal.proposal_budget_form_value }}"
                                     data-confidence-threshold="{{ goal.confidence_threshold }}"
                                     data-web-search-mode="{{ goal.web_search_mode }}"
-                                    data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
-                                    data-auto-merge-branch="{{ goal.auto_merge_branch }}"
                                 >Edit</button>
                                 <form
                                     method="post"
@@ -572,9 +570,6 @@
                         <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ goal.get_confidence_threshold_display }}</span>
                         <span class="meta">Web search: {{ goal.get_web_search_mode_display }}</span>
-                        {% if goal.auto_merge_to_local_branch %}
-                        <span class="meta">Auto merge: {{ goal.auto_merge_branch }}</span>
-                        {% endif %}
                         {% if goal.run_running %}
                         <span class="meta">Tokens used: {{ goal.run_tokens_used_display }}</span>
                         {% endif %}
@@ -696,20 +691,6 @@
                     {% endfor %}
                 </select>
             </label>
-            <label class="checkbox-label">
-                <span>Auto merge to local branch</span>
-                <input type="hidden" name="auto_merge_to_local_branch" value="false">
-                <input type="checkbox" name="auto_merge_to_local_branch" value="true" data-edit-autonomous-goal-auto-merge data-autonomous-goal-auto-merge>
-            </label>
-            <label>
-                Local branch
-                <select name="auto_merge_branch" data-edit-autonomous-goal-auto-merge-branch data-autonomous-goal-auto-merge-branch>
-                    <option value="">Select branch</option>
-                    {% for branch in local_branch_choices %}
-                    <option value="{{ branch }}">{{ branch }}</option>
-                    {% endfor %}
-                </select>
-            </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-edit-autonomous-goal-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
@@ -731,8 +712,6 @@
             const editGoalProposalBudget = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-proposal-budget]");
             const editGoalConfidence = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-confidence-threshold]");
             const editGoalWebSearch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-web-search-mode]");
-            const editGoalAutoMerge = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge]");
-            const editGoalAutoMergeBranch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge-branch]");
             const editGoalCancel = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-cancel]");
             const createGoalDialog = document.querySelector("[data-create-autonomous-goal-dialog]");
             const createGoalOpen = document.querySelector("[data-create-autonomous-goal-open]");
@@ -802,19 +781,6 @@
                 });
             }
             if (runStatusClose) runStatusClose.addEventListener("click", () => hideDialog(runStatusDialog));
-            function syncAutoMergeControls(form) {
-                if (!form) return;
-                const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
-                const autoMerge = form.querySelector("[data-autonomous-goal-auto-merge]");
-                const branch = form.querySelector("[data-autonomous-goal-auto-merge-branch]");
-                if (!autoQa || !autoMerge || !branch) return;
-                const autoQaEnabled = autoQa.checked && !autoQa.disabled;
-                autoMerge.disabled = !autoQaEnabled;
-                if (!autoQaEnabled) autoMerge.checked = false;
-                branch.disabled = !autoQaEnabled || !autoMerge.checked;
-                branch.required = autoQaEnabled && autoMerge.checked;
-                if (!autoMerge.checked) branch.value = "";
-            }
             function syncStackedDiffDepth(form) {
                 if (!form) return;
                 const autonomySelect = form.querySelector("select[name='autonomy']");
@@ -833,15 +799,10 @@
             function syncAutonomousGoalAutomation(form) {
                 syncAutonomousGoalAutoQa(form);
                 syncStackedDiffDepth(form);
-                syncAutoMergeControls(form);
             }
             for (const form of document.querySelectorAll("[data-autonomous-goal-create-form], [data-edit-autonomous-goal-form]")) {
                 const autonomy = form.querySelector("[data-autonomous-goal-autonomy]");
-                const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
-                const autoMerge = form.querySelector("[data-autonomous-goal-auto-merge]");
                 if (autonomy) autonomy.addEventListener("change", () => syncAutonomousGoalAutomation(form));
-                if (autoQa) autoQa.addEventListener("change", () => syncAutoMergeControls(form));
-                if (autoMerge) autoMerge.addEventListener("change", () => syncAutoMergeControls(form));
                 syncAutonomousGoalAutomation(form);
             }
             for (const button of document.querySelectorAll("[data-autonomous-goal-edit]")) {
@@ -864,10 +825,7 @@
                     if (editGoalProposalBudget) editGoalProposalBudget.value = button.dataset.proposalBudget || "";
                     if (editGoalConfidence) editGoalConfidence.value = button.dataset.confidenceThreshold || "";
                     if (editGoalWebSearch) editGoalWebSearch.value = button.dataset.webSearchMode || "";
-                    if (editGoalAutoMerge) editGoalAutoMerge.checked = button.dataset.autoMergeToLocalBranch === "true";
-                    if (editGoalAutoMergeBranch) editGoalAutoMergeBranch.value = button.dataset.autoMergeBranch || "";
                     syncStackedDiffDepth(editGoalForm);
-                    syncAutoMergeControls(editGoalForm);
                     showDialog(editGoalDialog);
                     if (editGoalTitle) editGoalTitle.focus();
                 });

@@ -713,7 +713,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
     @patch("hitch.main.repos.discover_repos")
-    def test_new_session_accept_preserves_proposal_auto_merge_settings(
+    def test_new_session_accept_preserves_proposal_auto_qa_setting(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
@@ -727,8 +727,6 @@ class NewSessionViewTests(TestCase):
             goal="Find useful test coverage increments.",
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
         )
         proposal = ProposedSession.objects.create(
             autonomous_goal=goal,
@@ -736,15 +734,9 @@ class NewSessionViewTests(TestCase):
             outcome_metadata={
                 "auto_pr_enabled": False,
                 "auto_qa_enabled": True,
-                "auto_merge_to_local_branch": True,
-                "auto_merge_branch": "release",
             },
         )
-        AutonomousGoal.objects.filter(pk=goal.pk).update(
-            auto_qa_enabled=False,
-            auto_merge_to_local_branch=False,
-            auto_merge_branch="",
-        )
+        AutonomousGoal.objects.filter(pk=goal.pk).update(auto_qa_enabled=False)
         prompt = "Go ahead and implement this proposed session."
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
@@ -762,8 +754,6 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
         self.assertTrue(metadata.auto_qa_enabled)
-        self.assertTrue(metadata.auto_merge_to_local_branch)
-        self.assertEqual(metadata.auto_merge_branch, "release")
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, metadata)
@@ -776,8 +766,6 @@ class NewSessionViewTests(TestCase):
             prompt=prompt,
             thread_name="Add parser coverage",
             auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
         )
 
     @patch(
@@ -817,8 +805,6 @@ class NewSessionViewTests(TestCase):
                 "resume_source_session": True,
                 "auto_pr_enabled": True,
                 "auto_qa_enabled": False,
-                "auto_merge_to_local_branch": False,
-                "auto_merge_branch": "",
             },
         )
 
@@ -907,8 +893,6 @@ class NewSessionViewTests(TestCase):
                 "resume_source_session": True,
                 "auto_pr_enabled": False,
                 "auto_qa_enabled": True,
-                "auto_merge_to_local_branch": True,
-                "auto_merge_branch": "release",
             },
         )
 
@@ -942,11 +926,6 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 0)
         self.assertEqual(mock_turn.call_args.kwargs["cwd"], recovery_repo)
         self.assertIs(mock_turn.call_args.kwargs["auto_qa_enabled"], True)
-        self.assertIs(
-            mock_turn.call_args.kwargs["auto_merge_to_local_branch"],
-            True,
-        )
-        self.assertEqual(mock_turn.call_args.kwargs["auto_merge_branch"], "release")
         source_session.refresh_from_db()
         self.assertFalse(source_session.codex_archived)
         self.assertIsNone(source_session.codex_archived_at)
@@ -955,8 +934,6 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(source_session.project_cleared)
         self.assertFalse(source_session.auto_pr_enabled)
         self.assertTrue(source_session.auto_qa_enabled)
-        self.assertTrue(source_session.auto_merge_to_local_branch)
-        self.assertEqual(source_session.auto_merge_branch, "release")
         proposal.refresh_from_db()
         self.assertEqual(proposal.accepted_session, source_session)
 
@@ -1340,7 +1317,7 @@ class NewSessionViewTests(TestCase):
             {"enable_memories": False},
         )
 
-    @patch("hitch.main.views.new_session._auto_merge_to_local_branch_for_proposal")
+    @patch("hitch.main.views.new_session._auto_review_settings_for_proposed_session")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1351,7 +1328,7 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
-        mock_auto_merge: MagicMock,
+        mock_auto_review: MagicMock,
     ) -> None:
         # Stale-tab race: new_session fetched the still-unset proposal and began
         # continuing its candidate worktree, but an inbox reject commits before
@@ -1379,14 +1356,14 @@ class NewSessionViewTests(TestCase):
             title="Add parser coverage",
         )
 
-        def reject_concurrently(*_args: Any, **_kwargs: Any) -> tuple[bool, str]:
+        def reject_concurrently(*_args: Any, **_kwargs: Any) -> tuple[bool, bool]:
             ProposedSession.objects.filter(pk=proposal.pk).update(
                 outcome_status=ProposedSession.OUTCOME_REJECTED,
                 outcome_notes="Resolved from another tab.",
             )
-            return False, ""
+            return False, False
 
-        mock_auto_merge.side_effect = reject_concurrently
+        mock_auto_review.side_effect = reject_concurrently
 
         response = self.client.post(
             reverse("new_session"),
@@ -1478,9 +1455,9 @@ class NewSessionViewTests(TestCase):
         mock_start_workflow: MagicMock,
     ) -> None:
         # Accepting an autonomous-goal proposal with a /qa (or /pr) prompt must
-        # persist the goal-derived auto-review and auto-merge configuration onto
-        # the session, so subsequent turns keep honoring it rather than silently
-        # reverting to manual review.
+        # persist the goal-derived auto-review configuration onto the session,
+        # so subsequent turns keep honoring it rather than silently reverting
+        # to manual review.
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
@@ -1492,8 +1469,6 @@ class NewSessionViewTests(TestCase):
             goal="Find useful test coverage increments.",
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
         )
         candidate = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -1508,8 +1483,6 @@ class NewSessionViewTests(TestCase):
             outcome_metadata={
                 "auto_pr_enabled": False,
                 "auto_qa_enabled": True,
-                "auto_merge_to_local_branch": True,
-                "auto_merge_branch": "release",
             },
         )
 
@@ -1539,7 +1512,6 @@ class NewSessionViewTests(TestCase):
             initial_user_message_index=0,
             pr_watch_tool_available=False,
             open_pr_on_lgtm=False,
-            auto_merge_branch="release",
         )
         mock_turn.assert_not_called()
         proposal.refresh_from_db()
@@ -1547,12 +1519,10 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)
         self.assertFalse(candidate.is_hidden_system_session)
-        # The goal enabled auto-QA and auto-merge; the accepted session must
-        # retain those so future turns continue to review and merge.
+        # The goal enabled auto-QA; the accepted session must retain it so
+        # future turns continue to review.
         self.assertFalse(candidate.auto_pr_enabled)
         self.assertTrue(candidate.auto_qa_enabled)
-        self.assertTrue(candidate.auto_merge_to_local_branch)
-        self.assertEqual(candidate.auto_merge_branch, "release")
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -2096,8 +2066,6 @@ class NewSessionViewTests(TestCase):
         metadata = SessionMetadata.objects.get(thread_id="coding-proposal-thread")
         self.assertFalse(metadata.auto_qa_enabled)
         self.assertFalse(metadata.auto_pr_enabled)
-        self.assertFalse(metadata.auto_merge_to_local_branch)
-        self.assertEqual(metadata.auto_merge_branch, "")
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.common.Codex")

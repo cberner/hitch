@@ -1,11 +1,11 @@
 """Shared low-level helpers for invoking git subprocesses.
 
-Each domain module (``diffs``, ``repos``, ``worktrees``, ``local_merges``) keeps
+Each domain module (``diffs``, ``repos``, ``worktrees``) keeps
 its own thin wrapper that owns the policy decisions -- the timeout, the
 environment, and how a failure is surfaced. This module owns the one mechanism
 they all share: building the ``git -C <cwd>`` command line and running it under a
 timeout. Centralizing the spawn/timeout handling keeps that error-prone surface
-in a single tested place instead of four subtly diverging copies.
+in a single tested place instead of three subtly diverging copies.
 """
 
 from __future__ import annotations

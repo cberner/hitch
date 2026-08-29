@@ -1414,44 +1414,6 @@ class SessionViewActiveWorkerTests(TestCase):
 
 
 
-    @patch("hitch.main.views.common.Codex")
-    def test_review_guidance_local_merge_surfaces_result(
-        self, mock_codex: MagicMock
-    ) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([_turn([_user_message("Review it"), _agent_message("Done")])]),
-        )
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/demo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
-            state={
-                "next_user_message_index": 1,
-                "open_pr_on_lgtm": False,
-                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
-                "auto_merge_result": {
-                    "branch": "main",
-                    "commit_sha": "def456",
-                    "target_worktree": "/tmp/demo",
-                    "changed": True,
-                },
-            },
-        )
-
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "thread-1"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Review workflow")
-        self.assertContains(response, "Hitch merged the session changes into main.")
-        self.assertContains(response, "Commit: def456")
-
-
     def test_system_session_detail_requires_system_run(self) -> None:
         response = self.client.get(reverse("system_session", kwargs={"session_id": "thread-1"}))
 
