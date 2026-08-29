@@ -20,7 +20,6 @@ from openai_codex.generated.v2_all import (
     ThreadSortKey,
 )
 
-from hitch.main import demo
 from hitch.main.goals.autonomous_goal_run_display import (
     _attach_proposed_session_display_state,
 )
@@ -92,11 +91,9 @@ from hitch.main.sessions.settings_cookies import (
     _apply_cookie_updates,
 )
 from hitch.main.sessions.system_agent_summary import (
-    _demo_system_thread_ids,
     _qa_activity_updated_at_by_main_thread_id,
     _session_updated_at,
     _system_agent_instance_for_thread,
-    _system_agent_kind,
     _system_agent_run_detail_title,
     _system_agent_run_for_thread,
     _system_agent_run_label,
@@ -186,9 +183,7 @@ def _session_list_page(
     hidden_thread_ids = system_agents.hidden_thread_ids(
         accepted_visible_thread_ids=accepted_visible_thread_ids
     )
-    system_thread_ids = (
-        hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
-    )
+    system_thread_ids = hidden_thread_ids if system_only else set()
     query = _SessionListQuery(
         projects=projects,
         current_project=current_project,
@@ -383,7 +378,7 @@ def _session_list_page_from_warm_index(
         hidden_thread_ids = system_agents.hidden_thread_ids(
             accepted_visible_thread_ids=accepted_visible_thread_ids
         )
-        system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
+        system_thread_ids = hidden_thread_ids
     query = _SessionListQuery(
         projects=projects,
         current_project=current_project,
@@ -1330,18 +1325,12 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
             read_only=True,
             require_system_agent_thread=True,
         )
-    agent_kind = _system_agent_kind(run, instance)
-    hide_demo_agent_entries = agent_kind != demo.DEMO_AGENT_KIND
     return common._render_session_detail(
         request,
         session_id,
         read_only=True,
         display_title=_system_agent_run_detail_title(run, instance),
         system_prompt=instance.prompt,
-        hide_demo_agent_entries=hide_demo_agent_entries,
-        demo_entries_run_id=(
-            run.pk if not hide_demo_agent_entries and run is not None else None
-        ),
     )
 
 @require_http_methods(["GET"])
@@ -1369,6 +1358,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
             "autonomous_goal",
             "candidate_session",
             "judge_session",
+            "source_session",
             "source_workflow",
         )
         .order_by("created_at", "id")

@@ -476,54 +476,6 @@ class RefreshThrottle(models.Model):
         return f"RefreshThrottle(key={self.key})"
 
 
-class SessionDemo(models.Model):
-    """Active web demo target for a Codex session."""
-
-    STATUS_REQUESTED = "requested"
-    STATUS_PREPARING = "preparing"
-    STATUS_ACTIVE = "active"
-    STATUS_STOPPED = "stopped"
-    STATUS_FAILED = "failed"
-
-    STATUS_CHOICES = (
-        (STATUS_REQUESTED, "requested"),
-        (STATUS_PREPARING, "preparing"),
-        (STATUS_ACTIVE, "active"),
-        (STATUS_STOPPED, "stopped"),
-        (STATUS_FAILED, "failed"),
-    )
-
-    thread_id = models.CharField(max_length=128, unique=True)
-    host = models.CharField(max_length=255, default="127.0.0.1")
-    port = models.PositiveIntegerField()
-    container_id = models.CharField(max_length=128, blank=True, default="")
-    container_name = models.CharField(max_length=128, blank=True, default="")
-    runtime = models.CharField(max_length=32, default="podman")
-    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
-    last_error = models.TextField(blank=True, default="")
-    generation = models.PositiveIntegerField(default=0)
-    registration_token = models.CharField(max_length=128, blank=True, default="")
-    logs = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(
-                fields=["thread_id", "status"],
-                name="sessiondemo_thread_status_idx",
-            ),
-            models.Index(fields=["status"], name="sessiondemo_status_idx"),
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return (
-            f"SessionDemo(thread_id={self.thread_id}, "
-            f"target={self.host}:{self.port}, status={self.status})"
-        )
-
-
 class CodexInstance(models.Model):
     """One row per spawned Codex worker subprocess.
 
@@ -928,7 +880,6 @@ class UserSettings(models.Model):
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
-    spec_critic_enabled = models.BooleanField(default=False)
     web_search_mode = models.CharField(max_length=16, blank=True, default="")
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")

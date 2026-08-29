@@ -1,10 +1,12 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from django.test import SimpleTestCase
 
+from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_events
 
 
@@ -101,9 +103,7 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
                 encoding="utf-8",
             )
 
-            goal = codex_events.latest_goal_from_event_paths(
-                [first, second], thread_id="thread-1"
-            )
+            goal = codex_events.latest_goal_from_event_paths([first, second], thread_id="thread-1")
 
         self.assertEqual(goal, "Ship the status strip")
 
@@ -133,9 +133,7 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
                 encoding="utf-8",
             )
 
-            goal = codex_events.latest_goal_from_event_paths(
-                [older_worker, newer_worker], thread_id="thread-1"
-            )
+            goal = codex_events.latest_goal_from_event_paths([older_worker, newer_worker], thread_id="thread-1")
 
         self.assertIsNone(goal)
 
@@ -165,9 +163,7 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
                 encoding="utf-8",
             )
 
-            goal = codex_events.latest_goal_from_event_paths(
-                [older_worker, newer_worker], thread_id="thread-1"
-            )
+            goal = codex_events.latest_goal_from_event_paths([older_worker, newer_worker], thread_id="thread-1")
 
         self.assertIsNone(goal)
 
@@ -214,6 +210,20 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
 
     def test_latest_goal_tokens_for_instance_handles_missing_instance(self) -> None:
         self.assertIsNone(codex_events.latest_goal_tokens_for_instance(None))
+
+    def test_legacy_demo_instance_event_projections_are_redacted(self) -> None:
+        instance = cast(
+            CodexInstance,
+            SimpleNamespace(
+                agent_kind="demo",
+                events_path="/events/must-not-be-read.jsonl",
+                thread_id="thread-1",
+            ),
+        )
+
+        self.assertIsNone(codex_events.latest_goal_tokens_for_instance(instance))
+        self.assertIsNone(codex_events.latest_task_plan_for_instance(instance))
+        self.assertIsNone(codex_events.latest_pr_snapshot_for_instance(instance))
 
     def test_accepts_recorded_at_alias_and_ignores_bad_order_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -314,9 +324,7 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
                 encoding="utf-8",
             )
 
-            goal = codex_events.latest_goal_from_event_paths(
-                [Path(raw) / "missing.jsonl", path], thread_id="thread-1"
-            )
+            goal = codex_events.latest_goal_from_event_paths([Path(raw) / "missing.jsonl", path], thread_id="thread-1")
 
         self.assertIsNone(goal)
 
@@ -544,9 +552,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             },
                             "result": {
                                 "structuredContent": {
-                                    "url": (
-                                        "https://github.com/cberner/hitch/pull/93"
-                                    ),
+                                    "url": ("https://github.com/cberner/hitch/pull/93"),
                                     "state": "closed",
                                 }
                             },
@@ -639,9 +645,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             "tool": "github_fetch_pr",
                             "result": {
                                 "structuredContent": {
-                                    "url": (
-                                        "https://github.com/cberner/hitch/pull/94"
-                                    ),
+                                    "url": ("https://github.com/cberner/hitch/pull/94"),
                                     "state": "closed",
                                 }
                             },
@@ -673,9 +677,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             "tool": "github_fetch_pr",
                             "result": {
                                 "structuredContent": {
-                                    "url": (
-                                        "https://github.com/cberner/hitch/pull/94"
-                                    ),
+                                    "url": ("https://github.com/cberner/hitch/pull/94"),
                                     "state": "closed",
                                 }
                             },
@@ -690,9 +692,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             "type": "mcpToolCall",
                             "server": "linear",
                             "tool": "create_issue",
-                            "result": {
-                                "structuredContent": {"identifier": "ENG-123"}
-                            },
+                            "result": {"structuredContent": {"identifier": "ENG-123"}},
                         },
                     ),
                     has_lifecycle_activity=True,
@@ -716,9 +716,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             "tool": "github_fetch_pr",
                             "result": {
                                 "structuredContent": {
-                                    "url": (
-                                        "https://github.com/cberner/hitch/pull/94"
-                                    ),
+                                    "url": ("https://github.com/cberner/hitch/pull/94"),
                                     "state": "open",
                                     "head_sha": "abc123",
                                 }
@@ -738,11 +736,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                                 "repo_full_name": "cberner/hitch",
                                 "commit_sha": "unrelated",
                             },
-                            "result": {
-                                "structuredContent": {
-                                    "statuses": [{"state": "success"}]
-                                }
-                            },
+                            "result": {"structuredContent": {"statuses": [{"state": "success"}]}},
                         },
                     ),
                     has_lifecycle_activity=True,
@@ -766,9 +760,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                             "tool": "github_fetch_pr",
                             "result": {
                                 "structuredContent": {
-                                    "url": (
-                                        "https://github.com/cberner/hitch/pull/94"
-                                    ),
+                                    "url": ("https://github.com/cberner/hitch/pull/94"),
                                     "state": "open",
                                     "head_sha": "abc123",
                                 }
@@ -788,11 +780,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
                                 "repo_full_name": "cberner/hitch",
                                 "commit_sha": "abc123",
                             },
-                            "result": {
-                                "structuredContent": {
-                                    "statuses": [{"state": "success"}]
-                                }
-                            },
+                            "result": {"structuredContent": {"statuses": [{"state": "success"}]}},
                         },
                     ),
                     has_lifecycle_activity=True,
@@ -951,9 +939,7 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
             }
 
         turns = [
-            codex_events.PrObservationTurn(
-                is_pr_prompt=True, is_completed=True, items=(head_item("head1"),)
-            ),
+            codex_events.PrObservationTurn(is_pr_prompt=True, is_completed=True, items=(head_item("head1"),)),
             codex_events.PrObservationTurn(
                 is_pr_prompt=False,
                 is_completed=True,
@@ -1010,14 +996,10 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "type": "mcpToolCall",
                                     "server": "codex_apps",
                                     "tool": "github_create_pull_request",
-                                    "arguments": {
-                                        "repository_full_name": "cberner/hitch"
-                                    },
+                                    "arguments": {"repository_full_name": "cberner/hitch"},
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/169"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/169"),
                                             "number": 169,
                                             "state": "open",
                                             "merged": False,
@@ -1128,9 +1110,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/168"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/168"),
                                             "number": 168,
                                             "state": "open",
                                         }
@@ -1149,9 +1129,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/169"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/169"),
                                             "number": 169,
                                             "state": "open",
                                         }
@@ -1192,9 +1170,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/168"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/168"),
                                             "number": 168,
                                             "head": "stale-branch",
                                         }
@@ -1215,11 +1191,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "pr_number": 169,
                                     },
-                                    "result": {
-                                        "structuredContent": {
-                                            "comments": [{"body": "new PR feedback"}]
-                                        }
-                                    },
+                                    "result": {"structuredContent": {"comments": [{"body": "new PR feedback"}]}},
                                 },
                             },
                             recorded_at=20,
@@ -1293,11 +1265,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "pr_number": 169,
                                     },
-                                    "result": {
-                                        "structuredContent": {
-                                            "reactions": [{"content": "+1"}]
-                                        }
-                                    },
+                                    "result": {"structuredContent": {"reactions": [{"content": "+1"}]}},
                                 },
                             },
                             recorded_at=20,
@@ -1359,9 +1327,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                 encoding="utf-8",
             )
 
-            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
-                [path], thread_id="thread-1"
-            )
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths([path], thread_id="thread-1")
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
@@ -1510,9 +1476,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/169"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/169"),
                                             "number": 169,
                                             "head_sha": "abc123",
                                         }
@@ -1593,9 +1557,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/170"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/170"),
                                             "number": 170,
                                             "head_sha": "abc123",
                                         }
@@ -1671,9 +1633,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/171"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/171"),
                                             "number": 171,
                                             "head_sha": "abc123",
                                         }
@@ -1790,9 +1750,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/172"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/172"),
                                             "number": 172,
                                             "head_sha": "abc123",
                                         }
@@ -1919,9 +1877,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/200"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/200"),
                                             "number": 200,
                                             "head_sha": "abc123",
                                         }
@@ -2036,9 +1992,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/202"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/202"),
                                             "number": 202,
                                             "head_sha": "abc123",
                                         }
@@ -2143,9 +2097,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/201"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/201"),
                                             "number": 201,
                                             "head_sha": "abc123",
                                         }
@@ -2193,9 +2145,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "commit_sha": "abc123",
                                     },
-                                    "result": {
-                                        "structuredContent": {"workflow_runs": []}
-                                    },
+                                    "result": {"structuredContent": {"workflow_runs": []}},
                                 },
                             },
                             recorded_at=20,
@@ -2252,9 +2202,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/203"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/203"),
                                             "number": 203,
                                             "head_sha": "abc123",
                                         }
@@ -2360,9 +2308,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/173"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/173"),
                                             "number": 173,
                                             "head_sha": "abc123",
                                         }
@@ -2487,9 +2433,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/174"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/174"),
                                             "number": 174,
                                             "head_sha": "abc123",
                                         }
@@ -2533,11 +2477,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "pr_number": 174,
                                     },
-                                    "result": {
-                                        "structuredContent": {
-                                            "reviews": []
-                                        }
-                                    },
+                                    "result": {"structuredContent": {"reviews": []}},
                                 },
                             },
                             recorded_at=20,
@@ -2586,9 +2526,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "tool": "github_create_pull_request",
                                     "result": {
                                         "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/175"
-                                            ),
+                                            "url": ("https://github.com/cberner/hitch/pull/175"),
                                             "number": 175,
                                             "head_sha": "abc123",
                                         }
@@ -2609,11 +2547,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "pr_number": 175,
                                     },
-                                    "result": {
-                                        "structuredContent": {
-                                            "reactions": [{"content": "+1"}]
-                                        }
-                                    },
+                                    "result": {"structuredContent": {"reactions": [{"content": "+1"}]}},
                                 },
                             },
                             recorded_at=10,
@@ -2630,9 +2564,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                         "repo_full_name": "cberner/hitch",
                                         "pr_number": 175,
                                     },
-                                    "result": {
-                                        "structuredContent": {"reviews": []}
-                                    },
+                                    "result": {"structuredContent": {"reviews": []}},
                                 },
                             },
                             recorded_at=20,
@@ -2670,11 +2602,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
                                     "server": "codex_apps",
                                     "tool": "github_create_pull_request",
                                     "result": {
-                                        "structuredContent": {
-                                            "url": (
-                                                "https://github.com/cberner/hitch/pull/169"
-                                            )
-                                        }
+                                        "structuredContent": {"url": ("https://github.com/cberner/hitch/pull/169")}
                                     },
                                 },
                             },
@@ -2707,9 +2635,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
 
 class FinalizePrSnapshotTests(SimpleTestCase):
     def test_accepts_repo_and_numeric_pr_number(self) -> None:
-        snapshot = codex_events._finalize_pr_snapshot(
-            {"repository_full_name": "cberner/hitch", "pr_number": 7}
-        )
+        snapshot = codex_events._finalize_pr_snapshot({"repository_full_name": "cberner/hitch", "pr_number": 7})
         self.assertIsNotNone(snapshot)
 
     def test_rejects_bool_pr_number(self) -> None:

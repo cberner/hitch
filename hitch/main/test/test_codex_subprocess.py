@@ -52,7 +52,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import demo, formatting
+from hitch.main import formatting
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
@@ -3159,7 +3159,7 @@ class ReconcileAndLookupTests(TestCase):
         _mock_cleanup: MagicMock,
     ) -> None:
         # A worker that saved its terminal status but died before its own notify
-        # must still be routed by the reclaim sweep — demo system-agent rows are
+        # must still be routed by the reclaim sweep — system-agent rows are
         # excluded from reconcile_terminal_workflow_instances() and have no other
         # backstop, so skipping routing here would strand them.
         instance = self._make(pid=21, status=CodexInstance.STATUS_RUNNING)
@@ -3522,53 +3522,6 @@ class ReconcileAndLookupTests(TestCase):
         notified = mock_notify.call_args.args[0]
         self.assertEqual(notified.pk, system_agent.pk)
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
-
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_does_not_double_route_demo_system_agent(
-        self,
-        _mock_worker_alive: MagicMock,
-        mock_system_notify: MagicMock,
-        mock_demo_notify: MagicMock,
-    ) -> None:
-        mock_system_notify.return_value = True
-        system_agent = self._make(
-            pid=10,
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
-        system_agent.agent_kind = demo.DEMO_AGENT_KIND
-        system_agent.save(update_fields=["agent_kind"])
-
-        n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        mock_system_notify.assert_called_once()
-        mock_demo_notify.assert_not_called()
-
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=False)
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_keeps_demo_fallback_when_system_agents_noop(
-        self,
-        _mock_worker_alive: MagicMock,
-        mock_system_notify: MagicMock,
-        mock_demo_notify: MagicMock,
-    ) -> None:
-        system_agent = self._make(
-            pid=10,
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
-        system_agent.agent_kind = demo.DEMO_AGENT_KIND
-        system_agent.save(update_fields=["agent_kind"])
-
-        n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        mock_system_notify.assert_called_once()
-        mock_demo_notify.assert_called_once_with(system_agent)
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
     @patch("hitch.main.runtime.codex_pool.is_alive", return_value=True)
@@ -4415,9 +4368,9 @@ class FinalizeReapedInstanceTests(TestCase):
     def test_routes_finish_hooks_for_reaped_terminal_turn(
         self, mock_notify: MagicMock, mock_cleanup: MagicMock
     ) -> None:
-        # A reaped demo/system-agent (or workflow) turn relies on the same
+        # A reaped system-agent (or workflow) turn relies on the same
         # idempotent finish routing as a row that died after saving terminal
-        # status; without it the SessionDemo/SystemAgentRun follow-up strands.
+        # status; without it the SystemAgentRun follow-up strands.
         agent = self._make(
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -6566,7 +6519,7 @@ class EventsDirTests(TestCase):
 
 
 class _FakePayload(BaseModel):
-    method_kind: str = "demo"
+    method_kind: str = "sample"
     detail: str
 
 
@@ -6578,7 +6531,7 @@ class SerializeEventTests(TestCase):
 
         # pydantic, dataclass, plain dict all flatten to a JSON payload field.
         cases = [
-            (_FakePayload(detail="hello"), {"method_kind": "demo", "detail": "hello"}),
+            (_FakePayload(detail="hello"), {"method_kind": "sample", "detail": "hello"}),
             (Params(params={"k": "v"}), {"params": {"k": "v"}}),
             ({"k": 1}, {"k": 1}),
         ]
@@ -7619,47 +7572,6 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(approval.decided_at)
         self.assertEqual(input_request.response, {"answers": {}})
         self.assertIsNotNone(input_request.responded_at)
-
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
-    def test_notify_system_agents_does_not_double_route_demo_system_agent(
-        self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
-    ) -> None:
-        mock_system_notify.return_value = True
-        instance = CodexInstance.objects.create(
-            pid=12345,
-            thread_id="thread-1",
-            cwd="/repo",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=demo.DEMO_AGENT_KIND,
-        )
-
-        codex_worker_module._notify_system_agents(instance)
-
-        mock_system_notify.assert_called_once_with(instance)
-        mock_demo_notify.assert_not_called()
-
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=False)
-    def test_notify_system_agents_keeps_demo_fallback_when_system_agents_noop(
-        self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
-    ) -> None:
-        instance = CodexInstance.objects.create(
-            pid=12345,
-            thread_id="thread-1",
-            cwd="/repo",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=demo.DEMO_AGENT_KIND,
-        )
-
-        codex_worker_module._notify_system_agents(instance)
-
-        mock_system_notify.assert_called_once_with(instance)
-        mock_demo_notify.assert_called_once_with(instance)
 
     @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=1000)
     def test_apply_worker_oom_score_adjust_writes_configured_score(self) -> None:
@@ -11262,36 +11174,6 @@ class StreamForInstanceTests(TestCase):
         self.assertEqual(
             streaming.system_workflow_status_text(workflow),
             "Hitch system agent is working...",
-        )
-
-    def test_system_workflow_status_text_handles_spec_critic_classifying(self) -> None:
-        workflow = cast(
-            SystemWorkflow,
-            SimpleNamespace(
-                kind="spec_critic",
-                step="spec_critic_classifying",
-                state={},
-            ),
-        )
-
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "Spec Critic is reviewing the request...",
-        )
-
-    def test_system_workflow_status_text_handles_spec_critic_analyzing(self) -> None:
-        workflow = cast(
-            SystemWorkflow,
-            SimpleNamespace(
-                kind="spec_critic",
-                step="spec_critic_analyzing",
-                state={},
-            ),
-        )
-
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "Spec Critic is analyzing the request...",
         )
 
     def test_system_workflow_status_text_handles_qa_feedback_step(self) -> None:

@@ -83,26 +83,6 @@ urlpatterns = [
     ),
     path("sessions/new/", new_session.new_session, name="new_session"),
     path(
-        "sessions/<str:session_id>/demo/start/",
-        session_actions.start_session_demo,
-        name="start_session_demo",
-    ),
-    path(
-        "sessions/<str:session_id>/demo/register/",
-        session_actions.register_session_demo,
-        name="session_demo_register",
-    ),
-    path(
-        "sessions/<str:session_id>/demo/",
-        session_actions.session_demo_proxy_root,
-        name="session_demo_proxy_root",
-    ),
-    path(
-        "sessions/<str:session_id>/demo/<path:path>",
-        session_actions.session_demo_proxy,
-        name="session_demo_proxy",
-    ),
-    path(
         "sessions/<str:session_id>/history/",
         session_detail.session_history,
         name="session_history",

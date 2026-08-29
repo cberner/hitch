@@ -17,10 +17,8 @@ from django.test import (
 from django.urls import reverse
 from openai_codex.errors import InternalRpcError, InvalidRequestError
 
-from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
-    SessionDemo,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
@@ -1786,100 +1784,122 @@ class SessionDetailFastPathTests(TestCase):
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
 
+    @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
-    def test_session_intermediate_derives_demo_visibility_from_signed_context(
+    def test_legacy_hidden_turn_stays_redacted_in_every_rollout_view(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
-        demo_prompt = "Start an interactive web demo"
+        hidden_prompt = (
+            "Start an interactive web demo.\n\nRegistration token: secret-token"
+        )
         rollout_path = _make_rollout(
             self,
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": demo_prompt},
+                    {"type": "user_message", "message": "Visible first prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Visible first answer"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": hidden_prompt},
                 ),
                 _rollout_line(
                     "response_item",
                     {
                         "type": "function_call",
                         "name": "exec_command",
-                        "arguments": json.dumps({"cmd": "printf demo-only-command"}),
-                        "call_id": "call-demo",
+                        "arguments": json.dumps(
+                            {"cmd": "printf hidden-demo-command"}
+                        ),
+                        "call_id": "call-hidden-demo",
                     },
                 ),
                 _rollout_line(
-                    "event_msg", {"type": "agent_reasoning", "text": "demo reasoning"}
-                ),
-                _rollout_line(
-                    "response_item",
+                    "event_msg",
                     {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Demo ready."}],
-                        "phase": "final_answer",
+                        "type": "agent_reasoning",
+                        "text": "hidden demo reasoning",
                     },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Hidden demo response"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Visible latest prompt"},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "agent_message", "message": "Visible latest answer"},
                 ),
             ],
         )
         now = datetime(2025, 1, 5, tzinfo=UTC)
         SessionMetadata.objects.create(
-            thread_id="demo-fragment",
+            thread_id="legacy-redacted-session",
             cwd="/repo",
             codex_path=str(rollout_path),
-            codex_name="Demo fragment",
-            codex_preview=demo_prompt,
+            codex_name="Legacy redacted session",
+            codex_preview="Visible latest prompt",
             codex_created_at=now,
             codex_updated_at=now,
         )
-        workflow = SystemWorkflow.objects.create(
-            kind=demo.DEMO_WORKFLOW_KIND,
-            main_thread_id="demo-fragment",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-        )
-        instance = CodexInstance.objects.create(
+        CodexInstance.objects.create(
             pid=1,
-            thread_id="demo-fragment",
+            thread_id="legacy-redacted-session",
             cwd="/repo",
-            prompt=demo_prompt,
+            prompt=hidden_prompt,
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=demo.DEMO_AGENT_KIND,
-            display_author=demo.DEMO_DISPLAY_AUTHOR,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=demo.DEMO_AGENT_KIND,
-            thread_id="demo-fragment",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        fragment_url = reverse(
-            "session_intermediate",
-            kwargs={"session_id": "demo-fragment", "entry_index": 1},
+            agent_kind="demo",
         )
 
-        insecure_fragment = self.client.get(f"{fragment_url}?hide_demo=0")
-        system_response = self.client.get(
-            reverse("system_session", kwargs={"session_id": "demo-fragment"}),
-            {"run_id": run.pk},
+        initial = self.client.get(
+            reverse("session", kwargs={"session_id": "legacy-redacted-session"})
         )
-        demo_context = common_views._session_intermediate_demo_context(
-            "demo-fragment", run.pk
-        )
-        signed_fragment = self.client.get(fragment_url, {"demo_context": demo_context})
+        self.assertEqual(initial.status_code, 200)
+        self.assertContains(initial, "Visible latest prompt")
+        self._assert_legacy_demo_secrets_hidden(initial)
 
-        self.assertEqual(insecure_fragment.status_code, 404)
-        self.assertEqual(system_response.status_code, 200)
-        self.assertContains(system_response, "data-lazy-intermediate")
-        self.assertContains(system_response, "demo_context=")
-        self.assertNotContains(system_response, "hide_demo=0")
-        self.assertEqual(signed_fragment.status_code, 200)
-        self.assertContains(signed_fragment, "printf demo-only-command")
+        history_url = initial.context["history_next_url"]
+        self.assertTrue(history_url)
+        while history_url:
+            fragment = self.client.get(history_url)
+            self.assertEqual(fragment.status_code, 200)
+            self._assert_legacy_demo_secrets_hidden(fragment)
+            history_url = fragment.context["history_next_url"]
+
+        full = self.client.get(
+            reverse("session", kwargs={"session_id": "legacy-redacted-session"}),
+            {"history": "all"},
+        )
+        self.assertEqual(full.status_code, 200)
+        self.assertContains(full, "Visible first prompt")
+        self.assertContains(full, "Visible latest answer")
+        self._assert_legacy_demo_secrets_hidden(full)
+
+        intermediate = self.client.get(
+            reverse(
+                "session_intermediate",
+                kwargs={"session_id": "legacy-redacted-session", "entry_index": 1},
+            )
+        )
+        self.assertEqual(intermediate.status_code, 404)
         mock_codex.assert_not_called()
+
+    def _assert_legacy_demo_secrets_hidden(self, response: Any) -> None:
+        self.assertNotContains(response, "Registration token: secret-token")
+        self.assertNotContains(response, "hidden-demo-command")
+        self.assertNotContains(response, "hidden demo reasoning")
+        self.assertNotContains(response, "Hidden demo response")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -3920,6 +3940,23 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"working": false', body)
         self.assertIn(b"event: reconnect", body)
 
+    def test_reloads_client_with_retired_demo_stream_token(self) -> None:
+        instance = self._make(
+            thread_id="legacy-demo-page",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.get(
+            self._stream_url(
+                "legacy-demo-page",
+                baseline=str(instance.pk),
+                demo="retired-token",
+            )
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "stale"', body)
+
     @patch(
         "hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances"
     )
@@ -4120,19 +4157,6 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
-        # Demo status changes are also render-state changes. A page that
-        # rendered while a demo was still requested must reload when the
-        # background notifier later marks it active.
-        SessionDemo.objects.create(
-            thread_id="thread-demo",
-            host="127.0.0.1",
-            port=45678,
-            status=SessionDemo.STATUS_ACTIVE,
-        )
-        response = self.client.get(self._stream_url("thread-demo"))
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-        self.assertIn(b'"status": "stale"', body)
-
     @patch("hitch.main.runtime.reconciliation.reconcile_dead_if_due", return_value=0)
     def test_reconciles_dead_active_worker_before_stream_routing(
         self, mock_global_reconcile: MagicMock
@@ -4188,37 +4212,6 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b"item/started", body)
         self.assertIn(b'"status": "completed"', body)
 
-    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
-    def test_active_worker_stream_reloads_when_demo_status_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            Path(events_path).touch()
-            instance = self._make(
-                thread_id="thread-demo-active",
-                agent_kind=demo.DEMO_AGENT_KIND,
-                events_path=events_path,
-            )
-            session_demo = SessionDemo.objects.create(
-                thread_id="thread-demo-active",
-                host="127.0.0.1",
-                port=3000,
-                status=SessionDemo.STATUS_REQUESTED,
-            )
-            demo_token = streaming.demo_stream_token("thread-demo-active")
-            response = self.client.get(
-                self._stream_url(
-                    "thread-demo-active",
-                    baseline=str(instance.pk),
-                    active=str(instance.pk),
-                    demo=demo_token,
-                )
-            )
-            session_demo.status = SessionDemo.STATUS_ACTIVE
-            session_demo.save(update_fields=["status", "updated_at"])
-
-            body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertIn(b'"status": "demo"', body)
 
 class SessionViewApprovalContextTests(TestCase):
     """The session detail view exposes POST URL templates for live
@@ -4235,7 +4228,7 @@ class SessionViewApprovalContextTests(TestCase):
             thread=SimpleNamespace(
                 id="thread-1",
                 cwd="/repo",
-                name="Demo",
+                name="Sample",
                 preview="",
                 turns=[],
                 path=None,

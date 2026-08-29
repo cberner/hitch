@@ -29,13 +29,6 @@
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <button type="button" role="menuitem" data-approval-mode-open>Approval mode</button>
-                    <form method="post" action="{{ start_demo_url }}" role="none">
-                        {% csrf_token %}
-                        <button type="submit" role="menuitem" {% if demo_start_disabled %}disabled{% endif %}>Start demo</button>
-                    </form>
-                    {% if active_session_demo %}
-                        <a href="{{ demo_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>
-                    {% endif %}
                     {% if pr_url %}
                         <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
                     {% endif %}
@@ -136,30 +129,8 @@
         </div>
 
         <div class="session-body">
-        {% if active_demo_worker %}
-        <input class="session-tab-input" type="radio" name="session-tab" id="session-tab-conversation">
-        <input class="session-tab-input" type="radio" name="session-tab" id="session-tab-demo-agent" checked>
-        <div class="session-tab-list" role="tablist" aria-label="Session views">
-            <label class="session-tab" for="session-tab-conversation" role="tab">Conversation</label>
-            <label class="session-tab" for="session-tab-demo-agent" role="tab">Demo agent</label>
-        </div>
-        <div class="session-tab-panel" id="session-panel-conversation" role="tabpanel" aria-labelledby="session-tab-conversation">
-        {% endif %}
-        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or queued_workflow_user_messages or active_worker or active_system_workflow or session_demo %}
+        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or queued_workflow_user_messages or active_worker or active_system_workflow %}
         <section class="thread" data-thread id="history-start">
-            {% if session_demo and not active_demo_worker %}
-            <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
-                <summary>Demo {{ session_demo.status }}</summary>
-                <div class="demo-status-body">
-                    <div class="demo-attempt">
-                        {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
-                        {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
-                        {% if session_demo.status == "failed" and demo_system_session_url %}<div class="demo-attempt-meta"><a href="{{ demo_system_session_url }}">View demo agent session</a></div>{% endif %}
-                        {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
-                    </div>
-                </div>
-            </details>
-            {% endif %}
             {% if system_prompt %}
             <details class="system-prompt">
                 <summary>System prompt</summary>
@@ -195,7 +166,7 @@
                 </div>
             </div>
             {% endif %}
-            {% if active_worker and not active_demo_worker %}
+            {% if active_worker %}
             <div class="entry"
                  data-live-root
                  data-active-author="{{ pending_user_author }}"
@@ -232,38 +203,6 @@
         {% else %}
         <div class="empty-thread">
             <p>No messages in this session yet.</p>
-        </div>
-        {% endif %}
-        {% if active_demo_worker %}
-        </div>
-        <div class="session-tab-panel" id="session-panel-demo-agent" role="tabpanel" aria-labelledby="session-tab-demo-agent">
-            <section class="thread" data-demo-agent-thread>
-                {% if session_demo %}
-                <details class="demo-status" open>
-                    <summary>Demo {{ session_demo.status }}</summary>
-                    <div class="demo-status-body">
-                        <div class="demo-attempt">
-                            {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
-                            {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
-                            {% if session_demo.status == "failed" and demo_system_session_url %}<div class="demo-attempt-meta"><a href="{{ demo_system_session_url }}">View demo agent session</a></div>{% endif %}
-                            {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
-                        </div>
-                    </div>
-                </details>
-                {% endif %}
-                {% if demo_rollout_entries %}
-                {% include "_session_entries.html" with entries=demo_rollout_entries %}
-                {% endif %}
-                <div class="entry"
-                     data-live-root
-                     data-active-author="{{ pending_user_author }}"
-                     data-hide-transcript="{{ rollout_owns_active_turn|yesno:'true,false' }}"
-                     data-hide-user-message="true"
-                     data-sanitize-live-details="true"
-                     data-read-only="{{ read_only|yesno:'true,false' }}"
-                     data-approval-url-template="{{ approval_url_template }}"
-                     data-input-url-template="{{ input_url_template }}"></div>
-            </section>
         </div>
         {% endif %}
         </div>

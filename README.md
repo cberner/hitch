@@ -31,15 +31,15 @@ the top level:
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
   `disk_cleanup`, `health`, and process/host infrastructure.
 - `workflows/` -- the system-agent workflow engine: `system_agents` (the
-  optional-review handoff, PR monitor, autonomous-goal runner, and spec-critic
-  state machines), their prompts, `gh` CLI integration, and PR handoff/stage
+  optional-review handoff, PR monitor, and autonomous-goal runner state
+  machines), their prompts, `gh` CLI integration, and PR handoff/stage
   bookkeeping.
 - `sessions/` -- session-page support: entry/metadata display, settings and
   signed settings cookies, session indexing, stage derivation, and token
   usage.
 - `goals/` -- autonomous goals: goal forms/prompts, proposal lifecycle and
   stacked-diff continuation, and the auto-proposal scheduler.
-- top level -- `views`, `models`, `demo`, `caches`, `formatting`, and the
+- top level -- `views`, `models`, `caches`, `formatting`, and the
   git/repo utilities (`repos`, `worktrees`, `git_support`, `local_merges`,
   `diffs`).
 

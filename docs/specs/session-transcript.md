@@ -49,13 +49,18 @@ space used by repetitive reasoning, command, and web-search activity.
   for that page lifecycle; SSE still replays the complete worker log for goal,
   plan, approval, and input state, but its transcript items remain hidden to
   avoid cross-source duplication. Older-history fragments and specialized live
-  roots, including the demo-agent view, inherit that same owner rather than
-  independently re-detecting it; a selected demo-agent panel renders the
-  rollout-owned active entries next to its hidden live transcript root.
+  roots inherit that same owner rather than independently re-detecting it.
 - `ST-history-full`: A visible up-arrow reloads the canonical full transcript
   and positions the reader at its beginning, including while a worker is
   active. Activity, synthesized rows, and oversized message bodies remain
   authoritative in this full view.
+- `ST-legacy-redaction`: Turns created by retired system features that were
+  hidden from the main session remain hidden in initial, full-history, paged,
+  and lazy intermediate-detail renders. Their durable turn markers are kept as
+  historical records so an upgrade cannot expose setup credentials, commands,
+  files, reasoning, or responses that were never user-visible. Those markers
+  also exclude the retired workers from event-derived session summaries such
+  as goals and task plans.
 
 ## Success Criteria
 
@@ -64,3 +69,5 @@ space used by repetitive reasoning, command, and web-search activity.
   message row plus a compact toggle until expanded.
 - Explicitly delimited mathematical notation is readable without exposing TeX
   control sequences, including in Thinking messages from long-running turns.
+- Upgrading across a system-feature removal does not reveal transcript content
+  that was hidden before the upgrade.

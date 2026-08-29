@@ -2,7 +2,7 @@
 
 Pure code-movement extraction from ``views.py``: builds the rendered
 entry list for a session (rollout vs. SDK fallback, system/QA author
-tagging, demo filtering) and the small active-worker/workflow status
+tagging) and the small active-worker/workflow status
 helpers the detail page and SSE view consume.
 """
 
@@ -18,8 +18,8 @@ from typing import Any
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from hitch.main import demo
 from hitch.main.formatting import render_markdown
+from hitch.main.legacy_agent_records import only_legacy_redacted_agent_records
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
@@ -106,37 +106,15 @@ def _active_stream_owns_turn(active: CodexInstance | None) -> bool:
                     return True
         except OSError:
             pass
-    return bool(
-        active.started_at
-        and active.started_at > timezone.now() - _ACTIVE_STREAM_CLAIM_GRACE
-    )
+    return bool(active.started_at and active.started_at > timezone.now() - _ACTIVE_STREAM_CLAIM_GRACE)
 
 
-def _entries_include_active_turn(
-    entries: list[dict[str, Any]], active: CodexInstance | None
-) -> bool:
+def _entries_include_active_turn(entries: list[dict[str, Any]], active: CodexInstance | None) -> bool:
     """Return whether rollout-rendered entries contain the active boundary."""
     return _active_turn_start_index(entries, active) is not None
 
 
-def _active_turn_entries(
-    entries: list[dict[str, Any]],
-    active: CodexInstance | None,
-    *,
-    active_turn_unresolved: bool = False,
-) -> list[dict[str, Any]]:
-    """Return the rollout entries owned by the active turn on this page."""
-    if active is None:
-        return []
-    active_turn_start = _active_turn_start_index(entries, active)
-    if active_turn_start is not None:
-        return entries[active_turn_start:]
-    return entries if active_turn_unresolved else []
-
-
-def _mark_active_history_user_entries(
-    entries: list[dict[str, Any]], active: CodexInstance | None
-) -> None:
+def _mark_active_history_user_entries(entries: list[dict[str, Any]], active: CodexInstance | None) -> None:
     """Mark the current active user boundary using prompt and timestamp."""
     identity = _active_history_user_identity(active)
     if identity is None:
@@ -153,9 +131,7 @@ def _mark_active_history_user_entries(
         )
 
 
-def _active_turn_start_index(
-    entries: list[dict[str, Any]], active: CodexInstance | None
-) -> int | None:
+def _active_turn_start_index(entries: list[dict[str, Any]], active: CodexInstance | None) -> int | None:
     active_text = _active_user_message_text(active)
     if not active_text:
         return None
@@ -163,19 +139,13 @@ def _active_turn_start_index(
         entry = entries[index]
         active_marker = entry.get("_hitch_active_user")
         if entry.get("kind") == "user" and (
-            active_marker is True
-            or (
-                "_hitch_active_user" not in entry
-                and entry.get("text") == active_text
-            )
+            active_marker is True or ("_hitch_active_user" not in entry and entry.get("text") == active_text)
         ):
             return index
     return None
 
 
-def _event_log_contains_original_user(
-    lines: Iterable[bytes], active: CodexInstance
-) -> bool:
+def _event_log_contains_original_user(lines: Iterable[bytes], active: CodexInstance) -> bool:
     """Identify this worker's submitted user item, not a later steer."""
     expected_client_id = f"hitch-instance-{active.pk}"
     first_user_item: dict[str, Any] | None = None
@@ -198,9 +168,7 @@ def _event_log_contains_original_user(
     if first_user_item is None:
         return False
     client_id = first_user_item.get("clientId", first_user_item.get("client_id"))
-    return client_id is None and _event_user_message_text(first_user_item) == (
-        _active_user_message_text(active)
-    )
+    return client_id is None and _event_user_message_text(first_user_item) == (_active_user_message_text(active))
 
 
 def _event_user_item(event: Any) -> dict[str, Any] | None:
@@ -245,7 +213,7 @@ def _event_user_message_text(item: dict[str, Any]) -> str:
 
 
 def _show_active_worker_transcript(active: CodexInstance | None) -> bool:
-    return active is not None and active.agent_kind != demo.DEMO_AGENT_KIND
+    return active is not None
 
 
 def _pending_user_prompt(active: CodexInstance | None) -> str:
@@ -258,7 +226,7 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     placeholder. The streaming JS removes the bubble as soon as the
     real ``userMessage`` event lands.
     """
-    if active is None or active.agent_kind == demo.DEMO_AGENT_KIND:
+    if active is None:
         return ""
     return _active_user_message_text(active)
 
@@ -267,11 +235,7 @@ def _queued_workflow_user_messages(
     workflow: SystemWorkflow | None,
 ) -> list[dict[str, Any]]:
     """Return accepted steering that has not reached a visible coding turn."""
-    if (
-        workflow is None
-        or workflow.kind != SystemWorkflow.KIND_PR_QA
-        or not workflow.is_active
-    ):
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA or not workflow.is_active:
         return []
     messages: list[dict[str, Any]] = []
     prompt = workflow.state.get("user_steering_prompt")
@@ -309,9 +273,7 @@ def _active_user_message_text(active: CodexInstance | None) -> str:
     parts: list[str] = []
     if active.prompt:
         parts.append(active.prompt)
-    parts.extend(
-        "[image]" for _path in _normalized_json_string_list(active.input_image_paths)
-    )
+    parts.extend("[image]" for _path in _normalized_json_string_list(active.input_image_paths))
     return "\n".join(parts)
 
 
@@ -346,10 +308,7 @@ def _task_plan_context(
         "recorded_at": snapshot.order[0],
         "event_seq": snapshot.order[1],
         "fallback_order": snapshot.order[2],
-        "steps": [
-            {"step": step.step, "status": step.status}
-            for step in snapshot.steps
-        ],
+        "steps": [{"step": step.step, "status": step.status} for step in snapshot.steps],
     }
 
 
@@ -364,13 +323,11 @@ def _current_task_text(steps: tuple[codex_events.TaskPlanStep, ...]) -> str:
 def _pending_user_author(active: CodexInstance | None) -> str:
     if active is None:
         return ""
-    if active.agent_kind == demo.DEMO_AGENT_KIND:
-        return active.display_author
     return active.display_author if active.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK else ""
 
 
 def _pending_user_timestamp(active: CodexInstance | None) -> int:
-    if active is None or active.agent_kind == demo.DEMO_AGENT_KIND:
+    if active is None:
         return 0
     return int(active.started_at.timestamp())
 
@@ -390,8 +347,6 @@ def _workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
 
 
 def _active_worker_status_text(active: CodexInstance | None) -> str:
-    if active is not None and active.agent_kind == demo.DEMO_AGENT_KIND:
-        return "Demo agent is working"
     return streaming.qa_agent_status_text_for_instance(active)
 
 
@@ -413,15 +368,12 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
         return None
     timestamp = latest.ended_at or latest.started_at
     return {
-        "message": latest.error.strip()
-        or "The agent turn ended without an error message.",
+        "message": latest.error.strip() or "The agent turn ended without an error message.",
         "timestamp": int(timestamp.timestamp()),
     }
 
 
-def _apply_system_authors(
-    entries: list[dict[str, Any]], session_id: str
-) -> list[dict[str, Any]]:
+def _apply_system_authors(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
     system_authors: dict[int, str] = {
         user_message_index: author
         for user_message_index, author in CodexInstance.objects.filter(
@@ -435,15 +387,11 @@ def _apply_system_authors(
         return entries
     user_message_index = 0
     for entry in entries:
-        user_message_index = _apply_system_author(
-            entry, system_authors, user_message_index
-        )
+        user_message_index = _apply_system_author(entry, system_authors, user_message_index)
     return entries
 
 
-def _apply_system_author(
-    entry: dict[str, Any], system_authors: dict[int, str], user_message_index: int
-) -> int:
+def _apply_system_author(entry: dict[str, Any], system_authors: dict[int, str], user_message_index: int) -> int:
     if entry.get("kind") == "user":
         author = system_authors.get(user_message_index)
         if author:
@@ -451,60 +399,46 @@ def _apply_system_author(
         return user_message_index + 1
     if entry.get("kind") == "intermediate":
         for item in entry.get("items", []):
-            user_message_index = _apply_system_author(
-                item, system_authors, user_message_index
-            )
+            user_message_index = _apply_system_author(item, system_authors, user_message_index)
     return user_message_index
 
 
-def _filter_demo_agent_entries(
-    entries: list[dict[str, Any]],
-    session_id: str,
-    *,
-    initial_user_text: str | None = None,
-    hidden_prompts: frozenset[str] | None = None,
-) -> list[dict[str, Any]]:
-    if hidden_prompts is None:
-        hidden_prompts = _demo_agent_prompts(session_id)
-    if not hidden_prompts:
-        return entries
-
-    filtered: list[dict[str, Any]] = []
-    suppress_turn = initial_user_text in hidden_prompts
-    for entry in entries:
-        if entry.get("kind") == "user":
-            hidden_demo = entry.get("_hitch_hidden_demo")
-            if isinstance(hidden_demo, bool):
-                suppress_turn = hidden_demo
-            else:
-                text = entry.get("text")
-                suppress_turn = isinstance(text, str) and text in hidden_prompts
-        if suppress_turn and _preserve_during_hidden_demo_turn(entry):
-            filtered.append(entry)
-            continue
-        if not suppress_turn:
-            filtered.append(entry)
-    return filtered
-
-
-def _demo_agent_prompts(session_id: str) -> frozenset[str]:
+def _legacy_redacted_prompts(session_id: str) -> frozenset[str]:
+    """Prompts whose persisted rollout turns must remain hidden after removal."""
     return frozenset(
         prompt
-        for prompt in CodexInstance.objects.filter(
-            thread_id=session_id,
-            agent_kind=demo.DEMO_AGENT_KIND,
+        for prompt in only_legacy_redacted_agent_records(
+            CodexInstance.objects.filter(thread_id=session_id)
         ).values_list("prompt", flat=True)
         if isinstance(prompt, str) and prompt
     )
 
 
-def _preserve_during_hidden_demo_turn(entry: dict[str, Any]) -> bool:
-    return entry.get("kind") == "agent" and bool(entry.get("display_author"))
-
-
-def _apply_qa_approval_messages(
-    entries: list[dict[str, Any]], session_id: str
+def _filter_legacy_redacted_entries(
+    entries: list[dict[str, Any]],
+    *,
+    initial_user_text: str | None = None,
+    redacted_prompts: frozenset[str],
 ) -> list[dict[str, Any]]:
+    if not redacted_prompts:
+        return entries
+    filtered: list[dict[str, Any]] = []
+    suppress_turn = initial_user_text in redacted_prompts
+    for entry in entries:
+        if entry.get("kind") == "user":
+            hidden_marker = entry.get("_hitch_hidden_user")
+            if isinstance(hidden_marker, bool):
+                suppress_turn = hidden_marker
+            else:
+                text = entry.get("text")
+                suppress_turn = isinstance(text, str) and text in redacted_prompts
+        preserve_authored_agent = suppress_turn and entry.get("kind") == "agent" and bool(entry.get("display_author"))
+        if not suppress_turn or preserve_authored_agent:
+            filtered.append(entry)
+    return filtered
+
+
+def _apply_qa_approval_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
     approvals = sorted(_qa_approval_entries(session_id), key=lambda item: item[0])
     if not approvals:
         result = entries
@@ -523,9 +457,7 @@ def _apply_qa_approval_messages(
     return _apply_workflow_auto_pull_messages(result, session_id)
 
 
-def _apply_workflow_auto_pull_messages(
-    entries: list[dict[str, Any]], session_id: str
-) -> list[dict[str, Any]]:
+def _apply_workflow_auto_pull_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
     additions = list(_workflow_auto_pull_entries(session_id))
     if not additions:
         return entries
@@ -544,9 +476,7 @@ def _workflow_auto_pull_entries(session_id: str) -> Iterator[dict[str, Any]]:
         .prefetch_related("agent_runs")
     )
     for workflow in workflows:
-        text = _auto_pull_text(
-            workflow.state.get(system_agents.AUTO_PULL_RESULT_STATE_KEY)
-        )
+        text = _auto_pull_text(workflow.state.get(system_agents.AUTO_PULL_RESULT_STATE_KEY))
         if not text:
             continue
         yield {
@@ -601,14 +531,8 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         }:
             insert_index = next_user_message_index
         else:
-            prompt_index = workflow.state.get(
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY
-            )
-            insert_index = (
-                prompt_index
-                if is_nonbool_int(prompt_index)
-                else max(next_user_message_index - 1, 0)
-            )
+            prompt_index = workflow.state.get(system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY)
+            insert_index = prompt_index if is_nonbool_int(prompt_index) else max(next_user_message_index - 1, 0)
         # ``_finalize_agent_entry`` would skip single-finding feedback
         # (``looks_like_markdown`` needs two bullets), so render the body
         # directly: QA feedback per the agent prompt carries structured
@@ -672,10 +596,7 @@ def _auto_pull_text(result: object) -> str:
     if status == "pulled" and isinstance(branch, str) and branch.strip():
         return f"Auto-pull: pulled origin/{branch.strip()} into the default repo."
     if status == "up_to_date" and isinstance(branch, str) and branch.strip():
-        return (
-            f"Auto-pull: the default repo was already up to date with "
-            f"origin/{branch.strip()}."
-        )
+        return f"Auto-pull: the default repo was already up to date with origin/{branch.strip()}."
     if status == "failed":
         error = result.get("error")
         if isinstance(error, str) and error.strip():
@@ -755,9 +676,7 @@ def _entries_for_with_source(
     return list(render_entries(thread)), False
 
 
-def _entries_from_rollout(
-    thread: Any, *, fallback_rollout_path: str | None = None
-) -> list[dict[str, Any]] | None:
+def _entries_from_rollout(thread: Any, *, fallback_rollout_path: str | None = None) -> list[dict[str, Any]] | None:
     """Materialise entries from the on-disk rollout, or return None to fall back.
 
     Returning ``None`` (vs. an empty list) is what triggers the SDK fallback;
@@ -786,11 +705,7 @@ def _entries_from_rollout(
     # than render commands without the conversation. A truly empty parse
     # against an equally empty Thread.turns falls through so the page can
     # show its empty-state placeholder.
-    if getattr(thread, "turns", None) and not any(
-        entry["kind"] in ("user", "agent") for entry in entries
-    ):
-        logger.warning(
-            "rollout %s yielded no user/agent entries; falling back to SDK turns", path
-        )
+    if getattr(thread, "turns", None) and not any(entry["kind"] in ("user", "agent") for entry in entries):
+        logger.warning("rollout %s yielded no user/agent entries; falling back to SDK turns", path)
         return None
     return entries

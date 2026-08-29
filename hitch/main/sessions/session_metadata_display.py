@@ -14,7 +14,6 @@ from typing import Any
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.urls import reverse
 
-from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -31,6 +30,7 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
+from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 
 _SESSION_PAGE_SIZE = 50
 
@@ -79,9 +79,7 @@ def _legacy_system_metadata_page(
     metadata_page = list(same_second_rows[:_SESSION_PAGE_SIZE])
     if len(metadata_page) < _SESSION_PAGE_SIZE:
         earlier_rows = rows.filter(codex_updated_at__lt=cursor_second_start)
-        metadata_page.extend(
-            earlier_rows[: _SESSION_PAGE_SIZE - len(metadata_page)]
-        )
+        metadata_page.extend(earlier_rows[: _SESSION_PAGE_SIZE - len(metadata_page)])
     if not metadata_page or len(metadata_page) < _SESSION_PAGE_SIZE:
         return metadata_page, "", False
 
@@ -97,9 +95,7 @@ def _legacy_system_metadata_page(
         )
         return (
             metadata_page,
-            _index_cursor_for_legacy_second(index_cursor, last_metadata)
-            if has_more
-            else "",
+            _index_cursor_for_legacy_second(index_cursor, last_metadata) if has_more else "",
             has_more,
         )
 
@@ -117,9 +113,7 @@ def _index_cursor_second_bounds(index_cursor: _IndexCursor) -> tuple[datetime, d
     return cursor_second_start, cursor_second_start + timedelta(seconds=1)
 
 
-def _metadata_in_cursor_second(
-    metadata: SessionMetadata, *, start: datetime, end: datetime
-) -> bool:
+def _metadata_in_cursor_second(metadata: SessionMetadata, *, start: datetime, end: datetime) -> bool:
     updated_at = metadata.codex_updated_at
     return isinstance(updated_at, datetime) and start <= updated_at < end
 
@@ -129,9 +123,7 @@ def _metadata_rows_after_index_cursor(
     index_cursor: _IndexCursor,
 ) -> QuerySet[SessionMetadata]:
     if not index_cursor.exact_updated_at:
-        cursor_second_start, cursor_second_end = _index_cursor_second_bounds(
-            index_cursor
-        )
+        cursor_second_start, cursor_second_end = _index_cursor_second_bounds(index_cursor)
         return rows.filter(
             Q(codex_updated_at__lt=cursor_second_start)
             | Q(
@@ -152,28 +144,20 @@ def _filter_visible_session_metadata_rows(
     *,
     accepted_visible_thread_ids: set[str],
 ) -> QuerySet[SessionMetadata]:
-    system_run_exists = (
-        SystemAgentRun.objects.filter(thread_id=OuterRef("thread_id"))
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+    system_run_exists = system_session_owner_rows(
+        SystemAgentRun.objects.filter(thread_id=OuterRef("thread_id")).exclude(thread_id="")
     )
-    system_instance_exists = (
+    system_instance_exists = system_session_owner_rows(
         CodexInstance.objects.filter(
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             thread_id=OuterRef("thread_id"),
-        )
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        ).exclude(thread_id="")
     )
     rows = rows.annotate(
         _has_system_run=Exists(system_run_exists),
         _has_system_instance=Exists(system_instance_exists),
     )
-    visible_filter = (
-        Q(is_hidden_system_session=False)
-        & Q(_has_system_run=False)
-        & Q(_has_system_instance=False)
-    )
+    visible_filter = Q(is_hidden_system_session=False) & Q(_has_system_run=False) & Q(_has_system_instance=False)
     if accepted_visible_thread_ids:
         visible_filter |= Q(thread_id__in=accepted_visible_thread_ids)
     return rows.filter(visible_filter)
@@ -207,9 +191,7 @@ def _sorted_visible_index_rows(
     )
 
 
-def _ensure_indexed_system_threads(
-    system_thread_ids: set[str], *, projects: list[Project]
-) -> None:
+def _ensure_indexed_system_threads(system_thread_ids: set[str], *, projects: list[Project]) -> None:
     missing_thread_ids = set(system_thread_ids) - set(
         SessionMetadata.objects.filter(
             thread_id__in=system_thread_ids,
@@ -219,7 +201,7 @@ def _ensure_indexed_system_threads(
     )
     if not missing_thread_ids:
         return
-    instances = (
+    instances = system_session_owner_rows(
         CodexInstance.objects.filter(
             thread_id__in=missing_thread_ids,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -238,7 +220,7 @@ def _ensure_indexed_system_threads(
             projects=projects,
             name=instance.display_author or instance.agent_kind,
             preview=instance.prompt,
-            is_hidden_system_session=instance.agent_kind != demo.DEMO_AGENT_KIND,
+            is_hidden_system_session=True,
         )
 
 
@@ -270,9 +252,7 @@ def _session_row_for_metadata(
                 "stage_main_updated_at": metadata.codex_updated_at,
                 "stage_cache_key": metadata.derived_stage,
                 "stage_cache_mtime_ns": metadata.derived_stage_source_mtime_ns,
-                "stage_pr_refresh_attempted_at": (
-                    metadata.derived_stage_pr_refresh_attempted_at
-                ),
+                "stage_pr_refresh_attempted_at": (metadata.derived_stage_pr_refresh_attempted_at),
             }
         )
     if system_only:
@@ -284,16 +264,8 @@ def _session_row_for_metadata(
         row.update(
             {
                 "detail_url": reverse("system_session", kwargs={"session_id": metadata.thread_id}),
-                "system_kind": (
-                    _system_agent_run_label(run, instance)
-                    if instance is not None
-                    else "Hitch system"
-                ),
-                "system_status": (
-                    _system_agent_status(run, instance)
-                    if instance is not None
-                    else "untracked"
-                ),
+                "system_kind": (_system_agent_run_label(run, instance) if instance is not None else "Hitch system"),
+                "system_status": (_system_agent_status(run, instance) if instance is not None else "untracked"),
             }
         )
     return row
@@ -318,9 +290,9 @@ def _qa_activity_updated_at_by_metadata_thread_ids(
         run_thread_ids &= hidden_thread_ids
     hidden_metadata_by_thread_id = {
         metadata.thread_id: metadata
-        for metadata in SessionMetadata.objects.filter(
-            thread_id__in=run_thread_ids
-        ).only("thread_id", "codex_updated_at", "codex_last_synced_at")
+        for metadata in SessionMetadata.objects.filter(thread_id__in=run_thread_ids).only(
+            "thread_id", "codex_updated_at", "codex_last_synced_at"
+        )
     }
     updated_at_by_main_thread: dict[str, Any] = {}
     for run in runs:
@@ -376,12 +348,8 @@ def _index_cursor_for_metadata_row(metadata: SessionMetadata) -> _IndexCursor:
     )
 
 
-def _index_cursor_for_legacy_second(
-    index_cursor: _IndexCursor, metadata: SessionMetadata
-) -> str:
-    return _index_cursor_for_sort_key(
-        (float(int(index_cursor.updated_at)), metadata.thread_id)
-    )
+def _index_cursor_for_legacy_second(index_cursor: _IndexCursor, metadata: SessionMetadata) -> str:
+    return _index_cursor_for_sort_key((float(int(index_cursor.updated_at)), metadata.thread_id))
 
 
 def _non_negative_int(value: str) -> int:

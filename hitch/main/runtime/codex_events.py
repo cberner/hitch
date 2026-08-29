@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from hitch.main.legacy_agent_records import (
+    is_legacy_redacted_agent_record,
+    without_legacy_redacted_agent_records,
+)
 from hitch.main.models import CodexInstance
 from hitch.main.runtime.pr_reviews import latest_effective_reviews_by_author
 from hitch.main.runtime.sdk_values import is_nonbool_int, positive_int, string_from_any
@@ -26,13 +30,9 @@ ITEM_COMPLETED_METHOD = "item/completed"
 NATIVE_REVIEW_COMPLETED_METHOD = "hitch/nativeReview/completed"
 TURN_DIFF_UPDATED_METHOD = "turn/diff/updated"
 
-_TURN_DIFF_EVENT_LINE_RE = re.compile(
-    rb'^\s*\{\s*"method"\s*:\s*"turn/diff/updated"(?:\s*[,}])'
-)
+_TURN_DIFF_EVENT_LINE_RE = re.compile(rb'^\s*\{\s*"method"\s*:\s*"turn/diff/updated"(?:\s*[,}])')
 
-_GITHUB_PR_URL_RE = re.compile(
-    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
-)
+_GITHUB_PR_URL_RE = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)")
 _PR_INFO_TOOLS = frozenset(
     {
         "create_pull_request",
@@ -54,9 +54,7 @@ _CI_STATUS_TOOLS = frozenset(
     }
 )
 _SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-_FAILURE_CONCLUSIONS = frozenset(
-    {"action_required", "cancelled", "failure", "startup_failure", "timed_out"}
-)
+_FAILURE_CONCLUSIONS = frozenset({"action_required", "cancelled", "failure", "startup_failure", "timed_out"})
 _PR_TEXT_MAX_CHARS = 500
 _PR_DETAIL_LIMIT = 5
 _T = TypeVar("_T")
@@ -72,9 +70,7 @@ def append_event(path: str | Path, method: str, payload: dict[str, Any]) -> None
 def prune_diff_events(events_path: str | Path) -> int:
     """Atomically remove obsolete full-diff notifications from a finished log."""
     path = Path(events_path)
-    temporary_path = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.compact"
-    )
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.compact")
     original_stat = path.stat()
     original_size = original_stat.st_size
     removed = False
@@ -154,21 +150,21 @@ def latest_goal_for_thread(thread_id: str) -> str:
     to ``CodexInstance.events_path`` for SSE replay, so the session view can
     recover the latest objective from those append-only logs.
     """
-    paths = CodexInstance.objects.filter(thread_id=thread_id).order_by("pk").values_list(
-        "events_path", flat=True
+    paths = (
+        without_legacy_redacted_agent_records(CodexInstance.objects.filter(thread_id=thread_id))
+        .order_by("pk")
+        .values_list("events_path", flat=True)
     )
     return latest_goal_from_event_paths(paths, thread_id=thread_id) or ""
 
 
-def latest_goal_from_event_paths(
-    paths: Iterable[str | Path], *, thread_id: str
-) -> str | None:
+def latest_goal_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> str | None:
     current = _latest_goal_event_from_event_paths(paths, thread_id=thread_id)
     return current.objective if current is not None else None
 
 
 def latest_goal_tokens_for_instance(instance: CodexInstance | None) -> int | None:
-    if instance is None or not instance.events_path:
+    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
         return None
     return latest_goal_tokens_from_event_paths(
         [instance.events_path],
@@ -176,16 +172,12 @@ def latest_goal_tokens_for_instance(instance: CodexInstance | None) -> int | Non
     )
 
 
-def latest_goal_tokens_from_event_paths(
-    paths: Iterable[str | Path], *, thread_id: str
-) -> int | None:
+def latest_goal_tokens_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> int | None:
     current = _latest_goal_event_from_event_paths(paths, thread_id=thread_id)
     return current.tokens_used if current is not None else None
 
 
-def _latest_goal_event_from_event_paths(
-    paths: Iterable[str | Path], *, thread_id: str
-) -> _GoalEvent | None:
+def _latest_goal_event_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> _GoalEvent | None:
     """Return the final goal state after applying goal events in ``paths``.
 
     Workers for the same thread can overlap, so prefer the per-notification
@@ -206,7 +198,7 @@ def _latest_goal_event_from_event_paths(
 
 def latest_task_plan_for_instance(instance: CodexInstance | None) -> TaskPlanSnapshot | None:
     """Return the latest visible task-plan snapshot for an active worker."""
-    if instance is None or not instance.events_path:
+    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
         return None
     return latest_task_plan_from_event_paths(
         [instance.events_path],
@@ -225,16 +217,14 @@ def latest_task_plan_for_thread(thread_id: str) -> TaskPlanSnapshot | None:
     plan only survives a reload when the latest turn actually produced one.
     """
     latest = (
-        CodexInstance.objects.filter(thread_id=thread_id)
+        without_legacy_redacted_agent_records(CodexInstance.objects.filter(thread_id=thread_id))
         .order_by("-started_at", "-pk")
         .first()
     )
     return latest_task_plan_for_instance(latest)
 
 
-def latest_task_plan_from_event_paths(
-    paths: Iterable[str | Path], *, thread_id: str
-) -> TaskPlanSnapshot | None:
+def latest_task_plan_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> TaskPlanSnapshot | None:
     """Return the final ``turn/plan/updated`` state after applying event logs."""
     current: _TaskPlanEvent | None = None
     for event in _parsed_events_from_paths(
@@ -249,7 +239,7 @@ def latest_task_plan_from_event_paths(
 
 def latest_pr_snapshot_for_instance(instance: CodexInstance | None) -> dict[str, Any] | None:
     """Return the latest GitHub PR state observed by a worker, if any."""
-    if instance is None or not instance.events_path:
+    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
         return None
     return latest_pr_snapshot_from_event_paths(
         [instance.events_path],
@@ -257,9 +247,7 @@ def latest_pr_snapshot_for_instance(instance: CodexInstance | None) -> dict[str,
     )
 
 
-def latest_pr_snapshot_from_event_paths(
-    paths: Iterable[str | Path], *, thread_id: str
-) -> dict[str, Any] | None:
+def latest_pr_snapshot_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> dict[str, Any] | None:
     """Recover a compact PR handoff snapshot from completed GitHub MCP calls.
 
     The PR workflow's visible turn already checks GitHub via MCP tools. Persisting
@@ -374,11 +362,7 @@ def pr_observation_result_from_turns(
                 if _pr_update_belongs_to_current_pr(working, update):
                     accepted_updates.append(update)
                     _merge_pr_snapshot_update(working, update)
-            if (
-                not accepted_updates
-                and turn.is_completed
-                and turn.has_lifecycle_activity
-            ):
+            if not accepted_updates and turn.is_completed and turn.has_lifecycle_activity:
                 updates_since_clear = []
                 current_snapshot = None
                 superseded_by_lifecycle = True
@@ -413,9 +397,7 @@ def _event_from_line(raw: str) -> dict[str, Any] | None:
     return event if isinstance(event, dict) else None
 
 
-def _goal_event_from_event(
-    event: dict[str, Any], thread_id: str, fallback_order: int
-) -> _GoalEvent | None:
+def _goal_event_from_event(event: dict[str, Any], thread_id: str, fallback_order: int) -> _GoalEvent | None:
     method = event.get("method")
     if method not in GOAL_METHODS:
         return None
@@ -449,9 +431,7 @@ def _goal_tokens_used(goal: dict[str, Any]) -> int | None:
     return None
 
 
-def _task_plan_event_from_event(
-    event: dict[str, Any], thread_id: str, fallback_order: int
-) -> _TaskPlanEvent | None:
+def _task_plan_event_from_event(event: dict[str, Any], thread_id: str, fallback_order: int) -> _TaskPlanEvent | None:
     if event.get("method") != TASK_PLAN_UPDATED_METHOD:
         return None
     payload = event.get("payload")
@@ -483,11 +463,7 @@ def _task_plan_snapshot(
     plan: list[Any],
     order: tuple[int, int, int],
 ) -> TaskPlanSnapshot:
-    steps = tuple(
-        step
-        for raw_step in plan
-        if (step := _task_plan_step(raw_step)) is not None
-    )
+    steps = tuple(step for raw_step in plan if (step := _task_plan_step(raw_step)) is not None)
     explanation = explanation.strip()
     return TaskPlanSnapshot(explanation=explanation, steps=steps, order=order)
 
@@ -598,9 +574,7 @@ def _normalized_github_tool(item: dict[str, Any]) -> str:
 def _copy_pr_identity_from_args(target: dict[str, Any], raw_args: Any) -> None:
     if not isinstance(raw_args, dict):
         return
-    repo = string_from_any(
-        raw_args.get("repository_full_name") or raw_args.get("repo_full_name")
-    )
+    repo = string_from_any(raw_args.get("repository_full_name") or raw_args.get("repo_full_name"))
     if repo:
         target["repository_full_name"] = repo
     number = positive_int(raw_args.get("pr_number") or raw_args.get("pull_number"))
@@ -689,9 +663,7 @@ def _copy_pr_info_fields(target: dict[str, Any], source: dict[str, Any]) -> None
         value = source.get(source_key)
         if isinstance(value, bool):
             target[target_key] = value
-    repo = string_from_any(
-        source.get("repository_full_name") or source.get("repo_full_name")
-    )
+    repo = string_from_any(source.get("repository_full_name") or source.get("repo_full_name"))
     if repo:
         target["repository_full_name"] = repo
 
@@ -714,9 +686,7 @@ def _copy_review_thread_fields(target: dict[str, Any], source: dict[str, Any]) -
     unresolved = [
         thread
         for thread in threads
-        if isinstance(thread, dict)
-        and thread.get("is_resolved") is not True
-        and thread.get("is_outdated") is not True
+        if isinstance(thread, dict) and thread.get("is_resolved") is not True and thread.get("is_outdated") is not True
     ]
     target["review_thread_count"] = len(threads)
     target["unresolved_thread_count"] = len(unresolved)
@@ -731,9 +701,7 @@ def _copy_review_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
     states = [
         state.upper()
         for review in reviews
-        if isinstance(review, dict)
-        and isinstance((state := review.get("state")), str)
-        and state
+        if isinstance(review, dict) and isinstance((state := review.get("state")), str) and state
     ]
     target["review_count"] = len(reviews)
     if "CHANGES_REQUESTED" in states:
@@ -754,8 +722,7 @@ def _copy_reaction_fields(target: dict[str, Any], source: dict[str, Any]) -> Non
     contents = [
         content
         for reaction in reactions
-        if isinstance(reaction, dict)
-        and isinstance((content := reaction.get("content")), str)
+        if isinstance(reaction, dict) and isinstance((content := reaction.get("content")), str)
     ]
     target["reaction_count"] = len(reactions)
     if "+1" in contents and target.get("review_signal") != "changes_requested":
@@ -778,9 +745,7 @@ def _copy_ci_fields(
         observed_run_id = positive_int(raw_args.get("run_id"))
         if observed_run_id is not None:
             target["observed_run_id"] = observed_run_id
-            target["workflow_run_ids"] = _merge_run_ids(
-                target.get("workflow_run_ids"), [observed_run_id]
-            )
+            target["workflow_run_ids"] = _merge_run_ids(target.get("workflow_run_ids"), [observed_run_id])
     for source in result_values:
         if tool == "get_commit_combined_status":
             status = _ci_status_from_statuses(source.get("statuses"))
@@ -803,9 +768,7 @@ def _copy_ci_fields(
             # follow-up job observations correlate by run id.
             run_ids = _workflow_run_ids_from_runs(source.get("workflow_runs"))
             if run_ids:
-                target["workflow_run_ids"] = _merge_run_ids(
-                    target.get("workflow_run_ids"), run_ids
-                )
+                target["workflow_run_ids"] = _merge_run_ids(target.get("workflow_run_ids"), run_ids)
             status = _ci_status_from_runs(source.get("workflow_runs"))
             if status:
                 # Workflow-runs observations DO speak for the same check-run
@@ -855,8 +818,7 @@ def _ci_status_from_statuses(raw_statuses: Any) -> str:
     states = [
         state.lower()
         for status in raw_statuses
-        if isinstance(status, dict)
-        and isinstance((state := status.get("state")), str)
+        if isinstance(status, dict) and isinstance((state := status.get("state")), str)
     ]
     if any(state in {"failure", "error"} for state in states):
         return "failure"
@@ -889,9 +851,7 @@ def _ci_status_from_runs(raw_runs: Any) -> str:
             has_pending = True
             continue
         saw_completed = True
-        if conclusion in _FAILURE_CONCLUSIONS or (
-            conclusion and conclusion not in _SUCCESS_CONCLUSIONS
-        ):
+        if conclusion in _FAILURE_CONCLUSIONS or (conclusion and conclusion not in _SUCCESS_CONCLUSIONS):
             has_failure = True
     if has_failure:
         return "failure"
@@ -925,9 +885,7 @@ def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
             pending.append(name)
             continue
         saw_completed = True
-        if conclusion in _FAILURE_CONCLUSIONS or (
-            conclusion and conclusion not in _SUCCESS_CONCLUSIONS
-        ):
+        if conclusion in _FAILURE_CONCLUSIONS or (conclusion and conclusion not in _SUCCESS_CONCLUSIONS):
             failing.append(name)
     if failing:
         return "failure", failing[:_PR_DETAIL_LIMIT], pending[:_PR_DETAIL_LIMIT]
@@ -936,9 +894,7 @@ def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
     return ("success", [], []) if saw_completed else ("unknown", [], [])
 
 
-def _merge_pr_snapshot_update(
-    snapshot: dict[str, Any], update: _PrSnapshotUpdate
-) -> None:
+def _merge_pr_snapshot_update(snapshot: dict[str, Any], update: _PrSnapshotUpdate) -> None:
     values = dict(update.values)
     if _pr_snapshot_identity_changed(snapshot, values):
         snapshot.clear()
@@ -965,11 +921,7 @@ def _merge_pr_snapshot_update(
             if key == "review_signal" and snapshot.get(key) != "thumbs_up":
                 snapshot[key] = ""
             continue
-        if (
-            key == "review_signal"
-            and value == "thumbs_up"
-            and snapshot.get("review_signal") == "changes_requested"
-        ):
+        if key == "review_signal" and value == "thumbs_up" and snapshot.get("review_signal") == "changes_requested":
             continue
         if key == "workflow_run_ids" and isinstance(value, list):
             # Run ids accumulate across observations (an empty list never
@@ -980,9 +932,7 @@ def _merge_pr_snapshot_update(
         snapshot[key] = value
 
 
-def _pr_snapshot_identity_changed(
-    current: dict[str, Any], update: dict[str, Any]
-) -> bool:
+def _pr_snapshot_identity_changed(current: dict[str, Any], update: dict[str, Any]) -> bool:
     if not current:
         return False
     for key in ("repository_full_name", "url"):
@@ -1052,9 +1002,7 @@ def _pr_snapshot_has_identity(snapshot: dict[str, Any] | None) -> bool:
     )
 
 
-def _pr_snapshot_matches_current_pr(
-    current: dict[str, Any] | None, update: dict[str, Any] | None
-) -> bool:
+def _pr_snapshot_matches_current_pr(current: dict[str, Any] | None, update: dict[str, Any] | None) -> bool:
     if current is None or update is None:
         return False
     if not _pr_snapshot_has_identity(current) or not _pr_snapshot_has_identity(update):
@@ -1062,18 +1010,14 @@ def _pr_snapshot_matches_current_pr(
     return not _pr_snapshot_identity_changed(current, update)
 
 
-def _pr_update_belongs_to_current_pr(
-    current: dict[str, Any] | None, update: _PrSnapshotUpdate
-) -> bool:
+def _pr_update_belongs_to_current_pr(current: dict[str, Any] | None, update: _PrSnapshotUpdate) -> bool:
     if not _pr_snapshot_has_identity(current):
         return False
     update_snapshot = _finalize_pr_snapshot(dict(update.values))
     if _pr_snapshot_has_identity(update_snapshot):
         return _pr_snapshot_matches_current_pr(current, update_snapshot)
     update_repo = string_from_any(update.values.get("repository_full_name"))
-    current_repo = (
-        string_from_any(current.get("repository_full_name")) if current else ""
-    )
+    current_repo = string_from_any(current.get("repository_full_name")) if current else ""
     if update_repo and current_repo and update_repo != current_repo:
         return False
     update_commit = string_from_any(update.values.get("latest_commit_sha"))
@@ -1098,11 +1042,7 @@ def _pr_workflow_run_ids(snapshot: dict[str, Any] | None) -> set[int]:
     raw = snapshot.get("workflow_run_ids")
     if not isinstance(raw, list):
         return set()
-    return {
-        value
-        for value in raw
-        if is_nonbool_int(value) and value > 0
-    }
+    return {value for value in raw if is_nonbool_int(value) and value > 0}
 
 
 def _workflow_run_ids_from_runs(raw_runs: Any) -> list[int]:
@@ -1112,9 +1052,7 @@ def _workflow_run_ids_from_runs(raw_runs: Any) -> list[int]:
     for run in raw_runs:
         if not isinstance(run, dict):
             continue
-        run_id = positive_int(
-            run.get("id") or run.get("run_id") or run.get("databaseId")
-        )
+        run_id = positive_int(run.get("id") or run.get("run_id") or run.get("databaseId"))
         if run_id is not None and run_id not in ids:
             ids.append(run_id)
     return ids
@@ -1126,12 +1064,7 @@ def _merge_run_ids(existing: Any, new: list[int]) -> list[int]:
         if not isinstance(source, list):
             continue
         for value in source:
-            if (
-                isinstance(value, int)
-                and not isinstance(value, bool)
-                and value > 0
-                and value not in merged
-            ):
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0 and value not in merged:
                 merged.append(value)
     return merged
 

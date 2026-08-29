@@ -15,8 +15,7 @@ from django.conf import settings
 
 from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
 
-_SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
-_WORKFLOW_KINDS = (SystemWorkflow.KIND_PR_QA, _SPEC_CRITIC_WORKFLOW_KIND)
+_WORKFLOW_KINDS = (SystemWorkflow.KIND_PR_QA,)
 
 
 class WorkflowStartBlockedError(RuntimeError):

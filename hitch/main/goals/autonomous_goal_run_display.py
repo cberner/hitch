@@ -26,8 +26,10 @@ from hitch.main.models import (
 from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import token_usage
 from hitch.main.sessions.session_settings import (
+    _BARE_REPO_PROJECT_VALUE,
     _active_project_from_request,
     _project_for_proposed_session,
+    _target_cwd_for_proposed_session,
 )
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
 from hitch.main.workflows import autonomous_goals, system_agents
@@ -498,14 +500,25 @@ def _attach_proposed_session_display_state(
             proposed_session
         )
         project = _project_for_proposed_session(proposed_session)
+        target_cwd = _target_cwd_for_proposed_session(proposed_session)
         proposed_session.accept_project_id = (  # type: ignore[attr-defined]
-            project.pk if project is not None else ""
+            project.pk
+            if project is not None
+            else _BARE_REPO_PROJECT_VALUE if target_cwd else ""
+        )
+        proposed_session.accept_cwd = (  # type: ignore[attr-defined]
+            "" if project is not None else target_cwd
         )
         auto_pr_enabled, auto_qa_enabled = (
             _auto_review_settings_for_proposed_session(proposed_session)
         )
         proposed_session.accept_auto_pr = auto_pr_enabled  # type: ignore[attr-defined]
         proposed_session.accept_auto_qa = auto_qa_enabled  # type: ignore[attr-defined]
+        metadata = _proposal_metadata(proposed_session)
+        proposed_session.accept_auto_review_explicit = (  # type: ignore[attr-defined]
+            proposed_session.autonomous_goal is not None
+            or metadata.get("resume_source_session") is True
+        )
         proposed_session.stack_label = _proposed_session_stack_label(  # type: ignore[attr-defined]
             proposed_session
         )
@@ -604,7 +617,7 @@ def _no_proposal_stall_display(metadata: dict[str, object]) -> str:
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
     if proposed_session.prompt.strip():
-        return proposed_session.prompt.strip()
+        return proposed_session.prompt
     parts = [
         "Go ahead and implement this proposed session.",
         "",

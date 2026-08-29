@@ -50,7 +50,6 @@ from hitch.main.test.views_helpers import (
     _PNG_BYTES,
     _PR_PROMPT,
     _QA_PROMPT,
-    _SPEC_CRITIC_COOKIE,
     _WEB_SEARCH_COOKIE,
     _WEBP_BYTES,
 )
@@ -71,7 +70,6 @@ class SendMessageViewTests(TestCase):
             use_worktrees=False,
             auto_pr_enabled=False,
             auto_qa_enabled=False,
-            spec_critic_enabled=False,
             web_search_mode="",
             show_archived_sessions=False,
             last_selected_repo="",
@@ -1337,125 +1335,6 @@ class SendMessageViewTests(TestCase):
         )
         # The model-sensitive turn recovered the thread model via a live resume.
         mock_codex.assert_called()
-
-    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_spec_critic_resume_intercepts_ambiguous_implementation_prompt(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_spec_critic: MagicMock,
-        mock_spec_critic_should_run: MagicMock,
-    ) -> None:
-        _seed_cookies(
-            self.client,
-            **{_SPEC_CRITIC_COOKIE: "true", _WEB_SEARCH_COOKIE: "cached"},
-        )
-        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "Improve onboarding"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_not_called()
-        mock_spec_critic_should_run.assert_not_called()
-        mock_start_spec_critic.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            prompt="Improve onboarding",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions=None,
-            enable_memories=False,
-            web_search_mode="cached",
-            initial_user_message_index=0,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
-            lifecycle_lock_held=True,
-        )
-
-    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_spec_critic_resume_preserves_auto_merge_settings(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_spec_critic: MagicMock,
-        mock_spec_critic_should_run: MagicMock,
-    ) -> None:
-        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "Improve onboarding"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_not_called()
-        mock_spec_critic_should_run.assert_not_called()
-        kwargs = mock_start_spec_critic.call_args.kwargs
-        self.assertFalse(kwargs["auto_pr_enabled"])
-        self.assertTrue(kwargs["auto_qa_enabled"])
-        self.assertTrue(kwargs["auto_merge_to_local_branch"])
-        self.assertEqual(kwargs["auto_merge_branch"], "main")
-
-    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run")
-    @patch("hitch.main.workflows.spec_critic.start_spec_critic_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_spec_critic_resume_defers_classification_to_background(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_spec_critic: MagicMock,
-        mock_spec_critic_should_run: MagicMock,
-    ) -> None:
-        # The view no longer branches on the classifier: it always hands off to
-        # the workflow, which classifies on a background thread and either runs
-        # the critique or the original prompt. The request must not block on the
-        # classifier or spawn the turn synchronously.
-        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={
-                "prompt": (
-                    'Change the settings checkbox label from "Auto-PR" '
-                    'to "Open PR automatically".'
-                )
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spec_critic_should_run.assert_not_called()
-        mock_spawn.assert_not_called()
-        mock_start_spec_critic.assert_called_once()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")

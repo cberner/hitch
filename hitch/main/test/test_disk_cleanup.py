@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, call, patch
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -81,35 +80,25 @@ class DiskCleanupTests(TestCase):
 
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20)
     def test_saved_global_max_allowed_percent_overrides_env(self) -> None:
-        GlobalSettings.objects.create(
-            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
-        )
+        GlobalSettings.objects.create(pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5)
 
         self.assertEqual(disk_cleanup._max_allowed_percent(), 35.5)
 
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
     @patch("hitch.main.runtime.disk_cleanup.logger.exception")
-    def test_max_allowed_percent_falls_back_when_saved_global_read_fails(
-        self, mock_log_exception: MagicMock
-    ) -> None:
+    def test_max_allowed_percent_falls_back_when_saved_global_read_fails(self, mock_log_exception: MagicMock) -> None:
         with patch(
             "hitch.main.runtime.disk_cleanup.GlobalSettings.objects.filter",
             side_effect=RuntimeError("database unavailable"),
         ):
             self.assertEqual(disk_cleanup._max_allowed_percent(), 35.0)
 
-        mock_log_exception.assert_called_once_with(
-            "failed to load saved Hitch disk usage setting"
-        )
+        mock_log_exception.assert_called_once_with("failed to load saved Hitch disk usage setting")
 
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
     @patch("hitch.main.runtime.disk_cleanup.logger.warning")
-    def test_invalid_saved_global_max_allowed_percent_uses_default(
-        self, mock_warning: MagicMock
-    ) -> None:
-        GlobalSettings.objects.create(
-            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=100.1
-        )
+    def test_invalid_saved_global_max_allowed_percent_uses_default(self, mock_warning: MagicMock) -> None:
+        GlobalSettings.objects.create(pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=100.1)
 
         self.assertEqual(
             disk_cleanup._max_allowed_percent(),
@@ -234,10 +223,7 @@ class DiskCleanupTests(TestCase):
             completed_path = events_dir / "completed.jsonl"
             active_path = events_dir / "active.jsonl"
             outside_path = root / "outside.jsonl"
-            diff_event = (
-                '{"method": "turn/diff/updated", '
-                '"payload": {"diff": "large"}}\n'
-            )
+            diff_event = '{"method": "turn/diff/updated", "payload": {"diff": "large"}}\n'
             terminal_event = '{"method": "turn/completed", "payload": {}}\n'
             for path in (completed_path, active_path, outside_path):
                 path.write_text(diff_event + terminal_event, encoding="utf-8")
@@ -305,18 +291,11 @@ class DiskCleanupTests(TestCase):
                     return_value=300,
                 ),
                 patch(
-                    "hitch.main.runtime.disk_cleanup."
-                    "_prune_oversized_finished_event_logs",
+                    "hitch.main.runtime.disk_cleanup._prune_oversized_finished_event_logs",
                     return_value=150,
                 ) as mock_prune,
-                patch(
-                    "hitch.main.runtime.disk_cleanup."
-                    "invalidate_hitch_home_disk_usage"
-                ) as mock_invalidate,
-                patch(
-                    "hitch.main.runtime.disk_cleanup."
-                    "cleanup_managed_worktree_path"
-                ) as mock_cleanup,
+                patch("hitch.main.runtime.disk_cleanup.invalidate_hitch_home_disk_usage") as mock_invalidate,
+                patch("hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path") as mock_cleanup,
             ):
                 cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
@@ -510,10 +489,7 @@ class DiskCleanupTests(TestCase):
                 archived_at=archived_at,
             )
             used_bytes = disk_cleanup._directory_size(hitch_home)
-            first_unique_bytes = (
-                disk_cleanup._directory_size(first)
-                - disk_cleanup._allocated_size(first_blob.lstat())
-            )
+            first_unique_bytes = disk_cleanup._directory_size(first) - disk_cleanup._allocated_size(first_blob.lstat())
             limit_bytes = used_bytes - first_unique_bytes - 1
             removed_paths: list[str] = []
 
@@ -685,7 +661,7 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
 
-    def test_demo_turn_on_visible_user_session_protects_worktree(self) -> None:
+    def test_legacy_demo_turn_on_user_session_protects_worktree(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -703,7 +679,7 @@ class DiskCleanupTests(TestCase):
                 events_path="/tmp/events.jsonl",
                 status=CodexInstance.STATUS_COMPLETED,
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=demo.DEMO_AGENT_KIND,
+                agent_kind="demo",
             )
 
             cleaned = self._run_cleanup(
@@ -788,17 +764,8 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            old_created_at = (
-                timezone.now()
-                - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
-                - timedelta(hours=1)
-            )
-            orphan_path = (
-                root
-                / "managed"
-                / "repo"
-                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
-            )
+            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
+            orphan_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             with patch(
                 "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[orphan_path],
@@ -823,25 +790,12 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            old_created_at = (
-                timezone.now()
-                - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
-                - timedelta(hours=1)
-            )
+            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
             metadata_path = self._managed_path(root, "metadata")
-            outside_path = (
-                root
-                / "outside"
-                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
-            )
+            outside_path = root / "outside" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             bad_shape_path = root / "managed" / "repo" / "not-a-managed-name"
             bad_date_path = root / "managed" / "repo" / "20261301121212-abcdef12"
-            valid_path = (
-                root
-                / "managed"
-                / "repo"
-                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-12345678"
-            )
+            valid_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-12345678"
             self._session(thread_id="visible", cwd=metadata_path)
             with patch(
                 "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
@@ -871,12 +825,7 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            orphan_path = (
-                root
-                / "managed"
-                / "repo"
-                / f"{timezone.now().strftime('%Y%m%d%H%M%S')}-abcdef12"
-            )
+            orphan_path = root / "managed" / "repo" / f"{timezone.now().strftime('%Y%m%d%H%M%S')}-abcdef12"
             with patch(
                 "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[orphan_path],
@@ -899,17 +848,8 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            old_created_at = (
-                timezone.now()
-                - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
-                - timedelta(hours=1)
-            )
-            orphan_path = (
-                root
-                / "managed"
-                / "repo"
-                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
-            )
+            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
+            orphan_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             CodexInstance.objects.create(
                 pid=123,
                 thread_id="active",
@@ -1238,9 +1178,7 @@ class DiskUsageSnapshotTests(SimpleTestCase):
             patch("hitch.main.runtime.disk_cleanup.close_old_connections") as mock_close,
             patch.object(disk_cleanup.logger, "exception") as mock_log,
         ):
-            self.assertEqual(
-                disk_cleanup.cached_hitch_home_disk_usage(), stale_usage
-            )
+            self.assertEqual(disk_cleanup.cached_hitch_home_disk_usage(), stale_usage)
             self._run_scheduled_refresh(mock_thread)
             self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
 
@@ -1311,9 +1249,7 @@ class DiskUsageSnapshotTests(SimpleTestCase):
         )
         disk_cleanup._disk_usage_generation = 7
 
-        with patch.object(
-            disk_cleanup, "_publish_disk_usage_invalidation"
-        ) as mock_publish:
+        with patch.object(disk_cleanup, "_publish_disk_usage_invalidation") as mock_publish:
             disk_cleanup.invalidate_hitch_home_disk_usage()
 
         mock_publish.assert_called_once_with()
@@ -1334,9 +1270,7 @@ class DiskUsageSnapshotTests(SimpleTestCase):
             self.assertEqual(disk_cleanup._disk_usage_invalidation_token(), "")
 
         token_path.read_text.assert_called_once_with(encoding="utf-8")
-        mock_log.assert_called_once_with(
-            "failed to read Hitch disk usage invalidation token"
-        )
+        mock_log.assert_called_once_with("failed to read Hitch disk usage invalidation token")
 
     def test_shared_token_publish_failures_are_nonfatal(self) -> None:
         with (

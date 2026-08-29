@@ -32,7 +32,6 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _AUTO_QA_COOKIE = "hitch_auto_qa"
-_SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -585,8 +584,6 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Auto-PR")
         self.assertContains(response, 'name="auto_qa"')
         self.assertContains(response, "Auto-QA")
-        self.assertContains(response, 'name="spec_critic"')
-        self.assertContains(response, "Spec Critic preflight")
         self.assertContains(response, 'name="web_search_mode"')
         self.assertContains(response, "Web search")
         self.assertContains(response, 'value="disabled"')
@@ -788,11 +785,6 @@ class SettingsPageRenderTests(TestCase):
                 _AUTO_QA_COOKIE,
                 "true",
                 'name="auto_qa" value="true" checked',
-            ),
-            "spec critic": (
-                _SPEC_CRITIC_COOKIE,
-                "true",
-                'name="spec_critic" value="true" checked',
             ),
             "web search": (
                 _WEB_SEARCH_COOKIE,
@@ -2368,14 +2360,6 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("auto-QA disabled", {}, {}, _AUTO_QA_COOKIE, "false"),
             (
-                "Spec Critic enabled",
-                {"spec_critic": "true"},
-                {},
-                _SPEC_CRITIC_COOKIE,
-                "true",
-            ),
-            ("Spec Critic disabled", {}, {}, _SPEC_CRITIC_COOKIE, "false"),
-            (
                 "memories enabled",
                 {"enable_memories": "true"},
                 {},
@@ -2460,12 +2444,6 @@ class UpdateSettingsViewTests(TestCase):
                 _AUTO_QA_COOKIE,
                 "true",
                 {"auto_qa": "yes"},
-            ),
-            (
-                "Spec Critic setting",
-                _SPEC_CRITIC_COOKIE,
-                "true",
-                {"spec_critic": "yes"},
             ),
             (
                 "web search setting",

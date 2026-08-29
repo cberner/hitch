@@ -14,7 +14,6 @@ from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
 from django.conf import settings as django_settings
-from django.core import signing
 from django.core.files.uploadedfile import UploadedFile
 from django.db import close_old_connections, transaction
 from django.db.models import QuerySet
@@ -34,7 +33,7 @@ from openai_codex.generated.v2_all import (
     ThreadSortKey,
 )
 
-from hitch.main import caches, demo
+from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import DiffView, build_worktree_diff
@@ -89,16 +88,15 @@ from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
-    _active_turn_entries,
     _active_worker_status_text,
     _apply_qa_approval_messages,
     _apply_system_authors,
-    _demo_agent_prompts,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
-    _filter_demo_agent_entries,
+    _filter_legacy_redacted_entries,
     _latest_user_turn_failure,
+    _legacy_redacted_prompts,
     _mark_active_history_user_entries,
     _pending_user_author,
     _pending_user_prompt,
@@ -161,9 +159,6 @@ from hitch.main.sessions.settings_cookies import (
     _option_label,
     _web_search_mode_label,
 )
-from hitch.main.sessions.system_agent_summary import (
-    _demo_system_session_url,
-)
 from hitch.main.workflows import autonomous_goals as goal_workflows
 from hitch.main.workflows import pr_qa, pr_stage, system_agents
 from hitch.main.worktrees import cleanup_managed_worktree_path as cleanup_managed_worktree_path
@@ -219,8 +214,6 @@ _PLAN_APPROVAL_PROMPT = "Implement the plan."
 
 _PLAN_REVISION_PROMPT = "Revise the plan."
 
-_SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT = "hitch.session-intermediate.demo-context"
-
 _SESSION_HISTORY_MIN_BYTES = 2 * 1024 * 1024
 
 _SESSION_HISTORY_MESSAGE_TARGET = 40
@@ -234,7 +227,7 @@ _INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
 _INTERMEDIATE_DETAIL_CACHE_MAX_SIZE = 1024
 
 _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
-    tuple[str, str, int, bool, int], dict[str, Any]
+    tuple[str, str, int, int], dict[str, Any]
 ] = OrderedDict()
 
 def _settings_context(
@@ -323,7 +316,6 @@ def _settings_context(
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
         "current_auto_qa": current_settings.auto_qa_enabled,
-        "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
         "current_disk_usage_max_percent": _format_disk_usage_max_percent(
@@ -456,8 +448,6 @@ def _render_session_detail(
     read_only: bool = False,
     display_title: str | None = None,
     system_prompt: str = "",
-    hide_demo_agent_entries: bool = True,
-    demo_entries_run_id: int | None = None,
     require_system_agent_thread: bool = False,
 ) -> HttpResponse:
     # Reconcile this thread before reading status: a worker that died without
@@ -483,9 +473,7 @@ def _render_session_detail(
         detail_rollout_state.mtime_ns if detail_rollout_state is not None else 0
     )
     full_history_requested = request.GET.get("history") == "all"
-    hidden_demo_prompts = (
-        _demo_agent_prompts(session_id) if hide_demo_agent_entries else frozenset()
-    )
+    legacy_redacted_prompts = _legacy_redacted_prompts(session_id)
     active_history_user = _active_history_user_identity(active_instance)
     paginate_history = False
     if (
@@ -516,7 +504,7 @@ def _render_session_detail(
             _SESSION_HISTORY_MESSAGE_TARGET if paginate_history else None
         ),
         allow_active_rollout=full_history_requested,
-        hidden_user_prompts=hidden_demo_prompts,
+        hidden_user_prompts=legacy_redacted_prompts,
         active_user_identity=active_history_user,
     )
     resumed: Any
@@ -640,15 +628,13 @@ def _render_session_detail(
         entries = _apply_qa_approval_messages(entries, session_id)
         if full_history_requested:
             _mark_active_history_user_entries(entries, active_instance)
-    if hide_demo_agent_entries:
-        entries = _filter_demo_agent_entries(
-            entries,
-            session_id,
-            initial_user_text=(
-                history_page.leading_user_text if history_page is not None else None
-            ),
-            hidden_prompts=hidden_demo_prompts,
-        )
+    entries = _filter_legacy_redacted_entries(
+        entries,
+        initial_user_text=(
+            history_page.leading_user_text if history_page is not None else None
+        ),
+        redacted_prompts=legacy_redacted_prompts,
+    )
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -802,9 +788,6 @@ def _render_session_detail(
         stage_context = dict(stage.as_context())
         if stage_refreshing:
             stage_context["refreshing"] = True
-    active_demo_worker = (
-        active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
-    )
     # While a worker is running, drop the entries that belong to its
     # in-progress turn when SSE has claimed that turn. A worker kept alive
     # across a deploy can lack the user item in its event log even while its
@@ -842,15 +825,6 @@ def _render_session_detail(
             if rollout_owns_active_turn
             else _ACTIVE_TRANSCRIPT_OWNER_STREAM
         )
-    demo_rollout_entries = (
-        _active_turn_entries(
-            entries,
-            active_instance,
-            active_turn_unresolved=active_turn_unresolved,
-        )
-        if active_demo_worker and rollout_owns_active_turn
-        else []
-    )
     entries = _trim_in_progress_turn(
         entries,
         active_instance,
@@ -886,8 +860,6 @@ def _render_session_detail(
         enabled=rollout_data is not None
         or (entries_backed_by_rollout and metadata is not None),
         cache_entries=rollout_data is not None,
-        hide_demo_agent_entries=hide_demo_agent_entries,
-        demo_entries_run_id=demo_entries_run_id,
         rollout_state=detail_rollout_state,
     )
     goal_objective = (
@@ -913,14 +885,6 @@ def _render_session_detail(
         DiffView(files=[])
         if active_instance is not None or active_system_workflow is not None
         else build_worktree_diff(thread_cwd)
-    )
-    active_session_demo = demo.active_demo_for(session_id)
-    session_demo = demo.latest_demo_for(session_id)
-    demo_system_session_url = _demo_system_session_url(session_id)
-    demo_url = (
-        demo.demo_url_for_request(request, session_id)
-        if active_session_demo is not None
-        else ""
     )
     settings_context = _settings_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
@@ -1000,14 +964,6 @@ def _render_session_detail(
                         history_page.flat_entries
                         and history_page.flat_entries[0].get("kind") != "user"
                     ),
-                    demo_context=(
-                        _session_intermediate_demo_context(
-                            session_id, demo_entries_run_id
-                        )
-                        if not hide_demo_agent_entries
-                        and demo_entries_run_id is not None
-                        else ""
-                    ),
                     active_transcript_owner=active_transcript_owner,
                 )
                 if history_page is not None and history_page.has_older
@@ -1022,9 +978,6 @@ def _render_session_detail(
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "set_archived_url": reverse(
                 "set_session_archived", kwargs={"session_id": session_id}
-            ),
-            "start_demo_url": reverse(
-                "start_session_demo", kwargs={"session_id": session_id}
             ),
             "set_project_url": reverse(
                 "set_session_project", kwargs={"session_id": session_id}
@@ -1052,17 +1005,12 @@ def _render_session_detail(
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
             "active_worker": active_instance is not None,
-            "active_demo_worker": active_demo_worker,
-            "demo_rollout_entries": demo_rollout_entries,
             "show_active_worker_transcript": show_active_worker_transcript,
             "rollout_owns_active_turn": rollout_owns_active_turn,
             "active_system_workflow": active_system_workflow,
             "workflow_composer_label": _workflow_composer_label(active_system_workflow),
             "workflow_accepts_steering": workflow_accepts_steering,
             "workflow_composer_locked": workflow_composer_locked,
-            "demo_start_disabled": (
-                active_system_workflow is not None or active_instance is not None
-            ),
             "workflow_status_text": workflow_status_text,
             "pr_workflow_progress": pr_workflow_progress,
             "active_worker_status_text": active_worker_status_text,
@@ -1109,10 +1057,6 @@ def _render_session_detail(
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
-            "session_demo": session_demo,
-            "active_session_demo": active_session_demo,
-            "demo_url": demo_url,
-            "demo_system_session_url": demo_system_session_url,
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
@@ -1131,7 +1075,6 @@ def _session_history_url(
     before_offset: int,
     partial_record_end: int | None = None,
     newer_turn_continues: bool = False,
-    demo_context: str = "",
     active_transcript_owner: str = "",
 ) -> str:
     params: dict[str, str | int] = {"before": before_offset}
@@ -1139,8 +1082,6 @@ def _session_history_url(
         params["record_end"] = partial_record_end
     if newer_turn_continues:
         params["newer_turn"] = "continued"
-    if demo_context:
-        params["demo_context"] = demo_context
     if active_transcript_owner:
         params["transcript_owner"] = active_transcript_owner
     return "{}?{}".format(
@@ -1237,18 +1178,10 @@ def _attach_lazy_intermediate_context(
     session_id: str,
     enabled: bool,
     cache_entries: bool,
-    hide_demo_agent_entries: bool,
-    demo_entries_run_id: int | None,
     rollout_state: _RolloutFileState | None,
 ) -> None:
     if not enabled or rollout_state is None:
         return
-    query_params: dict[str, str] = {}
-    if not hide_demo_agent_entries and demo_entries_run_id is not None:
-        query_params["demo_context"] = _session_intermediate_demo_context(
-            session_id, demo_entries_run_id
-        )
-    query = f"?{urlencode(query_params)}" if query_params else ""
     for entry_index, entry in enumerate(entries):
         if entry.get("kind") != "intermediate":
             continue
@@ -1259,7 +1192,6 @@ def _attach_lazy_intermediate_context(
             _cache_intermediate_detail(
                 session_id=session_id,
                 rollout_state=rollout_state,
-                hide_demo_agent_entries=hide_demo_agent_entries,
                 entry_index=entry_index,
                 entry=entry,
             )
@@ -1268,7 +1200,6 @@ def _attach_lazy_intermediate_context(
                 "session_intermediate",
                 kwargs={"session_id": session_id, "entry_index": entry_index},
             )
-            + query
         )
         entry["item_count"] = len(entry.get("items", []))
         entry["items"] = []
@@ -1278,14 +1209,12 @@ def _intermediate_detail_cache_key(
     *,
     session_id: str,
     rollout_state: _RolloutFileState,
-    hide_demo_agent_entries: bool,
     entry_index: int,
-) -> tuple[str, str, int, bool, int]:
+) -> tuple[str, str, int, int]:
     return (
         session_id,
         str(rollout_state.path),
         rollout_state.mtime_ns,
-        hide_demo_agent_entries,
         entry_index,
     )
 
@@ -1293,14 +1222,12 @@ def _cache_intermediate_detail(
     *,
     session_id: str,
     rollout_state: _RolloutFileState,
-    hide_demo_agent_entries: bool,
     entry_index: int,
     entry: dict[str, Any],
 ) -> None:
     key = _intermediate_detail_cache_key(
         session_id=session_id,
         rollout_state=rollout_state,
-        hide_demo_agent_entries=hide_demo_agent_entries,
         entry_index=entry_index,
     )
     cached_entry = {
@@ -1319,12 +1246,6 @@ def _cache_intermediate_detail(
         _INTERMEDIATE_DETAIL_CACHE.move_to_end(key)
         while len(_INTERMEDIATE_DETAIL_CACHE) > _INTERMEDIATE_DETAIL_CACHE_MAX_SIZE:
             _INTERMEDIATE_DETAIL_CACHE.popitem(last=False)
-
-def _session_intermediate_demo_context(session_id: str, run_id: int) -> str:
-    return signing.dumps(
-        {"session_id": session_id, "run_id": run_id},
-        salt=_SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT,
-    )
 
 def _metadata_rows_for_usage() -> list[SessionMetadata]:
     return list(
@@ -1703,13 +1624,11 @@ def _stream_url_for(
     active_id = active_instance.pk if active_instance is not None else None
     workflow_id = active_workflow.pk if active_workflow is not None else None
     steering_revision = streaming.workflow_steering_revision(active_workflow)
-    demo_token = streaming.demo_stream_token(session_id)
     query = {
         "baseline": str(baseline_id) if baseline_id is not None else "",
         "active": str(active_id) if active_id is not None else "",
         "workflow": str(workflow_id) if workflow_id is not None else "",
         "steering": str(steering_revision) if workflow_id is not None else "",
-        "demo": demo_token,
     }
     qs = urlencode(query)
     return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"

@@ -9,7 +9,6 @@ helpers those endpoints share.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
@@ -20,9 +19,7 @@ from django.views.decorators.http import require_http_methods
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime import codex_pool
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
-from hitch.main.workflows import spec_critic, system_agents
-
-logger = logging.getLogger(__name__)
+from hitch.main.workflows import system_agents
 
 
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
@@ -158,11 +155,6 @@ def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
     )
     if not updated:
         return HttpResponse("input request already resolved", status=409)
-    input_request.refresh_from_db()
-    try:
-        spec_critic.on_user_input_resolved(input_request)
-    except Exception:
-        logger.exception("failed to resume workflow for input request %s", input_id)
     return HttpResponse(json.dumps(response), content_type="application/json")
 
 

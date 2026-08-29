@@ -461,25 +461,12 @@ def _serialized_codex_error_info(error: TurnError | None) -> Any:
 
 
 def _notify_system_agents(instance: CodexInstance) -> None:
-    system_agents_handled = False
     try:
         from hitch.main.workflows import system_agents
 
-        system_agents_handled = system_agents.on_codex_instance_finished(instance)
+        system_agents.on_codex_instance_finished(instance)
     except Exception:
         logger.exception("failed to route completed worker %s to system agents", instance.pk)
-    try:
-        from hitch.main import demo
-
-        if (
-            system_agents_handled
-            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and instance.agent_kind == demo.DEMO_AGENT_KIND
-        ):
-            return
-        demo.on_codex_instance_finished(instance)
-    except Exception:
-        logger.exception("failed to route completed worker %s to demo workflow", instance.pk)
 
 
 def _apply_worker_oom_score_adjust(

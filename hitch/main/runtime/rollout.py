@@ -154,7 +154,7 @@ _HISTORY_TASK_MODE_RE = re.compile(
     rb'"collaboration_mode_kind"\s*:\s*"([^"]+)"'
 )
 _HISTORY_OMITTED_MESSAGE = "[Oversized message omitted from paged history.]"
-_HISTORY_HIDDEN_DEMO_KEY = "_hitch_hidden_demo"
+_HISTORY_HIDDEN_USER_KEY = "_hitch_hidden_user"
 _HISTORY_ACTIVE_USER_KEY = "_hitch_active_user"
 
 
@@ -249,9 +249,11 @@ def session_history_page(
                             if payload.get("type") != "user_message":
                                 leading_user_text = None
                         if payload.get("type") == "user_message":
-                            if payload.get(_HISTORY_HIDDEN_DEMO_KEY) is True:
-                                leading_user_text = next(iter(hidden_user_prompts), "")
-                            elif payload.get(_HISTORY_HIDDEN_DEMO_KEY) is False:
+                            if payload.get(_HISTORY_HIDDEN_USER_KEY) is True:
+                                leading_user_text = next(
+                                    iter(hidden_user_prompts), ""
+                                )
+                            elif payload.get(_HISTORY_HIDDEN_USER_KEY) is False:
                                 leading_user_text = ""
                             else:
                                 leading_user_text = _user_message_text(payload)
@@ -349,7 +351,7 @@ def _history_message_record(
         }:
             return None
         if payload.get("type") == "user_message" and hidden_user_prompts:
-            payload[_HISTORY_HIDDEN_DEMO_KEY] = (
+            payload[_HISTORY_HIDDEN_USER_KEY] = (
                 _user_message_text(payload) in hidden_user_prompts
             )
         if payload.get("type") == "user_message" and active_user_identity is not None:
@@ -369,13 +371,14 @@ def _history_message_record(
         payload = {
             "type": "user_message",
             "message": _HISTORY_OMITTED_MESSAGE,
-            _HISTORY_HIDDEN_DEMO_KEY: _oversized_user_matches_prompt(
+        }
+        if hidden_user_prompts:
+            payload[_HISTORY_HIDDEN_USER_KEY] = _oversized_user_matches_prompt(
                 raw,
                 contents=contents,
                 record_offset=record_offset,
                 encoded_prompts=encoded_hidden_prompts,
-            ),
-        }
+            )
         if active_user_identity is not None and encoded_active_prompt is not None:
             record_timestamp = _history_record_timestamp(raw)
             payload[_HISTORY_ACTIVE_USER_KEY] = (
@@ -1012,9 +1015,9 @@ def _entry_from_event(
             "text": _user_message_text(payload),
             "timestamp": timestamp,
         }
-        hidden_demo = payload.get(_HISTORY_HIDDEN_DEMO_KEY)
-        if isinstance(hidden_demo, bool):
-            user_entry[_HISTORY_HIDDEN_DEMO_KEY] = hidden_demo
+        hidden_user = payload.get(_HISTORY_HIDDEN_USER_KEY)
+        if isinstance(hidden_user, bool):
+            user_entry[_HISTORY_HIDDEN_USER_KEY] = hidden_user
         active_user = payload.get(_HISTORY_ACTIVE_USER_KEY)
         if isinstance(active_user, bool):
             user_entry[_HISTORY_ACTIVE_USER_KEY] = active_user
