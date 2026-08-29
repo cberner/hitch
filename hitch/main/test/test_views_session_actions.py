@@ -690,7 +690,7 @@ class SetSessionArchivedViewTests(TestCase):
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
         url = reverse("set_session_archived", kwargs={"session_id": "abc"})
 

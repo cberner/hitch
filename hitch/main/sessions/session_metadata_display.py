@@ -7,7 +7,6 @@ visible/system session listings. No behavior changes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,10 +18,8 @@ from hitch.main.models import (
     Project,
     SessionMetadata,
     SystemAgentRun,
-    SystemWorkflow,
 )
-from hitch.main.runtime.sdk_values import latest_updated_at, updated_at_seconds
-from hitch.main.sequences import unique_nonempty
+from hitch.main.runtime.sdk_values import latest_updated_at
 from hitch.main.sessions import session_index
 from hitch.main.sessions.session_cursor import _index_cursor_for_sort_key, _IndexCursor
 from hitch.main.sessions.system_agent_summary import (
@@ -30,7 +27,6 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
-from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 
 _SESSION_PAGE_SIZE = 50
 
@@ -144,10 +140,10 @@ def _filter_visible_session_metadata_rows(
     *,
     accepted_visible_thread_ids: set[str],
 ) -> QuerySet[SessionMetadata]:
-    system_run_exists = system_session_owner_rows(
-        SystemAgentRun.objects.filter(thread_id=OuterRef("thread_id")).exclude(thread_id="")
-    )
-    system_instance_exists = system_session_owner_rows(
+    system_run_exists = SystemAgentRun.objects.filter(
+        thread_id=OuterRef("thread_id")
+    ).exclude(thread_id="")
+    system_instance_exists = (
         CodexInstance.objects.filter(
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             thread_id=OuterRef("thread_id"),
@@ -165,29 +161,15 @@ def _filter_visible_session_metadata_rows(
 
 def _sorted_visible_index_rows(
     rows: QuerySet[SessionMetadata],
-    *,
-    hidden_thread_ids: set[str] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    sort_source = list(rows.values("thread_id", "codex_updated_at"))
-    main_thread_ids = [str(row["thread_id"]) for row in sort_source]
-    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_metadata_thread_ids(
-        main_thread_ids,
-        hidden_thread_ids,
-    )
-    return (
-        _sort_session_rows(
-            [
-                {
-                    "id": row["thread_id"],
-                    "updated_at": latest_updated_at(
-                        row["codex_updated_at"],
-                        qa_updated_at_by_main_thread.get(row["thread_id"]),
-                    ),
-                }
-                for row in sort_source
-            ]
-        ),
-        qa_updated_at_by_main_thread,
+) -> list[dict[str, Any]]:
+    return _sort_session_rows(
+        [
+            {
+                "id": row["thread_id"],
+                "updated_at": latest_updated_at(row["codex_updated_at"]),
+            }
+            for row in rows.values("thread_id", "codex_updated_at")
+        ]
     )
 
 
@@ -201,7 +183,7 @@ def _ensure_indexed_system_threads(system_thread_ids: set[str], *, projects: lis
     )
     if not missing_thread_ids:
         return
-    instances = system_session_owner_rows(
+    instances = (
         CodexInstance.objects.filter(
             thread_id__in=missing_thread_ids,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -227,18 +209,14 @@ def _ensure_indexed_system_threads(system_thread_ids: set[str], *, projects: lis
 def _session_row_for_metadata(
     metadata: SessionMetadata,
     *,
-    qa_updated_at_by_main_thread: Mapping[str, Any],
     runs_by_thread_id: dict[str, SystemAgentRun],
     instances_by_thread_id: dict[str, CodexInstance],
     system_only: bool,
 ) -> dict[str, Any] | None:
-    row = {
+    row: dict[str, Any] = {
         "id": metadata.thread_id,
         "cwd": metadata.cwd,
-        "updated_at": latest_updated_at(
-            metadata.codex_updated_at,
-            qa_updated_at_by_main_thread.get(metadata.thread_id),
-        ),
+        "updated_at": latest_updated_at(metadata.codex_updated_at),
         "display_title": metadata.codex_display_title or metadata.thread_id,
         "name_value": metadata.codex_name,
         "is_archived": metadata.codex_archived,
@@ -269,54 +247,6 @@ def _session_row_for_metadata(
             }
         )
     return row
-
-
-def _qa_activity_updated_at_by_metadata_thread_ids(
-    main_thread_ids: Iterable[str], hidden_thread_ids: set[str] | None
-) -> dict[str, Any]:
-    main_thread_ids = unique_nonempty(main_thread_ids)
-    if not main_thread_ids:
-        return {}
-    runs = list(
-        SystemAgentRun.objects.filter(
-            workflow__kind=SystemWorkflow.KIND_PR_QA,
-            workflow__main_thread_id__in=main_thread_ids,
-        )
-        .exclude(thread_id="")
-        .select_related("workflow")
-    )
-    run_thread_ids = {run.thread_id for run in runs if run.thread_id}
-    if hidden_thread_ids is not None:
-        run_thread_ids &= hidden_thread_ids
-    hidden_metadata_by_thread_id = {
-        metadata.thread_id: metadata
-        for metadata in SessionMetadata.objects.filter(thread_id__in=run_thread_ids).only(
-            "thread_id", "codex_updated_at", "codex_last_synced_at"
-        )
-    }
-    updated_at_by_main_thread: dict[str, Any] = {}
-    for run in runs:
-        main_thread_id = run.workflow.main_thread_id
-        if not main_thread_id:
-            continue
-        hidden_metadata = hidden_metadata_by_thread_id.get(run.thread_id)
-        local_run_updated_at = latest_updated_at(run.updated_at, run.workflow.updated_at)
-        if hidden_metadata is None:
-            run_updated_at = local_run_updated_at
-        elif (updated_at_seconds(local_run_updated_at) or 0.0) > (
-            updated_at_seconds(hidden_metadata.codex_last_synced_at) or 0.0
-        ):
-            run_updated_at = latest_updated_at(
-                hidden_metadata.codex_updated_at,
-                local_run_updated_at,
-            )
-        else:
-            run_updated_at = hidden_metadata.codex_updated_at
-        updated_at_by_main_thread[main_thread_id] = latest_updated_at(
-            updated_at_by_main_thread.get(main_thread_id),
-            run_updated_at,
-        )
-    return updated_at_by_main_thread
 
 
 def _sort_session_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:

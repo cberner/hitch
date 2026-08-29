@@ -189,7 +189,6 @@ _HISTORY_TASK_MODE_RE = re.compile(
     rb'"collaboration_mode_kind"\s*:\s*"([^"]+)"'
 )
 _HISTORY_OMITTED_MESSAGE = "[Oversized message omitted from paged history.]"
-_HISTORY_HIDDEN_USER_KEY = "_hitch_hidden_user"
 _HISTORY_ACTIVE_USER_KEY = "_hitch_active_user"
 
 
@@ -199,7 +198,6 @@ def session_history_page(
     before_offset: int | None = None,
     partial_record_end: int | None = None,
     message_target: int = 40,
-    hidden_user_prompts: frozenset[str] | None = None,
     active_user_identity: SessionHistoryUserIdentity | None = None,
 ) -> SessionHistoryPage | None:
     """Read recent conversation messages without loading the whole rollout.
@@ -210,8 +208,6 @@ def session_history_page(
     """
     if message_target < 1:
         raise ValueError("message_target must be positive")
-    if hidden_user_prompts is None:
-        hidden_user_prompts = frozenset()
     try:
         size = rollout_path.stat().st_size
         end_offset = size if before_offset is None else before_offset
@@ -230,10 +226,6 @@ def session_history_page(
         scanned_after_active_start = False
         active_turn_unresolved = False
         scanned_start = end_offset
-        encoded_hidden_prompts = tuple(
-            json.dumps(prompt, ensure_ascii=False).encode()
-            for prompt in hidden_user_prompts
-        )
         encoded_active_prompt = (
             json.dumps(active_user_identity.prompt, ensure_ascii=False).encode()
             if active_user_identity is not None
@@ -265,8 +257,6 @@ def session_history_page(
                         contents=contents,
                         record_offset=offset,
                         record_end=record_end,
-                        hidden_user_prompts=hidden_user_prompts,
-                        encoded_hidden_prompts=encoded_hidden_prompts,
                         active_user_identity=active_user_identity,
                         encoded_active_prompt=encoded_active_prompt,
                     )
@@ -284,14 +274,7 @@ def session_history_page(
                             if payload.get("type") != "user_message":
                                 leading_user_text = None
                         if payload.get("type") == "user_message":
-                            if payload.get(_HISTORY_HIDDEN_USER_KEY) is True:
-                                leading_user_text = next(
-                                    iter(hidden_user_prompts), ""
-                                )
-                            elif payload.get(_HISTORY_HIDDEN_USER_KEY) is False:
-                                leading_user_text = ""
-                            else:
-                                leading_user_text = _user_message_text(payload)
+                            leading_user_text = _user_message_text(payload)
                         if (
                             len(selected) >= message_target
                             and leading_user_text is not None
@@ -315,10 +298,6 @@ def session_history_page(
         logger.warning("failed to read rollout history %s: %s", rollout_path, exc)
         return None
     selected.reverse()
-    if leading_user_text is None and hidden_user_prompts:
-        # Unknown leading context is hidden conservatively until a visible user
-        # record establishes which turn this page starts in.
-        leading_user_text = next(iter(hidden_user_prompts))
     return SessionHistoryPage(
         flat_entries=tuple(_entries_from_lines(selected)),
         start_offset=start_offset,
@@ -367,8 +346,6 @@ def _history_message_record(
     contents: mmap.mmap | None = None,
     record_offset: int = 0,
     record_end: int = 0,
-    hidden_user_prompts: frozenset[str] | None = None,
-    encoded_hidden_prompts: tuple[bytes, ...] = (),
     active_user_identity: SessionHistoryUserIdentity | None = None,
     encoded_active_prompt: bytes | None = None,
 ) -> dict[str, Any] | None:
@@ -385,10 +362,6 @@ def _history_message_record(
             "agent_message",
         }:
             return None
-        if payload.get("type") == "user_message" and hidden_user_prompts:
-            payload[_HISTORY_HIDDEN_USER_KEY] = (
-                _user_message_text(payload) in hidden_user_prompts
-            )
         if payload.get("type") == "user_message" and active_user_identity is not None:
             event_timestamp = _iso_to_unix_timestamp(entry.get("timestamp"))
             payload[_HISTORY_ACTIVE_USER_KEY] = (
@@ -407,13 +380,6 @@ def _history_message_record(
             "type": "user_message",
             "message": _HISTORY_OMITTED_MESSAGE,
         }
-        if hidden_user_prompts:
-            payload[_HISTORY_HIDDEN_USER_KEY] = _oversized_user_matches_prompt(
-                raw,
-                contents=contents,
-                record_offset=record_offset,
-                encoded_prompts=encoded_hidden_prompts,
-            )
         if active_user_identity is not None and encoded_active_prompt is not None:
             record_timestamp = _history_record_timestamp(raw)
             payload[_HISTORY_ACTIVE_USER_KEY] = (
@@ -891,26 +857,6 @@ def _latest_pr_observation_result_from_lines(
     return codex_events.pr_observation_result_from_turns(turns)
 
 
-def review_output_for_turn(
-    rollout_path: Path, *, turn_id: str
-) -> dict[str, Any] | None:
-    """Return Codex's structured native-review result for ``turn_id``."""
-    lines = _load_rollout_lines(rollout_path)
-    if lines is None:
-        return None
-    for entry in reversed(lines):
-        if entry.get("type") != "event_msg":
-            continue
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("type") != "exited_review_mode":
-            continue
-        if payload.get("turn_id") != turn_id:
-            continue
-        review_output = payload.get("review_output")
-        return review_output if isinstance(review_output, dict) else None
-    return None
-
-
 def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
     try:
         text = rollout_path.read_text()
@@ -1050,9 +996,6 @@ def _entry_from_event(
             "text": _user_message_text(payload),
             "timestamp": timestamp,
         }
-        hidden_user = payload.get(_HISTORY_HIDDEN_USER_KEY)
-        if isinstance(hidden_user, bool):
-            user_entry[_HISTORY_HIDDEN_USER_KEY] = hidden_user
         active_user = payload.get(_HISTORY_ACTIVE_USER_KEY)
         if isinstance(active_user, bool):
             user_entry[_HISTORY_ACTIVE_USER_KEY] = active_user

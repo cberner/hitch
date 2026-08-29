@@ -12,10 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
-from hitch.main.legacy_agent_records import (
-    is_legacy_redacted_agent_record,
-    without_legacy_redacted_agent_records,
-)
 from hitch.main.models import CodexInstance
 from hitch.main.runtime.pr_reviews import latest_effective_reviews_by_author
 from hitch.main.runtime.sdk_values import is_nonbool_int, positive_int, string_from_any
@@ -27,7 +23,6 @@ GOAL_UPDATED_METHOD = "thread/goal/updated"
 GOAL_METHODS = frozenset({GOAL_CLEARED_METHOD, GOAL_UPDATED_METHOD})
 TASK_PLAN_UPDATED_METHOD = "turn/plan/updated"
 ITEM_COMPLETED_METHOD = "item/completed"
-NATIVE_REVIEW_COMPLETED_METHOD = "hitch/nativeReview/completed"
 TURN_DIFF_UPDATED_METHOD = "turn/diff/updated"
 
 _TURN_DIFF_EVENT_LINE_RE = re.compile(rb'^\s*\{\s*"method"\s*:\s*"turn/diff/updated"(?:\s*[,}])')
@@ -151,7 +146,7 @@ def latest_goal_for_thread(thread_id: str) -> str:
     recover the latest objective from those append-only logs.
     """
     paths = (
-        without_legacy_redacted_agent_records(CodexInstance.objects.filter(thread_id=thread_id))
+        CodexInstance.objects.filter(thread_id=thread_id)
         .order_by("pk")
         .values_list("events_path", flat=True)
     )
@@ -164,7 +159,7 @@ def latest_goal_from_event_paths(paths: Iterable[str | Path], *, thread_id: str)
 
 
 def latest_goal_tokens_for_instance(instance: CodexInstance | None) -> int | None:
-    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
+    if instance is None or not instance.events_path:
         return None
     return latest_goal_tokens_from_event_paths(
         [instance.events_path],
@@ -198,7 +193,7 @@ def _latest_goal_event_from_event_paths(paths: Iterable[str | Path], *, thread_i
 
 def latest_task_plan_for_instance(instance: CodexInstance | None) -> TaskPlanSnapshot | None:
     """Return the latest visible task-plan snapshot for an active worker."""
-    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
+    if instance is None or not instance.events_path:
         return None
     return latest_task_plan_from_event_paths(
         [instance.events_path],
@@ -217,7 +212,7 @@ def latest_task_plan_for_thread(thread_id: str) -> TaskPlanSnapshot | None:
     plan only survives a reload when the latest turn actually produced one.
     """
     latest = (
-        without_legacy_redacted_agent_records(CodexInstance.objects.filter(thread_id=thread_id))
+        CodexInstance.objects.filter(thread_id=thread_id)
         .order_by("-started_at", "-pk")
         .first()
     )
@@ -239,7 +234,7 @@ def latest_task_plan_from_event_paths(paths: Iterable[str | Path], *, thread_id:
 
 def latest_pr_snapshot_for_instance(instance: CodexInstance | None) -> dict[str, Any] | None:
     """Return the latest GitHub PR state observed by a worker, if any."""
-    if instance is None or is_legacy_redacted_agent_record(instance) or not instance.events_path:
+    if instance is None or not instance.events_path:
         return None
     return latest_pr_snapshot_from_event_paths(
         [instance.events_path],

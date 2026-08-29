@@ -661,35 +661,6 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
 
-    def test_legacy_demo_turn_on_user_session_protects_worktree(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            user_path = self._managed_path(root, "user")
-            self._session(thread_id="user", cwd=user_path)
-            CodexInstance.objects.create(
-                pid=123,
-                thread_id="user",
-                cwd=user_path,
-                events_path="/tmp/events.jsonl",
-                status=CodexInstance.STATUS_COMPLETED,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind="demo",
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 0)
-        mock_cleanup.assert_not_called()
 
     def test_recent_archived_user_session_protects_shared_worktree(self) -> None:
         with (

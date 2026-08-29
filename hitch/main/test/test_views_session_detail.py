@@ -20,7 +20,6 @@ from openai_codex.errors import InternalRpcError, InvalidRequestError
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
-    SystemAgentRun,
     SystemWorkflow,
 )
 from hitch.main.runtime import rollout as rollout_module
@@ -728,7 +727,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     def test_pr_closed_workflow_surfaces_auto_pull_result(self) -> None:
-        workflow = SystemWorkflow.objects.create(
+        SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="pr-closed-auto-pull",
             cwd="/repo",
@@ -742,33 +741,11 @@ class SessionDetailFastPathTests(TestCase):
                 },
             },
         )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="pr-closed-auto-pull",
-            cwd="/repo",
-            prompt="Run QA",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="pr-closed-auto-pull",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"lgtm": True},
-        )
-
-        entries = session_entry_display._apply_qa_approval_messages(
+        entries = session_entry_display._apply_workflow_messages(
             [{"kind": "user", "text": "Open a PR"}],
             "pr-closed-auto-pull",
         )
 
-        self.assertEqual(entries[0]["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertEqual(
             entries[-1]["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
         )
@@ -777,7 +754,7 @@ class SessionDetailFastPathTests(TestCase):
             entries[-1]["text"],
         )
 
-    def test_pr_workflow_auto_pull_result_surfaces_without_qa_approval(
+    def test_pr_workflow_auto_pull_result_surfaces_without_review_result(
         self,
     ) -> None:
         SystemWorkflow.objects.create(
@@ -797,7 +774,7 @@ class SessionDetailFastPathTests(TestCase):
             },
         )
 
-        entries = session_entry_display._apply_qa_approval_messages(
+        entries = session_entry_display._apply_workflow_messages(
             [{"kind": "user", "text": "Fix PR"}],
             "pr-monitor-auto-pull",
         )
@@ -1782,122 +1759,7 @@ class SessionDetailFastPathTests(TestCase):
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
 
-    @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
-    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_legacy_hidden_turn_stays_redacted_in_every_rollout_view(
-        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
-    ) -> None:
-        hidden_prompt = (
-            "Start an interactive web demo.\n\nRegistration token: secret-token"
-        )
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Visible first prompt"},
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Visible first answer"},
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": hidden_prompt},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "exec_command",
-                        "arguments": json.dumps(
-                            {"cmd": "printf hidden-demo-command"}
-                        ),
-                        "call_id": "call-hidden-demo",
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {
-                        "type": "agent_reasoning",
-                        "text": "hidden demo reasoning",
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Hidden demo response"},
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Visible latest prompt"},
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Visible latest answer"},
-                ),
-            ],
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        SessionMetadata.objects.create(
-            thread_id="legacy-redacted-session",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_name="Legacy redacted session",
-            codex_preview="Visible latest prompt",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-        CodexInstance.objects.create(
-            pid=1,
-            thread_id="legacy-redacted-session",
-            cwd="/repo",
-            prompt=hidden_prompt,
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind="demo",
-        )
 
-        initial = self.client.get(
-            reverse("session", kwargs={"session_id": "legacy-redacted-session"})
-        )
-        self.assertEqual(initial.status_code, 200)
-        self.assertContains(initial, "Visible latest prompt")
-        self._assert_legacy_demo_secrets_hidden(initial)
-
-        history_url = initial.context["history_next_url"]
-        self.assertTrue(history_url)
-        while history_url:
-            fragment = self.client.get(history_url)
-            self.assertEqual(fragment.status_code, 200)
-            self._assert_legacy_demo_secrets_hidden(fragment)
-            history_url = fragment.context["history_next_url"]
-
-        full = self.client.get(
-            reverse("session", kwargs={"session_id": "legacy-redacted-session"}),
-            {"history": "all"},
-        )
-        self.assertEqual(full.status_code, 200)
-        self.assertContains(full, "Visible first prompt")
-        self.assertContains(full, "Visible latest answer")
-        self._assert_legacy_demo_secrets_hidden(full)
-
-        intermediate = self.client.get(
-            reverse(
-                "session_intermediate",
-                kwargs={"session_id": "legacy-redacted-session", "entry_index": 1},
-            )
-        )
-        self.assertEqual(intermediate.status_code, 404)
-        mock_codex.assert_not_called()
-
-    def _assert_legacy_demo_secrets_hidden(self, response: Any) -> None:
-        self.assertNotContains(response, "Registration token: secret-token")
-        self.assertNotContains(response, "hidden-demo-command")
-        self.assertNotContains(response, "hidden demo reasoning")
-        self.assertNotContains(response, "Hidden demo response")
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -2009,7 +1871,7 @@ class SessionDetailFastPathTests(TestCase):
                     {
                         "type": "user_message",
                         "message": (
-                            "Hitch QA agent could not complete the PR workflow.\n\n"
+                            "Hitch PR workflow could not complete.\n\n"
                             "Status: Hitch checked the PR gates and is waiting on "
                             "external PR state.\n\n"
                             "Tell the user the PR workflow needs attention before "
@@ -3875,22 +3737,6 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"working": false', body)
         self.assertIn(b"event: reconnect", body)
 
-    def test_reloads_client_with_retired_demo_stream_token(self) -> None:
-        instance = self._make(
-            thread_id="legacy-demo-page",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        response = self.client.get(
-            self._stream_url(
-                "legacy-demo-page",
-                baseline=str(instance.pk),
-                demo="retired-token",
-            )
-        )
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertIn(b'"status": "stale"', body)
 
     @patch(
         "hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances"
@@ -3919,7 +3765,7 @@ class SessionStreamViewTests(TestCase):
             main_thread_id="thread-workflow",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "pr_gates": [
                     {
@@ -3950,7 +3796,7 @@ class SessionStreamViewTests(TestCase):
             main_thread_id="thread-workflow",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1},
         )
 
@@ -3965,48 +3811,6 @@ class SessionStreamViewTests(TestCase):
 
         self.assertIn(b'"status": "stale"', body)
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_stream_reloads_and_blocks_when_hidden_system_worker_died(
-        self, mock_worker_alive: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-dead-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = self._make(
-            pid=12345,
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=instance.thread_id,
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        response = self.client.get(
-            self._stream_url("thread-dead-workflow", workflow=str(workflow.pk))
-        )
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertIn(b'"status": "stale"', body)
-        mock_worker_alive.assert_called()
-        mock_spawn.assert_called_once()
-        instance.refresh_from_db()
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
@@ -4016,7 +3820,7 @@ class SessionStreamViewTests(TestCase):
             main_thread_id="thread-workflow-empty-progress",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         response = self.client.get(

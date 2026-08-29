@@ -7,19 +7,15 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from django.db import models, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.git_support import resolved_path
 from hitch.main.goals.autonomous_goal_proposal_stack import (
     _proposal_outcome_metadata,
-)
-from hitch.main.local_merges import (
-    build_auto_merge_review_patch,
 )
 from hitch.main.models import (
     CodexInstance,
@@ -37,7 +33,7 @@ from hitch.main.repos import (
     repo_root,
     same_repo_or_worktree,
 )
-from hitch.main.runtime import codex_events, codex_pool, rollout
+from hitch.main.runtime import codex_pool, rollout
 from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
@@ -45,7 +41,6 @@ from hitch.main.sessions.pr_prompts import (
     PR_SLASH_DISPLAY_PROMPT as PR_SLASH_DISPLAY_PROMPT,
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT as PR_SLASH_PROMPT
-from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 from hitch.main.workflows import engine, pr_watch
 from hitch.main.workflows.workflow_state import (
     _session_metadata_from_state,
@@ -56,11 +51,9 @@ from hitch.main.workflows.workflow_state import (
 
 logger = logging.getLogger(__name__)
 
-PR_QA_AGENT_KIND = "pr_qa"
 AUTONOMOUS_GOAL_AGENT_KIND: str = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
 AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
-QA_DISPLAY_AUTHOR = "QA agent"
 REVIEW_WORKFLOW_DISPLAY_AUTHOR = "Review workflow"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
@@ -78,19 +71,11 @@ AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_
 QA_SLASH_DISPLAY_PROMPT = (
     "Ask the coding agent to inspect the changes and optionally use a reviewer subagent"
 )
-QA_SLASH_LEGACY_DISPLAY_PROMPT = (
-    "Run the QA agent on the current diff and fix anything it finds"
-)
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
-QA_WORKFLOW_MAX_ITERATIONS = 10
-PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
-STEP_QA_RUNNING = "qa_running"
-STEP_FEEDBACK_RUNNING = "feedback_running"
 STEP_USER_STEERING_RUNNING = "user_steering_running"
 STEP_BLOCKED = "blocked"
-STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
-STEP_QA_APPROVED = "qa_approved"
+STEP_REVIEW_COMPLETED = "review_completed"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
 STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
 STEP_PR_WATCH_RUNNING = pr_watch.STEP_PR_WATCH_RUNNING
@@ -107,8 +92,6 @@ STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
 PR_QA_STEERABLE_STEPS = frozenset(
     {
-        STEP_QA_RUNNING,
-        STEP_FEEDBACK_RUNNING,
         STEP_USER_STEERING_RUNNING,
         STEP_PR_PROMPT_RUNNING,
         STEP_PR_WATCH_RUNNING,
@@ -131,36 +114,21 @@ _ARCHIVED_FROM_BLOCKED_STATE_KEY = "archived_from_blocked"
 # archive) and the health dashboard (which previews the same cutoff), so both
 # agree on what "stale" means.
 STALE_BLOCKED_AGE = timedelta(days=7)
-_WORKFLOW_FAILURE_OWNER_QA = "qa"
 _WORKFLOW_FAILURE_OWNER_REVIEW = "review"
 _WORKFLOW_FAILURE_OWNER_PR = "pr"
 REVIEW_GUIDANCE_STATE_KEY = "review_guidance"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
-# A PR-QA workflow commits its next transient step (qa_running, feedback_running,
-# pr_prompt_running, ...) and *then* spawns the worker for it inside the
+# A PR workflow commits its next transient step and then spawns the worker in the
 # just-finished worker process (or the web request). If that process dies before
 # the worker's CodexInstance row is created -- e.g. the orphan-worker reaper
 # SIGKILLs its scope during a SQLite-lock storm -- the workflow zombies in that
 # step with no worker and nothing to route, because there is no instance for the
 # terminal-instance/turn reconcilers to find. Reconciliation recovers the
-# workflow once the row is older than this window (re-driving the QA review,
-# whose prompt is reconstructable, or surfacing a clear failure for a lost turn).
+# workflow once the row is older than this window.
 # The window sits well above ``_WORKFLOW_ROUTE_CLAIM_TIMEOUT`` so a slow-but-live
 # spawn is never raced into a double review or a spurious failure.
 _WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
-# A steering message supersedes hidden QA output, but first gives the
-# worker a brief graceful-cancellation window to emit its terminal event. Native
-# review cancellation can be ignored indefinitely, so reconciliation force-stops
-# only that obsolete hidden run after this bound.
-_USER_STEERING_INTERRUPT_GRACE = timedelta(seconds=10)
-# Transient PR-QA steps whose worker is a visible coding/feedback turn spawned
-# right after the step is committed, and whose prompt is *not* reconstructable
-# (the QA feedback or the user's text is gone). A lost spawn here cannot be
-# re-driven, so the workflow is blocked with a surfaced explanation instead.
-# (pr_prompt_running is recovered separately by re-driving _spawn_pr_prompt,
-# whose prompt is reconstructable from state.)
 _ZOMBIE_TURN_STEP_MESSAGES = {
-    STEP_FEEDBACK_RUNNING: "QA feedback turn",
     STEP_USER_STEERING_RUNNING: "coding turn",
 }
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
@@ -169,41 +137,23 @@ _WORKFLOW_TURN_OWNER_INDEX_STATE_KEY = "workflow_turn_owner_index"
 _WORKFLOW_TURN_OWNER_STEP_STATE_KEY = "workflow_turn_owner_step"
 _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
 _WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
-_WORKER_EXITED_BEFORE_COMPLETION_ERROR = "worker process exited before reporting completion"
-_LEGACY_SERVER_OVERLOADED_ERROR = "Selected model is at capacity. Please try a different model."
-
-
-QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
+_WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
+    "worker process exited before reporting completion"
+)
+_LEGACY_SERVER_OVERLOADED_ERROR = (
+    "Selected model is at capacity. Please try a different model."
+)
 AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
 AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
 AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
 AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY = "auto_merge_reviewed_source_tree"
 AUTO_PULL_RESULT_STATE_KEY = "auto_pull_result"
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
-_LEGACY_QA_PANEL_LANE_AGENT_KINDS = (
-    "pr_qa_correctness",
-    "pr_qa_tests",
-    "pr_qa_ux_manual",
-    "pr_qa_security",
-    "pr_qa_maintainability",
-)
-_LEGACY_QA_PANEL_AGENT_KINDS = (
-    *_LEGACY_QA_PANEL_LANE_AGENT_KINDS,
-    "pr_qa_panel_synthesizer",
-)
-_LEGACY_QA_PANEL_CANCELLED_ERROR = "legacy QA panel run cancelled because the QA panel feature was removed"
 _REMOVED_PR_WORKFLOW_STEPS = frozenset({"pr_monitoring", "pr_feedback_running"})
 _REMOVED_PR_WORKFLOW_ERROR = (
     "The framework-driven PR monitor was removed. Start a new session to use "
     "hitch.watch_pr."
 )
-_QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND,)
-_QA_INTERRUPTIBLE_AGENT_KINDS = (
-    *_QA_VERDICT_AGENT_KINDS,
-    *_LEGACY_QA_PANEL_AGENT_KINDS,
-)
-
-
 def _sync_workflow_instance(target: SystemWorkflow, source: SystemWorkflow) -> None:
     target.status = source.status
     target.step = source.step
@@ -222,14 +172,13 @@ def accepted_visible_system_thread_ids() -> set[str]:
 
 def hidden_thread_ids(*, accepted_visible_thread_ids: set[str] | None = None) -> set[str]:
     hidden_ids = set(
-        system_session_owner_rows(SystemAgentRun.objects.exclude(thread_id=""))
+        SystemAgentRun.objects.exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )
     hidden_ids.update(
-        system_session_owner_rows(
-            CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT).exclude(thread_id="")
-        )
+        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
+        .exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )
@@ -319,7 +268,6 @@ def reconcile_terminal_workflow_instances(*, main_thread_id: str | None = None, 
         if workflow.step not in _REMOVED_PR_WORKFLOW_STEPS
     ]
     if workflows:
-        _escalate_stale_user_steering_interrupts(workflows)
         reconciled += _reconcile_terminal_system_agent_instances(workflows)
         reconciled += _reconcile_terminal_workflow_turns(workflows)
         reconciled += _drive_orphaned_workflow_spawns(workflows)
@@ -361,63 +309,6 @@ def _retire_removed_pr_workflows(
         if _block_workflow(workflow, _REMOVED_PR_WORKFLOW_ERROR):
             retired += 1
     return retired
-
-
-def _escalate_stale_user_steering_interrupts(
-    workflows: list[SystemWorkflow],
-) -> None:
-    """Bound cancellation of hidden runs superseded by user steering.
-
-    The initial steering claim sends a graceful interrupt. If that request is
-    ignored, the active hidden run otherwise keeps ``user_steering_running``
-    from spawning the user's turn forever. Reconciliation retries a missed
-    launch-race interrupt, then force-stops only a run whose graceful window
-    expired. Ordinary Stop requests retain their existing explicit second-click
-    escalation semantics.
-    """
-    workflow_ids = [
-        workflow.pk
-        for workflow in workflows
-        if workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.step == STEP_USER_STEERING_RUNNING
-        and workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
-    ]
-    if not workflow_ids:
-        return
-    now = timezone.now()
-    stale_before = now - _USER_STEERING_INTERRUPT_GRACE
-    instances = CodexInstance.objects.filter(
-        workflow_id__in=workflow_ids,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    ).order_by("started_at", "id")
-    for instance in instances:
-        workflow_id = cast(int, instance.workflow_id)
-        workflow = SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            kind=SystemWorkflow.KIND_PR_QA,
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=STEP_USER_STEERING_RUNNING,
-        ).first()
-        if workflow is None or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is True:
-            continue
-        if instance.interrupt_requested_at is None:
-            if workflow.updated_at > stale_before:
-                continue
-            codex_pool.interrupt_instance(
-                instance.pk,
-                expected_thread_id=instance.thread_id,
-            )
-            continue
-        if instance.interrupt_requested_at > stale_before:
-            continue
-        codex_pool.interrupt_instance(
-            instance.pk,
-            expected_thread_id=instance.thread_id,
-            force=True,
-            error="hidden workflow run superseded by user steering",
-        )
 
 
 def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:
@@ -584,12 +475,6 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
 
 
 def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str, ...]:
-    if workflow.kind == SystemWorkflow.KIND_PR_QA:
-        if workflow.step == STEP_QA_RUNNING:
-            return _QA_INTERRUPTIBLE_AGENT_KINDS
-        if workflow.step == STEP_USER_STEERING_RUNNING:
-            return _QA_INTERRUPTIBLE_AGENT_KINDS
-        return ()
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         if workflow.step == STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
             return (AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,)
@@ -609,14 +494,7 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
         turn_indices = _workflow_turn_owned_indices(workflow)
         if not turn_indices:
             continue
-        if workflow.step == STEP_FEEDBACK_RUNNING:
-            filters |= models.Q(
-                workflow_id=workflow.pk,
-                purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                user_message_index__in=turn_indices,
-            )
-            has_turn_filter = True
-        elif workflow.step in (
+        if workflow.step in (
             STEP_USER_STEERING_RUNNING,
             STEP_PR_PROMPT_RUNNING,
             STEP_PR_WATCH_RUNNING,
@@ -684,8 +562,6 @@ def stop_active_workflow(main_thread_id: str, *, expected_workflow_id: int | Non
             if workflow.kind == SystemWorkflow.KIND_PR_QA and (
                 workflow.step
                 in (
-                    STEP_QA_RUNNING,
-                    STEP_FEEDBACK_RUNNING,
                     STEP_USER_STEERING_RUNNING,
                     STEP_PR_PROMPT_RUNNING,
                     STEP_PR_WATCH_RUNNING,
@@ -782,12 +658,6 @@ def on_codex_instance_finished(instance: CodexInstance) -> bool:
         if route_claimed:
             _clear_workflow_instance_routing_claim(instance)
         raise
-    finally:
-        if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT and instance.agent_kind == PR_QA_AGENT_KIND:
-            try:
-                pr_qa._cleanup_qa_review_handoff_for_instance(instance)
-            except Exception:
-                logger.exception("failed to clean QA review handoff for instance %s", instance.pk)
 
 
 def _route_finished_codex_instance(instance: CodexInstance) -> bool:
@@ -1222,19 +1092,12 @@ def _route_system_agent_finished(instance: CodexInstance, run: SystemAgentRun, w
     handler.on_agent_finished(instance, run, workflow)
 
 
-# Shared by the PR-QA workflow phases that run in one KIND_PR_QA row.
-
-
-def _claim_workflow_turn_retry(workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str) -> bool:
-    """Record one more bounded retry for a transient workflow-turn failure.
-
-    Single source of the retry rule shared by every workflow turn: the
-    workflow must still be active, the failure must be recoverable without a
-    user Stop request, and the per-step retry budget
-    (``_WORKFLOW_TURN_DEATH_RETRY_LIMIT``) must not be exhausted. Bumps and
-    persists the per-kind count when it returns True. The persisted state key
-    retains its original ``death`` name for compatibility.
-    """
+def _claim_workflow_turn_retry(
+    workflow: SystemWorkflow,
+    instance: CodexInstance,
+    retry_kind: str,
+) -> bool:
+    """Claim one bounded retry for a transient autonomous-workflow failure."""
     if (
         not workflow.is_active
         or not retry_kind
@@ -1271,14 +1134,16 @@ def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
     raw = state.get(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY)
     if not isinstance(raw, dict):
         return {}
-    retries: dict[str, int] = {}
-    for key, value in raw.items():
-        if is_nonbool_int(value) and value > 0:
-            retries[str(key)] = value
-    return retries
+    return {
+        str(key): value
+        for key, value in raw.items()
+        if is_nonbool_int(value) and value > 0
+    }
 
 
-def _state_without_workflow_turn_death_retry(state: Mapping[str, Any], retry_kind: str) -> dict[str, Any]:
+def _state_without_workflow_turn_death_retry(
+    state: Mapping[str, Any], retry_kind: str
+) -> dict[str, Any]:
     retries = _workflow_turn_death_retries(state)
     if retry_kind not in retries:
         return dict(state)
@@ -1291,16 +1156,14 @@ def _state_without_workflow_turn_death_retry(state: Mapping[str, Any], retry_kin
     return updated
 
 
-def _is_worker_exited_before_completion_error(error: str) -> bool:
-    return error.strip().startswith(_WORKER_EXITED_BEFORE_COMPLETION_ERROR)
-
-
 def _is_retryable_workflow_turn_error(instance: CodexInstance) -> bool:
     error_info: object = instance.codex_error_info
     if error_info is not None:
         return error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED
     normalized = instance.error.strip()
-    return _is_worker_exited_before_completion_error(normalized) or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
+    return normalized.startswith(
+        _WORKER_EXITED_BEFORE_COMPLETION_ERROR
+    ) or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
 
 
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
@@ -1361,32 +1224,6 @@ def _candidate_session_cwd_from_state(workflow: SystemWorkflow, key: str) -> str
     return metadata.cwd if metadata is not None else ""
 
 
-# Hidden QA subagents do not surface approval prompts in the main workflow UI.
-# Keep their approval mode fixed; workflow approval state is for visible turns.
-
-
-def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
-    auto_merge_branch = _state_string(workflow, "auto_merge_branch")
-    if not auto_merge_branch:
-        return build_worktree_diff_text(workflow.cwd)
-    review_patch = build_auto_merge_review_patch(workflow.cwd, auto_merge_branch)
-    workflow.state = {
-        **workflow.state,
-        AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: review_patch.patch,
-        AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: review_patch.target_sha,
-        AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY: review_patch.base_sha,
-        AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY: review_patch.source_tree_sha,
-    }
-    workflow.save(update_fields=["state", "updated_at"])
-    # The lossless patch (surrogateescape-decoded bytes) is what gets applied
-    # from state; the copy embedded in the QA prompt must be valid UTF-8 for
-    # the app-server's JSON parser. Render any non-UTF-8 bytes as visible
-    # ``\xNN`` escapes so the QA agent reviews the exact byte values that
-    # will be merged, instead of a lossy substitution hiding them.
-    raw_patch = review_patch.patch.encode("utf-8", errors="surrogateescape")
-    return raw_patch.decode("utf-8", errors="backslashreplace")
-
-
 def _spawn_workflow_failure_turn(workflow: SystemWorkflow, error: str) -> CodexInstance:
     headline, display_author = _workflow_failure_turn_context(workflow, error)
     workflow_label = (
@@ -1411,8 +1248,6 @@ def _workflow_failure_turn_context(
     workflow: SystemWorkflow, error: str
 ) -> tuple[str, str]:
     owner = _workflow_failure_owner(workflow, error)
-    if owner == _WORKFLOW_FAILURE_OWNER_QA:
-        return "Hitch QA agent could not complete the PR workflow.", QA_DISPLAY_AUTHOR
     if owner == _WORKFLOW_FAILURE_OWNER_REVIEW:
         return (
             "Hitch review workflow could not complete.",
@@ -1424,18 +1259,12 @@ def _workflow_failure_turn_context(
 def _workflow_failure_owner(workflow: SystemWorkflow, error: str) -> str:
     stored_owner = workflow.state.get(_WORKFLOW_FAILURE_OWNER_STATE_KEY)
     if stored_owner in {
-        _WORKFLOW_FAILURE_OWNER_QA,
         _WORKFLOW_FAILURE_OWNER_REVIEW,
         _WORKFLOW_FAILURE_OWNER_PR,
     }:
         return str(stored_owner)
     if is_review_guidance_only_workflow(workflow):
         return _WORKFLOW_FAILURE_OWNER_REVIEW
-    step_owner = _workflow_failure_owner_for_step(workflow.step)
-    if step_owner:
-        return step_owner
-    if _is_qa_workflow_failure(error):
-        return _WORKFLOW_FAILURE_OWNER_QA
     return _WORKFLOW_FAILURE_OWNER_PR
 
 
@@ -1453,36 +1282,7 @@ def _workflow_stopped_error(workflow: SystemWorkflow) -> str:
         return "Review workflow stopped by user"
     if workflow.state.get(REVIEW_GUIDANCE_STATE_KEY) is True:
         return "PR workflow stopped by user"
-    return "QA workflow stopped by user"
-
-
-def _workflow_failure_owner_for_step(step: str) -> str:
-    if step in {STEP_QA_RUNNING, STEP_FEEDBACK_RUNNING}:
-        return _WORKFLOW_FAILURE_OWNER_QA
-    if step in {
-        STEP_USER_STEERING_RUNNING,
-        STEP_PR_PROMPT_SPAWNED,
-        STEP_PR_PROMPT_RUNNING,
-        STEP_PR_WATCH_RUNNING,
-    }:
-        return _WORKFLOW_FAILURE_OWNER_PR
-    return ""
-
-
-def _is_qa_workflow_failure(error: str) -> bool:
-    return error.startswith(
-        (
-            "QA agent reached",
-            "QA feedback worker failed",
-            "QA output ",
-            "QA worker ",
-            "failed to restart QA agent",
-            "failed to start QA agent",
-            "failed to start QA feedback turn",
-            "legacy QA panel run cancelled",
-            "unsupported PR QA agent kind",
-        )
-    )
+    return "PR workflow stopped by user"
 
 
 def _spawn_workflow_turn(
@@ -1525,7 +1325,7 @@ def _spawn_workflow_turn(
         web_search_mode=_workflow_web_search_mode(workflow),
         purpose=purpose,
         workflow_id=workflow.pk,
-        agent_kind=(agent_kind or PR_QA_AGENT_KIND if purpose != CodexInstance.PURPOSE_USER else ""),
+        agent_kind=agent_kind,
         display_author=display_author,
         user_message_index=user_message_index,
     )
@@ -1583,38 +1383,6 @@ def _final_agent_text(events_path: str) -> str:
             ):
                 latest = item["text"]
     return latest
-
-
-def _codex_review_result(events_path: str) -> dict[str, Any] | None:
-    """Return native Codex review presentation text and structured output."""
-    path = Path(events_path)
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    latest_text = None
-    latest_output = None
-    for raw in lines:
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        payload = event.get("payload") or {}
-        if event.get("method") == "item/completed":
-            item = payload.get("item") or {}
-            review = item.get("review")
-            if item.get("type") == "exitedReviewMode" and isinstance(review, str):
-                latest_text = review
-        elif event.get("method") == codex_events.NATIVE_REVIEW_COMPLETED_METHOD:
-            review_output = payload.get("reviewOutput")
-            if isinstance(review_output, dict):
-                latest_output = review_output
-    if latest_text is None and latest_output is None:
-        return None
-    if latest_text is None and latest_output is not None:
-        explanation = latest_output.get("overall_explanation")
-        latest_text = explanation if isinstance(explanation, str) else ""
-    return {"feedback": latest_text or "", "review_output": latest_output}
 
 
 def _fail_run_and_block_workflow(
@@ -1846,7 +1614,6 @@ def _finish_workflow_block(
     surface_to_thread: bool = True,
 ) -> None:
     """Run side effects for an already committed blocked transition."""
-    pr_qa._interrupt_orphaned_qa_review_runs(workflow, error)
     if surface_to_thread:
         _surface_workflow_failure(workflow, error)
 
@@ -1942,28 +1709,14 @@ def _system_agent_run_for_instance(instance: CodexInstance) -> SystemAgentRun | 
             "agent_kind": instance.agent_kind,
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
-            "input": _recovered_system_agent_run_input(instance, workflow),
+            "input": _recovered_system_agent_run_input(instance),
         },
     )
     return run
 
 
-def _recovered_system_agent_run_input(instance: CodexInstance, workflow: SystemWorkflow) -> dict[str, Any]:
-    run_input: dict[str, Any] = {"cwd": instance.cwd}
-    if workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return run_input
-    if instance.agent_kind not in _QA_INTERRUPTIBLE_AGENT_KINDS:
-        return run_input
-    revision_key = "qa_review_revision"
-    revision = instance.user_message_index
-    run_input[revision_key] = revision if revision is not None else 0
-    if instance.agent_kind == PR_QA_AGENT_KIND:
-        run_input["qa_handoff_ref"] = pr_qa._qa_review_handoff_ref(
-            workflow.pk,
-            revision if revision is not None else 0,
-            workflow.iteration,
-        )
-    return run_input
+def _recovered_system_agent_run_input(instance: CodexInstance) -> dict[str, Any]:
+    return {"cwd": instance.cwd}
 
 
 # Imported last: the kind modules register their WorkflowHandler with the

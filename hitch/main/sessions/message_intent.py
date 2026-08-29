@@ -11,16 +11,12 @@ from hitch.main.sessions.pr_prompts import (
     is_pr_creation_prompt,
 )
 from hitch.main.sessions.session_settings import _QA_SLASH_PROMPT
-from hitch.main.workflows.system_agents import QA_SLASH_LEGACY_DISPLAY_PROMPT
 
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"
 _PR_NOW_SLASH_COMMAND = "/pr-now"
 _FIX_PR_SLASH_COMMAND = "/fix-pr"
 _QA_SLASH_COMMAND = "/qa"
-_QA_PROMPT_ALIASES = frozenset(
-    {_QA_SLASH_PROMPT, QA_SLASH_LEGACY_DISPLAY_PROMPT}
-)
 
 
 class _MessageIntent(NamedTuple):
@@ -80,7 +76,7 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         )
     if not plan_mode and is_pr_creation_prompt(prompt):
         return _MessageIntent(prompt, False, False, False, pr_activation=True)
-    if not plan_mode and prompt in _QA_PROMPT_ALIASES:
+    if not plan_mode and prompt == _QA_SLASH_PROMPT:
         return _MessageIntent(
             _QA_SLASH_PROMPT, False, False, False, qa_activation=True
         )
@@ -90,5 +86,5 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         True,
         explicit_plan_mode,
         pr_activation=is_pr_creation_prompt(prompt),
-        qa_activation=prompt in _QA_PROMPT_ALIASES,
+        qa_activation=prompt == _QA_SLASH_PROMPT,
     )

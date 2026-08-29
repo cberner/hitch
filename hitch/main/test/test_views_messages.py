@@ -369,45 +369,6 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
-    def test_queues_message_behind_active_workflow_feedback_turn(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        instance = CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="fix QA feedback",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "also lint", "active_instance": str(instance.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(workflow.steering_messages.get().prompt, "also lint")
-        mock_steer.assert_not_called()
-        mock_spawn.assert_not_called()
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -2324,17 +2285,6 @@ class SendMessageViewTests(TestCase):
                 {"open_pr_on_lgtm": False},
             ),
             (
-                "legacy qa menu alias",
-                {
-                    "prompt": (
-                        "Run the QA agent on the current diff and fix anything it finds"
-                    )
-                },
-                None,
-                None,
-                {"open_pr_on_lgtm": False},
-            ),
-            (
                 "pr slash after pending plan",
                 {"prompt": "/pr", "plan_mode": "true"},
                 "pending",
@@ -2900,7 +2850,7 @@ class SendMessageViewTests(TestCase):
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
         mock_enqueue_steering.return_value = True
 
@@ -2938,7 +2888,6 @@ class SendMessageViewTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "next_user_message_index": 1,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 0,
                 system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
                     system_agents.STEP_PR_PROMPT_RUNNING
                 ),
@@ -2988,13 +2937,13 @@ class SendMessageViewTests(TestCase):
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         def finish_before_claim(*_args: object, **_kwargs: object) -> bool:
             SystemWorkflow.objects.filter(pk=workflow.pk).update(
                 status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_QA_APPROVED,
+                step=system_agents.STEP_REVIEW_COMPLETED,
             )
             return False
 
@@ -3048,35 +2997,6 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_running_feedback_workflow_accepts_normal_follow_up(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_enqueue_steering: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "please also do this"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_enqueue_steering.assert_called_once_with(
-            workflow,
-            prompt="please also do this",
-        )
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -3132,7 +3052,7 @@ class SendMessageViewTests(TestCase):
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         response = self.client.post(
@@ -3424,7 +3344,6 @@ class StopSessionViewTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "next_user_message_index": 1,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 0,
                 system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
                     system_agents.STEP_PR_PROMPT_RUNNING
                 ),

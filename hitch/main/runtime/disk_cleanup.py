@@ -26,7 +26,6 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
-from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -573,14 +572,13 @@ def _protected_proposal_session_ids() -> set[int]:
 
 def _hidden_system_thread_ids() -> set[str]:
     thread_ids = set(
-        system_session_owner_rows(SystemAgentRun.objects.exclude(thread_id=""))
+        SystemAgentRun.objects.exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )
     thread_ids.update(
-        system_session_owner_rows(
-            CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT).exclude(thread_id="")
-        )
+        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
+        .exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )

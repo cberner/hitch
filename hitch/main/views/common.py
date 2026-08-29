@@ -89,14 +89,12 @@ from hitch.main.sessions.session_entry_display import (
     _active_instance_for,
     _active_stream_owns_turn,
     _active_worker_status_text,
-    _apply_qa_approval_messages,
     _apply_system_authors,
+    _apply_workflow_messages,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
-    _filter_legacy_redacted_entries,
     _latest_user_turn_failure,
-    _legacy_redacted_prompts,
     _mark_active_history_user_entries,
     _pending_user_author,
     _pending_user_prompt,
@@ -473,7 +471,6 @@ def _render_session_detail(
         detail_rollout_state.mtime_ns if detail_rollout_state is not None else 0
     )
     full_history_requested = request.GET.get("history") == "all"
-    legacy_redacted_prompts = _legacy_redacted_prompts(session_id)
     active_history_user = _active_history_user_identity(active_instance)
     paginate_history = False
     if (
@@ -504,7 +501,6 @@ def _render_session_detail(
             _SESSION_HISTORY_MESSAGE_TARGET if paginate_history else None
         ),
         allow_active_rollout=full_history_requested,
-        hidden_user_prompts=legacy_redacted_prompts,
         active_user_identity=active_history_user,
     )
     resumed: Any
@@ -625,16 +621,9 @@ def _render_session_detail(
         entries = raw_entries
     else:
         entries = _apply_system_authors(raw_entries, session_id)
-        entries = _apply_qa_approval_messages(entries, session_id)
+        entries = _apply_workflow_messages(entries, session_id)
         if full_history_requested:
             _mark_active_history_user_entries(entries, active_instance)
-    entries = _filter_legacy_redacted_entries(
-        entries,
-        initial_user_text=(
-            history_page.leading_user_text if history_page is not None else None
-        ),
-        redacted_prompts=legacy_redacted_prompts,
-    )
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])

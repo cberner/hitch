@@ -25,10 +25,8 @@ from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
-    _apply_qa_approval_messages,
     _apply_system_authors,
-    _filter_legacy_redacted_entries,
-    _legacy_redacted_prompts,
+    _apply_workflow_messages,
     _trim_in_progress_turn,
 )
 from hitch.main.sessions.session_resume import (
@@ -62,7 +60,6 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         raise Http404("history page not found") from exc
     active_instance = _active_instance_for(session_id)
     active_user_identity = _active_history_user_identity(active_instance)
-    legacy_redacted_prompts = _legacy_redacted_prompts(session_id)
     # The parent page selects one transcript source for its whole lifecycle.
     # Fragments inherit that choice; only direct or legacy fragment URLs need
     # to detect ownership from the current worker state.
@@ -86,7 +83,6 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         before_offset=before_offset,
         partial_record_end=partial_record_end,
         message_target=common._SESSION_HISTORY_MESSAGE_TARGET,
-        hidden_user_prompts=legacy_redacted_prompts,
         active_user_identity=active_user_identity,
     )
     if page is None:
@@ -103,11 +99,6 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
             leading_turn_continues=leading_turn_continues,
             trailing_turn_continues=newer_turn_continues,
         )
-    )
-    entries = _filter_legacy_redacted_entries(
-        entries,
-        initial_user_text=page.leading_user_text,
-        redacted_prompts=legacy_redacted_prompts,
     )
     entries = _trim_in_progress_turn(
         entries,
@@ -202,11 +193,7 @@ def _rollout_intermediate_entry_for_detail(
     if not _entries_include_transcript(entries):
         raise Http404("session not found")
     entries = _apply_system_authors(entries, session_id)
-    entries = _apply_qa_approval_messages(entries, session_id)
-    entries = _filter_legacy_redacted_entries(
-        entries,
-        redacted_prompts=_legacy_redacted_prompts(session_id),
-    )
+    entries = _apply_workflow_messages(entries, session_id)
     if entry_index >= len(entries):
         raise Http404("intermediate entry not found")
     entry = entries[entry_index]
@@ -240,7 +227,6 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     steering_param = request.GET.get("steering", "")
-    legacy_demo_param = request.GET.get("demo", "")
     active = _active_instance_for(session_id)
     active_workflow = system_agents.active_workflow_for_thread(
         session_id,
@@ -264,8 +250,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
         str(current_steering_revision) if active_workflow is not None else ""
     )
     if (
-        legacy_demo_param
-        or baseline_param != current_latest_str
+        baseline_param != current_latest_str
         or active_param != current_active_str
         or workflow_param != current_workflow_str
         or steering_param != current_steering_str

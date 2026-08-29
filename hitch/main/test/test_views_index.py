@@ -486,124 +486,6 @@ class IndexViewTests(TestCase):
             self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_refreshes_uncached_pr_snapshot_to_done_merged(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_gh_pr_view: MagicMock,
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        pr_url = "https://github.com/cberner/hitch/pull/94"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_fetch_pr",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps({"url": pr_url, "state": "open"}),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Open."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="uncached-pr-merged",
-            cwd=str(rollout_path.parent),
-            codex_display_title="Uncached PR merged",
-            codex_preview="Open a PR",
-            codex_path=str(rollout_path),
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="uncached-pr-merged",
-            cwd=str(rollout_path.parent),
-            status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
-            step=system_agents.STEP_MAX_ITERATIONS_REACHED,
-            state={
-                "pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 94,
-                    "state": "open",
-                },
-                "hitch_pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 94,
-                },
-            },
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
-        mock_gh_pr_view.return_value = {
-            "url": pr_url,
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 94,
-            "state": "closed",
-            "merged": True,
-            "merged_at": "2026-06-02T08:26:51Z",
-        }
-
-        # First load serves the open PR badge with the refreshing highlight and
-        # refreshes the snapshot off-request; the stale workflow is stripped by
-        # the main-lifecycle check so the refresh lands on the stage cache only.
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Uncached PR merged")
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #94</span>',
-        )
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "done_merged")
-        self.assertIsNotNone(metadata.derived_stage_pr_refresh_attempted_at)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_MAX_ITERATIONS_REACHED)
-        mock_gh_pr_view.assert_called_once()
-        mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
-
-        # The next load reads the refreshed terminal stage from cache, no gh.
-        response = self.client.get(reverse("index"))
-        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
-        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1335,8 +1217,11 @@ class IndexViewTests(TestCase):
             main_thread_id="running-workflow-no-handoff",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={},
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+            },
         )
 
         response = self.client.get(reverse("index"))
@@ -1416,7 +1301,7 @@ class IndexViewTests(TestCase):
             main_thread_id="running-workflow-terminal-pr",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={"pr_handoff": {"url": pr_url, "state": "open"}},
         )
 
@@ -2113,162 +1998,7 @@ class IndexViewTests(TestCase):
         assert metadata.codex_last_synced_at is not None
         self.assertGreater(metadata.codex_last_synced_at, old_updated_at)
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_order_uses_local_qa_activity_when_hidden_row_is_stale(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/repo",
-            codex_display_title="Main session",
-            codex_created_at=datetime.fromtimestamp(900, UTC),
-            codex_updated_at=datetime.fromtimestamp(900, UTC),
-            codex_last_synced_at=now,
-        )
-        SessionMetadata.objects.create(
-            thread_id="other-thread",
-            cwd="/repo",
-            codex_display_title="Other session",
-            codex_created_at=datetime.fromtimestamp(1500, UTC),
-            codex_updated_at=datetime.fromtimestamp(1500, UTC),
-            codex_last_synced_at=now,
-        )
-        SessionMetadata.objects.create(
-            thread_id="qa-thread",
-            cwd="/repo",
-            codex_display_title="Hidden QA",
-            codex_created_at=datetime.fromtimestamp(1000, UTC),
-            codex_updated_at=datetime.fromtimestamp(1000, UTC),
-            codex_last_synced_at=datetime.fromtimestamp(1000, UTC),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        run_updated_at = datetime.fromtimestamp(2000, UTC)
-        SystemAgentRun.objects.filter(pk=run.pk).update(updated_at=run_updated_at)
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=run_updated_at)
 
-        response = self.client.get(reverse("index"))
-        body = response.content.decode()
-        sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            [session["id"] for session in sessions_context],
-            ["main-thread", "other-thread"],
-        )
-        self.assertEqual(sessions_context[0]["updated_at"], 2000)
-        self.assertLess(body.index("Main session"), body.index("Other session"))
-        self.assertNotContains(response, "Hidden QA")
-        client.thread_list.assert_not_called()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_order_promotes_qa_activity_from_beyond_page_size(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        for index in range(session_list._SESSION_PAGE_SIZE):
-            updated_at = datetime.fromtimestamp(5000 - index, UTC)
-            SessionMetadata.objects.create(
-                thread_id=f"ordinary-{index}",
-                cwd="/repo",
-                codex_display_title=f"Ordinary {index}",
-                codex_created_at=updated_at,
-                codex_updated_at=updated_at,
-                codex_last_synced_at=now,
-            )
-        SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/repo",
-            codex_display_title="Main session",
-            codex_created_at=datetime.fromtimestamp(1, UTC),
-            codex_updated_at=datetime.fromtimestamp(1, UTC),
-            codex_last_synced_at=now,
-        )
-        SessionMetadata.objects.create(
-            thread_id="qa-thread",
-            cwd="/repo",
-            codex_display_title="Hidden QA",
-            codex_created_at=datetime.fromtimestamp(1000, UTC),
-            codex_updated_at=datetime.fromtimestamp(1000, UTC),
-            codex_last_synced_at=datetime.fromtimestamp(1000, UTC),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        run_updated_at = datetime.fromtimestamp(10_000, UTC)
-        SystemAgentRun.objects.filter(pk=run.pk).update(updated_at=run_updated_at)
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=run_updated_at)
-
-        response = self.client.get(reverse("index"))
-        sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
-        session_ids = [session["id"] for session in sessions_context]
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(session_ids[0], "main-thread")
-        self.assertIn("ordinary-48", session_ids)
-        self.assertNotIn("ordinary-49", session_ids)
-        self.assertNotContains(response, "Hidden QA")
-        client.thread_list.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -3024,25 +2754,25 @@ class IndexViewTests(TestCase):
         )
         instance = CodexInstance.objects.create(
             pid=1,
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
-            prompt="QA prompt",
+            prompt="Autonomous goal prompt",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author="QA agent",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="system-thread",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
         )
         SessionMetadata.objects.create(
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
             project=project,
         )
@@ -3050,9 +2780,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "QA agent")
+        self.assertContains(response, system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR)
         self.assertContains(response, "completed")
-        metadata = SessionMetadata.objects.get(thread_id="qa-thread")
+        metadata = SessionMetadata.objects.get(thread_id="system-thread")
         self.assertEqual(metadata.project, project)
         self.assertIsNotNone(metadata.codex_updated_at)
 
@@ -3228,19 +2958,19 @@ class IndexViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     def test_hides_system_agent_threads(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         visible = _session("visible", preview="Visible")
-        hidden = _session("qa-thread", preview="Hidden QA")
+        hidden = _session("system-thread", preview="Hidden system")
         _setup_codex(mock_codex, threads=[visible, hidden])
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
         )
         instance = CodexInstance.objects.create(
             pid=1,
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
-            prompt="qa",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -3248,8 +2978,8 @@ class IndexViewTests(TestCase):
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="system-thread",
             instance=instance,
         )
 
@@ -3257,7 +2987,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
-        self.assertNotContains(response, "Hidden QA")
+        self.assertNotContains(response, "Hidden system")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -3610,51 +3340,6 @@ class IndexViewTests(TestCase):
         self.assertEqual(client.thread_list.call_count, 2)
         self.assertTrue(SessionIndexSyncState.objects.get(source="active").is_complete)
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_historical_qa_run_does_not_disable_cursor_pagination(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        first_page = [_session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i) for i in range(50)]
-        second_page = [_session("thread-50", name="Session 50", updated_at=900)]
-        client = _setup_codex(mock_codex)
-
-        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if cursor == "page-2":
-                return SimpleNamespace(data=second_page)
-            return SimpleNamespace(data=first_page, next_cursor="page-2")
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="old-main",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="old-qa",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="old-qa",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Session 0")
-        self._assert_index_cursor_url(response)
-        self.assertEqual(client.thread_list.call_count, 2)
-        self.assertTrue(SessionIndexSyncState.objects.get(source="active").is_complete)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -3737,7 +3422,7 @@ class IndexViewTests(TestCase):
     def test_paginates_sessions_before_hiding_system_agent_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        hidden = _session("qa-thread", preview="Hidden QA", updated_at=2000)
+        hidden = _session("system-thread", preview="Hidden system", updated_at=2000)
         visible = _session("visible-next-page", preview="Visible next page", updated_at=1000)
         client = _setup_codex(mock_codex)
 
@@ -3751,15 +3436,15 @@ class IndexViewTests(TestCase):
         client.thread_list.side_effect = thread_list
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible-next-page",
             cwd="/repo",
         )
         instance = CodexInstance.objects.create(
             pid=1,
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
-            prompt="qa",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -3767,8 +3452,8 @@ class IndexViewTests(TestCase):
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="system-thread",
             instance=instance,
         )
 
@@ -3776,318 +3461,40 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible next page")
-        self.assertNotContains(response, "Hidden QA")
+        self.assertNotContains(response, "Hidden system")
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_activity_can_promote_main_session_from_later_codex_page(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        client = _setup_codex(mock_codex)
 
-        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if cursor == "page-2":
-                return SimpleNamespace(data=[main])
-            return SimpleNamespace(data=[*ordinary, hidden_qa], next_cursor="page-2")
 
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
 
-        response = self.client.get(reverse("index"))
 
-        self.assertContains(response, "Main session")
-        self.assertContains(response, "Ordinary 48")
-        self.assertNotContains(response, "Ordinary 49")
-        self.assertNotContains(response, "Hidden QA")
-        load_more_url = self._assert_index_cursor_url(response)
-        self.assertNotContains(response, "materialized_order=1")
 
-        response = self.client.get(load_more_url)
-
-        self.assertNotContains(response, "Main session")
-        self.assertContains(response, "Ordinary 49")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_activity_can_promote_main_session_from_later_in_fetch_page(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertContains(response, "Main session")
-        self.assertContains(response, "Ordinary 48")
-        self.assertNotContains(response, "Ordinary 49")
-        self.assertNotContains(response, "Hidden QA")
-        self._assert_index_cursor_url(response)
-        self.assertNotContains(response, "materialized_order=1")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_mid_pagination_qa_activity_keeps_cursor_order(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        first_page = [_session(f"first-{i}", name=f"First {i}", updated_at=3000 - i) for i in range(50)]
-        second_page = [_session(f"second-{i}", name=f"Second {i}", updated_at=2000 - i) for i in range(50)]
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        client = _setup_codex(mock_codex)
-
-        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if cursor == "page-2":
-                return SimpleNamespace(data=[*second_page, hidden_qa], next_cursor="page-3")
-            if cursor == "page-3":
-                return SimpleNamespace(data=[main])
-            return SimpleNamespace(data=first_page, next_cursor="page-2")
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"), {"cursor": "page-2"})
-
-        self.assertContains(response, "Second 0")
-        self.assertContains(response, "Second 49")
-        self.assertNotContains(response, "First 0")
-        self.assertNotContains(response, "materialized_order=1")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_activity_materializes_incomplete_final_page(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        ordinary = _session("ordinary", name="Ordinary session", updated_at=1000)
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        client = _setup_codex(mock_codex)
-
-        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if cursor == "page-2":
-                return SimpleNamespace(data=[main])
-            return SimpleNamespace(data=[ordinary, hidden_qa], next_cursor="page-2")
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"))
-        body = response.content.decode()
-
-        self.assertContains(response, "Main session")
-        self.assertContains(response, "Ordinary session")
-        self.assertLess(body.index("Main session"), body.index("Ordinary session"))
-        self.assertNotContains(response, "Hidden QA")
-        self.assertNotContains(response, "Load more")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_activity_promotes_main_session_when_archived_sessions_are_shown(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        client = _setup_codex(mock_codex)
-
-        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if archived:
-                return SimpleNamespace(data=[])
-            if cursor == "page-2":
-                return SimpleNamespace(data=[main])
-            return SimpleNamespace(data=[*ordinary, hidden_qa], next_cursor="page-2")
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertContains(response, "Main session")
-        self.assertContains(response, "Ordinary 48")
-        self.assertNotContains(response, "Ordinary 49")
-        self.assertNotContains(response, "Hidden QA")
-        self._assert_index_cursor_url(response)
-        self.assertNotContains(response, "materialized_order=1")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_merge_promotes_main_session_from_later_in_fetch_page(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
-        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
-        main = _session("main-thread", name="Main session", updated_at=1)
-        _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="pr_qa",
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertContains(response, "Main session")
-        self.assertContains(response, "Ordinary 48")
-        self.assertNotContains(response, "Ordinary 49")
-        self.assertNotContains(response, "Hidden QA")
-        self._assert_index_cursor_url(response)
-        self.assertNotContains(response, "materialized_order=1")
 
     @patch("hitch.main.views.common.Codex")
     def test_system_sessions_lists_hidden_threads_as_read_only_links(self, mock_codex: MagicMock) -> None:
         visible = _session("visible", preview="Visible")
-        hidden = _session("qa-thread", preview="Hidden QA")
+        hidden = _session("system-thread", preview="Hidden system")
         _setup_codex(mock_codex, threads=[visible, hidden])
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
         )
         instance = CodexInstance.objects.create(
             pid=1,
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
-            prompt="qa",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="system-thread",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
         )
@@ -4100,9 +3507,9 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'class="session-list-menu-fallback"')
         self.assertContains(response, f'href="{reverse("index")}" role="menuitem"')
         self.assertContains(response, ">Sessions<")
-        self.assertContains(response, "Hidden QA")
-        self.assertContains(response, reverse("system_session", kwargs={"session_id": "qa-thread"}))
-        self.assertContains(response, "QA agent")
+        self.assertContains(response, "Hidden system")
+        self.assertContains(response, reverse("system_session", kwargs={"session_id": "system-thread"}))
+        self.assertContains(response, system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR)
         self.assertContains(response, "completed")
         self.assertNotContains(response, "Visible")
         self.assertNotContains(response, 'aria-label="Session actions"')
@@ -4111,27 +3518,27 @@ class IndexViewTests(TestCase):
 
     def test_system_session_helpers_defer_large_payload_fields(self) -> None:
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
         )
         run_instance = CodexInstance.objects.create(
             pid=1,
-            thread_id="qa-thread",
+            thread_id="system-thread",
             cwd="/repo",
             prompt="prompt " * 2000,
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             developer_instructions="developer " * 2000,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="system-thread",
             instance=run_instance,
             status=SystemAgentRun.STATUS_COMPLETED,
             input={"prompt": "input " * 2000},
@@ -4153,13 +3560,13 @@ class IndexViewTests(TestCase):
         )
 
         with CaptureQueriesContext(connection) as captured:
-            runs_by_thread_id = system_agent_summary._system_agent_runs_by_thread_id(["qa-thread"])
+            runs_by_thread_id = system_agent_summary._system_agent_runs_by_thread_id(["system-thread"])
             instances_by_thread_id = system_agent_summary._system_agent_instances_by_thread_id(["instance-only-thread"])
-            run = runs_by_thread_id["qa-thread"]
+            run = runs_by_thread_id["system-thread"]
             instance = instances_by_thread_id["instance-only-thread"]
             self.assertEqual(
                 system_agent_summary._system_agent_run_label(run),
-                system_agents.QA_DISPLAY_AUTHOR,
+                system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             )
             self.assertEqual(
                 system_agent_summary._system_agent_status(run),
@@ -4248,113 +3655,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, ".session.pending-archive {")
         self.assertContains(response, "visibility: hidden;")
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_session_updated_at_includes_hidden_qa_agent_activity(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        active = _session("active", name="Active session", updated_at=1000)
-        other = _session("other", name="Other session", updated_at=1500)
-        qa_thread = _session("qa-thread", name="Hidden QA", updated_at=2000)
-        _setup_codex(mock_codex, threads=[active, other, qa_thread])
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="active",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
 
-        response = self.client.get(reverse("index"))
-        body = response.content.decode()
-        sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual([session["id"] for session in sessions_context], ["active", "other"])
-        self.assertEqual(sessions_context[0]["updated_at"], 2000)
-        self.assertContains(response, 'data-updated-at="2000"')
-        self.assertLess(body.index("Active session"), body.index("Other session"))
-        self.assertNotContains(response, "Hidden QA")
-
-    def test_qa_activity_lookup_is_scoped_to_current_sessions(self) -> None:
-        current_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="active",
-            cwd="/repo",
-        )
-        current_instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="active-qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=current_workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        current_run = SystemAgentRun.objects.create(
-            workflow=current_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="active-qa-thread",
-            instance=current_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        old_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="old-session",
-            cwd="/repo",
-        )
-        old_instance = CodexInstance.objects.create(
-            pid=2,
-            thread_id="old-qa-thread",
-            cwd="/repo",
-            prompt="qa",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=old_workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        old_run = SystemAgentRun.objects.create(
-            workflow=old_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="old-qa-thread",
-            instance=old_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        old_time = datetime.fromtimestamp(1900, UTC)
-        current_time = datetime.fromtimestamp(2000, UTC)
-        newer_old_time = datetime.fromtimestamp(3000, UTC)
-        SystemWorkflow.objects.filter(pk=current_workflow.pk).update(updated_at=old_time)
-        SystemAgentRun.objects.filter(pk=current_run.pk).update(updated_at=current_time)
-        SystemWorkflow.objects.filter(pk=old_workflow.pk).update(updated_at=newer_old_time)
-        SystemAgentRun.objects.filter(pk=old_run.pk).update(updated_at=newer_old_time)
-
-        updated_at_by_main_thread = system_agent_summary._qa_activity_updated_at_by_main_thread_id(
-            [_session("active", updated_at=1000)],
-            system_agents.hidden_thread_ids(),
-        )
-
-        self.assertEqual(updated_at_by_main_thread, {"active": 2000})
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -4400,7 +3701,7 @@ class IndexViewTests(TestCase):
             codex_updated_at=now + timedelta(seconds=1),
         )
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
             status=SystemWorkflow.STATUS_COMPLETED,
@@ -4409,16 +3710,16 @@ class IndexViewTests(TestCase):
             pid=1,
             thread_id="hidden-system",
             cwd="/repo",
-            prompt="qa",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="hidden-system",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
@@ -4438,36 +3739,6 @@ class IndexViewTests(TestCase):
         mock_hidden_thread_ids.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.common.Codex")
-    def test_warm_index_keeps_legacy_demo_user_session_visible(self, mock_codex: MagicMock) -> None:
-        now = timezone.now()
-        SessionMetadata.objects.create(
-            thread_id="legacy-demo-user",
-            cwd="/repo",
-            codex_display_title="Visible legacy demo session",
-            codex_updated_at=now,
-        )
-        CodexInstance.objects.create(
-            pid=1,
-            thread_id="legacy-demo-user",
-            cwd="/repo",
-            prompt="Registration token: historical-secret",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind="demo",
-        )
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Visible legacy demo session")
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -5745,7 +5016,7 @@ class IndexViewTests(TestCase):
             ],
         )
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="active",
             cwd="/repo",
         )
@@ -5753,7 +5024,7 @@ class IndexViewTests(TestCase):
             pid=1,
             thread_id="system",
             cwd="/repo",
-            prompt="qa",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -5761,7 +5032,7 @@ class IndexViewTests(TestCase):
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="system",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,

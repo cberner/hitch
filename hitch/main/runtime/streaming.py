@@ -28,14 +28,13 @@ from typing import Any
 
 from django.db import close_old_connections
 
-from hitch.main import formatting
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, codex_pool, reconciliation
+from hitch.main.runtime import codex_pool, reconciliation
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.workflows import system_agents
 
@@ -123,7 +122,7 @@ def stream_for_instance(
         return
     yield _heartbeat_frame(
         working=True,
-        status_text=qa_agent_status_text_for_instance(instance),
+        status_text="",
         workflow=_workflow_for_instance(instance),
     )
 
@@ -143,7 +142,7 @@ def stream_for_instance(
         if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
             yield _heartbeat_frame(
                 working=True,
-                status_text=qa_agent_status_text_for_instance(instance),
+                status_text="",
                 workflow=_workflow_for_instance(instance),
             )
             last_heartbeat = time.monotonic()
@@ -201,7 +200,7 @@ def stream_for_instance(
             if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
                 yield _heartbeat_frame(
                     working=True,
-                    status_text=qa_agent_status_text_for_instance(instance),
+                    status_text="",
                     workflow=_workflow_for_instance(instance),
                 )
                 last_heartbeat = time.monotonic()
@@ -615,24 +614,11 @@ def _pr_gate_status_label(status: str) -> str:
     }.get(status, "Pending")
 
 
-def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
-    if instance is None:
-        return ""
-    if not _is_qa_agent_instance(instance):
-        return ""
-    tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
-    if tokens_used is None:
-        return "QA agent working..."
-    return f"QA agent working...{formatting.format_token_count(tokens_used)} tokens"
-
-
 def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow is None:
         return ""
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."
-    if workflow.step == system_agents.STEP_FEEDBACK_RUNNING:
-        return "QA feedback agent is fixing feedback..."
     if workflow.step == system_agents.STEP_PR_PROMPT_RUNNING:
         if system_agents.is_review_guidance_only_workflow(workflow):
             return "Coding agent is reviewing the changes..."
@@ -647,16 +633,7 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         ).exists():
             return "Coding agent is working..."
         return "Coding agent is waiting for the current workflow turn..."
-    instance = _running_system_agent_instance(workflow.pk)
-    status_text = qa_agent_status_text_for_instance(instance)
-    return status_text or "QA agent working..."
-
-
-def _is_qa_agent_instance(instance: CodexInstance) -> bool:
-    return (
-        instance.display_author == system_agents.QA_DISPLAY_AUTHOR
-        or instance.agent_kind == system_agents.PR_QA_AGENT_KIND
-    )
+    return "Hitch workflow is working..."
 
 
 def _running_system_workflow(

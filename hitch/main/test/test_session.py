@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -23,7 +23,6 @@ from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
-    SystemAgentRun,
     SystemWorkflow,
     WorkflowSteeringMessage,
 )
@@ -255,18 +254,6 @@ def _diff_view() -> DiffView:
 
 
 class PrUrlDetectionTests(TestCase):
-    LEGACY_PR_PROMPT = "Do a thorough review of the diff. Rebase on master, clean it up, and then open a PR"
-    LEGACY_PR_FINAL_PROMPT = (
-        f"{LEGACY_PR_PROMPT}. After opening it, poll the PR every 2 minutes "
-        "until you have CI status and at least one review signal: code review "
-        "comments, a thumbs up emoji on the PR, or an explicit review approval. "
-        "On each poll, check whether the PR has merge conflicts. Address CI "
-        "failures, review comments, merge conflicts, and any other blocking issues; "
-        "push fixes and keep looping until CI, review, and mergeability are all clean. "
-        "Stop and report back if any single polling iteration has no results after "
-        "30 minutes."
-    )
-
     def test_detects_pr_url_from_latest_pr_turn_github_mcp_result(self) -> None:
         earlier = "https://github.com/cberner/hitch/pull/93"
         latest = "https://github.com/cberner/hitch/pull/94"
@@ -300,29 +287,6 @@ class PrUrlDetectionTests(TestCase):
         )
 
         self.assertEqual(_pr_url_for_thread(thread), latest)
-
-    def test_detects_pr_url_from_legacy_pr_prompt_strings(self) -> None:
-        display_url = "https://github.com/cberner/hitch/pull/93"
-        final_url = "https://github.com/cberner/hitch/pull/94"
-
-        for prompt, url in (
-            (self.LEGACY_PR_PROMPT, display_url),
-            (self.LEGACY_PR_FINAL_PROMPT, final_url),
-        ):
-            with self.subTest(prompt=prompt):
-                thread = _thread(
-                    [
-                        _turn(
-                            [
-                                _user_message(prompt),
-                                _mcp_tool_call("github", "_create_pull_request", {"url": url}),
-                                _agent_message("Opened the PR."),
-                            ]
-                        )
-                    ]
-                )
-
-                self.assertEqual(_pr_url_for_thread(thread), url)
 
     def test_ignores_non_pr_turns_and_non_github_tools(self) -> None:
         url = "https://github.com/cberner/hitch/pull/94"
@@ -390,41 +354,6 @@ class PrUrlDetectionTests(TestCase):
 
         self.assertIsNone(_pr_url_for_thread(thread))
 
-    def test_pr_workflow_notice_without_observation_keeps_existing_pr(self) -> None:
-        url = "https://github.com/cberner/hitch/pull/94"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {"url": url, "state": "open"},
-                        ),
-                        _agent_message("Opened the PR."),
-                    ]
-                ),
-                _turn(
-                    [
-                        _user_message(
-                            "Hitch QA agent could not complete the PR workflow.\n\n"
-                            "Status: Hitch checked the PR gates and is waiting on "
-                            "external PR state.\n\n"
-                            "Tell the user the PR workflow needs attention before "
-                            "continuing."
-                        ),
-                        _agent_message("PR workflow needs attention."),
-                    ]
-                ),
-            ]
-        )
-
-        self.assertEqual(_pr_url_for_thread(thread), url)
-        snapshot = _pr_snapshot_for_thread(thread)
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot["url"], url)
 
     def test_detects_pr_url_when_mcp_tool_call_follows_final_message(self) -> None:
         # The model can emit the create_pull_request MCP call in the same
@@ -971,7 +900,7 @@ class SessionViewTests(TestCase):
 
     @patch("hitch.main.views.common.Codex")
     def test_system_feedback_renders_with_display_author(self, mock_codex: MagicMock) -> None:
-        prompt = "Feedback from Hitch QA agent:\n\nFix the failing flow."
+        prompt = "Hitch review workflow could not complete.\n\nFix the failing flow."
         thread = _thread([_turn([_user_message(prompt), _agent_message("fixed")])])
         _patch_thread(self, mock_codex, thread)
         CodexInstance.objects.create(
@@ -982,19 +911,19 @@ class SessionViewTests(TestCase):
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            display_author="QA agent",
+            display_author="Review workflow",
             user_message_index=0,
         )
 
         response = _get_session(self.client)
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<span class="role">QA agent</span>')
+        self.assertContains(response, '<span class="role">Review workflow</span>')
         self.assertNotContains(response, '<span class="role">User</span>')
 
     @patch("hitch.main.views.common.Codex")
     def test_system_feedback_author_uses_turn_index_not_text(self, mock_codex: MagicMock) -> None:
-        prompt = "Feedback from Hitch QA agent:\n\nFix the failing flow."
+        prompt = "Hitch review workflow could not complete.\n\nFix the failing flow."
         thread = _thread(
             [
                 _turn([_user_message(prompt), _agent_message("fixed")]),
@@ -1010,14 +939,14 @@ class SessionViewTests(TestCase):
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            display_author="QA agent",
+            display_author="Review workflow",
             user_message_index=0,
         )
 
         response = _get_session(self.client)
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<span class="role">QA agent</span>', count=1)
+        self.assertContains(response, '<span class="role">Review workflow</span>', count=1)
         self.assertContains(response, '<span class="role">User</span>', count=1)
 
     @patch("hitch.main.views.common.Codex")
@@ -2834,66 +2763,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotContains(response, 'aria-label="Settings for the next message"')
         mock_diff.assert_not_called()
 
-    @patch("hitch.main.views.common.build_worktree_diff")
-    @patch("hitch.main.views.common.Codex")
-    def test_active_qa_worker_renders_token_progress(self, mock_codex: MagicMock, mock_diff: MagicMock) -> None:
-        mock_diff.return_value = _diff_view()
-        _patch_thread(self, mock_codex, _thread([]))
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": codex_events.GOAL_UPDATED_METHOD,
-                        "payload": {
-                            "threadId": "thread-1",
-                            "goal": {
-                                "objective": "Apply QA feedback",
-                                "tokens_used": 1234,
-                            },
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            events_path=events_path,
-            pid=_LIVE_PID,
-        )
 
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-
-        self.assertContains(response, "QA agent working...1.2K tokens")
-        self.assertContains(response, 'data-working-text="QA agent working...1.2K tokens"')
-
-    @patch("hitch.main.views.common.build_worktree_diff")
-    @patch("hitch.main.views.common.Codex")
-    def test_active_qa_feedback_message_renders_timestamp(self, mock_codex: MagicMock, mock_diff: MagicMock) -> None:
-        mock_diff.return_value = _diff_view()
-        _patch_thread(self, mock_codex, _thread([]))
-        instance = _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_RUNNING,
-            prompt="Feedback from Hitch QA agent:\n\nFix this.",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            pid=_LIVE_PID,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(started_at=datetime.fromtimestamp(1700000456, UTC))
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-
-        self.assertContains(response, '<span class="role">QA agent</span>')
-        self.assertContains(
-            response,
-            '<time data-ts="1700000456">1700000456</time>',
-            count=1,
-        )
 
     @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
@@ -2988,61 +2858,6 @@ class SessionViewActiveWorkerTests(TestCase):
             html=False,
         )
 
-    @patch("hitch.main.views.common.build_worktree_diff")
-    @patch("hitch.main.views.common.Codex")
-    def test_legacy_demo_event_summaries_remain_redacted(self, mock_codex: MagicMock, mock_diff: MagicMock) -> None:
-        mock_diff.return_value = _diff_view()
-        _patch_thread(self, mock_codex, _thread([]))
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
-            fh.write(
-                "\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "method": codex_events.GOAL_UPDATED_METHOD,
-                                "payload": {
-                                    "threadId": "thread-1",
-                                    "goal": {"objective": "Retired demo goal secret-token"},
-                                },
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "method": codex_events.TASK_PLAN_UPDATED_METHOD,
-                                "payload": {
-                                    "threadId": "thread-1",
-                                    "explanation": "Retired demo setup secret-token",
-                                    "plan": [
-                                        {
-                                            "step": "Run retired demo command secret-token",
-                                            "status": "in_progress",
-                                        }
-                                    ],
-                                },
-                            }
-                        ),
-                    ]
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_COMPLETED,
-            prompt="Registration token: secret-token",
-            pid=0,
-            events_path=events_path,
-            agent_kind="demo",
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "Retired demo goal secret-token")
-        self.assertNotContains(response, "Retired demo setup secret-token")
-        self.assertNotContains(response, "Run retired demo command secret-token")
-        self.assertNotContains(response, 'class="has-task-plan"')
 
     @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
@@ -3418,7 +3233,7 @@ class SessionViewActiveWorkerTests(TestCase):
         rendered = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         self.assertContains(rendered, f'name="instance" value="{instance.pk}"')
         self.assertContains(rendered, "first request")
-        self.assertContains(rendered, 'aria-label="Stop the QA workflow"')
+        self.assertContains(rendered, 'aria-label="Stop the PR workflow"')
         self.assertNotContains(rendered, 'aria-label="Stop the running turn"')
         self.assertNotContains(rendered, "PR workflow continuation requirements")
 
@@ -3454,540 +3269,17 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, reverse("stop_session", kwargs={"session_id": "thread-1"}))
 
-    @patch("hitch.main.views.common.Codex")
-    def test_hidden_system_workflow_renders_busy_state(self, mock_codex: MagicMock) -> None:
-        _patch_thread(self, mock_codex, _thread([]))
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": codex_events.GOAL_UPDATED_METHOD,
-                        "payload": {
-                            "threadId": "hidden-thread",
-                            "goal": {
-                                "objective": "Review the diff",
-                                "tokensUsed": 4200,
-                            },
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            events_path=events_path,
-            pid=_LIVE_PID,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        WorkflowSteeringMessage.objects.create(
-            workflow=workflow,
-            prompt="also update the release notes",
-        )
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "QA agent working...4.2K tokens")
-        self.assertContains(response, 'data-workflow-locked="false"')
-        self.assertContains(response, "Add instructions")
-        self.assertContains(response, ">Steer</button>")
-        self.assertContains(response, "User · Queued")
-        self.assertContains(response, "also update the release notes")
-        self.assertContains(response, "data-queued-workflow-user")
-        self.assertContains(response, 'aria-label="Stop the QA workflow"')
-        self.assertContains(
-            response,
-            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;steering=0"',
-        )
 
-        workflow.steering_messages.all().delete()
-        workflow.step = system_agents.STEP_USER_STEERING_RUNNING
-        workflow.state = {
-            "next_user_message_index": 1,
-            "user_steering_prompt": "also update the release notes",
-            "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-            "user_steering_message_index": 1,
-        }
-        workflow.save(update_fields=["step", "state", "updated_at"])
 
-        claimed_response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
-        self.assertContains(claimed_response, "User · Queued")
-        self.assertContains(claimed_response, "also update the release notes")
-        self.assertContains(claimed_response, "data-queued-workflow-user")
+
+
+
+
 
     @patch("hitch.main.views.common.Codex")
-    def test_active_prompt_renders_before_later_queued_steering(self, mock_codex: MagicMock) -> None:
-        _patch_thread(self, mock_codex, _thread([]))
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 1,
-                "user_steering_prompt": "first request",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 0,
-            },
-        )
-        _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            prompt="first request",
-            user_message_index=0,
-            pid=_LIVE_PID,
-        )
-        WorkflowSteeringMessage.objects.create(
-            workflow=workflow,
-            prompt="second request",
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "first request")
-        self.assertContains(response, "second request")
-        self.assertLess(body.index("first request"), body.index("second request"))
-
-        try:
-            from playwright.sync_api import Error as PlaywrightError
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            self.skipTest(f"playwright unavailable: {exc}")
-
-        with sync_playwright() as playwright:
-            try:
-                browser = playwright.chromium.launch(headless=True)
-            except PlaywrightError as exc:
-                self.skipTest(f"playwright browser unavailable: {exc}")
-            try:
-                page = browser.new_page()
-                page.evaluate(
-                    """
-                    () => {
-                        class MockEventSource {
-                            constructor(url) {
-                                this.url = url;
-                                this.listeners = {};
-                                window.__eventSource = this;
-                            }
-                            addEventListener(type, callback) {
-                                this.listeners[type] = callback;
-                            }
-                            close() {}
-                            emit(type, data) {
-                                this.listeners[type]({ data: JSON.stringify(data) });
-                            }
-                        }
-                        window.EventSource = MockEventSource;
-                    }
-                    """
-                )
-                page.set_content(body, wait_until="load")
-                page.wait_for_function("window.__eventSource !== undefined")
-                user_messages = "[data-thread] > .entry .message.user .body"
-                self.assertEqual(
-                    page.locator(user_messages).all_text_contents(),
-                    ["first request", "second request"],
-                )
-
-                page.evaluate(
-                    """
-                    () => window.__eventSource.emit("message", {
-                        method: "item/started",
-                        recordedAt: 1700000123000000,
-                        eventSeq: 1,
-                        payload: {
-                            item: {
-                                id: "streamed-user",
-                                type: "userMessage",
-                                content: [{ type: "text", text: "first request" }],
-                            },
-                        },
-                    })
-                    """
-                )
-                page.wait_for_selector('[data-item-id="streamed-user"]')
-
-                self.assertEqual(
-                    page.locator(user_messages).all_text_contents(),
-                    ["first request", "second request"],
-                )
-            finally:
-                browser.close()
-
-    @patch("hitch.main.views.common.Codex")
-    def test_workflow_system_feedback_worker_accepts_steering(self, mock_codex: MagicMock) -> None:
-        _patch_thread(self, mock_codex, _thread([]))
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            pid=_LIVE_PID,
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-workflow-locked="false"')
-        self.assertContains(response, "Add instructions")
-        self.assertContains(response, ">Steer</button>")
-
-    @patch("hitch.main.views.common.Codex")
-    def test_completed_qa_approval_is_shown_in_transcript(self, mock_codex: MagicMock) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread(
-                [
-                    _turn([_user_message("Change it"), _agent_message("Done")]),
-                    _turn(
-                        [
-                            _user_message(system_agents.PR_SLASH_PROMPT),
-                            _agent_message("Opened PR"),
-                        ],
-                        started_at=1700000010,
-                    ),
-                ]
-            ),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-            state={
-                "next_user_message_index": 2,
-                "last_feedback": "No qualifying findings.",
-            },
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": "No qualifying findings.", "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<span class="role">QA agent</span>')
-        self.assertContains(response, "QA agent approved the diff.")
-        self.assertContains(response, "No qualifying findings.")
-        self.assertLess(
-            body.index("QA agent approved the diff."),
-            body.index(system_agents.PR_SLASH_PROMPT),
-        )
-
-    @patch("hitch.main.views.common.Codex")
-    def test_monitored_pr_qa_approval_keeps_original_prompt_order(self, mock_codex: MagicMock) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread(
-                [
-                    _turn([_user_message("Change it"), _agent_message("Done")]),
-                    _turn(
-                        [
-                            _user_message(system_agents.PR_SLASH_PROMPT),
-                            _agent_message("Opened PR"),
-                        ],
-                        started_at=1700000010,
-                    ),
-                    _turn(
-                        [
-                            _user_message("Address monitor feedback"),
-                            _agent_message("Pushed fix"),
-                        ],
-                        started_at=1700000020,
-                    ),
-                ]
-            ),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-            state={
-                "next_user_message_index": 4,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 1,
-                "last_feedback": "No qualifying findings.",
-            },
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": "No qualifying findings.", "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "QA agent approved the diff.")
-        self.assertLess(
-            body.index("QA agent approved the diff."),
-            body.index(system_agents.PR_SLASH_PROMPT),
-        )
-        self.assertLess(
-            body.index("QA agent approved the diff."),
-            body.index("Address monitor feedback"),
-        )
-
-    @patch("hitch.main.views.common.Codex")
-    def test_completed_qa_only_approval_is_appended_to_transcript(self, mock_codex: MagicMock) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_QA_APPROVED,
-            state={
-                "next_user_message_index": 1,
-                "last_feedback": "No qualifying findings.",
-            },
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": "No qualifying findings.", "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<span class="role">QA agent</span>')
-        self.assertContains(response, "QA agent approved the diff.")
-        self.assertContains(response, "No qualifying findings.")
-        self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
-
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_approval_feedback_renders_markdown_findings(self, mock_codex: MagicMock) -> None:
-        # Multi-finding feedback: lists, bold severity tags, inline-code paths
-        # must reach the user formatted rather than as raw markdown syntax.
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
-        )
-        feedback = (
-            "Findings:\n\n- **CRITICAL**: SQL injection in `users.py:42`\n- **MAJOR**: Missing test for `delete_user`\n"
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_QA_APPROVED,
-            state={"next_user_message_index": 1, "last_feedback": feedback},
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": feedback, "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('<div class="body markdown">', body)
-        self.assertIn("<strong>CRITICAL</strong>", body)
-        self.assertIn("<strong>MAJOR</strong>", body)
-        self.assertIn("<code>users.py:42</code>", body)
-        # The raw markdown syntax must not leak through to the rendered page.
-        self.assertNotIn("**CRITICAL**", body)
-        self.assertNotIn("- **MAJOR**", body)
-
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_approval_feedback_renders_single_finding_markdown(self, mock_codex: MagicMock) -> None:
-        # ``looks_like_markdown`` needs two bullets, so single-finding
-        # feedback would otherwise stay as raw ``-``/``**``/backticks; the
-        # transcript must still surface the formatted finding.
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
-        )
-        feedback = "- **P1**: issue in `views.py`"
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_QA_APPROVED,
-            state={"next_user_message_index": 1, "last_feedback": feedback},
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": feedback, "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('<div class="body markdown">', body)
-        self.assertIn("<strong>P1</strong>", body)
-        self.assertIn("<code>views.py</code>", body)
-        self.assertNotIn("**P1**", body)
-
-    @patch("hitch.main.views.common.Codex")
-    def test_completed_local_merge_approval_shows_branch_and_commit(self, mock_codex: MagicMock) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
-            state={
-                "next_user_message_index": 1,
-                "last_feedback": "No qualifying findings.",
-                "auto_merge_result": {
-                    "branch": "main",
-                    "commit_sha": "abc123",
-                    "target_worktree": "/tmp/repo",
-                    "changed": True,
-                },
-            },
-        )
-        instance = _make_codex_instance(
-            thread_id="hidden-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="hidden-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": "No qualifying findings.", "lgtm": True},
-        )
-
-        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        body = response.content.decode()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "QA agent approved the diff and merged it into main.")
-        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
-        self.assertContains(response, "Commit: abc123")
-        self.assertContains(response, "No qualifying findings.")
-        self.assertLess(
-            body.index("Done"),
-            body.index("QA agent approved the diff and merged it into main."),
-        )
-
-    @patch("hitch.main.views.common.Codex")
-    def test_review_guidance_local_merge_surfaces_without_qa_run(
+    def test_review_guidance_local_merge_surfaces_result(
         self, mock_codex: MagicMock
     ) -> None:
         _patch_thread(
@@ -4022,71 +3314,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "Review workflow")
         self.assertContains(response, "Hitch merged the session changes into main.")
         self.assertContains(response, "Commit: def456")
-        self.assertNotContains(response, "QA agent approved the diff")
 
-    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.common.Codex")
-    def test_system_session_detail_is_read_only_and_shows_system_prompt(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
-        prompt = "You are Hitch's QA agent.\nReview <diff>."
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([], id="qa-thread", name="QA thread", cwd="/repo"),
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/repo",
-        )
-        instance = _make_codex_instance(
-            thread_id="qa-thread",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            prompt=prompt,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-
-        response = self.client.get(reverse("system_session", kwargs={"session_id": "qa-thread"}))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<body class="read-only">')
-        self.assertContains(response, "QA agent log")
-        self.assertContains(response, '<details class="system-prompt">', html=False)
-        self.assertContains(response, "<summary>System prompt</summary>", html=False)
-        self.assertContains(response, "Review &lt;diff&gt;.")
-        self.assertContains(response, 'aria-label="Session actions"')
-        self.assertContains(response, ">Debug chat</a>")
-        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
-        parsed = urlparse(debug_url)
-        query = parse_qs(parsed.query)
-        self.assertEqual(parsed.path, reverse("new_session"))
-        self.assertEqual(query["cwd"], ["/repo"])
-        self.assertIn("session UID qa-thread", query["prompt"][0])
-        self.assertNotContains(response, '<span class="meta-label">stage</span>')
-        self.assertNotContains(response, "No messages in this session yet.")
-        self.assertNotContains(response, 'class="composer"')
-        self.assertNotContains(
-            response,
-            '<button type="button" role="menuitem" data-edit-title-open>Rename</button>',
-            html=False,
-        )
-        self.assertNotContains(
-            response,
-            '<button type="button" role="menuitem" data-move-project-open>Move to project</button>',
-            html=False,
-        )
-        self.assertNotContains(response, 'name="archived"')
 
     def test_system_session_detail_requires_system_run(self) -> None:
         response = self.client.get(reverse("system_session", kwargs={"session_id": "thread-1"}))

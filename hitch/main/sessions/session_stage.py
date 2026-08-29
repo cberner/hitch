@@ -50,9 +50,7 @@ _LEGACY_STAGES_BY_KEY = {
 
 _STAGE_BY_WORKFLOW_STEP = {
     system_agents.STEP_LOCAL_BRANCH_MERGED: DONE_MERGED,
-    system_agents.STEP_QA_RUNNING: QA,
-    system_agents.STEP_QA_APPROVED: QA,
-    system_agents.STEP_FEEDBACK_RUNNING: IMPLEMENTATION,
+    system_agents.STEP_REVIEW_COMPLETED: QA,
     system_agents.STEP_USER_STEERING_RUNNING: IMPLEMENTATION,
     system_agents.STEP_PR_PROMPT_SPAWNED: PR,
     system_agents.STEP_PR_PROMPT_RUNNING: PR,

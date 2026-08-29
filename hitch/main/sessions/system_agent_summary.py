@@ -1,16 +1,11 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
-    SystemWorkflow,
 )
-from hitch.main.runtime.sdk_values import (
-    latest_updated_at,
-    updated_at_seconds,
-)
-from hitch.main.sessions.system_session_ownership import system_session_owner_rows
+from hitch.main.runtime.sdk_values import updated_at_seconds
 
 
 def _system_agent_runs_by_thread_id(
@@ -19,7 +14,7 @@ def _system_agent_runs_by_thread_id(
     ids = [thread_id for thread_id in thread_ids if thread_id]
     if not ids:
         return {}
-    runs = system_session_owner_rows(
+    runs = (
         SystemAgentRun.objects.filter(thread_id__in=ids)
         .exclude(thread_id="")
         .select_related("instance")
@@ -52,7 +47,7 @@ def _system_agent_instances_by_thread_id(
     ids = [thread_id for thread_id in thread_ids if thread_id]
     if not ids:
         return {}
-    instances = system_session_owner_rows(
+    instances = (
         CodexInstance.objects.filter(
             thread_id__in=ids,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -74,50 +69,6 @@ def _system_agent_instances_by_thread_id(
     return by_thread_id
 
 
-def _qa_activity_updated_at_by_main_thread_id(threads: Iterable[Any], hidden_thread_ids: set[str]) -> dict[str, Any]:
-    current_thread_ids = {
-        thread_id for thread in threads if isinstance((thread_id := getattr(thread, "id", None)), str)
-    }
-    current_main_thread_ids = current_thread_ids - hidden_thread_ids
-    if not current_main_thread_ids:
-        return {}
-
-    hidden_updated_at_by_thread_id: dict[str, Any] = {}
-    for thread in threads:
-        thread_id = getattr(thread, "id", None)
-        if isinstance(thread_id, str) and thread_id in hidden_thread_ids:
-            hidden_updated_at_by_thread_id[thread_id] = getattr(thread, "updated_at", None)
-
-    runs = (
-        SystemAgentRun.objects.filter(
-            workflow__kind=SystemWorkflow.KIND_PR_QA,
-            workflow__main_thread_id__in=current_main_thread_ids,
-        )
-        .exclude(thread_id="")
-        .select_related("workflow")
-    )
-    updated_at_by_main_thread: dict[str, Any] = {}
-    for run in runs:
-        main_thread_id = run.workflow.main_thread_id
-        if not main_thread_id:
-            continue
-        run_updated_at = hidden_updated_at_by_thread_id.get(run.thread_id)
-        if updated_at_seconds(run_updated_at) is None:
-            run_updated_at = latest_updated_at(run.updated_at, run.workflow.updated_at)
-        updated_at_by_main_thread[main_thread_id] = latest_updated_at(
-            updated_at_by_main_thread.get(main_thread_id),
-            run_updated_at,
-        )
-    return updated_at_by_main_thread
-
-
-def _session_updated_at(thread: Any, qa_updated_at_by_main_thread: Mapping[str, Any]) -> Any:
-    return latest_updated_at(
-        getattr(thread, "updated_at", None),
-        qa_updated_at_by_main_thread.get(getattr(thread, "id", "")),
-    )
-
-
 def _updated_at_sort_key(updated_at: Any) -> float:
     seconds = updated_at_seconds(updated_at)
     return seconds if seconds is not None else 0.0
@@ -127,10 +78,10 @@ def _system_agent_run_for_thread(thread_id: str, *, run_id: int | None = None) -
     if not thread_id:
         return None
     if run_id is not None:
-        return system_session_owner_rows(
-            SystemAgentRun.objects.filter(pk=run_id, thread_id=thread_id).select_related("instance", "workflow")
+        return SystemAgentRun.objects.filter(pk=run_id, thread_id=thread_id).select_related(
+            "instance", "workflow"
         ).first()
-    return system_session_owner_rows(
+    return (
         SystemAgentRun.objects.filter(thread_id=thread_id)
         .select_related("instance", "workflow")
         .order_by("-created_at", "-pk")
@@ -140,7 +91,7 @@ def _system_agent_run_for_thread(thread_id: str, *, run_id: int | None = None) -
 def _system_agent_instance_for_thread(thread_id: str) -> CodexInstance | None:
     if not thread_id:
         return None
-    return system_session_owner_rows(
+    return (
         CodexInstance.objects.filter(
             thread_id=thread_id,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
