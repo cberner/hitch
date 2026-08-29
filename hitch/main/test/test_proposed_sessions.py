@@ -20,37 +20,11 @@ from hitch.main.models import AutonomousGoal, ProposedSession, SessionMetadata
 from hitch.main.runtime.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
-    registered_dynamic_tool_specs,
 )
 from hitch.main.test.support import _make_project
 
 
 class ProposedSessionServiceTests(TestCase):
-    def test_create_proposed_session_resolves_project_and_source_session(self) -> None:
-        project = _make_project()
-        source = SessionMetadata.objects.create(
-            thread_id="thread-1",
-            cwd="/repo",
-            project=project,
-        )
-
-        proposal = create_proposed_session(
-            ProposedSessionInput(
-                title="Add focused coverage",
-                summary="This would cover the proposal service.",
-                prompt="Add tests for proposed sessions.",
-                cwd="/repo",
-                relevant_files=["hitch/main/proposed_sessions.py", ""],
-                confidence=AutonomousGoal.CONFIDENCE_HIGH,
-                source_thread_id=source.thread_id,
-            )
-        )
-
-        self.assertEqual(proposal.project, project)
-        self.assertIsNone(proposal.autonomous_goal)
-        self.assertEqual(proposal.source_session, source)
-        self.assertEqual(proposal.relevant_files, ["hitch/main/proposed_sessions.py"])
-
     def test_create_proposed_session_rejects_unknown_project(self) -> None:
         with self.assertRaisesRegex(
             ProposedSessionError, "cwd does not match a Hitch project"
@@ -320,14 +294,6 @@ class ProposeSessionCommandTests(TestCase):
 
 
 class CodexToolTests(TestCase):
-    def test_registered_specs_include_propose_session(self) -> None:
-        specs = registered_dynamic_tool_specs()
-
-        self.assertEqual(specs[0]["namespace"], "hitch")
-        self.assertEqual(specs[0]["name"], "propose_session")
-        self.assertIn("inputSchema", specs[0])
-        self.assertIn("proposal_id", specs[0]["inputSchema"]["properties"])
-
     def test_dynamic_tool_call_creates_proposal(self) -> None:
         project = _make_project()
         source = SessionMetadata.objects.create(

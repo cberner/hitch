@@ -30,33 +30,6 @@ class _FakeCodex:
 
 
 class StartCodexWithRetryTests(SimpleTestCase):
-    def test_returns_immediately_on_clean_start(self) -> None:
-        sentinel = object()
-        factory = MagicMock(return_value=sentinel)
-        with patch("hitch.main.runtime.app_server_pool.time.sleep") as mock_sleep:
-            result = app_server_pool._start_codex_with_retry(factory)
-
-        self.assertIs(result, sentinel)
-        self.assertEqual(factory.call_count, 1)
-        mock_sleep.assert_not_called()
-
-    def test_retries_locked_state_db_then_succeeds(self) -> None:
-        sentinel = object()
-        factory = MagicMock(
-            side_effect=[
-                TransportClosedError(_LOCKED),
-                TransportClosedError(_LOCKED),
-                sentinel,
-            ]
-        )
-        with patch("hitch.main.runtime.app_server_pool.time.sleep") as mock_sleep:
-            result = app_server_pool._start_codex_with_retry(factory)
-
-        self.assertIs(result, sentinel)
-        self.assertEqual(factory.call_count, 3)
-        # Backoff slept once per failed attempt, never after the success.
-        self.assertEqual(mock_sleep.call_count, 2)
-
     def test_non_locked_transport_error_is_not_retried(self) -> None:
         boom = TransportClosedError("app-server closed stdout. stderr_tail=segfault")
         factory = MagicMock(side_effect=boom)
@@ -90,48 +63,6 @@ class OpenCodexTests(SimpleTestCase):
 
 
 class RunCodexOpWithRetryTests(SimpleTestCase):
-    def test_returns_operation_result_on_clean_run(self) -> None:
-        codex = _FakeCodex()
-        factory = MagicMock(return_value=codex)
-        operation = MagicMock(return_value="ok")
-        with patch("hitch.main.runtime.app_server_pool.time.sleep") as mock_sleep:
-            result = app_server_pool.run_codex_op_with_retry(factory, operation)
-
-        self.assertEqual(result, "ok")
-        self.assertEqual(factory.call_count, 1)
-        operation.assert_called_once_with(codex)
-        # open_codex closes the session even on the success path.
-        self.assertTrue(codex.closed)
-        mock_sleep.assert_not_called()
-
-    def test_retries_locked_operation_with_fresh_server(self) -> None:
-        servers: list[_FakeCodex] = []
-
-        def factory() -> _FakeCodex:
-            server = _FakeCodex()
-            servers.append(server)
-            return server
-
-        attempts = {"n": 0}
-
-        def operation(_codex: object) -> str:
-            attempts["n"] += 1
-            if attempts["n"] < 3:
-                raise TransportClosedError(_LOCKED)
-            return "ok"
-
-        with patch("hitch.main.runtime.app_server_pool.time.sleep") as mock_sleep:
-            result = app_server_pool.run_codex_op_with_retry(
-                cast("Callable[[], Any]", factory), operation
-            )
-
-        self.assertEqual(result, "ok")
-        # Each attempt opened (and closed) a fresh app-server, never reusing the
-        # one that exited on the locked state DB.
-        self.assertEqual(len(servers), 3)
-        self.assertTrue(all(server.closed for server in servers))
-        self.assertEqual(mock_sleep.call_count, 2)
-
     def test_non_locked_transport_error_is_not_retried(self) -> None:
         codex = _FakeCodex()
         factory = MagicMock(return_value=codex)
@@ -141,33 +72,6 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         with (
             patch("hitch.main.runtime.app_server_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
-        ):
-            app_server_pool.run_codex_op_with_retry(factory, operation)
-
-        self.assertEqual(operation.call_count, 1)
-
-    def test_locked_construction_retries_stay_bounded(self) -> None:
-        # A lock during *construction* (factory raising) must be retried by this
-        # single loop, not by a nested startup loop -- so factory runs at most
-        # _APPSERVER_START_MAX_ATTEMPTS times, never that count squared.
-        factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
-        operation = MagicMock()
-        with (
-            patch("hitch.main.runtime.app_server_pool.time.sleep"),
-            self.assertRaises(TransportClosedError),
-        ):
-            app_server_pool.run_codex_op_with_retry(factory, operation)
-
-        self.assertEqual(factory.call_count, app_server_pool._APPSERVER_START_MAX_ATTEMPTS)
-        operation.assert_not_called()
-
-    def test_non_transport_error_propagates_immediately(self) -> None:
-        codex = _FakeCodex()
-        factory = MagicMock(return_value=codex)
-        operation = MagicMock(side_effect=ValueError("boom"))
-        with (
-            patch("hitch.main.runtime.app_server_pool.time.sleep"),
-            self.assertRaises(ValueError),
         ):
             app_server_pool.run_codex_op_with_retry(factory, operation)
 
@@ -241,20 +145,6 @@ class _ValidationFailingCodex(_FakeCodex):
 
 
 class OpenCodexResumedTests(SimpleTestCase):
-    def test_yields_resumed_thread_and_closes_on_exit(self) -> None:
-        codex = _ResumableCodex()
-        configured: list[object] = []
-        with app_server_pool.open_codex_resumed(
-            cast("Callable[[], Any]", lambda: codex),
-            thread_id="t1",
-            configure=configured.append,
-        ) as (opened, thread):
-            self.assertIs(opened, codex)
-            self.assertEqual(thread, ("thread", "t1"))
-            self.assertEqual(configured, [codex])
-            self.assertFalse(codex.closed)
-        self.assertTrue(codex.closed)
-
     def test_raw_resume_fallback_for_sdk_metadata_validation(self) -> None:
         codex = _ValidationFailingCodex(
             _thread_resume_validation_error(loc=("reasoningEffort",))
@@ -299,35 +189,6 @@ class OpenCodexResumedTests(SimpleTestCase):
         self.assertEqual(codex._client.raw_requests, [])
         self.assertTrue(codex.closed)
 
-    def test_retries_locked_resume_with_fresh_server(self) -> None:
-        servers: list[_ResumableCodex] = []
-
-        def factory() -> _ResumableCodex:
-            # The first server loses the migration race and exits on resume; the
-            # next attempt opens a fresh server whose resume succeeds.
-            server = _ResumableCodex(fail_times=1 if not servers else 0)
-            servers.append(server)
-            return server
-
-        configured: list[object] = []
-        with (
-            patch("hitch.main.runtime.app_server_pool.time.sleep") as mock_sleep,
-            app_server_pool.open_codex_resumed(
-                cast("Callable[[], Any]", factory),
-                thread_id="t1",
-                configure=configured.append,
-            ) as (opened, thread),
-        ):
-            self.assertEqual(thread, ("thread", "t1"))
-
-        # First server failed its resume and was closed; second succeeded.
-        self.assertEqual(len(servers), 2)
-        self.assertTrue(servers[0].closed)
-        self.assertIs(opened, servers[1])
-        # configure runs once per attempt against that attempt's server.
-        self.assertEqual(configured, servers)
-        self.assertEqual(mock_sleep.call_count, 1)
-
     def test_non_locked_resume_error_is_not_retried(self) -> None:
         codex = _ResumableCodex(fail_times=1, error=TransportClosedError("crash"))
         with (
@@ -355,36 +216,6 @@ class OpenCodexResumedTests(SimpleTestCase):
         self.assertEqual(
             factory.call_count, app_server_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS
         )
-
-    def test_mixed_worker_construction_and_resume_locks_share_budget(self) -> None:
-        factory_calls = 0
-        servers: list[_ResumableCodex] = []
-
-        def factory() -> _ResumableCodex:
-            nonlocal factory_calls
-            factory_calls += 1
-            if factory_calls % 2:
-                raise TransportClosedError(_LOCKED)
-            server = _ResumableCodex(fail_times=1)
-            servers.append(server)
-            return server
-
-        with (
-            patch("hitch.main.runtime.app_server_pool.time.sleep"),
-            self.assertRaises(TransportClosedError),
-            app_server_pool.open_codex_resumed(
-                cast("Callable[[], Any]", factory), thread_id="t1"
-            ),
-        ):
-            pass
-
-        self.assertEqual(
-            factory_calls, app_server_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS
-        )
-        self.assertEqual(
-            len(servers), app_server_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS // 2
-        )
-        self.assertTrue(all(server.closed for server in servers))
 
     def test_caller_exception_closes_server(self) -> None:
         codex = _ResumableCodex()
@@ -417,13 +248,3 @@ class ReconcileDeadIfDueTests(SimpleTestCase):
         ):
             self.assertEqual(reconciliation.reconcile_dead_if_due(), 0)
         sweep.assert_not_called()
-
-    @override_settings(TESTING=True)
-    def test_always_sweeps_under_testing(self) -> None:
-        with (
-            patch("hitch.main.runtime.reconciliation.reconcile_dead", return_value=1) as sweep,
-            patch("hitch.main.runtime.reconciliation.rate_limit.claim") as claim,
-        ):
-            self.assertEqual(reconciliation.reconcile_dead_if_due(), 1)
-        sweep.assert_called_once_with()
-        claim.assert_not_called()

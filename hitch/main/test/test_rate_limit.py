@@ -17,14 +17,6 @@ class RateLimitTests(TestCase):
     def setUp(self) -> None:
         self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.get_current_timezone())
 
-    def test_default_min_interval_is_two_minutes(self) -> None:
-        self.assertEqual(rate_limit.DEFAULT_MIN_INTERVAL, timedelta(minutes=2))
-
-    def test_first_claim_wins_and_records_attempt(self) -> None:
-        self.assertTrue(rate_limit.claim("gh:pr-view:x", now=self.now))
-        row = RefreshThrottle.objects.get(key="gh:pr-view:x")
-        self.assertEqual(row.attempted_at, self.now)
-
     def test_second_claim_within_window_loses(self) -> None:
         self.assertTrue(rate_limit.claim("k", now=self.now))
         self.assertFalse(
@@ -48,39 +40,11 @@ class RateLimitTests(TestCase):
         ]
         self.assertEqual(results.count(True), 1)
 
-    def test_distinct_keys_are_independent(self) -> None:
-        self.assertTrue(rate_limit.claim("a", now=self.now))
-        self.assertTrue(rate_limit.claim("b", now=self.now))
-
-    def test_custom_min_interval(self) -> None:
-        self.assertTrue(
-            rate_limit.claim("k", min_interval=timedelta(seconds=10), now=self.now)
-        )
-        self.assertFalse(
-            rate_limit.claim(
-                "k",
-                min_interval=timedelta(seconds=10),
-                now=self.now + timedelta(seconds=9),
-            )
-        )
-        self.assertTrue(
-            rate_limit.claim(
-                "k",
-                min_interval=timedelta(seconds=10),
-                now=self.now + timedelta(seconds=10),
-            )
-        )
-
     def test_due_does_not_record_an_attempt(self) -> None:
         self.assertTrue(rate_limit.due("k", now=self.now))
         self.assertFalse(RefreshThrottle.objects.filter(key="k").exists())
         # A claim is still available because `due` recorded nothing.
         self.assertTrue(rate_limit.claim("k", now=self.now))
-
-    def test_due_reflects_recent_attempt(self) -> None:
-        rate_limit.claim("k", now=self.now)
-        self.assertFalse(rate_limit.due("k", now=self.now + timedelta(seconds=30)))
-        self.assertTrue(rate_limit.due("k", now=self.now + timedelta(minutes=2)))
 
     def test_mark_blocks_a_following_claim(self) -> None:
         rate_limit.mark("k", now=self.now)

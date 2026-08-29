@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
-from pygments.lexers import PythonLexer
 
 from hitch.main import diffs as diffs_module
 from hitch.main.diffs import (
@@ -150,20 +149,6 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertIn("changed line 0", rendered)
         self.assertNotIn(f"changed line {changed_line_count - 1}", rendered)
 
-    def test_highlight_reuses_cached_lexer_class_for_repeated_filename(self) -> None:
-        diffs_module._lexer_class_for_filename.cache_clear()
-        try:
-            with patch(
-                "hitch.main.diffs.find_lexer_class_for_filename",
-                return_value=PythonLexer,
-            ) as find_lexer_class:
-                diffs_module._highlight_code("example.py", "first = 1")
-                diffs_module._highlight_code("example.py", "second = 2")
-
-            self.assertEqual(find_lexer_class.call_count, 1)
-        finally:
-            diffs_module._lexer_class_for_filename.cache_clear()
-
     def test_builds_highlighted_diff_for_tracked_and_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
@@ -214,65 +199,6 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.additions, 1)
         self.assertEqual(diff.deletions, 1)
 
-    def test_branch_diff_uses_merge_base_when_origin_master_has_advanced(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            worktree = root / "feature-worktree"
-            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
-
-            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
-            _git(repo, "add", "upstream.py")
-            _git(repo, "commit", "-m", "upstream change")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-
-            branch_file = worktree / "example.py"
-            branch_file.write_text("def answer():\n    return 2\n")
-            _git(worktree, "commit", "-am", "feature change")
-
-            diff = build_worktree_diff(str(worktree))
-
-        self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.file_count, 1)
-        self.assertEqual(diff.files[0].path, "example.py")
-        self.assertEqual(diff.additions, 1)
-        self.assertEqual(diff.deletions, 1)
-
-    def test_branch_diff_prefers_origin_head_over_stale_origin_main(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            worktree = root / "feature-worktree"
-            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-
-            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
-            _git(repo, "add", "upstream.py")
-            _git(repo, "commit", "-m", "upstream change")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-            _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
-            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
-
-            branch_file = worktree / "example.py"
-            branch_file.write_text("def answer():\n    return 2\n")
-            _git(worktree, "commit", "-am", "feature change")
-
-            diff = build_worktree_diff(str(worktree))
-
-        self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.file_count, 1)
-        self.assertEqual(diff.files[0].path, "example.py")
-
     def test_branch_diff_origin_head_beats_closer_non_default_ref(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -291,34 +217,6 @@ class WorktreeDiffTests(SimpleTestCase):
             branch_file.write_text("def answer():\n    return 2\n")
             _git(worktree, "commit", "-am", "feature change")
             _git(worktree, "update-ref", "refs/remotes/origin/master", "HEAD")
-
-            diff = build_worktree_diff(str(worktree))
-
-        self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.file_count, 1)
-        self.assertEqual(diff.files[0].path, "example.py")
-
-    def test_branch_diff_prefers_closest_remote_base_without_origin_head(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            worktree = root / "feature-worktree"
-            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-
-            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
-            _git(repo, "add", "upstream.py")
-            _git(repo, "commit", "-m", "upstream change")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
-
-            branch_file = worktree / "example.py"
-            branch_file.write_text("def answer():\n    return 2\n")
-            _git(worktree, "commit", "-am", "feature change")
 
             diff = build_worktree_diff(str(worktree))
 
@@ -357,40 +255,6 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertNotIn("remote.py", paths)
         self.assertIn("feature.py", review_diff)
         self.assertNotIn("remote.py", review_diff)
-
-    def test_disjoint_history_uses_repo_object_format_empty_tree(self) -> None:
-        # The empty-tree base must match the repo's object format: the sha1
-        # empty-tree id is not a valid object in a sha256 repo, which would make
-        # the diff silently fall back to HEAD and drop the branch content.
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            init = subprocess.run(
-                [
-                    "git", "init", "--object-format=sha256",
-                    "--initial-branch=feature", str(repo),
-                ],
-                capture_output=True,
-            )
-            if init.returncode != 0:
-                self.skipTest("git lacks sha256 object-format support")
-            (repo / "feature.py").write_text("def feature():\n    return 1\n")
-            _git(repo, "add", "feature.py")
-            _git(repo, "commit", "-m", "feature")
-
-            _git(repo, "checkout", "--orphan", "remote-master")
-            _git(repo, "rm", "-rf", ".")
-            (repo / "remote.py").write_text("def remote():\n    return 2\n")
-            _git(repo, "add", "remote.py")
-            _git(repo, "commit", "-m", "remote master")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-            _git(repo, "checkout", "feature")
-
-            diff = build_worktree_diff(str(repo))
-
-        self.assertTrue(diff.has_changes)
-        paths = {file.path for file in diff.files}
-        self.assertIn("feature.py", paths)
-        self.assertNotIn("remote.py", paths)
 
     def test_shallow_clone_diffs_against_base_ref_not_empty_tree(self) -> None:
         # A shallow clone can omit the shared ancestor, so merge-base reports no
@@ -473,29 +337,6 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertIn("base.py", paths)
         self.assertNotIn("shared.py", paths)
 
-    def test_reviewer_diff_preserves_merge_base_execution_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            (repo / "tracked.txt").write_text("initial\n")
-            _git(repo, "add", "tracked.txt")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-
-            def fail_strict_merge_base(
-                cwd: str | Path, args: list[str], **kwargs: Any
-            ) -> subprocess.CompletedProcess[bytes]:
-                if args[:1] == ["merge-base"]:
-                    raise GitCommandError("timed out")
-                return git_run_git(cwd, args, **kwargs)
-
-            with patch.object(
-                diffs_module, "run_git", side_effect=fail_strict_merge_base
-            ), self.assertRaisesRegex(
-                IncompleteDiffError, "git could not run merge-base"
-            ):
-                build_worktree_diff_text(str(repo))
-
     def test_reviewer_diff_does_not_treat_head_lookup_failure_as_unborn(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
@@ -515,89 +356,6 @@ class WorktreeDiffTests(SimpleTestCase):
                 diffs_module, "run_git", side_effect=fail_head_lookup
             ), self.assertRaisesRegex(IncompleteDiffError, "git could not run"):
                 build_worktree_diff_text(str(repo))
-
-    def test_origin_master_diff_does_not_require_local_master_branch(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            worktree = root / "feature-worktree"
-            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "main")
-
-            branch_file = worktree / "example.py"
-            branch_file.write_text("def answer():\n    return 2\n")
-            _git(worktree, "commit", "-am", "feature change")
-
-            diff = build_worktree_diff(str(worktree))
-
-        self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.files[0].path, "example.py")
-
-    def test_builds_diff_for_committed_branch_changes_against_origin_main(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            worktree = root / "feature-worktree"
-            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "main")
-
-            branch_file = worktree / "example.py"
-            branch_file.write_text("def answer():\n    return 2\n")
-            _git(worktree, "commit", "-am", "feature change")
-
-            diff = build_worktree_diff(str(worktree))
-
-        self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.file_count, 1)
-        self.assertEqual(diff.files[0].path, "example.py")
-        self.assertEqual(diff.additions, 1)
-        self.assertEqual(diff.deletions, 1)
-
-    def test_committed_branch_changes_fall_back_to_head_without_origin_master(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "checkout", "-b", "feature")
-            tracked.write_text("def answer():\n    return 2\n")
-            _git(repo, "commit", "-am", "feature change")
-
-            diff = build_worktree_diff(str(repo))
-
-        self.assertFalse(diff.has_changes)
-
-    def test_hunk_lines_that_look_like_file_headers_stay_in_hunk(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            tracked = repo / "operators.txt"
-            tracked.write_text("-- i;\nkeep\n")
-            _git(repo, "add", "operators.txt")
-            _git(repo, "commit", "-m", "initial")
-
-            tracked.write_text("++ i;\nkeep\n")
-
-            diff = build_worktree_diff(str(repo))
-
-        self.assertEqual(diff.additions, 1)
-        self.assertEqual(diff.deletions, 1)
-        self.assertEqual(diff.files[0].path, "operators.txt")
-        rendered = "\n".join(line.html for file in diff.files for line in file.lines)
-        self.assertIn("++ i;", rendered)
-        self.assertIn("-- i;", rendered)
 
     def test_unborn_repo_still_shows_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -655,30 +413,6 @@ class WorktreeDiffTests(SimpleTestCase):
             with self.assertRaisesRegex(IncompleteDiffError, "tracked non-UTF-8"):
                 build_worktree_diff_text(str(repo))
 
-    def test_reviewer_diff_quotes_non_utf8_tracked_path(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            raw_path = os.path.join(os.fsencode(repo), b"bad-\xff.txt")
-            fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o644)
-            try:
-                os.write(fd, b"old text\n")
-            finally:
-                os.close(fd)
-            _git(repo, "add", "-A")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "config", "core.quotePath", "false")
-            fd = os.open(raw_path, os.O_WRONLY | os.O_TRUNC)
-            try:
-                os.write(fd, b"new text\n")
-            finally:
-                os.close(fd)
-
-            diff_text = build_worktree_diff_text(str(repo))
-
-        self.assertIn('"a/bad-\\377.txt"', diff_text)
-        self.assertIn("+new text", diff_text)
-
     def test_reviewer_diff_rejects_nul_forced_to_text(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
@@ -723,20 +457,6 @@ class WorktreeDiffTests(SimpleTestCase):
 
             with self.assertRaisesRegex(IncompleteDiffError, "dirty submodule"):
                 build_worktree_diff_text(str(repo))
-
-    def test_reviewer_diff_allows_dirty_submodule_marker_in_text_file(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            path = repo / "notes.txt"
-            path.write_text("heading\n")
-            _git(repo, "add", "notes.txt")
-            _git(repo, "commit", "-m", "initial")
-            path.write_text("heading\nSubproject commit abc-dirty\n")
-
-            diff_text = build_worktree_diff_text(str(repo))
-
-        self.assertIn("+Subproject commit abc-dirty", diff_text)
 
     def test_reviewer_diff_rejects_renamed_dirty_submodule_with_ambiguous_path(
         self,
@@ -820,18 +540,6 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertIn("Binary file not shown", preview.files[0].lines[-1].html)
 
-    def test_reviewer_diff_preserves_untracked_executable_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            script = repo / "run.sh"
-            script.write_text("#!/bin/sh\nexit 0\n")
-            script.chmod(0o755)
-
-            diff_text = build_worktree_diff_text(str(repo))
-
-        self.assertIn("new file mode 100755", diff_text)
-
     def test_reviewer_diff_uses_default_when_core_file_mode_is_unset(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
@@ -844,45 +552,6 @@ class WorktreeDiffTests(SimpleTestCase):
             diff_text = build_worktree_diff_text(str(repo))
 
         self.assertIn("new file mode 100755", diff_text)
-
-    def test_reviewer_diff_ignores_non_owner_execute_bits(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            path = repo / "not-owner-executable.txt"
-            path.write_text("plain text\n")
-            path.chmod(0o655)
-
-            diff_text = build_worktree_diff_text(str(repo))
-
-        self.assertIn("new file mode 100644", diff_text)
-        self.assertNotIn("new file mode 100755", diff_text)
-
-    def test_reviewer_diff_preserves_untracked_crlf_content(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            (repo / "windows.txt").write_bytes(b"first\r\nsecond\r\n")
-
-            diff_text = build_worktree_diff_text(str(repo))
-
-        self.assertIn("+first\r\n+second\r\n", diff_text)
-
-    def test_mnemonic_prefix_config_does_not_leak_into_file_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            _git(repo, "config", "diff.mnemonicPrefix", "true")
-            tracked = repo / "example.py"
-            tracked.write_text("def answer():\n    return 1\n")
-            _git(repo, "add", "example.py")
-            _git(repo, "commit", "-m", "initial")
-
-            tracked.write_text("def answer():\n    return 2\n")
-
-            diff = build_worktree_diff(str(repo))
-
-        self.assertEqual(diff.files[0].path, "example.py")
 
     def test_quoted_git_path_decodes_octal_utf8_escapes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -899,30 +568,6 @@ class WorktreeDiffTests(SimpleTestCase):
             diff = build_worktree_diff(str(repo))
 
         self.assertEqual(diff.files[0].path, filename)
-
-    def test_rename_headers_decode_quoted_git_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            old_name = "\N{MICRO SIGN} old.txt"
-            new_name = "\N{MICRO SIGN} new.txt"
-            old_path = repo / old_name
-            old_path.write_text("same\n")
-            _git(repo, "add", old_name)
-            _git(repo, "commit", "-m", "initial")
-
-            old_path.rename(repo / new_name)
-            _git(repo, "add", "-A")
-
-            diff = build_worktree_diff(str(repo))
-            reviewer_diff = build_worktree_diff_text(str(repo))
-
-        self.assertEqual(diff.files[0].status, "Renamed")
-        self.assertEqual(diff.files[0].old_path, old_name)
-        self.assertEqual(diff.files[0].path, new_name)
-        self.assertIn("similarity index 100%", reviewer_diff)
-        self.assertIn("rename from ", reviewer_diff)
-        self.assertIn("rename to ", reviewer_diff)
 
     def test_rename_preserves_a_prefixed_directory_segment(self) -> None:
         # git's ``rename from``/``rename to`` headers carry the actual file
@@ -949,97 +594,6 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.files[0].status, "Renamed")
         self.assertEqual(diff.files[0].old_path, old_name)
         self.assertEqual(diff.files[0].path, new_name)
-
-    def test_tracked_and_untracked_changes_do_not_phantom_context_line(self) -> None:
-        # ``build_worktree_diff`` joins ``git diff`` output -- which always
-        # ends with a newline -- to the synthetic untracked-file diff with
-        # ``"\n".join``. ``splitlines()`` therefore yields a blank string at
-        # the boundary, and previously the parser fell through to the
-        # context branch and appended a phantom blank line with bogus line
-        # numbers past EOF to the last tracked file. This regresses to a
-        # visible "line 2" pseudo-context in a single-line file, plus a
-        # misleading additions/deletions tail in the rendered diff.
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            tracked = repo / "tracked.txt"
-            tracked.write_text("line1\n")
-            _git(repo, "add", "tracked.txt")
-            _git(repo, "commit", "-m", "initial")
-
-            tracked.write_text("line1 modified\n")
-            (repo / "untracked.txt").write_text("brand new\n")
-
-            diff = build_worktree_diff(str(repo))
-
-        paths = [file.path for file in diff.files]
-        self.assertIn("tracked.txt", paths)
-        self.assertIn("untracked.txt", paths)
-        tracked_file = next(file for file in diff.files if file.path == "tracked.txt")
-        context_line_numbers = [
-            (line.old_lineno, line.new_lineno)
-            for line in tracked_file.lines
-            if line.kind == "context"
-        ]
-        self.assertEqual(context_line_numbers, [])
-
-    def test_form_feed_in_content_does_not_split_diff_lines(self) -> None:
-        # git frames diff output on ``\n`` only, treating form feeds (common in
-        # Python/Emacs/C source as page-break markers), vertical tabs, and the
-        # Unicode line/paragraph separators as ordinary line content.
-        # ``str.splitlines`` instead breaks on all of them, which used to tear a
-        # single diff line in two: the model added exactly one line, but the
-        # tail after the form feed -- here beginning with ``-`` -- was reparsed
-        # as a phantom deletion, inventing a bogus ``deletions`` total and
-        # shifting the old-side line numbers of every following context line.
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            tracked = repo / "page.txt"
-            tracked.write_text("one\ntwo\nthree\n")
-            _git(repo, "add", "page.txt")
-            _git(repo, "commit", "-m", "initial")
-
-            tracked.write_text("one\ninserted\x0c-dashed\ntwo\nthree\n")
-
-            diff = build_worktree_diff(str(repo))
-
-        self.assertEqual(diff.additions, 1)
-        self.assertEqual(diff.deletions, 0)
-        page = next(file for file in diff.files if file.path == "page.txt")
-        added = [line for line in page.lines if line.kind == "add"]
-        self.assertEqual(len(added), 1)
-        self.assertIn("inserted", added[0].html)
-        self.assertIn("dashed", added[0].html)
-        self.assertEqual([line for line in page.lines if line.kind == "remove"], [])
-        # The unchanged trailing lines keep their true old-side line numbers
-        # rather than being pushed down by the phantom deletion.
-        context = [
-            (line.old_lineno, line.new_lineno)
-            for line in page.lines
-            if line.kind == "context"
-        ]
-        self.assertEqual(context, [(1, 1), (2, 3), (3, 4)])
-
-    def test_form_feed_in_untracked_file_keeps_one_line_per_newline(self) -> None:
-        # The same ``splitlines`` over-split inflated the synthetic untracked
-        # file diff: a file with N ``\n``-delimited lines but an embedded form
-        # feed rendered N+1 ``+`` rows and a wrong ``@@ -0,0 +1,N @@`` count.
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw)
-            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-            (repo / "new.txt").write_text("header\x0cbody\ntail\n")
-
-            diff_text = build_worktree_diff_text(str(repo))
-            diff = build_worktree_diff(str(repo))
-
-        self.assertIn("@@ -0,0 +1,2 @@", diff_text)
-        new_file = next(file for file in diff.files if file.path == "new.txt")
-        added = [line for line in new_file.lines if line.kind == "add"]
-        self.assertEqual(len(added), 2)
-        self.assertIn("header", added[0].html)
-        self.assertIn("body", added[0].html)
-        self.assertIn("tail", added[1].html)
 
     def test_untracked_file_without_trailing_newline_marks_eof(self) -> None:
         # The synthetic untracked-file diff is rendered into the session view

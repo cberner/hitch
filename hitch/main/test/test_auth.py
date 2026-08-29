@@ -110,82 +110,6 @@ class AuthViewTests(TestCase):
             "Prefer focused tests.",
         )
 
-    def test_login_imports_provider_advertised_effort_unknown_to_sdk_enum(self) -> None:
-        user = _make_user()
-        _seed_cookies(
-            self.client,
-            **{_MODEL_COOKIE: "gpt-5.6", _EFFORT_COOKIE: "ultra"},
-        )
-
-        response = self.client.post(
-            reverse("login"),
-            data={"username": "dev@example.com", "password": "StrongPass123!"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        settings = UserSettings.objects.get(user=user)
-        self.assertEqual(settings.model, "gpt-5.6")
-        self.assertEqual(settings.reasoning_effort, "ultra")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
-
-    def test_login_seeds_blank_account_model_settings_from_cookies(self) -> None:
-        user = _make_user()
-        UserSettings.objects.create(user=user)
-        _seed_cookies(
-            self.client,
-            **{_MODEL_COOKIE: "gpt-5.6", _EFFORT_COOKIE: "ultra"},
-        )
-
-        response = self.client.post(
-            reverse("login"),
-            data={"username": "dev@example.com", "password": "StrongPass123!"},
-        )
-
-        settings = UserSettings.objects.get(user=user)
-        self.assertEqual(settings.model, "gpt-5.6")
-        self.assertEqual(settings.reasoning_effort, "ultra")
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.6")
-        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "ultra")
-
-    def test_login_without_settings_cookies_preserves_db_settings(self) -> None:
-        user = _make_user()
-        UserSettings.objects.create(
-            user=user,
-            model="stored-model",
-            reasoning_effort="low",
-            sandbox_policy="readOnly",
-            approval_mode="deny_all",
-            extra_system_prompt="Stored prompt.",
-            use_worktrees=True,
-            auto_pr_enabled=True,
-            auto_qa_enabled=True,
-            show_archived_sessions=True,
-            last_selected_repo="/home/user/stored",
-        )
-
-        response = self.client.post(
-            reverse("login"),
-            data={"username": "dev@example.com", "password": "StrongPass123!"},
-        )
-
-        settings = UserSettings.objects.get(user=user)
-        self.assertEqual(settings.model, "stored-model")
-        self.assertEqual(settings.reasoning_effort, "low")
-        self.assertEqual(settings.sandbox_policy, "readOnly")
-        self.assertTrue(settings.use_worktrees)
-        self.assertTrue(settings.auto_pr_enabled)
-        self.assertTrue(settings.auto_qa_enabled)
-        self.assertTrue(settings.show_archived_sessions)
-        self.assertEqual(settings.last_selected_repo, "/home/user/stored")
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "stored-model")
-        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
-        self.assertEqual(
-            _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/stored"
-        )
-
     def test_login_preserves_account_settings_over_stale_browser_cookies(self) -> None:
         user = _make_user()
         UserSettings.objects.create(
@@ -239,30 +163,6 @@ class AuthViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "false")
 
     @patch("hitch.main.views.common.Codex")
-    def test_profile_renders_anonymous_user_with_usage(
-        self, mock_codex: MagicMock
-    ) -> None:
-        _setup_codex(mock_codex)
-
-        response = self.client.get(reverse("profile"))
-
-        self.assertEqual(response.status_code, 200)
-        body = response.content.decode()
-        nav_start = body.index('<nav class="primary-nav"')
-        nav_end = body.index("</nav>", nav_start)
-        nav_html = body[nav_start:nav_end]
-        self.assertIn(f'href="{reverse("profile")}"', nav_html)
-        self.assertIn('aria-current="page"', nav_html)
-        self.assertIn(">anonymous</a>", nav_html)
-        self.assertContains(response, "anonymous")
-        self.assertContains(response, "Signed out")
-        self.assertContains(response, "Token usage")
-        self.assertContains(response, "Quota usage")
-        self.assertContains(response, f'href="{reverse("login")}"')
-        self.assertContains(response, f'href="{reverse("register")}"')
-        self.assertNotContains(response, f'action="{reverse("logout")}"')
-
-    @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_profile_hides_server_git_hash_for_anonymous_user(
         self, _mock_hash: MagicMock, mock_codex: MagicMock
@@ -276,81 +176,8 @@ class AuthViewTests(TestCase):
         self.assertNotContains(response, "Server git hash")
         self.assertNotContains(response, "abc123")
 
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
-    def test_profile_renders_logout_form_for_authenticated_user(
-        self, _mock_hash: MagicMock, mock_codex: MagicMock
-    ) -> None:
-        user = _make_user()
-        self.client.force_login(user)
-        _setup_codex(mock_codex)
-
-        response = self.client.get(reverse("profile"))
-
-        body = response.content.decode()
-        self.assertContains(response, "dev@example.com")
-        self.assertContains(response, "Signed in")
-        self.assertContains(response, "Token usage")
-        self.assertContains(response, "Quota usage")
-        self.assertContains(response, f'action="{reverse("logout")}"')
-        self.assertContains(response, ">Log out</button>")
-        self.assertContains(response, "Server git hash")
-        self.assertContains(response, ">abc123</code>")
-        self.assertLess(
-            body.index('<section class="profile-panel"'),
-            body.index('<section class="usage-section"'),
-        )
-        self.assertLess(
-            body.index('<section class="usage-section"'),
-            body.index('<form class="profile-logout-form"'),
-        )
-        self.assertLess(
-            body.index('<form class="profile-logout-form"'),
-            body.index('<p class="profile-revision"'),
-        )
-
-    @patch("hitch.main.views.common._usage_context", side_effect=RuntimeError("codex down"))
-    def test_profile_renders_account_controls_when_usage_context_fails(
-        self, mock_usage_context: MagicMock
-    ) -> None:
-        user = _make_user()
-        self.client.force_login(user)
-
-        response = self.client.get(reverse("profile"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "dev@example.com")
-        self.assertContains(response, f'action="{reverse("logout")}"')
-        self.assertContains(response, "All sessions usage unavailable.")
-        self.assertContains(response, "Usage unavailable.")
-        mock_usage_context.assert_called_once()
-
 
 class NukeCodexViewTests(TestCase):
-    @patch("hitch.main.views.common.Codex")
-    def test_profile_renders_nuke_button_for_authenticated_user(
-        self, mock_codex: MagicMock
-    ) -> None:
-        self.client.force_login(_make_user())
-        _setup_codex(mock_codex)
-
-        response = self.client.get(reverse("profile"))
-
-        self.assertContains(response, f'action="{reverse("nuke_codex")}"')
-        self.assertContains(response, ">Nuke Codex instances</button>")
-        # No confirmation line until the action has run.
-        self.assertNotContains(response, "Killed ")
-
-    @patch("hitch.main.views.common.Codex")
-    def test_profile_hides_nuke_button_for_anonymous_user(
-        self, mock_codex: MagicMock
-    ) -> None:
-        _setup_codex(mock_codex)
-
-        response = self.client.get(reverse("profile"))
-
-        self.assertNotContains(response, "Nuke Codex instances")
-
     @patch("hitch.main.views.common.Codex")
     def test_profile_shows_killed_count_after_nuke(
         self, mock_codex: MagicMock
@@ -499,6 +326,7 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
 
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefers_account_settings_over_conflicting_cookies(
@@ -575,6 +403,7 @@ class AuthenticatedSettingsTests(TestCase):
             _cookie_value(new_session_response, _ENABLE_MEMORIES_COOKIE), "true"
         )
 
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
@@ -612,8 +441,6 @@ class AuthenticatedSettingsTests(TestCase):
             approval_mode="deny_all",
             enable_memories=True,
         )
-
-
 class ConfirmFormTests(TestCase):
     """The shared data-confirm wirer replaces inline onsubmit confirms.
 

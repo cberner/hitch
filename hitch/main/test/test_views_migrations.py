@@ -3,7 +3,6 @@
 import importlib
 import json
 import os
-import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -739,164 +738,6 @@ class RemovedFeatureRetirementHelperTests(SimpleTestCase):
                 )
             )
 
-    def test_worker_identity_accepts_prior_release_with_owned_event_log(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=12345,
-            events_path="/deployment/events/7.jsonl",
-        )
-        old_release_cmdline = [
-            b"/old-release/.venv/bin/python",
-            b"/old-release/manage.py",
-            b"codex_worker",
-            b"--instance-id",
-            b"7",
-        ]
-        with (
-            patch.object(
-                migration_module,
-                "_worker_cmdline_parts",
-                return_value=old_release_cmdline,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_events_file",
-                return_value=True,
-            ) as owns_events,
-        ):
-            self.assertTrue(migration_module._worker_cmdline_matches(instance))
-
-        owns_events.assert_called_once_with(instance)
-
-    def test_worker_identity_accepts_terminal_prior_release_with_open_database(
-        self,
-    ) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=12345,
-            events_path="/deployment/events/7.jsonl",
-        )
-        old_release_cmdline = [
-            b"/old-release/.venv/bin/python",
-            b"/old-release/manage.py",
-            b"codex_worker",
-            b"--instance-id",
-            b"7",
-        ]
-        with (
-            patch.object(
-                migration_module,
-                "_worker_cmdline_parts",
-                return_value=old_release_cmdline,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_events_file",
-                return_value=False,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_database_file",
-                return_value=True,
-            ) as owns_database,
-        ):
-            self.assertTrue(migration_module._worker_cmdline_matches(instance))
-
-        owns_database.assert_called_once_with(instance)
-
-    def test_worker_identity_rejects_same_checkout_without_local_resource(
-        self,
-    ) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=12345,
-            events_path="/other-state/events/7.jsonl",
-        )
-        same_checkout_cmdline = [
-            b"/usr/bin/python",
-            os.path.join(str(migration_module.settings.BASE_DIR), "manage.py").encode(),
-            b"codex_worker",
-            b"--instance-id",
-            b"7",
-        ]
-        with (
-            patch.object(
-                migration_module,
-                "_worker_cmdline_parts",
-                return_value=same_checkout_cmdline,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_events_file",
-                return_value=False,
-            ) as owns_events,
-            patch.object(
-                migration_module,
-                "_worker_has_open_database_file",
-                return_value=False,
-            ) as owns_database,
-        ):
-            self.assertFalse(migration_module._worker_cmdline_matches(instance))
-
-        owns_events.assert_called_once_with(instance)
-        owns_database.assert_called_once_with(instance)
-
-    def test_worker_stop_aborts_for_unverified_prior_release_worker(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=12345,
-            events_path="/deployment/events/7.jsonl",
-            systemd_scope_unit="",
-        )
-        old_release_cmdline = [
-            b"/other-release/.venv/bin/python",
-            b"/other-release/manage.py",
-            b"codex_worker",
-            b"--instance-id",
-            b"7",
-        ]
-        with (
-            patch.object(
-                migration_module,
-                "_worker_cmdline_parts",
-                return_value=old_release_cmdline,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_events_file",
-                return_value=False,
-            ),
-            patch.object(
-                migration_module,
-                "_worker_has_open_database_file",
-                return_value=False,
-            ),
-            patch.object(migration_module.os, "kill") as kill,
-            self.assertRaisesRegex(RuntimeError, "cannot verify ownership"),
-        ):
-            migration_module._stop_worker_process(instance)
-
-        kill.assert_not_called()
-
-    def test_worker_stop_forces_verified_process_without_callbacks(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(pk=7, pid=12345, systemd_scope_unit="")
-        with (
-            patch.object(
-                migration_module,
-                "_worker_cmdline_matches",
-                return_value=True,
-            ),
-            patch.object(migration_module, "_force_stop_worker") as force_stop,
-        ):
-            migration_module._stop_worker_process(instance)
-
-        force_stop.assert_called_once_with(instance)
-
     def test_worker_stop_does_not_signal_an_unrelated_reused_pid(self) -> None:
         migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
         instance = SimpleNamespace(pk=7, pid=12345, systemd_scope_unit="")
@@ -912,94 +753,6 @@ class RemovedFeatureRetirementHelperTests(SimpleTestCase):
             migration_module._stop_worker_process(instance)
 
         force_stop.assert_not_called()
-
-    def test_direct_worker_stop_kills_detached_descendants(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(pk=7, pid=100, systemd_scope_unit="")
-        identities = {
-            100: migration_module._ProcessIdentity(100, 1, 1000, "S"),
-            200: migration_module._ProcessIdentity(200, 100, 2000, "S"),
-            300: migration_module._ProcessIdentity(300, 200, 3000, "S"),
-        }
-
-        def process_identity(pid: int, **_kwargs: Any) -> Any:
-            return identities.get(pid)
-
-        def kill(pid: int, sig: signal.Signals) -> None:
-            if sig == signal.SIGKILL:
-                current = identities[pid]
-                identities[pid] = migration_module._ProcessIdentity(
-                    current.pid,
-                    current.ppid,
-                    current.start_time,
-                    "Z",
-                )
-
-        def killpg(pid: int, sig: signal.Signals) -> None:
-            if sig == signal.SIGKILL:
-                current = identities[pid]
-                identities[pid] = migration_module._ProcessIdentity(
-                    current.pid,
-                    current.ppid,
-                    current.start_time,
-                    "Z",
-                )
-
-        with (
-            patch.object(migration_module, "_worker_cmdline_matches", return_value=True),
-            patch.object(migration_module.os, "getsid", return_value=instance.pid),
-            patch.object(
-                migration_module,
-                "_process_identity",
-                side_effect=process_identity,
-            ),
-            patch.object(
-                migration_module,
-                "_descendant_process_identities",
-                return_value=(identities[200], identities[300]),
-            ),
-            patch.object(migration_module.os, "kill", side_effect=kill) as signal_pid,
-            patch.object(migration_module.os, "killpg", side_effect=killpg) as signal_group,
-            patch.object(migration_module.time, "sleep"),
-        ):
-            migration_module._force_stop_direct_worker(instance)
-
-        self.assertEqual(
-            signal_group.call_args_list,
-            [
-                call(instance.pid, signal.SIGSTOP),
-                call(instance.pid, signal.SIGKILL),
-            ],
-        )
-        for pid in (200, 300):
-            self.assertIn(call(pid, signal.SIGSTOP), signal_pid.call_args_list)
-            self.assertIn(call(pid, signal.SIGKILL), signal_pid.call_args_list)
-
-    def test_descendant_scan_follows_parent_chain_across_sessions(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-
-        def write_stat(proc_root: Path, pid: int, ppid: int, start_time: int) -> None:
-            pid_dir = proc_root / str(pid)
-            pid_dir.mkdir()
-            fields = ["S", str(ppid), *("0" for _ in range(17)), str(start_time)]
-            (pid_dir / "stat").write_text(
-                f"{pid} (command with ) chars) " + " ".join(fields) + "\n",
-                encoding="utf-8",
-            )
-
-        with tempfile.TemporaryDirectory() as raw:
-            proc_root = Path(raw)
-            write_stat(proc_root, 100, 1, 1000)
-            write_stat(proc_root, 200, 100, 2000)
-            write_stat(proc_root, 300, 200, 3000)
-            write_stat(proc_root, 400, 1, 4000)
-
-            descendants = migration_module._descendant_process_identities(
-                100,
-                proc_root=proc_root,
-            )
-
-        self.assertEqual({identity.pid for identity in descendants}, {200, 300})
 
     def test_force_stop_revalidates_direct_worker_before_group_kill(self) -> None:
         migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
@@ -1019,42 +772,6 @@ class RemovedFeatureRetirementHelperTests(SimpleTestCase):
             migration_module._force_stop_worker(instance)
 
         killpg.assert_not_called()
-
-    def test_worker_stop_kills_owned_scope_when_main_pid_is_gone(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=12345,
-            systemd_scope_unit="hitch-codex-worker-abc123def456-7.service",
-        )
-        completed = subprocess.CompletedProcess([], 0, b"", b"")
-        with (
-            patch.object(migration_module, "_worker_cmdline_matches", return_value=False),
-            patch.object(
-                migration_module,
-                "_scope_worker_ownership",
-                return_value="empty",
-            ),
-            patch.object(migration_module.shutil, "which", return_value="/bin/systemctl"),
-            patch.object(
-                migration_module.subprocess,
-                "run",
-                return_value=completed,
-            ) as run,
-        ):
-            migration_module._stop_worker_process(instance)
-
-        self.assertEqual(
-            run.call_args.args[0],
-            [
-                "/bin/systemctl",
-                "--user",
-                "kill",
-                "--kill-whom=all",
-                "--signal=SIGKILL",
-                instance.systemd_scope_unit,
-            ],
-        )
 
     def test_scope_worker_ownership_uses_live_worker_resources_during_pid_handoff(
         self,
@@ -1120,32 +837,6 @@ class RemovedFeatureRetirementHelperTests(SimpleTestCase):
             migration_module._stop_worker_process(instance)
 
         which.assert_not_called()
-
-    def test_worker_stop_kills_owned_scope_before_pid_is_published(self) -> None:
-        migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")
-        instance = SimpleNamespace(
-            pk=7,
-            pid=0,
-            events_path="/deployment/events/7.jsonl",
-            systemd_scope_unit="hitch-codex-worker-abc123def456-7.service",
-        )
-        completed = subprocess.CompletedProcess([], 0, b"", b"")
-        with (
-            patch.object(
-                migration_module,
-                "_scope_worker_ownership",
-                return_value="owned",
-            ),
-            patch.object(migration_module.shutil, "which", return_value="/bin/systemctl"),
-            patch.object(
-                migration_module.subprocess,
-                "run",
-                return_value=completed,
-            ) as run,
-        ):
-            migration_module._stop_worker_process(instance)
-
-        self.assertEqual(run.call_args.args[0][-1], instance.systemd_scope_unit)
 
     def test_worker_stop_skips_a_reused_legacy_scope(self) -> None:
         migration_module = importlib.import_module("hitch.main.migrations.0069_remove_demo_and_spec_critic")

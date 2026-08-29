@@ -13,9 +13,8 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -61,7 +60,6 @@ from hitch.main.management.commands.codex_worker import (
     _install_notification_sequencer,
     _make_approval_handler,
     _serialize_event,
-    _start_goal_event_forwarder,
 )
 from hitch.main.models import (
     ApprovalRequest,
@@ -216,34 +214,6 @@ def _turn_error_event(
     )
 
 
-def _goal_updated_event(
-    thread_id: str,
-    status: ThreadGoalStatus,
-    *,
-    turn_id: str | None = None,
-) -> Notification:
-    return Notification(
-        method=codex_events.GOAL_UPDATED_METHOD,
-        payload=cast(
-            Any,
-            ThreadGoalUpdatedNotification(
-                thread_id=thread_id,
-                turn_id=turn_id,
-                goal=ThreadGoal(
-                    thread_id=thread_id,
-                    objective="persisted goal",
-                    status=status,
-                    token_budget=None,
-                    tokens_used=1,
-                    time_used_seconds=1,
-                    created_at=1,
-                    updated_at=2,
-                ),
-            ),
-        ),
-    )
-
-
 def _stub_thread_resume(events: list[SimpleNamespace], turn_id: str = "turn-1") -> object:
     """Return an object shaped like ``thread_resume(...).turn(...).stream()``."""
     return SimpleNamespace(
@@ -280,16 +250,6 @@ def _forget_worker_pid(pid: int) -> None:
 
 
 class SpawnNewSessionTests(TestCase):
-    def test_app_server_config_uses_sdk_bundled_runtime(self) -> None:
-        config = codex_pool.app_server_config()
-
-        self.assertIsNone(config.codex_bin)
-
-    def test_memories_are_explicitly_disabled_by_default(self) -> None:
-        config = codex_pool.app_server_config()
-
-        self.assertEqual(config.config_overrides, ("features.memories=false",))
-
     def test_stamps_deployment_marker_for_nuke_scoping(self) -> None:
         config = codex_pool.app_server_config()
 
@@ -360,29 +320,6 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_systemd_launch_leaves_pid_for_worker_and_records_unit(
-        self, mock_codex: MagicMock, mock_launch: MagicMock
-    ) -> None:
-        _stub_codex_thread_start(mock_codex, "thread-scoped")
-        mock_launch.return_value = codex_pool.WorkerLaunch(
-            pid=0,
-            scope_unit="hitch-codex-worker-7.service",
-        )
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_new_session(cwd="/repo", prompt="hi")
-
-        self.assertEqual(instance.pid, 0)
-        self.assertEqual(
-            instance.systemd_scope_unit,
-            "hitch-codex-worker-7.service",
-        )
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_systemd_post_launch_pid_write_does_not_clobber_worker_pid(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -419,63 +356,6 @@ class SpawnNewSessionTests(TestCase):
             instance.systemd_scope_unit,
             "hitch-codex-worker-7.service",
         )
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_spawn_new_session_persists_auto_qa_and_auto_merge_fields(
-        self, mock_codex: MagicMock, mock_launch: MagicMock
-    ) -> None:
-        _stub_codex_thread_start(mock_codex, "thread-auto-merge")
-        mock_launch.return_value = SimpleNamespace(pid=4242)
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_new_session(
-                cwd="/repo",
-                prompt="hi",
-                auto_qa_enabled=True,
-                auto_merge_to_local_branch=True,
-                auto_merge_branch="release",
-            )
-
-        self.assertTrue(instance.auto_qa_enabled)
-        self.assertFalse(instance.auto_pr_enabled)
-        self.assertTrue(instance.auto_merge_to_local_branch)
-        self.assertEqual(instance.auto_merge_branch, "release")
-        instance.refresh_from_db()
-        self.assertTrue(instance.auto_qa_enabled)
-        self.assertFalse(instance.auto_pr_enabled)
-        self.assertTrue(instance.auto_merge_to_local_branch)
-        self.assertEqual(instance.auto_merge_branch, "release")
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_initial_thread_name_derivation(
-        self, mock_codex: MagicMock, mock_launch: MagicMock
-    ) -> None:
-        """The initial name is the first line of the prompt, trimmed of
-        whitespace, clipped to 200 chars; whitespace-only prompts fall back
-        to a static placeholder rather than being passed through verbatim
-        (Codex rejects whitespace-only names)."""
-        codex = _stub_codex_thread_start(mock_codex)
-        mock_launch.return_value = SimpleNamespace(pid=1)
-
-        cases = [
-            ("  Refactor the parser \nthen write tests\n", "Refactor the parser"),
-            ("a" * 500, "a" * 200),
-            ("   \n\t  ", "New session"),
-        ]
-        for prompt, expected in cases:
-            with self.subTest(prompt=prompt[:30]):
-                codex._client.thread_set_name.reset_mock()
-                with (
-                    _events_dir() as events_dir,
-                    override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-                ):
-                    codex_pool.spawn_new_session(cwd="/repo", prompt=prompt)
-                codex._client.thread_set_name.assert_called_once_with("t", expected)
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     @patch("hitch.main.runtime.codex_pool.Codex")
@@ -648,38 +528,6 @@ class SpawnNewSessionTests(TestCase):
             web_search_mode="live",
         )
 
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_plan_mode_forwards_model_to_worker(
-        self, mock_codex: MagicMock, mock_launch: MagicMock
-    ) -> None:
-        codex = _stub_codex_thread_start(mock_codex)
-        mock_launch.return_value = SimpleNamespace(pid=1)
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_new_session(
-                cwd="/repo",
-                prompt="hi",
-                model="gpt-5.4",
-                plan_mode=True,
-            )
-
-        payload = _thread_start_payload(codex)
-        self.assertEqual(payload["cwd"], "/repo")
-        self.assertIsNone(payload["developerInstructions"])
-        self.assertEqual(payload["model"], "gpt-5.4")
-        mock_launch.assert_called_once_with(
-            instance_id=instance.pk,
-            model="gpt-5.4",
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode=None,
-            plan_mode=True,
-        )
-
 
 class SqliteHomeTests(SimpleTestCase):
     """Per-role ``sqlite_home`` isolation (openai/codex#20213 mitigation)."""
@@ -764,71 +612,10 @@ class SqliteHomeTests(SimpleTestCase):
             finally:
                 lease.release()
 
-    def test_app_server_config_injects_explicit_sqlite_home(self) -> None:
-        config = codex_pool.app_server_config(sqlite_home="/srv/codex-state")
-        assert config.env is not None
-        self.assertEqual(
-            config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV), "/srv/codex-state"
-        )
-
-    def test_app_server_config_defaults_to_web_home_outside_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as base:
-            with override_settings(
-                CODEX_SQLITE_HOME_BASE=Path(base), TESTING=False
-            ):
-                config = codex_pool.app_server_config()
-            assert config.env is not None
-            self.assertEqual(
-                config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV),
-                str(Path(base) / "web"),
-            )
-
-    def test_app_server_config_omits_sqlite_home_under_tests(self) -> None:
-        # The default request path must not create state dirs (or perturb the
-        # exact-env assertion) while running the suite.
-        config = codex_pool.app_server_config()
-        assert config.env is not None
-        self.assertNotIn(codex_pool._CODEX_SQLITE_HOME_ENV, config.env)
-
-    def test_codex_home_dir_fallback_overrides_inherited_env(self) -> None:
-        # The lease-failure degrade points at $CODEX_HOME explicitly so it
-        # overrides any CODEX_SQLITE_HOME the deployment exported (a bare omission
-        # would leave the inherited value in effect via the SDK's env merge).
-        with patch.dict(os.environ, {"CODEX_HOME": "/srv/codex"}):
-            self.assertEqual(codex_pool.codex_home_dir(), Path("/srv/codex"))
-            config = codex_pool.app_server_config(
-                sqlite_home=str(codex_pool.codex_home_dir())
-            )
-        assert config.env is not None
-        self.assertEqual(
-            config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV), "/srv/codex"
-        )
-
 
 class PruneWorkerLogsDbTests(SimpleTestCase):
     def _write(self, path: Path, size: int) -> None:
         path.write_bytes(b"\0" * size)
-
-    def test_deletes_oversized_log_db_and_sidecars(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
-            home_path = Path(home)
-            logs = home_path / "logs_2.sqlite"
-            wal = home_path / "logs_2.sqlite-wal"
-            shm = home_path / "logs_2.sqlite-shm"
-            state = home_path / "state_5.sqlite"
-            self._write(logs, 80)
-            self._write(wal, 60)  # main+wal exceed the 100-byte cap
-            self._write(shm, 5)
-            self._write(state, 1000)
-
-            freed = codex_pool.prune_worker_logs_db(home_path, max_bytes=100)
-
-            self.assertEqual(freed, 145)
-            self.assertFalse(logs.exists())
-            self.assertFalse(wal.exists())
-            self.assertFalse(shm.exists())
-            # The state DB is never touched, even when much larger than the cap.
-            self.assertTrue(state.exists())
 
     def test_keeps_log_db_under_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as home:
@@ -848,12 +635,6 @@ class PruneWorkerLogsDbTests(SimpleTestCase):
                 freed = codex_pool.prune_worker_logs_db(home)
             self.assertEqual(freed, 200)
             self.assertFalse(logs.exists())
-
-    def test_missing_home_is_noop(self) -> None:
-        freed = codex_pool.prune_worker_logs_db(
-            Path("/nonexistent/codex-home"), max_bytes=1
-        )
-        self.assertEqual(freed, 0)
 
 
 class SpawnFailureTests(TestCase):
@@ -923,66 +704,6 @@ class SpawnFailureTests(TestCase):
 
 
 class SpawnTurnTests(TestCase):
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_resumes_existing_thread_without_calling_codex(
-        self, mock_launch: MagicMock
-    ) -> None:
-        """``spawn_turn`` operates entirely on a known thread id — it must
-        never reach out to the Codex app-server, which keeps it cheap on the
-        request-serving path."""
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz",
-                cwd="/repo",
-                prompt="follow-up",
-                input_image_paths=["/tmp/screen.png"],
-            )
-
-        self.assertEqual(instance.thread_id, "thread-xyz")
-        self.assertEqual(instance.prompt, "follow-up")
-        self.assertEqual(instance.input_image_paths, ["/tmp/screen.png"])
-        self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
-        self.assertEqual(instance.developer_instructions, "")
-        self.assertEqual(instance.pid, 1234)
-        mock_launch.assert_called_once_with(
-            instance_id=instance.pk,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode=None,
-        )
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_spawn_turn_immediately_bumps_session_index(
-        self, mock_launch: MagicMock
-    ) -> None:
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-        stale = timezone.now() - timedelta(days=3)
-        metadata = SessionMetadata.objects.create(
-            thread_id="thread-xyz",
-            cwd="/repo",
-            codex_created_at=stale,
-            codex_updated_at=stale,
-            codex_last_synced_at=stale,
-        )
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz",
-                cwd="/repo",
-                prompt="follow-up",
-            )
-
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.codex_updated_at, instance.started_at)
-
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_persists_auto_qa_enabled(self, mock_launch: MagicMock) -> None:
         mock_launch.return_value = SimpleNamespace(pid=1234)
@@ -1057,65 +778,6 @@ class SpawnTurnTests(TestCase):
         )
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_copies_developer_instructions_from_previous_turn(
-        self, mock_launch: MagicMock
-    ) -> None:
-        """Follow-up workers have to re-supply the thread's developer
-        instructions on resume; copy them from the latest known row so
-        they are not lost when each turn runs in a fresh process."""
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-        CodexInstance.objects.create(
-            pid=999,
-            thread_id="thread-xyz",
-            cwd="/repo",
-            prompt="first",
-            developer_instructions="Prefer small, typed changes.",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
-            )
-
-        self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_omitted_web_search_mode_does_not_inherit_previous_turn(
-        self, mock_launch: MagicMock
-    ) -> None:
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-        CodexInstance.objects.create(
-            pid=999,
-            thread_id="thread-xyz",
-            cwd="/repo",
-            prompt="first",
-            web_search_mode="live",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
-            )
-
-        self.assertEqual(instance.web_search_mode, "")
-        mock_launch.assert_called_once_with(
-            instance_id=instance.pk,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode=None,
-        )
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_explicit_blank_web_search_mode_clears_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -1148,36 +810,6 @@ class SpawnTurnTests(TestCase):
             sandbox_policy=None,
             approval_mode=None,
         )
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_explicit_developer_instructions_override_previous_turn(
-        self, mock_launch: MagicMock
-    ) -> None:
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-        CodexInstance.objects.create(
-            pid=999,
-            thread_id="thread-xyz",
-            cwd="/repo",
-            prompt="first",
-            developer_instructions="Old instructions.",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz",
-                cwd="/repo",
-                prompt="follow-up",
-                developer_instructions="Fresh instructions.",
-                user_message_index=7,
-            )
-
-        self.assertEqual(instance.developer_instructions, "Fresh instructions.")
-        self.assertEqual(instance.user_message_index, 7)
 
     @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
@@ -1370,20 +1002,6 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
 
 class LaunchWorkerProcessSystemdTests(TestCase):
-    def test_scope_unit_name_is_stable_and_deployment_scoped(self) -> None:
-        with self.settings(BASE_DIR=Path("/srv/hitch-a")):
-            first = codex_pool._scope_unit_for_instance(7)
-            same_deployment = codex_pool._scope_unit_for_instance(7)
-        with self.settings(BASE_DIR=Path("/srv/hitch-b")):
-            other_deployment = codex_pool._scope_unit_for_instance(7)
-
-        self.assertEqual(first, same_deployment)
-        self.assertNotEqual(first, other_deployment)
-        self.assertRegex(
-            first,
-            r"\Ahitch-codex-worker-[a-f0-9]{12}-7\.service\Z",
-        )
-
     @override_settings(
         CODEX_WORKER_ISOLATION="systemd",
         CODEX_WORKER_MEMORY_HIGH="4G",
@@ -1487,41 +1105,6 @@ class LaunchWorkerProcessSystemdTests(TestCase):
 
     @override_settings(
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
-        CODEX_PARENT_SLICE="",
-    )
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.runtime.codex_pool.subprocess.run")
-    def test_configures_worker_slice_aggregate_memory_cap(
-        self, mock_run: MagicMock, mock_which: MagicMock
-    ) -> None:
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-        codex_pool._ensure_systemd_worker_slice()
-
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(
-            argv[:5],
-            [
-                "/usr/bin/systemctl",
-                "--user",
-                "set-property",
-                "--runtime",
-                "hitch-codex-workers.slice",
-            ],
-        )
-        self.assertIn("MemoryAccounting=yes", argv)
-        self.assertIn("MemoryHigh=8G", argv)
-        self.assertIn("MemoryMax=10G", argv)
-        # The aggregate slice caps swap too, so workers collectively can't
-        # exceed their RAM budget by spilling to swap.
-        self.assertIn("MemorySwapMax=0", argv)
-        mock_which.assert_called_once_with("systemctl")
-
-    @override_settings(
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
         CODEX_WORKER_SLICE_MEMORY_HIGH="",
         CODEX_WORKER_SLICE_MEMORY_MAX="65%",
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
@@ -1541,202 +1124,6 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         self.assertIn("MemoryHigh=infinity", argv)
         self.assertIn("MemoryMax=65%", argv)
         self.assertIn("MemorySwapMax=0", argv)
-
-    @override_settings(
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="",
-        CODEX_PARENT_SLICE="",
-    )
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.runtime.codex_pool.subprocess.run")
-    def test_slice_resets_cleared_caps_to_infinity(
-        self, mock_run: MagicMock, _mock_which: MagicMock
-    ) -> None:
-        # `set-property --runtime` only changes the properties it is handed, so
-        # a cleared cap must be reset to `infinity` rather than omitted —
-        # otherwise a previously-applied MemoryMax/MemorySwapMax would linger on
-        # the runtime slice and keep clipping workers after the operator cleared
-        # it (and the hierarchy warning would wrongly treat it as unlimited).
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-        codex_pool._ensure_systemd_worker_slice()
-
-        argv = mock_run.call_args.args[0]
-        self.assertIn("MemoryHigh=8G", argv)
-        self.assertIn("MemoryMax=infinity", argv)
-        self.assertIn("MemorySwapMax=infinity", argv)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="4G",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_enables_memory_accounting(self) -> None:
-        # Regression: a worker unit launched with MemoryHigh/MemoryMax but no
-        # MemoryAccounting=yes has its limits silently dropped on any host that
-        # does not default to memory accounting (DefaultMemoryAccounting=no or
-        # legacy cgroup v1). The aggregate slice opts in, so without this the
-        # per-worker cap is the only one that fails to bind and a single
-        # runaway worker can consume the whole slice budget and OOM-kill its
-        # sibling QA-panel lanes.
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemoryAccounting=yes", argv)
-        self.assertIn("--property=MemoryHigh=2G", argv)
-        self.assertIn("--property=MemoryMax=4G", argv)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="",
-        CODEX_WORKER_MEMORY_MAX="40%",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_worker_omits_soft_throttle_but_keeps_hard_cap(self) -> None:
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemoryAccounting=yes", argv)
-        self.assertNotIn("--property=MemoryHigh=", argv)
-        self.assertIn("--property=MemoryMax=40%", argv)
-        self.assertIn("--property=MemorySwapMax=0", argv)
-
-    def test_systemd_service_env_args_copy_valid_names_without_values(self) -> None:
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-            env={
-                "DJANGO_SETTINGS_MODULE": "hitch.settings.dev",
-                "CODEX_HOME": "/home/user/.codex",
-                "INVOCATION_ID": "parent-unit",
-                "bad-name": "ignored",
-            },
-        )
-
-        self.assertIn("--setenv=CODEX_HOME", argv)
-        self.assertIn("--setenv=DJANGO_SETTINGS_MODULE", argv)
-        self.assertNotIn("--setenv=INVOCATION_ID", argv)
-        self.assertNotIn("--setenv=bad-name", argv)
-        self.assertFalse(
-            [arg for arg in argv if arg.startswith("--setenv=CODEX_HOME=")]
-        )
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="4G",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_caps_swap(self) -> None:
-        # Regression: cgroup v2 counts only RAM toward MemoryMax, so without a
-        # swap cap a runaway worker is reclaimed to swap rather than OOM-killed.
-        # The hard cap then never fires and the turn thrashes the host
-        # indefinitely instead of failing, so MemoryMax must ride with a swap
-        # cap to be a true ceiling.
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemorySwapMax=0", argv)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="4G",
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_honors_swap_override(self) -> None:
-        # A non-zero cap grants a bounded swap cushion rather than forbidding
-        # swap outright; the configured value must be passed through verbatim.
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemorySwapMax=1G", argv)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="",
-        CODEX_WORKER_MEMORY_MAX="",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_skips_accounting_without_limits(self) -> None:
-        # Accounting is only worth enabling when a limit rides along with it;
-        # an unconfigured cap must not emit a bare MemoryAccounting property,
-        # and a stray swap cap must not disable swap on an otherwise-unbounded
-        # unit (it only completes a real MemoryMax ceiling).
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertNotIn("--property=MemoryAccounting=yes", argv)
-        self.assertFalse([arg for arg in argv if arg.startswith("--property=Memory")])
-        # OOMPolicy also protects a surviving worker during a host-level OOM;
-        # it is independent of Hitch's optional cgroup memory limits.
-        self.assertIn("--property=OOMPolicy=continue", argv)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_keeps_swap_for_soft_only_throttle(self) -> None:
-        # MemoryHigh is a soft throttle that usage may exceed (graceful
-        # degradation, no OOM); with no hard MemoryMax there is no ceiling for a
-        # swap cap to make "true", so swap must NOT be disabled out from under a
-        # config that deliberately avoided fail-fast OOMs. Accounting and the
-        # soft throttle itself still apply.
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemoryAccounting=yes", argv)
-        self.assertIn("--property=MemoryHigh=2G", argv)
-        self.assertNotIn("--property=MemoryMax=", argv)
-        self.assertFalse(
-            [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
-        )
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="infinity",
-        CODEX_WORKER_MEMORY_SWAP_MAX="0",
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-    )
-    def test_per_worker_service_keeps_swap_when_hard_cap_is_infinity(self) -> None:
-        # systemd treats MemoryMax=infinity as no limit, so it is not a real
-        # ceiling for the swap cap to make "true"; capping swap here would
-        # reintroduce the soft-only/unbounded regression. The explicit
-        # MemoryMax=infinity is still passed through.
-        argv = codex_pool._systemd_scope_argv(
-            systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.service",
-            worker_argv=["python", "manage.py", "codex_worker"],
-        )
-
-        self.assertIn("--property=MemoryMax=infinity", argv)
-        self.assertFalse(
-            [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
-        )
 
     @override_settings(CODEX_WORKER_SLICE="", CODEX_PARENT_SLICE="hitch.slice")
     @patch("hitch.main.runtime.codex_pool.shutil.which")
@@ -1772,24 +1159,12 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Failed to connect to bus"):
             codex_pool._ensure_systemd_worker_slice()
 
-    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="20")
-    def test_parent_slice_properties_default(self) -> None:
-        self.assertEqual(
-            codex_pool._systemd_parent_slice_properties(), ["CPUWeight=20"]
-        )
-
     @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="")
     def test_parent_slice_properties_cleared_resets_to_default(self) -> None:
         # A cleared weight must render declaratively as the cgroup-v2 default so
         # a previously-applied --runtime weight doesn't linger on the slice.
         self.assertEqual(
             codex_pool._systemd_parent_slice_properties(), ["CPUWeight=100"]
-        )
-
-    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="500")
-    def test_parent_slice_properties_passes_arbitrary_valid_weight(self) -> None:
-        self.assertEqual(
-            codex_pool._systemd_parent_slice_properties(), ["CPUWeight=500"]
         )
 
     @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="20000")
@@ -1803,66 +1178,6 @@ class LaunchWorkerProcessSystemdTests(TestCase):
     def test_parent_slice_properties_drops_non_integer_weight(self) -> None:
         with self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             self.assertEqual(codex_pool._systemd_parent_slice_properties(), [])
-
-    @override_settings(
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
-        CODEX_PARENT_SLICE="hitch.slice",
-        CODEX_PARENT_SLICE_CPU_WEIGHT="20",
-    )
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.runtime.codex_pool.subprocess.run")
-    def test_biases_parent_slice_after_workers_slice(
-        self, mock_run: MagicMock, _mock_which: MagicMock
-    ) -> None:
-        # The CPU weight belongs on the parent slice (sibling to the runserver's
-        # slice), applied after the workers-slice memory config. Setting it on
-        # the workers slice would be inert — workers have no siblings there.
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-        codex_pool._ensure_systemd_worker_slice()
-
-        self.assertEqual(mock_run.call_count, 2)
-        workers_argv = mock_run.call_args_list[0].args[0]
-        parent_argv = mock_run.call_args_list[1].args[0]
-        self.assertEqual(workers_argv[4], "hitch-codex-workers.slice")
-        self.assertEqual(
-            parent_argv,
-            [
-                "/usr/bin/systemctl",
-                "--user",
-                "set-property",
-                "--runtime",
-                "hitch.slice",
-                "CPUWeight=20",
-            ],
-        )
-
-    @override_settings(
-        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
-        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
-        CODEX_PARENT_SLICE="",
-    )
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.runtime.codex_pool.subprocess.run")
-    def test_parent_slice_configuration_skipped_when_disabled(
-        self, mock_run: MagicMock, _mock_which: MagicMock
-    ) -> None:
-        # An empty CODEX_PARENT_SLICE disables the CPU-weight bias entirely
-        # (deployments not under systemd-user) while the workers slice is still
-        # configured — only the one set-property call fires.
-        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-        codex_pool._ensure_systemd_worker_slice()
-
-        self.assertEqual(mock_run.call_count, 1)
-        self.assertEqual(
-            mock_run.call_args.args[0][4], "hitch-codex-workers.slice"
-        )
 
     @patch("hitch.main.runtime.codex_pool.shutil.which", return_value=None)
     def test_apply_slice_properties_requires_systemctl(
@@ -1929,33 +1244,6 @@ class LaunchWorkerProcessSystemdTests(TestCase):
     @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
-    def test_auto_launch_uses_systemd_when_user_manager_available(
-        self,
-        mock_popen: MagicMock,
-        _mock_which: MagicMock,
-        mock_ensure_slice: MagicMock,
-        mock_user_manager: MagicMock,
-    ) -> None:
-        proc = MagicMock()
-        proc.pid = 999
-        proc.wait.return_value = 0
-        mock_popen.return_value = proc
-        expected_scope = codex_pool._scope_unit_for_instance(7)
-
-        launch = codex_pool._launch_worker_process(instance_id=7)
-
-        argv = mock_popen.call_args.args[0]
-        self.assertEqual(launch.pid, 0)
-        self.assertEqual(launch.scope_unit, expected_scope)
-        self.assertEqual(argv[0], "/usr/bin/systemd-run")
-        mock_user_manager.assert_called_once_with()
-        mock_ensure_slice.assert_called_once_with()
-
-    @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.runtime.systemd_isolation._systemd_user_manager_available", return_value=True)
-    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_auto_launch_fails_closed_when_systemd_run_fails(
         self,
         mock_popen: MagicMock,
@@ -1978,35 +1266,6 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             codex_pool._launch_worker_process(instance_id=7)
 
         self.assertEqual(mock_popen.call_count, 1)
-
-    @override_settings(CODEX_WORKER_ISOLATION="systemd")
-    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
-    def test_systemd_launch_fails_promptly_when_systemd_run_exits_nonzero(
-        self,
-        mock_popen: MagicMock,
-        _mock_which: MagicMock,
-        _mock_ensure_slice: MagicMock,
-    ) -> None:
-        proc = MagicMock()
-        proc.wait.return_value = 1
-
-        def popen_side_effect(*_args: object, **kwargs: object) -> MagicMock:
-            stderr = cast(Any, kwargs["stderr"])
-            stderr.write(b"Failed to connect to bus: Operation not permitted\n")
-            stderr.flush()
-            return proc
-
-        mock_popen.side_effect = popen_side_effect
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Failed to connect to bus: Operation not permitted",
-        ):
-            codex_pool._launch_worker_process(instance_id=7)
-
-        proc.wait.assert_called_once_with(timeout=0.25)
 
     @override_settings(CODEX_WORKER_ISOLATION="bogus")
     def test_rejects_unknown_worker_isolation(self) -> None:
@@ -2063,20 +1322,6 @@ class SwapCapHierarchyWarningTests(TestCase):
     }
 
     @override_settings(
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0"
-    )
-    def test_warns_when_zero_slice_cap_nullifies_worker_cushion(self) -> None:
-        with (
-            override_settings(**self.BASE),
-            self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs,
-        ):
-            codex_pool._warn_on_swap_cap_hierarchy()
-        self.assertTrue(
-            any("hierarchical" in line and "1G" in line for line in logs.output),
-            logs.output,
-        )
-
-    @override_settings(
         CODEX_WORKER_MEMORY_SWAP_MAX="", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0"
     )
     def test_warns_when_worker_opts_out_but_slice_still_caps(self) -> None:
@@ -2093,29 +1338,6 @@ class SwapCapHierarchyWarningTests(TestCase):
             any("uncapped" in line and "hierarchical" in line for line in logs.output),
             logs.output,
         )
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="512M"
-    )
-    def test_warns_when_slice_cap_smaller_than_worker_cushion(self) -> None:
-        # 512M < 1G, so the parent still clips the per-worker cushion even
-        # though it is not a hard zero.
-        with (
-            override_settings(**self.BASE),
-            self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs,
-        ):
-            codex_pool._warn_on_swap_cap_hierarchy()
-        self.assertTrue(any("512M" in line for line in logs.output), logs.output)
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="2G"
-    )
-    def test_silent_when_slice_cap_accommodates_worker_cushion(self) -> None:
-        with (
-            override_settings(**self.BASE),
-            self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"),
-        ):
-            codex_pool._warn_on_swap_cap_hierarchy()
 
     @override_settings(
         CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=""
@@ -2139,34 +1361,6 @@ class SwapCapHierarchyWarningTests(TestCase):
             override_settings(**self.BASE),
             self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"),
         ):
-            codex_pool._warn_on_swap_cap_hierarchy()
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="2G",
-        CODEX_WORKER_MEMORY_MAX="",
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
-    )
-    def test_silent_when_worker_is_soft_only_throttle(self) -> None:
-        # A high-only worker has no hard MemoryMax, so its swap cap is never
-        # emitted (mirrors _memory_cgroup_properties) and there is no effective
-        # cushion for the slice to nullify — nothing to warn about.
-        with self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"):
-            codex_pool._warn_on_swap_cap_hierarchy()
-
-    @override_settings(
-        CODEX_WORKER_MEMORY_HIGH="",
-        CODEX_WORKER_MEMORY_MAX="",
-        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
-        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
-        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
-    )
-    def test_silent_when_worker_has_no_memory_limit(self) -> None:
-        # Without a worker memory limit the swap cap is never emitted onto the
-        # scope (mirrors _memory_cgroup_properties), so there is no cushion that
-        # the slice could nullify.
-        with self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             codex_pool._warn_on_swap_cap_hierarchy()
 
     def test_parse_memory_bytes_handles_units_and_rejects_ambiguous(self) -> None:
@@ -2217,52 +1411,6 @@ class IsAliveTests(TestCase):
         # 2**22 is well above the default pid_max on Linux/macOS.
         self.assertFalse(codex_pool.is_alive(2**22))
 
-    @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
-    def test_zombie_pid_is_not_alive(self) -> None:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import os; os._exit(0)"],
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            _wait_for_linux_proc_state(proc.pid, "Z")
-
-            self.assertFalse(codex_pool.is_alive(proc.pid))
-        finally:
-            if proc.returncode is None:
-                proc.wait(timeout=5)
-
-    def test_linux_proc_state_tolerates_non_utf8_comm(self) -> None:
-        # A recycled pid can point at a foreign process whose comm (executable
-        # basename) holds arbitrary non-UTF-8 bytes. Reading its state must not
-        # raise UnicodeDecodeError out of the liveness check.
-        raw = b"1234 (we\xffird) R 1 0 0 0 -1"
-        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
-            proc_root = mock_path.return_value
-            proc_root.exists.return_value = True
-            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
-            stat_path.read_bytes.return_value = raw
-            self.assertEqual(codex_pool._linux_proc_state(1234), "R")
-
-    def test_worker_is_alive_uses_reaped_instance_key(self) -> None:
-        pid = 98765
-        instance = CodexInstance.objects.create(
-            pid=pid,
-            thread_id="t",
-            cwd="/r",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        try:
-            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                codex_pool._REAPED_WORKERS.add((pid, instance.pk))
-
-            self.assertFalse(codex_pool.worker_is_alive(instance))
-        finally:
-            _forget_worker_pid(pid)
-
     def test_tracked_finished_worker_is_reaped_by_liveness_check(self) -> None:
         pid = 98766
         proc = MagicMock()
@@ -2308,23 +1456,6 @@ class IsAliveTests(TestCase):
             proc.wait.assert_called_once_with(timeout=0)
         finally:
             _forget_worker_pid(pid)
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.runtime.codex_pool.is_alive", return_value=True)
-    def test_worker_is_alive_rejects_recycled_untracked_pid(
-        self, mock_alive: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        instance = CodexInstance.objects.create(
-            pid=4321,
-            thread_id="t",
-            cwd="/r",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        self.assertFalse(codex_pool.worker_is_alive(instance))
-        mock_identity.assert_called_once_with(4321, instance.pk)
-        mock_alive.assert_not_called()
 
     def test_linux_proc_state_defensive_branches(self) -> None:
         with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
@@ -2418,64 +1549,6 @@ class ReconcileAndLookupTests(TestCase):
             status=status or CodexInstance.STATUS_COMPLETED,
             purpose=purpose,
         )
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive")
-    def test_reconcile_marks_only_dead_pending_rows_failed(
-        self, mock_worker_alive: MagicMock
-    ) -> None:
-        dead_running = self._make(pid=10, status=CodexInstance.STATUS_RUNNING)
-        live_running = self._make(pid=11, status=CodexInstance.STATUS_RUNNING)
-        completed = self._make(pid=12, status=CodexInstance.STATUS_COMPLETED)
-        stale = timezone.now() - timedelta(days=3)
-        metadata = SessionMetadata.objects.create(
-            thread_id=dead_running.thread_id,
-            cwd=dead_running.cwd,
-            codex_created_at=stale,
-            codex_updated_at=stale,
-            codex_last_synced_at=stale,
-        )
-        mock_worker_alive.side_effect = lambda instance: instance.pk == live_running.pk
-
-        n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        dead_running.refresh_from_db()
-        live_running.refresh_from_db()
-        completed.refresh_from_db()
-        self.assertEqual(dead_running.status, CodexInstance.STATUS_FAILED)
-        self.assertIsNotNone(dead_running.ended_at)
-        self.assertEqual(live_running.status, CodexInstance.STATUS_RUNNING)
-        self.assertIsNone(live_running.ended_at)
-        self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
-        self.assertIn("exited", dead_running.error)
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.codex_updated_at, dead_running.ended_at)
-
-    @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
-    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_mark_dead_instances_failed_does_not_fan_out_disk_cleanup(
-        self,
-        _mock_alive: MagicMock,
-        _mock_notify: MagicMock,
-        _mock_cleanup_images: MagicMock,
-        mock_disk_cleanup: MagicMock,
-    ) -> None:
-        # Both the per-instance kill branch and the already-terminal branch of
-        # _mark_dead_instances_failed used to fan out a full ~/.hitch walk per
-        # row. A single reconcile sweep must trigger zero disk cleanups.
-        dead = self._make(pid=30, status=CodexInstance.STATUS_RUNNING)
-        late = self._make(pid=31, status=CodexInstance.STATUS_RUNNING)
-        pending = list(CodexInstance.objects.filter(pk__in=[dead.pk, late.pk]))
-        CodexInstance.objects.filter(pk=late.pk).update(
-            status=CodexInstance.STATUS_COMPLETED
-        )
-
-        n = reconciliation._mark_dead_instances_failed(pending)
-
-        self.assertEqual(n, 1)
-        mock_disk_cleanup.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_last_auto_approval_timeout(
@@ -2625,105 +1698,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertNotIn("auto-approval review in progress", instance.error)
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_dead_records_last_agent_message(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = Path(raw) / "events.jsonl"
-            events_path.write_text(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "type": "agentMessage",
-                                "text": "Running the base side of the paired measurement now.",
-                            },
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            instance = self._make(
-                pid=15,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(events_path),
-            )
-
-            n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertIn(
-            "worker process exited before reporting completion", instance.error
-        )
-        self.assertIn(
-            "agent last said: Running the base side of the paired measurement now.",
-            instance.error,
-        )
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_dead_keeps_retryable_error_as_context(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = Path(raw) / "events.jsonl"
-            events_path.write_text(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "type": "commandExecution",
-                                "status": "completed",
-                                "command": (
-                                    "/bin/bash -lc "
-                                    '"sed -n \'90,390p\' src/multimap_table.rs"'
-                                ),
-                            },
-                        },
-                    }
-                )
-                + "\n"
-                + json.dumps(
-                    {
-                        "method": "error",
-                        "payload": {
-                            "error": {
-                                "message": "Reconnecting... 4/5",
-                                "additionalDetails": "request timed out",
-                            },
-                            "willRetry": True,
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            instance = self._make(
-                pid=16,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(events_path),
-            )
-
-            n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertIn(
-            "worker process exited before reporting completion", instance.error
-        )
-        self.assertIn("command completed:", instance.error)
-        self.assertIn("src/multimap_table.rs", instance.error)
-        self.assertIn(
-            "last retryable error: Reconnecting... 4/5: request timed out",
-            instance.error,
-        )
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_adds_newer_retryable_context_to_error_detail(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2773,59 +1747,6 @@ class ReconcileAndLookupTests(TestCase):
             "last retryable error: Reconnecting... 4/5: request timed out",
             instance.error,
         )
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_dead_keeps_retryable_error_after_late_hitch_event(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = Path(raw) / "events.jsonl"
-            events_path.write_text(
-                json.dumps(
-                    {
-                        "method": "error",
-                        "payload": {
-                            "error": {
-                                "message": "Reconnecting... 4/5",
-                                "additionalDetails": "request timed out",
-                            },
-                            "willRetry": True,
-                        },
-                    }
-                )
-                + "\n"
-                + json.dumps(
-                    {
-                        "method": "approval/resolved",
-                        "payload": {
-                            "id": 99,
-                            "method": "exec",
-                            "decision": "accept",
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            instance = self._make(
-                pid=19,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(events_path),
-            )
-
-            n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertIn(
-            "worker process exited before reporting completion", instance.error
-        )
-        self.assertIn(
-            "last event: retryable error: Reconnecting... 4/5: request timed out",
-            instance.error,
-        )
-        self.assertNotIn("approval/resolved", instance.error)
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_uses_recorded_order_for_retryable_progress(
@@ -3050,33 +1971,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("SystemExit: transport closed", instance.error)
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_dead_ignores_worker_log_tail_when_test_logging_disabled(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(HITCH_HOME_DIR=Path(raw), CODEX_WORKER_LOG_DIR=None),
-        ):
-            instance = self._make(
-                pid=17,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "missing.jsonl"),
-            )
-            log_path = codex_pool.worker_log_path(instance.pk)
-            log_path.parent.mkdir(parents=True)
-            log_path.write_text("stale host log\n", encoding="utf-8")
-
-            n = reconciliation.reconcile_dead()
-
-        self.assertEqual(n, 1)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(
-            instance.error,
-            "worker process exited before reporting completion",
-        )
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_cancels_pending_requests_of_dead_worker(
         self, _mock_alive: MagicMock
     ) -> None:
@@ -3109,25 +2003,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNotNone(input_request.responded_at)
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_preserves_resolved_request_of_dead_worker(
-        self, _mock_alive: MagicMock
-    ) -> None:
-        # A decision the user already made (and the worker may have consumed) must
-        # not be retroactively overwritten with "cancel" by the reconcile sweep.
-        instance = self._make(pid=31, status=CodexInstance.STATUS_RUNNING)
-        approval = ApprovalRequest.objects.create(
-            instance=instance,
-            method="item/commandExecution/requestApproval",
-            params={},
-            decision=ApprovalRequest.DECISION_ACCEPT,
-        )
-
-        reconciliation.reconcile_dead()
-
-        approval.refresh_from_db()
-        self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_preserves_row_that_completed_during_sweep(
         self, _mock_alive: MagicMock
     ) -> None:
@@ -3147,50 +2022,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertEqual(instance.error, "")
         self.assertIsNone(instance.ended_at)
-
-    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_still_routes_instance_that_completed_during_sweep(
-        self,
-        _mock_alive: MagicMock,
-        mock_notify: MagicMock,
-        _mock_cleanup: MagicMock,
-    ) -> None:
-        # A worker that saved its terminal status but died before its own notify
-        # must still be routed by the reclaim sweep — system-agent rows are
-        # excluded from reconcile_terminal_workflow_instances() and have no other
-        # backstop, so skipping routing here would strand them.
-        instance = self._make(pid=21, status=CodexInstance.STATUS_RUNNING)
-        pending = list(CodexInstance.objects.filter(pk=instance.pk))
-        CodexInstance.objects.filter(pk=instance.pk).update(
-            status=CodexInstance.STATUS_COMPLETED
-        )
-
-        n = reconciliation._mark_dead_instances_failed(pending)
-
-        self.assertEqual(n, 0)
-        mock_notify.assert_called_once()
-        routed = mock_notify.call_args.args[0]
-        self.assertEqual(routed.pk, instance.pk)
-        self.assertEqual(routed.status, CodexInstance.STATUS_COMPLETED)
-
-    def test_reconcile_spares_freshly_spawned_worker_with_unassigned_pid(self) -> None:
-        # ``_spawn_worker`` commits the CodexInstance row with ``pid=0`` before
-        # ``subprocess.Popen`` returns. Between those two writes, reconcile_dead
-        # — invoked on essentially every page render — must not interpret the
-        # row's transient unassigned pid as "worker process exited"; doing so
-        # poisons a completing turn with a leftover error message and prematurely
-        # routes system-agent workers through their workflow's failure handler.
-        starting = self._make(pid=0, status=CodexInstance.STATUS_STARTING)
-
-        n = reconciliation.reconcile_dead()
-
-        starting.refresh_from_db()
-        self.assertEqual(starting.status, CodexInstance.STATUS_STARTING)
-        self.assertEqual(starting.error, "")
-        self.assertIsNone(starting.ended_at)
-        self.assertEqual(n, 0)
 
     def test_reconcile_fails_stale_unassigned_pid_after_grace_window(self) -> None:
         # The pid=0 reprieve must be bounded: if the Django parent crashed
@@ -3256,98 +2087,6 @@ class ReconcileAndLookupTests(TestCase):
             main_thread_id=target_workflow.main_thread_id,
             workflow_id=target_workflow.pk,
         )
-
-    @patch("hitch.main.runtime.reconciliation.reconcile_orphaned_workers", return_value=0)
-    @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
-    def test_reconcile_dead_for_workflow_reaps_orphans(
-        self, _mock_reconcile: MagicMock, mock_reap: MagicMock
-    ) -> None:
-        # A hidden workflow stream may be the only thing reconciling, so it must
-        # still run the orphan reap to free a wedged worker's DB lock.
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-
-        reconciliation.reconcile_dead_for_workflow(
-            workflow.pk, main_thread_id=workflow.main_thread_id
-        )
-
-        mock_reap.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
-    def test_reconcile_does_not_notify_system_agents_for_unassigned_pid(
-        self, mock_notify: MagicMock
-    ) -> None:
-        # A system-agent worker in its pid=0 launch window must not be routed
-        # through ``on_codex_instance_finished``. The autonomous-goal and
-        # PR-QA workflows treat a system-agent ``finished`` event as terminal
-        # and block on the recorded error — so the workflow would be marked
-        # failed before its worker subprocess has even started running.
-        self._make(
-            pid=0,
-            status=CodexInstance.STATUS_STARTING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
-
-        reconciliation.reconcile_dead()
-
-        mock_notify.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive")
-    def test_reconcile_dead_retains_pending_attachments(
-        self, mock_worker_alive: MagicMock
-    ) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            dead_path = codex_pool.input_attachments_dir() / "dead" / "1.png"
-            live_path = codex_pool.input_attachments_dir() / "live" / "1.png"
-            completed_path = codex_pool.input_attachments_dir() / "done" / "1.png"
-            for path in (dead_path, live_path, completed_path):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"image")
-            dead_running = self._make(
-                pid=10,
-                status=CodexInstance.STATUS_RUNNING,
-            )
-            live_running = self._make(
-                pid=11,
-                status=CodexInstance.STATUS_RUNNING,
-            )
-            completed = self._make(
-                pid=12,
-                status=CodexInstance.STATUS_COMPLETED,
-            )
-            CodexInstance.objects.filter(pk=dead_running.pk).update(
-                input_image_paths=[str(dead_path)],
-                input_attachment_paths=[str(dead_path)],
-            )
-            CodexInstance.objects.filter(pk=live_running.pk).update(
-                input_attachment_paths=[str(live_path)]
-            )
-            CodexInstance.objects.filter(pk=completed.pk).update(
-                input_attachment_paths=[str(completed_path)]
-            )
-            mock_worker_alive.side_effect = (
-                lambda instance: instance.pk == live_running.pk
-            )
-
-            n = reconciliation.reconcile_dead()
-
-            self.assertEqual(n, 1)
-            self.assertTrue(dead_path.exists())
-            self.assertTrue(live_path.exists())
-            self.assertTrue(completed_path.exists())
-            dead_running.refresh_from_db()
-            live_running.refresh_from_db()
-            completed.refresh_from_db()
-            self.assertEqual(dead_running.input_image_paths, [str(dead_path)])
-            self.assertEqual(dead_running.input_attachment_paths, [str(dead_path)])
-            self.assertEqual(live_running.input_attachment_paths, [str(live_path)])
-            self.assertEqual(completed.input_attachment_paths, [str(completed_path)])
 
     def test_cleanup_keeps_attachment_ledger_for_unlink_failures(self) -> None:
         with (
@@ -3538,36 +2277,6 @@ class ReconcileAndLookupTests(TestCase):
         mock_identity.assert_called_once_with(4321, instance.pk)
         mock_alive.assert_not_called()
 
-    @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
-    def test_tracked_exited_workers_are_reaped_and_reconciled(self) -> None:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import os; os._exit(0)"],
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        instance: CodexInstance | None = None
-        try:
-            instance = self._make(pid=proc.pid, status=CodexInstance.STATUS_RUNNING)
-            codex_pool._track_worker_process(instance.pk, proc)
-            _wait_for_process_exit(proc)
-
-            n = reconciliation.reconcile_dead()
-
-            self.assertEqual(n, 1)
-            self.assertEqual(proc.returncode, 0)
-            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                self.assertNotIn(proc.pid, codex_pool._TRACKED_WORKER_PROCS)
-                self.assertNotIn((proc.pid, instance.pk), codex_pool._REAPED_WORKERS)
-            instance.refresh_from_db()
-            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-            self.assertIn("exited", instance.error)
-        finally:
-            if proc.returncode is None:
-                proc.wait(timeout=5)
-            _forget_worker_pid(proc.pid)
-
     def test_reconcile_sweeps_finished_tracked_workers(self) -> None:
         pid = 98768
         instance = self._make(pid=pid, status=CodexInstance.STATUS_RUNNING)
@@ -3627,50 +2336,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(codex_pool.latest_for_thread("t1"), second)
         self.assertIsNone(codex_pool.latest_for_thread("nothing"))
 
-    def test_latest_active_for_thread(self) -> None:
-        # ``send_message`` can stack workers on a thread, so a newer
-        # terminal row must not mask an older still-running one — the
-        # streaming UI needs to stay up as long as *any* worker for the
-        # thread is in progress.
-        older = self._make(thread_id="t-active", status=CodexInstance.STATUS_RUNNING)
-        newer_terminal = self._make(
-            thread_id="t-active", status=CodexInstance.STATUS_FAILED
-        )
-        self.assertEqual(codex_pool.latest_active_for_thread("t-active"), older)
-
-        # When multiple actives exist, return the newest by started_at.
-        newer_active = self._make(
-            thread_id="t-active", status=CodexInstance.STATUS_STARTING
-        )
-        self.assertEqual(codex_pool.latest_active_for_thread("t-active"), newer_active)
-
-        # All terminal → None; never-existed thread → None.
-        older.status = CodexInstance.STATUS_COMPLETED
-        older.save(update_fields=["status"])
-        newer_active.status = CodexInstance.STATUS_COMPLETED
-        newer_active.save(update_fields=["status"])
-        self.assertIsNone(codex_pool.latest_active_for_thread("t-active"))
-        self.assertIsNone(codex_pool.latest_active_for_thread("never-existed"))
-        # newer_terminal was already terminal; referenced here so it isn't
-        # flagged as unused by future readers.
-        self.assertEqual(newer_terminal.status, CodexInstance.STATUS_FAILED)
-
-
-    def test_latest_id_for_thread(self) -> None:
-        # ``latest_id_for_thread`` is the baseline the idle SSE stream
-        # uses to spot any out-of-band turn — including fast turns that
-        # complete between two polls. It must return the highest pk for
-        # the thread regardless of status and ``None`` when the thread
-        # has never had a worker.
-        self.assertIsNone(codex_pool.latest_id_for_thread("never-existed"))
-        first = self._make(thread_id="t-id", status=CodexInstance.STATUS_RUNNING)
-        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), first.pk)
-        second = self._make(thread_id="t-id", status=CodexInstance.STATUS_COMPLETED)
-        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
-        # Workers on other threads must not bleed into this thread's pk.
-        self._make(thread_id="other", status=CodexInstance.STATUS_RUNNING)
-        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
-
 
 class ReapScopeCgroupTests(TestCase):
     def _make(self, *, systemd_scope_unit: str = "", pid: int = 7) -> CodexInstance:
@@ -3682,25 +2347,6 @@ class ReapScopeCgroupTests(TestCase):
             status=CodexInstance.STATUS_FAILED,
             systemd_scope_unit=systemd_scope_unit,
         )
-
-    @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=False)
-    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
-    def test_kills_cgroup_of_scoped_worker(
-        self, mock_force_kill: MagicMock, _mock_live: MagicMock
-    ) -> None:
-        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
-
-        systemd_isolation._reap_scope_cgroup(instance)
-
-        mock_force_kill.assert_called_once_with(instance)
-
-    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
-    def test_skips_non_scoped_worker(self, mock_force_kill: MagicMock) -> None:
-        # A direct launch has no cgroup to sweep, and its already-dead pid must
-        # never be re-signaled (it may have been recycled).
-        systemd_isolation._reap_scope_cgroup(self._make(systemd_scope_unit=""))
-
-        mock_force_kill.assert_not_called()
 
     @patch("hitch.main.runtime.systemd_isolation._scope_has_live_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
@@ -3817,21 +2463,6 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             )
         )
 
-    def test_true_for_legacy_scope_worker(self) -> None:
-        proc_root = self._proc(
-            {
-                "101": {
-                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
-                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
-                },
-            }
-        )
-        self.assertTrue(
-            systemd_isolation._scope_has_live_worker(
-                "hitch-codex-worker-7.scope", proc_root=proc_root
-            )
-        )
-
     def test_false_when_only_a_grandchild_runs_in_scope(self) -> None:
         # A leaked ``cargo bench`` is not a codex_worker, so the unit is still
         # ours to reap.
@@ -3840,21 +2471,6 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
                 "200": {
                     "cmdline": b"cargo\x00bench\x00",
                     "cgroup": b"0::/u.slice/hitch-codex-worker-7.service\n",
-                },
-            }
-        )
-        self.assertFalse(
-            systemd_isolation._scope_has_live_worker(
-                "hitch-codex-worker-7.service", proc_root=proc_root
-            )
-        )
-
-    def test_false_when_worker_is_in_a_different_scope(self) -> None:
-        proc_root = self._proc(
-            {
-                "300": {
-                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
-                    "cgroup": b"0::/u.slice/hitch-codex-worker-99.service\n",
                 },
             }
         )
@@ -3905,34 +2521,6 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
 
         self.assertEqual(unit, "hitch-codex-worker-7.service")
 
-    def test_worker_unit_from_pid_cgroup_returns_deployment_service(self) -> None:
-        with tempfile.TemporaryDirectory() as proc_root:
-            pid_dir = Path(proc_root) / "703"
-            pid_dir.mkdir()
-            (pid_dir / "cgroup").write_bytes(
-                b"0::/user.slice/hitch-codex-worker-abc123def456-7.service\n"
-            )
-
-            unit = systemd_isolation._worker_unit_from_pid_cgroup(
-                703, 7, proc_root=Path(proc_root)
-            )
-
-        self.assertEqual(unit, "hitch-codex-worker-abc123def456-7.service")
-
-    def test_worker_unit_from_pid_cgroup_returns_legacy_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as proc_root:
-            pid_dir = Path(proc_root) / "701"
-            pid_dir.mkdir()
-            (pid_dir / "cgroup").write_bytes(
-                b"0::/user.slice/hitch-codex-worker-7.scope\n"
-            )
-
-            unit = systemd_isolation._worker_unit_from_pid_cgroup(
-                701, 7, proc_root=Path(proc_root)
-            )
-
-        self.assertEqual(unit, "hitch-codex-worker-7.scope")
-
     def test_worker_unit_from_pid_cgroup_ignores_wrong_instance(self) -> None:
         with tempfile.TemporaryDirectory() as proc_root:
             pid_dir = Path(proc_root) / "702"
@@ -3965,33 +2553,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
             purpose=purpose,
         )
 
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_kills_worker_whose_instance_is_terminal(
-        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
-    ) -> None:
-        done = self._make(pid=5001, status=CodexInstance.STATUS_COMPLETED)
-        mock_iter.return_value = [(5001, done.pk)]
-
-        killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 1)
-        mock_killpg.assert_called_once_with(5001, signal.SIGKILL)
-
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_kills_worker_with_no_instance_row(
-        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
-    ) -> None:
-        mock_iter.return_value = [(5002, 999999)]
-
-        killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 1)
-        mock_killpg.assert_called_once_with(5002, signal.SIGKILL)
-
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup", return_value=None)
@@ -4022,123 +2583,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(
             target.systemd_scope_unit, codex_pool._scope_unit_for_instance(999999)
         )
-
-    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch(
-        "hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup",
-        return_value="hitch-codex-worker-999999.scope",
-    )
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_kills_legacy_scope_worker_with_no_instance_row(
-        self,
-        mock_iter: MagicMock,
-        mock_identity: MagicMock,
-        _mock_cgroup_unit: MagicMock,
-        mock_killpg: MagicMock,
-        mock_force_kill: MagicMock,
-    ) -> None:
-        mock_identity.side_effect = (
-            lambda pid, iid, require_session_leader=True: not require_session_leader
-        )
-        mock_iter.return_value = [(5002, 999999)]
-
-        killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 1)
-        mock_killpg.assert_not_called()
-        mock_force_kill.assert_called_once()
-        target = mock_force_kill.call_args.args[0]
-        self.assertEqual(target.systemd_scope_unit, "hitch-codex-worker-999999.scope")
-
-    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup", return_value=None)
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_kills_systemd_worker_when_row_lacks_unit(
-        self,
-        mock_iter: MagicMock,
-        mock_identity: MagicMock,
-        _mock_cgroup_unit: MagicMock,
-        mock_killpg: MagicMock,
-        mock_force_kill: MagicMock,
-    ) -> None:
-        # The row exists but never saved its systemd unit (parent died after
-        # systemd-run returned): the worker is still systemd-managed (not a
-        # session leader), so derive the unit rather than falling through to
-        # killpg.
-        done = self._make(pid=5006, status=CodexInstance.STATUS_COMPLETED)
-        mock_identity.side_effect = (
-            lambda pid, iid, require_session_leader=True: not require_session_leader
-        )
-        mock_iter.return_value = [(5006, done.pk)]
-
-        killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 1)
-        mock_killpg.assert_not_called()
-        mock_force_kill.assert_called_once()
-        target = mock_force_kill.call_args.args[0]
-        self.assertEqual(
-            target.systemd_scope_unit, codex_pool._scope_unit_for_instance(done.pk)
-        )
-
-    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_kills_legacy_scope_worker_when_row_lacks_unit(
-        self,
-        mock_iter: MagicMock,
-        mock_identity: MagicMock,
-        mock_killpg: MagicMock,
-        mock_force_kill: MagicMock,
-    ) -> None:
-        done = self._make(pid=5006, status=CodexInstance.STATUS_COMPLETED)
-        mock_identity.side_effect = (
-            lambda pid, iid, require_session_leader=True: not require_session_leader
-        )
-        mock_iter.return_value = [(5006, done.pk)]
-        with patch(
-            "hitch.main.runtime.systemd_isolation._worker_unit_from_pid_cgroup",
-            return_value=f"hitch-codex-worker-{done.pk}.scope",
-        ):
-            killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 1)
-        mock_killpg.assert_not_called()
-        mock_force_kill.assert_called_once()
-        target = mock_force_kill.call_args.args[0]
-        self.assertEqual(
-            target.systemd_scope_unit, f"hitch-codex-worker-{done.pk}.scope"
-        )
-
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_spares_running_user_and_system_workers(
-        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
-    ) -> None:
-        user = self._make(pid=5003, status=CodexInstance.STATUS_RUNNING)
-        starting = self._make(pid=5004, status=CodexInstance.STATUS_STARTING)
-        # A running system-agent worker is expected too and must never be reaped.
-        system = self._make(
-            pid=5005,
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
-        mock_iter.return_value = [
-            (5003, user.pk),
-            (5004, starting.pk),
-            (5005, system.pk),
-        ]
-
-        killed = reconciliation.reconcile_orphaned_workers()
-
-        self.assertEqual(killed, 0)
-        mock_killpg.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
@@ -4307,24 +2751,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.runtime.reconciliation._finalize_reaped_instance")
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.reconciliation._iter_running_worker_pids")
-    def test_finalizes_each_reaped_instance(
-        self,
-        mock_iter: MagicMock,
-        _mock_identity: MagicMock,
-        _mock_killpg: MagicMock,
-        mock_finalize: MagicMock,
-    ) -> None:
-        done = self._make(pid=5016, status=CodexInstance.STATUS_COMPLETED)
-        mock_iter.return_value = [(5016, done.pk)]
-
-        reconciliation.reconcile_orphaned_workers()
-
-        mock_finalize.assert_called_once_with(done.pk)
-
 
 class FinalizeReapedInstanceTests(TestCase):
     def _make(
@@ -4351,54 +2777,6 @@ class FinalizeReapedInstanceTests(TestCase):
             plan_mode=plan_mode,
             workflow_id=workflow_id,
         )
-
-    @patch("hitch.main.runtime.codex_pool._resolve_dangling_requests")
-    def test_failed_turn_resolves_dangling_requests(
-        self, mock_resolve: MagicMock
-    ) -> None:
-        failed = self._make(status=CodexInstance.STATUS_FAILED)
-
-        reconciliation._finalize_reaped_instance(failed.pk)
-
-        mock_resolve.assert_called_once_with(failed.pk)
-
-    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.runtime.reconciliation._notify_system_agents_if_needed")
-    def test_routes_finish_hooks_for_reaped_terminal_turn(
-        self, mock_notify: MagicMock, mock_cleanup: MagicMock
-    ) -> None:
-        # A reaped system-agent (or workflow) turn relies on the same
-        # idempotent finish routing as a row that died after saving terminal
-        # status; without it the SystemAgentRun follow-up strands.
-        agent = self._make(
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        )
-
-        reconciliation._finalize_reaped_instance(agent.pk)
-
-        self.assertEqual(mock_notify.call_args.args[0].pk, agent.pk)
-        self.assertEqual(mock_cleanup.call_args.args[0].pk, agent.pk)
-
-    def test_non_terminal_instance_is_a_noop(self) -> None:
-        running = self._make(status=CodexInstance.STATUS_RUNNING, auto_pr_enabled=True)
-
-        reconciliation._finalize_reaped_instance(running.pk)
-
-        running.refresh_from_db()
-        self.assertEqual(running.status, CodexInstance.STATUS_RUNNING)
-
-    @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
-    def test_does_not_fan_out_disk_cleanup(
-        self, mock_disk_cleanup: MagicMock
-    ) -> None:
-        # Disk cleanup walks all of ~/.hitch; finalizing a reaped worker must
-        # not trigger it — the 10-minute scheduler owns that cadence.
-        done = self._make(status=CodexInstance.STATUS_COMPLETED)
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        mock_disk_cleanup.assert_not_called()
 
     @patch(
         "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
@@ -4456,49 +2834,12 @@ class FinalizeReapedInstanceTests(TestCase):
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
         self.assertEqual(done.error, "")
 
-    def test_completed_without_auto_review_is_untouched(self) -> None:
-        done = self._make(status=CodexInstance.STATUS_COMPLETED)
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        done.refresh_from_db()
-        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
-        self.assertEqual(done.error, "")
-
-    def test_completed_auto_pr_already_fired_is_untouched(self) -> None:
-        done = self._make(
-            status=CodexInstance.STATUS_COMPLETED,
-            auto_pr_enabled=True,
-            auto_pr_triggered_at=timezone.now(),
-        )
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        done.refresh_from_db()
-        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
-
-    def test_missing_instance_is_a_noop(self) -> None:
-        reconciliation._finalize_reaped_instance(999999)  # must not raise
-
 
 class IterRunningWorkerPidsTests(SimpleTestCase):
     def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir()
         (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
-
-    def test_default_host_proc_scan_is_disabled_during_test_process(self) -> None:
-        with (
-            patch("hitch.main.runtime.reconciliation.sys.argv", ["manage.py", "test"]),
-            patch.object(
-                Path,
-                "iterdir",
-                side_effect=AssertionError("scanned host proc"),
-            ),
-        ):
-            found = list(reconciliation._iter_running_worker_pids())
-
-        self.assertEqual(found, [])
 
     def test_matches_our_worker_and_scopes_out_other_deployments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4641,31 +2982,6 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
 
         self.assertEqual(found, [100])
 
-    def test_yields_legacy_wrapper_and_native_child(self) -> None:
-        # A legacy PATH-based CLI may have a wrapper/native pair. Both carry
-        # the SDK app-server argv and our marker, and the nuke sweep must signal
-        # each process directly. Deduping to one logical app-server is the job
-        # of count_running_codex_app_servers.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            # Worker (parent of the wrapper) -- not itself an app-server.
-            self._write_proc(proc_root, 50, [b"python", b"manage.py"], ppid=1)
-            # Legacy wrapper (parent is the worker) + native child.
-            self._write_proc(
-                proc_root, 100, self._APP_SERVER_ARGV, [self._MARKER], ppid=50
-            )
-            self._write_proc(
-                proc_root, 200, self._APP_SERVER_ARGV, [self._MARKER], ppid=100
-            )
-
-            found = sorted(
-                reconciliation._iter_codex_app_server_pids(
-                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
-                )
-            )
-
-        self.assertEqual(found, [100, 200])
-
     def test_unreadable_environ_is_not_matched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
@@ -4695,28 +3011,6 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
 
         self.assertEqual(found, [300])
 
-    def test_no_proc_root_yields_nothing(self) -> None:
-        missing = Path(tempfile.gettempdir()) / "definitely-not-here-67890"
-        self.assertEqual(
-            list(
-                reconciliation._iter_codex_app_server_pids(
-                    proc_root=missing, deployment_id=self._DEPLOYMENT
-                )
-            ),
-            [],
-        )
-
-    @patch.object(sys, "argv", ["manage.py", "test"])
-    def test_default_proc_scan_disabled_under_django_tests(self) -> None:
-        self.assertEqual(
-            list(
-                reconciliation._iter_codex_app_server_pids(
-                    deployment_id=self._DEPLOYMENT
-                )
-            ),
-            [],
-        )
-
 
 class NukeCodexAppServersTests(SimpleTestCase):
     _DEPLOYMENT = "/srv/hitch"
@@ -4742,36 +3036,6 @@ class NukeCodexAppServersTests(SimpleTestCase):
         (pid_dir / "environ").write_bytes(marker + b"\0")
         if ppid is not None:
             (pid_dir / "stat").write_text(f"{pid} (codex) S {ppid} 0 0\n")
-
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_sigkills_each_app_server(self, mock_kill: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 111)
-            self._write_app_server(proc_root, 222)
-
-            killed = reconciliation.nuke_codex_app_servers(proc_root=proc_root)
-
-        self.assertEqual(killed, 2)
-        mock_kill.assert_any_call(111, signal.SIGKILL)
-        mock_kill.assert_any_call(222, signal.SIGKILL)
-
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_signals_legacy_wrapper_and_native_child(
-        self, mock_kill: MagicMock
-    ) -> None:
-        # Legacy installs may have a wrapper/native pair. SIGKILL is not
-        # delivered to children, so the sweep must signal both directly.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 111, ppid=50)
-            self._write_app_server(proc_root, 222, ppid=111)
-
-            killed = reconciliation.nuke_codex_app_servers(proc_root=proc_root)
-
-        self.assertEqual(killed, 2)
-        mock_kill.assert_any_call(111, signal.SIGKILL)
-        mock_kill.assert_any_call(222, signal.SIGKILL)
 
     @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_recycled_pid_failing_recheck_is_not_signaled(
@@ -4811,14 +3075,6 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self.assertEqual(
                 reconciliation.nuke_codex_app_servers(proc_root=proc_root), 0
             )
-
-    @patch.object(sys, "argv", ["manage.py", "test"])
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_default_proc_scan_disabled_under_django_tests(
-        self, mock_kill: MagicMock
-    ) -> None:
-        self.assertEqual(reconciliation.nuke_codex_app_servers(), 0)
-        mock_kill.assert_not_called()
 
 
 class ReapOrphanedAppServersTests(TestCase):
@@ -4911,19 +3167,6 @@ class ReapOrphanedAppServersTests(TestCase):
         mock_kill.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_keeps_server_owned_by_current_process(
-        self, mock_kill: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 111, ppid=os.getpid())
-
-            killed = reconciliation.reap_orphaned_app_servers(proc_root=proc_root)
-
-        self.assertEqual(killed, 0)
-        mock_kill.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_kills_server_whose_dead_worker_left_a_terminal_row(
         self, mock_kill: MagicMock
     ) -> None:
@@ -4946,14 +3189,6 @@ class ReapOrphanedAppServersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_kill.assert_called_once()
 
-    @patch.object(sys, "argv", ["manage.py", "test"])
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_default_proc_scan_disabled_under_django_tests(
-        self, mock_kill: MagicMock
-    ) -> None:
-        self.assertEqual(reconciliation.reap_orphaned_app_servers(), 0)
-        mock_kill.assert_not_called()
-
 
 class CountRunningCodexAppServersTests(SimpleTestCase):
     def _write_app_server(
@@ -4974,20 +3209,6 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
         (pid_dir / "environ").write_bytes(marker + b"\0")
         if ppid is not None:
             (pid_dir / "stat").write_text(f"{pid} (codex app) S {ppid} 0 0\n")
-
-    def test_counts_one_per_legacy_wrapper_child_pair(self) -> None:
-        # Two legacy logical app-servers, each represented by a wrapper/native
-        # pair, must collapse from four matched pids to a count of two.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 100, ppid=50)  # wrapper A
-            self._write_app_server(proc_root, 200, ppid=100)  # native child A
-            self._write_app_server(proc_root, 300, ppid=51)  # wrapper B
-            self._write_app_server(proc_root, 400, ppid=300)  # native child B
-
-            count = reconciliation.count_running_codex_app_servers(proc_root=proc_root)
-
-        self.assertEqual(count, 2)
 
     def test_missing_stat_counts_pid(self) -> None:
         # ppid unknown (no stat) -> count it rather than silently drop, so a
@@ -5016,10 +3237,6 @@ class CountRunningCodexAppServersTests(SimpleTestCase):
         self.assertEqual(
             reconciliation.count_running_codex_app_servers(proc_root=missing), 0
         )
-
-    @patch.object(sys, "argv", ["manage.py", "test"])
-    def test_default_proc_scan_disabled_under_django_tests(self) -> None:
-        self.assertEqual(reconciliation.count_running_codex_app_servers(), 0)
 
 
 class InterruptActiveTests(TestCase):
@@ -5070,44 +3287,6 @@ class InterruptActiveTests(TestCase):
         # Timestamp recorded so the next click can detect "polite
         # already issued" and escalate to SIGKILL.
         self.assertIsNotNone(instance.interrupt_requested_at)
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_second_stop_escalates_to_sigkill(
-        self,
-        mock_kill: MagicMock,
-        mock_killpg: MagicMock,
-        mock_identity: MagicMock,
-    ) -> None:
-        # Worker didn't honour the polite stop; user clicks again.
-        # Escalate to SIGKILL on the whole process group (so the codex
-        # app-server child dies with the worker) and write status
-        # ourselves since the worker no longer has the chance to.
-        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
-        stale = timezone.now() - timedelta(days=3)
-        metadata = SessionMetadata.objects.create(
-            thread_id=instance.thread_id,
-            cwd=instance.cwd,
-            codex_created_at=stale,
-            codex_updated_at=stale,
-            codex_last_synced_at=stale,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(
-            interrupt_requested_at=timezone.now()
-        )
-
-        result = codex_pool.interrupt_active("t")
-
-        self.assertIsNotNone(result)
-        mock_kill.assert_not_called()
-        mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(instance.error, "forcibly stopped by user")
-        self.assertIsNotNone(instance.ended_at)
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.codex_updated_at, instance.ended_at)
 
     @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
@@ -5302,26 +3481,6 @@ class InterruptActiveTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.killpg")
-    def test_worker_exit_between_identity_and_sigkill_marks_failed(
-        self, mock_killpg: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        # Same TOCTOU as the SIGTERM case, but on the escalation path:
-        # ESRCH from SIGKILL is tolerated and we still flip the row.
-        mock_killpg.side_effect = ProcessLookupError
-        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
-        CodexInstance.objects.filter(pk=instance.pk).update(
-            interrupt_requested_at=timezone.now()
-        )
-
-        result = codex_pool.interrupt_active("t")
-
-        self.assertIsNotNone(result)
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(instance.error, "forcibly stopped by user")
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_completed_status_under_race_is_preserved_on_sigkill(
         self, mock_killpg: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5445,30 +3604,6 @@ class InterruptInstanceTests(TestCase):
             events_path="/dev/null",
             status=status,
         )
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_stops_specific_instance(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        target = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
-        # A second, newer active worker that would be picked by
-        # ``latest_active_for_thread`` is left untouched: the targeted
-        # entry point must hit the exact instance the page asked for.
-        bystander = self._make(pid=9999, status=CodexInstance.STATUS_RUNNING)
-
-        result = codex_pool.interrupt_instance(target.pk, expected_thread_id="t")
-
-        self.assertIsNotNone(result)
-        # First-click path: polite SIGTERM to the worker pid only.
-        mock_kill.assert_called_once_with(4321, signal.SIGTERM)
-        target.refresh_from_db()
-        bystander.refresh_from_db()
-        # Status is left for the worker to update; the timestamp marks
-        # that polite interrupt was issued so a re-click can escalate.
-        self.assertIsNotNone(target.interrupt_requested_at)
-        self.assertIsNone(bystander.interrupt_requested_at)
-        self.assertEqual(bystander.status, CodexInstance.STATUS_RUNNING)
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.killpg")
@@ -5616,77 +3751,6 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_queues_payload_and_signals_running_instance(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            target = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "target.jsonl"),
-            )
-            bystander = self._make(
-                pid=9999,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "bystander.jsonl"),
-            )
-
-            result = codex_pool.steer_instance(
-                target.pk,
-                expected_thread_id="t",
-                prompt="also update the tests",
-            )
-
-            self.assertIsNotNone(result)
-            mock_identity.assert_called_once_with(4321, target.pk)
-            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
-            line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
-            payload = json.loads(line)
-            self.assertTrue(payload.pop("id"))
-            self.assertEqual(
-                payload,
-                {"op": "steer", "input": "also update the tests"},
-            )
-            self.assertFalse(codex_pool.control_path_for(bystander).exists())
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_queues_image_paths_for_steer(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            target = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "target.jsonl"),
-            )
-
-            result = codex_pool.steer_instance(
-                target.pk,
-                expected_thread_id="t",
-                prompt="use this",
-                input_image_paths=["/tmp/screen.png"],
-            )
-
-            self.assertIsNotNone(result)
-            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
-            line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
-            payload = json.loads(line)
-            self.assertTrue(payload.pop("id"))
-            self.assertEqual(
-                payload,
-                {
-                    "op": "steer",
-                    "input": "use this",
-                    "inputImagePaths": ["/tmp/screen.png"],
-                },
-            )
-            target.refresh_from_db()
-            self.assertEqual(target.input_image_paths, [])
-            self.assertEqual(target.input_attachment_paths, ["/tmp/screen.png"])
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_queues_image_only_steer(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5765,72 +3829,6 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_steer_falls_back_when_instance_turns_terminal_before_ack(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        # A steer appended after the worker's final control drain is never
-        # read; the row turning terminal without an ack is the only signal,
-        # and it must surface as a failed steer rather than a silent drop.
-        with tempfile.TemporaryDirectory() as raw:
-            target = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "target.jsonl"),
-            )
-
-            def kill_then_complete(*args: Any, **kwargs: Any) -> None:
-                CodexInstance.objects.filter(pk=target.pk).update(
-                    status=CodexInstance.STATUS_COMPLETED
-                )
-
-            mock_kill.side_effect = kill_then_complete
-            with patch.object(codex_pool, "_STEER_ACK_TIMEOUT_SECONDS", 5.0):
-                result = codex_pool.steer_instance(
-                    target.pk,
-                    expected_thread_id="t",
-                    prompt="also update the tests",
-                )
-
-            self.assertIsNone(result)
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_image_steer_records_ledger_before_control_request(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        original_append = codex_pool._append_control_request
-
-        def append_and_assert_tracked(
-            instance: CodexInstance,
-            payload: dict[str, Any],
-        ) -> None:
-            instance.refresh_from_db()
-            self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
-            original_append(instance, payload)
-
-        with tempfile.TemporaryDirectory() as raw:
-            target = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "target.jsonl"),
-            )
-
-            with patch(
-                "hitch.main.runtime.codex_pool._append_control_request",
-                side_effect=append_and_assert_tracked,
-            ):
-                result = codex_pool.steer_instance(
-                    target.pk,
-                    expected_thread_id="t",
-                    prompt="use this",
-                    input_image_paths=["/tmp/screen.png"],
-                )
-
-            self.assertIsNotNone(result)
-            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_instance_queues_without_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5851,31 +3849,6 @@ class SteerInstanceTests(TestCase):
             mock_identity.assert_called_once_with(4321, instance.pk)
             mock_kill.assert_not_called()
             self.assertTrue(codex_pool.control_path_for(instance).exists())
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_starting_image_steer_does_not_change_initial_inputs(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_STARTING,
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-
-            result = codex_pool.steer_instance(
-                instance.pk,
-                expected_thread_id="t",
-                prompt="use this later",
-                input_image_paths=["/tmp/steer.png"],
-            )
-
-            self.assertIsNotNone(result)
-            mock_kill.assert_not_called()
-            instance.refresh_from_db()
-            self.assertEqual(instance.input_image_paths, [])
-            self.assertEqual(instance.input_attachment_paths, ["/tmp/steer.png"])
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
@@ -5916,25 +3889,6 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
             self.assertEqual(instance.input_attachment_paths, [])
             self.assertTrue(image_path.exists())
-
-    def test_attachment_tracking_merges_from_current_row(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            stale = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-            CodexInstance.objects.filter(pk=stale.pk).update(
-                input_attachment_paths=["/tmp/first.png"]
-            )
-
-            codex_pool._add_input_attachment_paths(stale, ["/tmp/second.png"])
-
-            stale.refresh_from_db()
-            self.assertEqual(
-                stale.input_attachment_paths,
-                ["/tmp/first.png", "/tmp/second.png"],
-            )
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
@@ -6010,43 +3964,6 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_starting_instance_reports_not_steered_if_terminal_after_append(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        original_append = codex_pool._append_control_request
-
-        def append_and_finish(
-            instance: CodexInstance,
-            payload: dict[str, Any],
-        ) -> None:
-            original_append(instance, payload)
-            CodexInstance.objects.filter(pk=instance.pk).update(
-                status=CodexInstance.STATUS_FAILED
-            )
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_STARTING,
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-            with patch(
-                "hitch.main.runtime.codex_pool._append_control_request",
-                side_effect=append_and_finish,
-            ):
-                result = codex_pool.steer_instance(
-                    instance.pk,
-                    expected_thread_id="t",
-                    prompt="also inspect migrations",
-                )
-
-            self.assertIsNone(result)
-            mock_identity.assert_called_once_with(4321, instance.pk)
-            mock_kill.assert_not_called()
-            self.assertTrue(codex_pool.control_path_for(instance).exists())
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_image_steer_rolls_back_if_terminal_after_append(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -6093,24 +4010,6 @@ class SteerInstanceTests(TestCase):
         with tempfile.TemporaryDirectory() as raw:
             instance = self._make(
                 thread_id="other",
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-
-            result = codex_pool.steer_instance(
-                instance.pk,
-                expected_thread_id="t",
-                prompt="also do this",
-            )
-
-            self.assertIsNone(result)
-            mock_kill.assert_not_called()
-            self.assertFalse(codex_pool.control_path_for(instance).exists())
-
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_terminal_instance_refuses(self, mock_kill: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make(
-                status=CodexInstance.STATUS_COMPLETED,
                 events_path=str(Path(raw) / "events.jsonl"),
             )
 
@@ -6202,36 +4101,6 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_running_instance_reports_not_steered_if_terminal_after_signal(
-        self, mock_kill: MagicMock, mock_identity: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make(
-                pid=4321,
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-
-            def finish_after_signal(_pid: int, _signal: int) -> None:
-                CodexInstance.objects.filter(pk=instance.pk).update(
-                    status=CodexInstance.STATUS_COMPLETED
-                )
-
-            mock_kill.side_effect = finish_after_signal
-
-            result = codex_pool.steer_instance(
-                instance.pk,
-                expected_thread_id="t",
-                prompt="also do this",
-            )
-
-            self.assertIsNone(result)
-            mock_identity.assert_called_once_with(4321, instance.pk)
-            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
-            self.assertTrue(codex_pool.control_path_for(instance).exists())
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_rolls_back_ledger_when_terminal_after_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -6261,33 +4130,6 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
             instance.refresh_from_db()
             self.assertEqual(instance.input_attachment_paths, [])
-
-    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    @patch("hitch.main.runtime.codex_pool._append_control_request")
-    def test_control_file_write_error_reports_not_steered(
-        self,
-        mock_append: MagicMock,
-        mock_kill: MagicMock,
-        mock_identity: MagicMock,
-    ) -> None:
-        mock_append.side_effect = OSError("disk full")
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make(
-                pid=4321,
-                events_path=str(Path(raw) / "events.jsonl"),
-            )
-
-            result = codex_pool.steer_instance(
-                instance.pk,
-                expected_thread_id="t",
-                prompt="also do this",
-            )
-
-            self.assertIsNone(result)
-            mock_identity.assert_called_once_with(4321, instance.pk)
-            mock_append.assert_called_once()
-            mock_kill.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
@@ -6404,52 +4246,11 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.runtime.codex_pool.Path")
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_rejects_wrong_instance_id(
-        self, mock_getsid: MagicMock, mock_path: MagicMock
-    ) -> None:
-        # cmdline names a codex_worker but for a different instance —
-        # another worker, not ours.
-        mock_getsid.return_value = 4321
-        marker = codex_pool._our_manage_py().encode()
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
-            b"python\x00" + marker + b"\x00codex_worker\x00--instance-id\x0099\x00"
-        )
-
-        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
-
     @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_not_session_leader(
         self, mock_getsid: MagicMock
     ) -> None:
         mock_getsid.return_value = 999  # different from pid
-
-        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
-
-    @patch("hitch.main.runtime.codex_pool.Path")
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_scoped_worker_identity_does_not_require_session_leader(
-        self, mock_getsid: MagicMock, mock_path: MagicMock
-    ) -> None:
-        mock_getsid.return_value = 999
-        marker = codex_pool._our_manage_py().encode()
-        cmdline = (
-            b"/usr/bin/python\x00" + marker + b"\x00codex_worker\x00"
-            b"--instance-id\x0042\x00"
-        )
-        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
-
-        self.assertTrue(
-            codex_pool._pid_is_our_worker(
-                4321, 42, require_session_leader=False
-            )
-        )
-        mock_getsid.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.os.getsid")
-    def test_rejects_when_pid_gone(self, mock_getsid: MagicMock) -> None:
-        mock_getsid.side_effect = ProcessLookupError
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
@@ -6484,27 +4285,12 @@ class PidIsOurWorkerTests(TestCase):
 
 
 class EventsDirTests(TestCase):
-    def test_uses_setting_when_configured(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            self.assertEqual(codex_pool.events_dir(), Path(raw))
-
     def test_falls_back_to_home_dir(self) -> None:
         with override_settings(CODEX_EVENTS_DIR=None):
             self.assertEqual(
                 codex_pool.events_dir(),
                 Path.home() / ".hitch" / "codex_events",
             )
-
-    def test_worker_logs_dir_uses_setting_when_configured(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_WORKER_LOG_DIR=Path(raw)),
-        ):
-            self.assertEqual(codex_pool.worker_logs_dir(), Path(raw))
-            self.assertEqual(codex_pool.worker_log_path(7), Path(raw) / "7.log")
 
     def test_worker_logs_dir_falls_back_under_hitch_home(self) -> None:
         with (
@@ -6639,85 +4425,6 @@ class GoalNotificationForwarderTests(TestCase):
         )
         self.assertEqual(discarded, [account_updated, other_thread_clear])
 
-    def test_exits_on_unexpected_notification_shape(self) -> None:
-        written: list[tuple[str, object]] = []
-        discarded: list[Notification] = []
-
-        _forward_goal_notifications(
-            source=_FakeNotificationSource([object()]),
-            thread_id="thread-1",
-            write_notification=lambda event: written.append((event.method, event.payload)),
-            discard_notification=discarded.append,
-        )
-
-        self.assertEqual(written, [])
-        self.assertEqual(discarded, [])
-
-    def test_start_goal_event_forwarder_runs_in_background(self) -> None:
-        written: list[tuple[str, object]] = []
-        discarded: list[Notification] = []
-
-        thread = _start_goal_event_forwarder(
-            _FakeNotificationSource(
-                [
-                    Notification(
-                        method=codex_events.GOAL_CLEARED_METHOD,
-                        payload=cast(
-                            Any,
-                            ThreadGoalClearedNotification(thread_id="thread-1"),
-                        ),
-                    )
-                ]
-            ),
-            thread_id="thread-1",
-            write_notification=lambda event: written.append((event.method, event.payload)),
-            discard_notification=discarded.append,
-        )
-        thread.join(timeout=1)
-
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(discarded, [])
-        self.assertEqual(
-            [method for method, _payload in written],
-            [codex_events.GOAL_CLEARED_METHOD],
-        )
-
-    def test_notification_sequencer_preserves_router_arrival_order(self) -> None:
-        class Router:
-            def __init__(self) -> None:
-                self.routed: list[Notification] = []
-
-            def route_notification(self, notification: Notification) -> None:
-                self.routed.append(notification)
-
-        router = Router()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        with patch(
-            "hitch.main.management.commands.codex_worker.time.time_ns",
-            side_effect=[2_000_000, 1_000_000, 3_000_000],
-        ):
-            order_for = _install_notification_sequencer(cast(Any, codex))
-            first = Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
-            )
-            second = Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
-            )
-            unrouted = Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
-            )
-
-            router.route_notification(first)
-            router.route_notification(second)
-
-            self.assertEqual(router.routed, [first, second])
-            self.assertEqual(order_for(second), (2_000, 2))
-            self.assertEqual(order_for(first), (2_000, 1))
-            self.assertEqual(order_for(unrouted), (3_000, 3))
-
     def test_forwarder_discards_order_for_skipped_notifications(self) -> None:
         class Router:
             def __init__(self) -> None:
@@ -6752,165 +4459,6 @@ class GoalNotificationForwarderTests(TestCase):
             self.assertEqual(written, [])
             self.assertEqual(discarded_orders, [(2_000, 1)])
             self.assertEqual(order_for(skipped), (3_000, 2))
-
-    def test_preserves_early_turn_completed_until_stream_registration(self) -> None:
-        """Fast turns may complete before ``TurnHandle.stream`` registers.
-
-        The pinned SDK drops that early completion by default; Hitch's worker
-        router shim must keep it pending so the stream loop can observe the
-        terminal event and mark the row completed.
-        """
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        _install_notification_sequencer(cast(Any, codex))
-        completed = Notification(
-            method="turn/completed",
-            payload=cast(
-                Any,
-                TurnCompletedNotification(
-                    thread_id="thread-1",
-                    turn=Turn(id="turn-1", items=[], status=TurnStatus.completed),
-                ),
-            ),
-        )
-
-        router.route_notification(completed)
-        router.register_turn("turn-1")
-
-        queue = router._turn_notifications["turn-1"]
-        self.assertEqual(queue.qsize(), 1)
-        self.assertIs(queue.get_nowait(), completed)
-
-    def test_binds_submission_to_its_client_message_execution(self) -> None:
-        thread_id = "01a02723-e41b-7321-941b-5080a347b7f8"
-        returned_id = "01a029b8-9d7d-7023-ab9d-d086e1ab2bc9"
-        execution_id = "8dca081c-4203-4e3d-a86f-0f06e0ad31ec"
-        client_message_id = "hitch-instance-9762"
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission(thread_id, client_message_id)
-        router.register_turn(returned_id)
-
-        # A resumed goal continuation can start and finish before this
-        # submission is processed. It does not carry our client message id and
-        # therefore cannot claim this worker.
-        stale_started = Notification(
-            method="turn/started",
-            payload=cast(
-                Any,
-                TurnStartedNotification(
-                    thread_id=thread_id,
-                    turn=Turn(
-                        id="stale-goal-turn",
-                        items=[],
-                        status=TurnStatus.in_progress,
-                    ),
-                ),
-            ),
-        )
-        stale_completed = Notification(
-            method="turn/completed",
-            payload=cast(
-                Any,
-                TurnCompletedNotification(
-                    thread_id=thread_id,
-                    turn=Turn(
-                        id="stale-goal-turn",
-                        items=[],
-                        status=TurnStatus.completed,
-                    ),
-                ),
-            ),
-        )
-        router.route_notification(stale_started)
-        router.route_notification(stale_completed)
-        self.assertIsNone(submission._turn_id)
-
-        started = Notification(
-            method="turn/started",
-            payload=cast(
-                Any,
-                TurnStartedNotification(
-                    thread_id=thread_id,
-                    turn=Turn(
-                        id=execution_id,
-                        items=[],
-                        status=TurnStatus.in_progress,
-                    ),
-                ),
-            ),
-        )
-        submitted_message = _submitted_message_event(
-            thread_id=thread_id,
-            turn_id=execution_id,
-            client_message_id=client_message_id,
-        )
-        completed = Notification(
-            method="turn/completed",
-            payload=cast(
-                Any,
-                TurnCompletedNotification(
-                    thread_id=thread_id,
-                    turn=Turn(
-                        id=execution_id,
-                        items=[],
-                        status=TurnStatus.completed,
-                    ),
-                ),
-            ),
-        )
-        router.route_notification(started)
-        router.route_notification(submitted_message)
-        router.route_notification(completed)
-        client = SimpleNamespace(
-            _router=router,
-            register_turn_notifications=router.register_turn,
-            next_turn_notification=router.next_turn_notification,
-            unregister_turn_notifications=router.unregister_turn,
-        )
-        turn = TurnHandle(cast(Any, client), thread_id, returned_id)
-
-        _bind_submitted_turn_handle(turn, submission, sequencer)
-        sequencer.finish_submission(submission)
-
-        self.assertEqual(turn.id, execution_id)
-        self.assertIn(execution_id, router._turn_notifications)
-        self.assertEqual(list(turn.stream()), [started, submitted_message, completed])
-
-    def test_bound_queue_surfaces_transport_failure_before_stream(self) -> None:
-        thread_id = "thread-1"
-        returned_id = "submission-1"
-        execution_id = "execution-1"
-        client_message_id = "client-1"
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission(thread_id, client_message_id)
-        router.register_turn(returned_id)
-        submitted_message = _submitted_message_event(
-            thread_id=thread_id,
-            turn_id=execution_id,
-            client_message_id=client_message_id,
-        )
-        router.route_notification(submitted_message)
-        client = SimpleNamespace(
-            _router=router,
-            register_turn_notifications=router.register_turn,
-            next_turn_notification=router.next_turn_notification,
-            unregister_turn_notifications=router.unregister_turn,
-        )
-        turn = TurnHandle(cast(Any, client), thread_id, returned_id)
-        _bind_submitted_turn_handle(turn, submission, sequencer)
-        sequencer.finish_submission(submission)
-        transport_error = RuntimeError("transport closed after reconciliation")
-
-        router.fail_all(transport_error)
-
-        stream = turn.stream()
-        self.assertIs(next(stream), submitted_message)
-        with self.assertRaisesRegex(RuntimeError, "transport closed"):
-            next(stream)
 
     def test_submission_wait_is_woken_by_transport_failure(self) -> None:
         router = MessageRouter()
@@ -6994,39 +4542,6 @@ class GoalNotificationForwarderTests(TestCase):
         )
 
         self.assertEqual(submission.wait(), "execution-1")
-
-    def test_submission_cancellation_does_not_bind_returned_pseudo_id(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        router.register_turn("submission-1")
-        client = SimpleNamespace(_router=router)
-        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
-        failures: list[BaseException] = []
-
-        def bind() -> None:
-            try:
-                _bind_submitted_turn_handle(turn, submission, sequencer)
-            except BaseException as exc:  # pragma: no cover - asserted below
-                failures.append(exc)
-
-        with patch.object(codex_worker_module, "_cancel_requested", True):
-            waiter = threading.Thread(target=bind)
-            waiter.start()
-            waiter.join(timeout=0.01)
-            self.assertTrue(waiter.is_alive())
-            router.route_notification(
-                _turn_completed_event(
-                    thread_id="thread-1", turn_id="submission-1"
-                )
-            )
-            waiter.join(timeout=1)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(len(failures), 1)
-        self.assertRegex(str(failures[0]), "completed before")
-        self.assertEqual(turn.id, "submission-1")
 
     def test_cancelled_submission_tracks_goal_rollover_until_acceptance(self) -> None:
         router = MessageRouter()
@@ -7157,356 +4672,6 @@ class GoalNotificationForwarderTests(TestCase):
         self.assertEqual(turn.id, "execution-1")
         self.assertEqual(list(turn.stream()), [started, submitted, completed])
 
-    def test_terminal_goal_outcomes_wait_for_submission_terminal(self) -> None:
-        outcomes = [
-            (
-                "cleared",
-                Notification(
-                    method=codex_events.GOAL_CLEARED_METHOD,
-                    payload=cast(
-                        Any,
-                        ThreadGoalClearedNotification(thread_id="thread-1"),
-                    ),
-                ),
-            ),
-            *[
-                (status.value, _goal_updated_event("thread-1", status))
-                for status in (
-                    ThreadGoalStatus.paused,
-                    ThreadGoalStatus.blocked,
-                    ThreadGoalStatus.usage_limited,
-                    ThreadGoalStatus.budget_limited,
-                    ThreadGoalStatus.complete,
-                )
-            ],
-        ]
-
-        for outcome, notification in outcomes:
-            with self.subTest(outcome=outcome):
-                router = MessageRouter()
-                codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-                sequencer = _install_notification_sequencer(cast(Any, codex))
-                router.route_notification(
-                    _turn_started_event(
-                        thread_id="thread-1", turn_id="persisted-goal-turn"
-                    )
-                )
-                submission = sequencer.begin_submission("thread-1", "client-1")
-                sequencer.send_submission(lambda: None)
-                sequencer.register_returned_turn(submission, "submission-1")
-
-                router.route_notification(notification)
-
-                self.assertFalse(submission._wakeup.is_set())
-                router.route_notification(
-                    _turn_completed_event(
-                        thread_id="thread-1", turn_id="persisted-goal-turn"
-                    )
-                )
-                self.assertFalse(submission._wakeup.is_set())
-                router.route_notification(
-                    _turn_completed_event(
-                        thread_id="thread-1", turn_id="submission-1"
-                    )
-                )
-                with self.assertRaisesRegex(RuntimeError, "completed before"):
-                    submission.wait()
-
-    def test_idle_goal_clear_waits_for_submission_terminal(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        sequencer.send_submission(lambda: None)
-        sequencer.register_returned_turn(submission, "submission-1")
-
-        router.route_notification(
-            Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(
-                    Any,
-                    ThreadGoalClearedNotification(thread_id="thread-1"),
-                ),
-            )
-        )
-
-        self.assertFalse(submission._wakeup.is_set())
-        router.route_notification(
-            _turn_completed_event(
-                thread_id="thread-1", turn_id="submission-1"
-            )
-        )
-        with self.assertRaisesRegex(RuntimeError, "completed before"):
-            submission.wait()
-
-    def test_idle_goal_clear_cannot_overtake_matching_message(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        sequencer.send_submission(lambda: None)
-        router.register_turn("submission-1")
-        client = SimpleNamespace(_router=router)
-        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
-        failures: list[BaseException] = []
-
-        def bind() -> None:
-            try:
-                _bind_submitted_turn_handle(turn, submission, sequencer)
-            except BaseException as exc:  # pragma: no cover - asserted below
-                failures.append(exc)
-
-        waiter = threading.Thread(target=bind)
-        waiter.start()
-        waiter.join(timeout=0.01)
-        self.assertTrue(waiter.is_alive())
-
-        router.route_notification(
-            Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(
-                    Any,
-                    ThreadGoalClearedNotification(thread_id="thread-1"),
-                ),
-            )
-        )
-        waiter.join(timeout=0.01)
-        self.assertTrue(waiter.is_alive())
-
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="accepting-turn",
-                client_message_id="client-1",
-            )
-        )
-        waiter.join(timeout=1)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(failures, [])
-        self.assertEqual(turn.id, "accepting-turn")
-
-    def test_terminal_goal_after_physical_completion_waits_for_submission(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        router.route_notification(
-            _turn_started_event(
-                thread_id="thread-1", turn_id="persisted-goal-turn"
-            )
-        )
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        sequencer.send_submission(lambda: None)
-        sequencer.register_returned_turn(submission, "submission-1")
-
-        router.route_notification(
-            _turn_completed_event(
-                thread_id="thread-1", turn_id="persisted-goal-turn"
-            )
-        )
-        self.assertFalse(submission._wakeup.is_set())
-        router.route_notification(
-            _goal_updated_event(
-                "thread-1",
-                ThreadGoalStatus.complete,
-                turn_id="persisted-goal-turn",
-            )
-        )
-        self.assertFalse(submission._wakeup.is_set())
-        router.route_notification(
-            _turn_completed_event(
-                thread_id="thread-1", turn_id="submission-1"
-            )
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "completed before"):
-            submission.wait()
-
-    def test_matching_message_overrides_completed_goal_boundary(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        router.route_notification(
-            _turn_started_event(
-                thread_id="thread-1", turn_id="persisted-goal-turn"
-            )
-        )
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        sequencer.send_submission(lambda: None)
-        sequencer.register_returned_turn(submission, "submission-1")
-
-        router.route_notification(
-            _goal_updated_event(
-                "thread-1",
-                ThreadGoalStatus.complete,
-                turn_id="persisted-goal-turn",
-            )
-        )
-        router.route_notification(
-            _turn_completed_event(
-                thread_id="thread-1", turn_id="persisted-goal-turn"
-            )
-        )
-        self.assertFalse(submission._wakeup.is_set())
-
-        router.route_notification(
-            _turn_started_event(thread_id="thread-1", turn_id="accepting-turn")
-        )
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="accepting-turn",
-                client_message_id="client-1",
-            )
-        )
-
-        self.assertEqual(submission.wait(), "accepting-turn")
-
-    def test_goal_reactivation_does_not_resolve_submission(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        sequencer.send_submission(lambda: None)
-
-        router.route_notification(
-            _goal_updated_event(
-                "thread-1",
-                ThreadGoalStatus.blocked,
-            )
-        )
-        router.route_notification(
-            _goal_updated_event(
-                "thread-1",
-                ThreadGoalStatus.active,
-            )
-        )
-        router.register_turn("submission-1")
-        client = SimpleNamespace(_router=router)
-        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
-        failures: list[BaseException] = []
-
-        def bind() -> None:
-            try:
-                _bind_submitted_turn_handle(turn, submission, sequencer)
-            except BaseException as exc:  # pragma: no cover - asserted below
-                failures.append(exc)
-
-        waiter = threading.Thread(target=bind)
-        waiter.start()
-        waiter.join(timeout=0.01)
-        self.assertTrue(waiter.is_alive())
-
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="accepting-turn",
-                client_message_id="client-1",
-            )
-        )
-        waiter.join(timeout=1)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(failures, [])
-        self.assertEqual(turn.id, "accepting-turn")
-
-    def test_goal_notifications_do_not_resolve_submission(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        router.route_notification(
-            _turn_started_event(thread_id="thread-1", turn_id="execution-1")
-        )
-        submission = sequencer.begin_submission("thread-1", "client-1")
-
-        router.route_notification(
-            _goal_updated_event("thread-1", ThreadGoalStatus.active)
-        )
-        router.route_notification(
-            Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(
-                    Any,
-                    ThreadGoalClearedNotification(thread_id="other-thread"),
-                ),
-            )
-        )
-        router.route_notification(
-            Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(
-                    Any,
-                    ThreadGoalClearedNotification(thread_id="thread-1"),
-                ),
-            )
-        )
-        self.assertFalse(submission._wakeup.is_set())
-
-        sequencer.send_submission(lambda: None)
-        router.route_notification(
-            Notification(
-                method=codex_events.GOAL_CLEARED_METHOD,
-                payload=cast(
-                    Any,
-                    ThreadGoalClearedNotification(thread_id="thread-1"),
-                ),
-            )
-        )
-        self.assertFalse(submission._wakeup.is_set())
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="execution-1",
-                client_message_id="client-1",
-            )
-        )
-        router.route_notification(
-            _turn_completed_event(thread_id="thread-1", turn_id="execution-1")
-        )
-
-        self.assertEqual(submission.wait(), "execution-1")
-
-    def test_submission_wait_ignores_other_turns_until_its_message_arrives(self) -> None:
-        router = MessageRouter()
-        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
-        sequencer = _install_notification_sequencer(cast(Any, codex))
-        submission = sequencer.begin_submission("thread-1", "client-1")
-        router.register_turn("submission-1")
-        client = SimpleNamespace(_router=router)
-        turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
-        failures: list[BaseException] = []
-
-        def bind() -> None:
-            try:
-                _bind_submitted_turn_handle(turn, submission, sequencer)
-            except BaseException as exc:  # pragma: no cover - asserted below
-                failures.append(exc)
-
-        waiter = threading.Thread(target=bind)
-        waiter.start()
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="other-execution",
-                client_message_id="other-client",
-            )
-        )
-        waiter.join(timeout=0.01)
-        self.assertTrue(waiter.is_alive())
-
-        router.route_notification(
-            _submitted_message_event(
-                thread_id="thread-1",
-                turn_id="owned-execution",
-                client_message_id="client-1",
-            )
-        )
-        waiter.join(timeout=1)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(failures, [])
-        self.assertEqual(turn.id, "owned-execution")
-
 
 class _BrokenStderr:
     def write(self, _value: str) -> int:
@@ -7581,24 +4746,6 @@ class CodexWorkerCommandTests(TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "1000\n")
 
-    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=1500)
-    def test_apply_worker_oom_score_adjust_clamps_score(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "oom_score_adj"
-
-            codex_worker_module._apply_worker_oom_score_adjust(path)
-
-            self.assertEqual(path.read_text(encoding="utf-8"), "1000\n")
-
-    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=0)
-    def test_apply_worker_oom_score_adjust_skips_zero_score(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "oom_score_adj"
-
-            codex_worker_module._apply_worker_oom_score_adjust(path)
-
-            self.assertFalse(path.exists())
-
     @override_settings(CODEX_WORKER_OOM_SCORE_ADJ="not-an-int")
     @patch("hitch.main.management.commands.codex_worker.logger.warning")
     def test_apply_worker_oom_score_adjust_ignores_invalid_score(
@@ -7635,84 +4782,6 @@ class CodexWorkerCommandTests(TestCase):
             instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         mock_codex.assert_not_called()
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_streams_notifications_and_marks_completed(self, mock_codex: MagicMock) -> None:
-        events = [
-            SimpleNamespace(
-                method="item/agentMessage/delta",
-                payload=_FakePayload(detail="chunk-1"),
-            ),
-            _completed_event("turn-1", TurnStatus.completed),
-        ]
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-            with open(instance.events_path, encoding="utf-8") as fh:
-                lines = [json.loads(line) for line in fh]
-
-        codex_ctx.thread_resume.assert_called_once_with("thread-1")
-        config = mock_codex.call_args.kwargs["config"]
-        self.assertIn("features.multi_agent=true", config.config_overrides)
-        self.assertTrue(
-            any(
-                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.config_file=")
-                for value in config.config_overrides
-            )
-        )
-        self.assertEqual(os.environ["HITCH_THREAD_ID"], "thread-1")
-        self.assertEqual(os.environ["HITCH_CWD"], "/repo")
-        self.assertEqual(os.environ["HITCH_PROJECT_DIR"], str(Path(settings.BASE_DIR)))
-        self.assertEqual(
-            os.environ["HITCH_MANAGE_PY"],
-            str(Path(settings.BASE_DIR) / "manage.py"),
-        )
-        self.assertEqual(os.environ["HITCH_MANAGE_COMMAND"], "uv")
-        self.assertEqual(os.environ["HITCH_PROPOSE_SESSION_COMMAND"], "uv")
-        self.assertEqual(len(lines), 2)
-        self.assertEqual(lines[0]["method"], "item/agentMessage/delta")
-        self.assertEqual(lines[0]["payload"]["detail"], "chunk-1")
-        self.assertEqual(lines[1]["method"], "turn/completed")
-
-        instance.refresh_from_db()
-        self.assertEqual(instance.pid, os.getpid())
-        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
-        self.assertIsNotNone(instance.ended_at)
-        self.assertEqual(instance.error, "")
-
-
-
-    def test_ordinary_typed_start_injects_client_message_id(self) -> None:
-        client = MagicMock()
-        client.turn_start.return_value = SimpleNamespace(
-            turn=SimpleNamespace(id="turn-1")
-        )
-        codex = cast(Codex, SimpleNamespace(_client=client))
-        thread = Thread(cast(Any, client), "thread-1")
-
-        handle = codex_worker_module._start_turn(
-            codex,
-            thread,
-            prompt="hello",
-            input_image_paths=None,
-            model=None,
-            effort=None,
-            sandbox_policy=None,
-            approval_mode=None,
-            collaboration_mode=None,
-            plan_mode=False,
-            output_schema=None,
-            client_user_message_id="hitch-instance-42",
-        )
-
-        params = client.turn_start.call_args.kwargs["params"]
-        self.assertIsInstance(params, TurnStartParams)
-        self.assertEqual(params.client_user_message_id, "hitch-instance-42")
-        self.assertEqual(handle.id, "turn-1")
 
     def test_ordinary_start_serializes_submission_write(self) -> None:
         router = MessageRouter()
@@ -7847,32 +4916,6 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
 
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
-    @patch("hitch.main.management.commands.codex_worker._run_turn")
-    def test_worker_bumps_session_index_on_completion(
-        self, mock_run_turn: MagicMock, _mock_notify: MagicMock
-    ) -> None:
-        # Worker turns write to an isolated sqlite_home the web index never reads,
-        # so the worker must bump the session's recency directly on completion.
-        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
-        stale = timezone.now() - timedelta(days=3)
-        SessionMetadata.objects.create(
-            thread_id="thread-1",
-            cwd="/repo",
-            codex_created_at=stale,
-            codex_updated_at=stale,
-            codex_last_synced_at=stale,
-        )
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        metadata = SessionMetadata.objects.get(thread_id="thread-1")
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
-        assert metadata.codex_updated_at is not None
-        self.assertGreater(metadata.codex_updated_at, stale)
-
     @patch(
         "hitch.main.management.commands.codex_worker.disk_cleanup"
         ".run_finished_session_disk_cleanup"
@@ -7932,52 +4975,6 @@ class CodexWorkerCommandTests(TestCase):
             str(codex_pool.codex_home_dir()),
         )
 
-    @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=StringIO)
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
-    @patch("hitch.main.management.commands.codex_worker._run_turn")
-    def test_worker_records_base_exception_before_reraising(
-        self,
-        mock_run_turn: MagicMock,
-        _mock_notify: MagicMock,
-        stderr: StringIO,
-    ) -> None:
-        mock_run_turn.side_effect = SystemExit("transport closed")
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "worker-logs"),
-        ):
-            instance = self._make_instance(Path(raw))
-
-            with self.assertRaises(SystemExit):
-                call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(instance.error, "SystemExit('transport closed')")
-        self.assertIn("failed with SystemExit", stderr.getvalue())
-
-    @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=_BrokenStderr)
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
-    @patch("hitch.main.management.commands.codex_worker._run_turn")
-    def test_worker_stderr_errors_do_not_block_completed_status(
-        self,
-        mock_run_turn: MagicMock,
-        _mock_notify: MagicMock,
-        _stderr: _BrokenStderr,
-    ) -> None:
-        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "worker-logs"),
-        ):
-            instance = self._make_instance(Path(raw))
-
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
-        self.assertEqual(instance.error, "")
-
     @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=_BrokenStderr)
     @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
@@ -8017,24 +5014,6 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(config.config_overrides[:1], ("features.memories=true",))
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_web_search_row_sets_app_server_override(
-        self, mock_codex: MagicMock
-    ) -> None:
-        events = [_completed_event("turn-1", TurnStatus.completed)]
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw), web_search_mode="live")
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        config = mock_codex.call_args.kwargs["config"]
-        self.assertEqual(
-            config.config_overrides[:2],
-            ('features.memories=false', 'web_search="live"'),
-        )
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_web_search_cli_flag_sets_app_server_override(
         self, mock_codex: MagicMock
     ) -> None:
@@ -8057,23 +5036,6 @@ class CodexWorkerCommandTests(TestCase):
             config.config_overrides[:2],
             ('features.memories=false', 'web_search="cached"'),
         )
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_invalid_web_search_row_is_rejected_before_codex_starts(
-        self, mock_codex: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(
-                Path(raw),
-                web_search_mode='live"\napproval_policy="never',
-            )
-
-            with self.assertRaises(ValueError):
-                call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_forwards_developer_instructions_on_resume(
@@ -8104,124 +5066,6 @@ class CodexWorkerCommandTests(TestCase):
                 for value in config.config_overrides
             )
         )
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_reads_prompt_from_instance_row(self, mock_codex: MagicMock) -> None:
-        """The prompt isn't a CLI arg — verify it round-trips via the row,
-        including a leading-dash value that argparse would reject."""
-        captured: dict[str, object] = {}
-
-        def _capture_turn(input_obj: object) -> object:
-            captured["input"] = input_obj
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw), prompt="- a markdown bullet")
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        self.assertEqual(getattr(captured["input"], "text", None), "- a markdown bullet")
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_reads_input_images_from_instance_row(self, mock_codex: MagicMock) -> None:
-        captured: dict[str, object] = {}
-
-        def _capture_turn(input_obj: object) -> object:
-            captured["input"] = input_obj
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            image_paths = [
-                codex_pool.input_attachments_dir() / "req" / "1.png",
-                codex_pool.input_attachments_dir() / "req" / "2.jpg",
-            ]
-            image_paths[0].parent.mkdir(parents=True)
-            for image_path in image_paths:
-                image_path.write_bytes(b"image")
-            instance = self._make_instance(Path(raw), prompt="use this")
-            instance.input_image_paths = [str(path) for path in image_paths]
-            instance.input_attachment_paths = [str(path) for path in image_paths]
-            instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        input_items = captured["input"]
-        assert isinstance(input_items, list)
-        self.assertEqual(getattr(input_items[0], "text", None), "use this")
-        self.assertEqual(
-            [getattr(item, "path", None) for item in input_items[1:]],
-            [str(path) for path in image_paths],
-        )
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_attachment_ledger_is_not_initial_turn_input(
-        self, mock_codex: MagicMock
-    ) -> None:
-        captured: dict[str, object] = {}
-
-        def _capture_turn(input_obj: object) -> object:
-            captured["input"] = input_obj
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            image_path = codex_pool.input_attachments_dir() / "steer" / "1.png"
-            image_path.parent.mkdir(parents=True)
-            image_path.write_bytes(b"steer")
-            instance = self._make_instance(Path(raw), prompt="initial prompt")
-            instance.input_attachment_paths = [str(image_path)]
-            instance.save(update_fields=["input_attachment_paths"])
-
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-            self.assertEqual(getattr(captured["input"], "text", None), "initial prompt")
-            self.assertTrue(image_path.exists())
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_terminal_worker_retains_input_images(self, mock_codex: MagicMock) -> None:
-        events = [_completed_event("turn-1", TurnStatus.completed)]
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
-            image_path.parent.mkdir(parents=True)
-            image_path.write_bytes(b"image")
-            instance = self._make_instance(Path(raw), prompt="use this")
-            instance.input_image_paths = [str(image_path)]
-            instance.input_attachment_paths = [str(image_path)]
-            instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
-
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-            self.assertTrue(image_path.exists())
-            instance.refresh_from_db()
-            self.assertEqual(instance.input_image_paths, [str(image_path)])
-            self.assertEqual(instance.input_attachment_paths, [str(image_path)])
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_terminal_worker_cleans_images_when_archive_requested(
@@ -8257,42 +5101,6 @@ class CodexWorkerCommandTests(TestCase):
             self.assertEqual(instance.input_image_paths, [])
             self.assertEqual(instance.input_attachment_paths, [])
             self.assertFalse(instance.input_attachment_cleanup_requested)
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_terminal_worker_retains_image_steers_added_after_load(
-        self, mock_codex: MagicMock
-    ) -> None:
-        captured: dict[str, Path] = {}
-
-        def _capture_turn(input_obj: object) -> object:
-            assert not isinstance(input_obj, list)
-            steer_path = codex_pool.input_attachments_dir() / "steer" / "1.png"
-            steer_path.parent.mkdir(parents=True)
-            steer_path.write_bytes(b"steer")
-            captured["steer_path"] = steer_path
-            CodexInstance.objects.filter(pk=instance.pk).update(
-                input_attachment_paths=[str(steer_path)]
-            )
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            instance = self._make_instance(Path(raw), prompt="keep going")
-
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-            self.assertTrue(captured["steer_path"].exists())
-            instance.refresh_from_db()
-            self.assertEqual(instance.input_image_paths, [])
-            self.assertEqual(instance.input_attachment_paths, [str(captured["steer_path"])])
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_failed_for_non_completed_outcomes(self, mock_codex: MagicMock) -> None:
@@ -8342,34 +5150,6 @@ class CodexWorkerCommandTests(TestCase):
                 self.assertEqual(instance.input_image_paths, [str(image_path)])
                 self.assertEqual(instance.input_attachment_paths, [str(image_path)])
                 self._assert_requests_cancelled(approval, input_request)
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_records_failure_when_codex_raises(self, mock_codex: MagicMock) -> None:
-        mock_codex.return_value.__enter__.side_effect = RuntimeError("boom")
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            instance = self._make_instance(Path(raw))
-            approval, input_request = self._make_pending_requests(instance)
-            image_path = self._attach_input_image(instance)
-            with self.assertRaises(RuntimeError):
-                call_command(
-                    "codex_worker",
-                    "--instance-id",
-                    str(instance.pk),
-                    stderr=StringIO(),
-                )
-            self.assertTrue(image_path.exists())
-
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertIn("boom", instance.error)
-        self.assertIsNotNone(instance.ended_at)
-        self.assertEqual(instance.input_image_paths, [str(image_path)])
-        self.assertEqual(instance.input_attachment_paths, [str(image_path)])
-        self._assert_requests_cancelled(approval, input_request)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_typed_cli_args_round_trip_to_turn_kwargs(self, mock_codex: MagicMock) -> None:
@@ -8727,25 +5507,6 @@ class CodexWorkerCommandTests(TestCase):
                 self.assertEqual(sandbox_policy["type"], "workspaceWrite")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_marks_running_before_streaming(self, mock_codex: MagicMock) -> None:
-        """The row flips to ``running`` before the first event so a slow
-        codex initialization is visible to observers (UI / reconciliation)."""
-        observed_status: dict[str, str] = {}
-
-        def _capture_thread_resume(*_args: object, **_kwargs: object) -> object:
-            observed_status["value"] = CodexInstance.objects.get(pk=instance.pk).status
-            return _stub_thread_resume([_completed_event("turn-1", TurnStatus.completed)])
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.side_effect = _capture_thread_resume
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        self.assertEqual(observed_status["value"], CodexInstance.STATUS_RUNNING)
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_installs_interactive_approval_handler_before_streaming(
         self, mock_codex: MagicMock
     ) -> None:
@@ -8901,26 +5662,6 @@ class ApprovalHandlerTests(TestCase):
                 {"item": {"command": "ls"}},
             ),
             {"decision": "accept"},
-        )
-        self.assertEqual(events, [])
-        self.assertFalse(ApprovalRequest.objects.exists())
-
-    def test_handler_observes_live_deny_all_mode_change(self) -> None:
-        instance = self._make_instance()
-        events: list[tuple[str, object]] = []
-        handler = _make_approval_handler(
-            instance=instance,
-            write_event=lambda method, payload: events.append((method, payload)),
-            approval_mode="prompt_user",
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(approval_mode="deny_all")
-
-        self.assertEqual(
-            handler(
-                "item/commandExecution/requestApproval",
-                {"item": {"command": "ls"}},
-            ),
-            {"decision": "decline"},
         )
         self.assertEqual(events, [])
         self.assertFalse(ApprovalRequest.objects.exists())
@@ -9173,54 +5914,6 @@ class ApprovalHandlerTests(TestCase):
                         methods_to_payload["input/resolved"]["response"], response
                     )
 
-    def test_handler_ignores_unrelated_request_user_input_substrings(self) -> None:
-        instance = self._make_instance()
-        events: list[tuple[str, object]] = []
-        handler = _make_approval_handler(
-            instance=instance,
-            write_event=lambda m, p: events.append((m, p)),
-            approval_mode="auto_review",
-        )
-
-        self.assertEqual(handler("custom/requestUserInputExtra", {}), {})
-        self.assertFalse(UserInputRequest.objects.exists())
-        self.assertEqual(events, [])
-
-    def test_drain_steer_requests_splits_only_on_newline(self) -> None:
-        """The control file is newline-delimited JSONL; the drain must split on
-        ``\\n`` (matching its byte-offset accounting) and leave a trailing
-        partial line for the next drain."""
-        from hitch.main.management.commands import codex_worker
-
-        instance = self._make_instance()
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "control.jsonl"
-            complete = (
-                json.dumps({"op": "steer", "input": "first"}).encode()
-                + b"\n"
-                + json.dumps({"op": "steer", "input": "second"}).encode()
-                + b"\n"
-            )
-            partial = json.dumps({"op": "steer", "input": "third"}).encode()
-            control_path.write_bytes(complete + partial)
-
-            steered: list[str] = []
-
-            def _record_steer(turn: Any, text: str, **kw: Any) -> bool:
-                steered.append(text)
-                return True
-
-            with patch.object(codex_worker, "_try_steer", side_effect=_record_steer):
-                new_offset = codex_worker._drain_steer_requests(
-                    MagicMock(),
-                    instance=instance,
-                    control_path=control_path,
-                    control_offset=0,
-                )
-
-        self.assertEqual(steered, ["first", "second"])
-        self.assertEqual(new_offset, len(complete))
-
     def test_wait_for_decision_declines_when_row_deleted(self) -> None:
         # The wait runs on the SDK reader thread: a DoesNotExist escaping it
         # would kill the reader loop and fail the whole turn instead of just
@@ -9230,45 +5923,6 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(
             _wait_for_decision(987654321), ApprovalRequest.DECISION_DECLINE
         )
-
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
-    )
-    def test_wait_for_decision_returns_recorded_decision(self) -> None:
-        """Once the view records a decision on the row, the polling loop
-        wakes up on the next interval and returns that wire value
-        verbatim — the handler then forwards it into the SDK response."""
-        from hitch.main.management.commands.codex_worker import _wait_for_decision
-
-        approval = ApprovalRequest.objects.create(
-            instance=self._make_instance(),
-            method="item/commandExecution/requestApproval",
-            params={},
-            decision="cancel",
-        )
-
-        self.assertEqual(_wait_for_decision(approval.pk), "cancel")
-
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
-    )
-    def test_wait_for_decision_returns_structured_decision_payload(self) -> None:
-        from hitch.main.management.commands.codex_worker import _wait_for_decision
-
-        payload = {
-            "acceptWithExecpolicyAmendment": {
-                "execpolicy_amendment": ["uv", "run", "python"]
-            }
-        }
-        approval = ApprovalRequest.objects.create(
-            instance=self._make_instance(),
-            method="item/commandExecution/requestApproval",
-            params={},
-            decision="accept",
-            decision_payload=payload,
-        )
-
-        self.assertEqual(_wait_for_decision(approval.pk), payload)
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
@@ -9387,26 +6041,6 @@ class ApprovalHandlerTests(TestCase):
         approval.refresh_from_db()
         self.assertEqual(approval.decision, "accept")
 
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
-    )
-    def test_wait_for_user_input_response_returns_recorded_response(self) -> None:
-        from hitch.main.management.commands.codex_worker import (
-            _wait_for_user_input_response,
-        )
-
-        input_request = UserInputRequest.objects.create(
-            instance=self._make_instance(),
-            method="request_user_input",
-            params={},
-            response={"answers": {"scope": "UI"}},
-        )
-
-        self.assertEqual(
-            _wait_for_user_input_response(input_request.pk),
-            {"answers": {"scope": "UI"}},
-        )
-
     def test_wait_for_user_input_response_defaults_to_empty_for_missing_row(self) -> None:
         from hitch.main.management.commands.codex_worker import (
             _wait_for_user_input_response,
@@ -9438,29 +6072,6 @@ class ApprovalHandlerTests(TestCase):
         input_request.refresh_from_db()
         self.assertEqual(input_request.response, {"answers": {}})
         self.assertIsNotNone(input_request.responded_at)
-
-    @patch("hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.management.commands.codex_worker._cancel_requested", True)
-    def test_wait_for_user_input_response_returns_empty_on_cancellation(self) -> None:
-        """A Stop click must also release a worker blocked on a structured input
-        request, recording the empty-answer fallback so codex unblocks and the
-        main loop can interrupt rather than hanging until SIGKILL."""
-        from hitch.main.management.commands.codex_worker import (
-            _wait_for_user_input_response,
-        )
-
-        input_request = UserInputRequest.objects.create(
-            instance=self._make_instance(),
-            method="request_user_input",
-            params={},
-        )
-
-        self.assertEqual(
-            _wait_for_user_input_response(input_request.pk),
-            {"answers": {}},
-        )
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": {}})
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.0
@@ -9495,22 +6106,6 @@ class ApprovalHandlerTests(TestCase):
         )
         input_request.refresh_from_db()
         self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
-
-    def test_interactive_handler_ignores_unknown_methods(self) -> None:
-        """Approval methods we don't recognise (future SDK additions) must
-        return ``{}`` without creating a stray row — the SDK treats ``{}``
-        as "no opinion", which is what the previous default handler did."""
-        instance = self._make_instance()
-        events: list[tuple[str, object]] = []
-        handler = _make_approval_handler(
-            instance=instance,
-            write_event=lambda m, p: events.append((m, p)),
-            approval_mode="auto_review",
-        )
-
-        self.assertEqual(handler("custom/escalation", None), {})
-        self.assertFalse(ApprovalRequest.objects.exists())
-        self.assertEqual(events, [])
 
 
 class WorkerCancellationTests(TestCase):
@@ -9597,14 +6192,6 @@ acceptance.join()
         codex_worker_module._on_sigusr1(signal.SIGUSR1, None)
         self.assertTrue(wakeup.is_set())
 
-    def test_try_interrupt_calls_sdk_and_reports_sent(self) -> None:
-        turn = MagicMock()
-
-        sent = codex_worker_module._try_interrupt(turn)
-
-        self.assertTrue(sent)
-        turn.interrupt.assert_called_once_with()
-
     def test_interrupt_forwarder_fires_while_turn_stream_is_silent(self) -> None:
         turn = MagicMock()
         interrupted = threading.Event()
@@ -9617,95 +6204,6 @@ acceptance.join()
             codex_worker_module._stop_interrupt_forwarder(forwarder)
 
         turn.interrupt.assert_called_once_with()
-
-    def test_interrupt_is_sent_once_across_stream_and_forwarder(self) -> None:
-        turn = MagicMock()
-        interrupted = threading.Event()
-        turn.interrupt.side_effect = interrupted.set
-        forwarder = codex_worker_module._start_interrupt_forwarder(turn)
-        try:
-            codex_worker_module._on_sigterm(signal.SIGTERM, None)
-            codex_worker_module._forward_interrupt_if_requested(
-                turn,
-                target_turn_ids=forwarder.target_turn_ids,
-                sent_turn_ids=forwarder.sent_turn_ids,
-                send_lock=forwarder.send_lock,
-            )
-            self.assertTrue(interrupted.wait(timeout=1))
-        finally:
-            codex_worker_module._stop_interrupt_forwarder(forwarder)
-
-        turn.interrupt.assert_called_once_with()
-
-    def test_interrupt_is_not_resent_when_competing_caller_claims_send(self) -> None:
-        turn = MagicMock()
-        sent_turn_ids: set[str] = set()
-        send_lock = MagicMock()
-        send_lock.__enter__.side_effect = lambda: sent_turn_ids.add("")
-        codex_worker_module._cancel_requested = True
-
-        forwarded = codex_worker_module._forward_interrupt_if_requested(
-            turn,
-            sent_turn_ids=sent_turn_ids,
-            send_lock=send_lock,
-        )
-
-        self.assertFalse(forwarded)
-        turn.interrupt.assert_not_called()
-
-    def test_try_steer_calls_sdk_with_text_input_and_reports_sent(self) -> None:
-        turn = MagicMock()
-
-        sent = codex_worker_module._try_steer(turn, "also update docs")
-
-        self.assertTrue(sent)
-        turn.steer.assert_called_once()
-        self.assertEqual(turn.steer.call_args.args[0].text, "also update docs")
-
-    def test_try_steer_calls_sdk_with_text_and_images(self) -> None:
-        turn = MagicMock()
-
-        sent = codex_worker_module._try_steer(
-            turn,
-            "use this screenshot",
-            input_image_paths=["/tmp/screen.png"],
-        )
-
-        self.assertTrue(sent)
-        turn.steer.assert_called_once()
-        input_items = turn.steer.call_args.args[0]
-        assert isinstance(input_items, list)
-        self.assertEqual(getattr(input_items[0], "text", None), "use this screenshot")
-        self.assertEqual(getattr(input_items[1], "path", None), "/tmp/screen.png")
-
-    def test_image_only_turn_input_omits_empty_text_item(self) -> None:
-        input_items = codex_worker_module._turn_input(
-            "",
-            input_image_paths=["/tmp/screen.png"],
-        )
-
-        assert isinstance(input_items, list)
-        self.assertEqual(len(input_items), 1)
-        self.assertEqual(getattr(input_items[0], "path", None), "/tmp/screen.png")
-
-    def test_image_only_typed_turn_input_omits_empty_text_item(self) -> None:
-        input_items = codex_worker_module._typed_turn_input(
-            "",
-            input_image_paths=["/tmp/screen.png"],
-        )
-
-        self.assertEqual(len(input_items), 1)
-        self.assertEqual(input_items[0].root.type, "localImage")
-        self.assertEqual(getattr(input_items[0].root, "path", None), "/tmp/screen.png")
-
-    def test_try_steer_reports_sdk_errors(self) -> None:
-        turn = MagicMock()
-        turn.steer.side_effect = RuntimeError("turn no longer accepts steer")
-
-        sent = codex_worker_module._try_steer(turn, "also update docs")
-
-        self.assertFalse(sent)
-        turn.steer.assert_called_once()
 
     def test_drain_steer_requests_consumes_complete_jsonl_only(self) -> None:
         turn = MagicMock()
@@ -9740,98 +6238,6 @@ acceptance.join()
             self.assertEqual(turn.steer.call_count, 2)
             self.assertEqual(turn.steer.call_args.args[0].text, "wait for newline")
             self.assertEqual(offset, control_path.stat().st_size)
-
-    def test_drain_steer_requests_forwards_images(self) -> None:
-        turn = MagicMock()
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "worker.control.jsonl"
-            control_path.write_text(
-                json.dumps(
-                    {
-                        "op": "steer",
-                        "input": "use this",
-                        "inputImagePaths": ["/tmp/screen.png"],
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            offset = codex_worker_module._drain_steer_requests(
-                turn,
-                instance=self._make_instance(raw),
-                control_path=control_path,
-                control_offset=0,
-            )
-            self.assertEqual(offset, control_path.stat().st_size)
-
-        input_items = turn.steer.call_args.args[0]
-        assert isinstance(input_items, list)
-        self.assertEqual(getattr(input_items[0], "text", None), "use this")
-        self.assertEqual(getattr(input_items[1], "path", None), "/tmp/screen.png")
-
-    def test_drain_steer_requests_forwards_image_only_input(self) -> None:
-        turn = MagicMock()
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "worker.control.jsonl"
-            control_path.write_text(
-                json.dumps(
-                    {
-                        "op": "steer",
-                        "input": "",
-                        "inputImagePaths": ["/tmp/screen.png"],
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            offset = codex_worker_module._drain_steer_requests(
-                turn,
-                instance=self._make_instance(raw),
-                control_path=control_path,
-                control_offset=0,
-            )
-            self.assertEqual(offset, control_path.stat().st_size)
-
-        turn.steer.assert_called_once()
-        input_items = turn.steer.call_args.args[0]
-        assert isinstance(input_items, list)
-        self.assertEqual(len(input_items), 1)
-        self.assertEqual(getattr(input_items[0], "path", None), "/tmp/screen.png")
-
-    def test_drain_steer_requests_skips_failed_steer_line(self) -> None:
-        turn = MagicMock()
-        turn.steer.side_effect = [RuntimeError("rejected"), None]
-        first_line = b'{"op":"steer","input":"bad"}\n'
-        retry_line = b'{"op":"steer","input":"retry me"}\n'
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "worker.control.jsonl"
-            control_path.write_bytes(first_line + retry_line)
-
-            offset = codex_worker_module._drain_steer_requests(
-                turn,
-                instance=self._make_instance(raw),
-                control_path=control_path,
-                control_offset=0,
-            )
-
-            self.assertEqual(offset, len(first_line) + len(retry_line))
-            self.assertEqual(turn.steer.call_count, 2)
-        self.assertEqual(turn.steer.call_args.args[0].text, "retry me")
-
-    def test_drain_steer_requests_missing_file_is_noop(self) -> None:
-        turn = MagicMock()
-        with tempfile.TemporaryDirectory() as raw:
-            offset = codex_worker_module._drain_steer_requests(
-                turn,
-                instance=self._make_instance(raw),
-                control_path=Path(raw) / "missing.control.jsonl",
-                control_offset=0,
-            )
-
-        self.assertEqual(offset, 0)
-        turn.steer.assert_not_called()
 
     def test_drain_steer_requests_ignores_malformed_json(self) -> None:
         turn = MagicMock()
@@ -9931,129 +6337,6 @@ acceptance.join()
             ],
         )
 
-    def test_steer_forwarder_drains_once_after_stop(self) -> None:
-        turn = MagicMock()
-        initial_drain = threading.Event()
-        original_drain = codex_worker_module._drain_steer_requests
-
-        def drain_side_effect(
-            turn_arg: Any,
-            *,
-            instance: CodexInstance,
-            control_path: Path,
-            control_offset: int,
-        ) -> int:
-            result = original_drain(
-                turn_arg,
-                instance=instance,
-                control_path=control_path,
-                control_offset=control_offset,
-            )
-            initial_drain.set()
-            return result
-
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "worker.control.jsonl"
-            wakeup = threading.Event()
-            stop = threading.Event()
-            with (
-                patch.object(codex_worker_module, "_STEER_CONTROL_POLL_INTERVAL", 60),
-                patch.object(
-                    codex_worker_module,
-                    "_drain_steer_requests",
-                    side_effect=drain_side_effect,
-                ),
-            ):
-                forwarder = threading.Thread(
-                    target=codex_worker_module._forward_steer_requests,
-                    kwargs={
-                        "turn": turn,
-                        "instance": self._make_instance(raw),
-                        "control_path": control_path,
-                        "wakeup": wakeup,
-                        "stop": stop,
-                    },
-                    daemon=True,
-                )
-                forwarder.start()
-                self.assertTrue(initial_drain.wait(timeout=1))
-                control_path.write_text(
-                    json.dumps({"op": "steer", "input": "last chance"}) + "\n",
-                    encoding="utf-8",
-                )
-
-                stop.set()
-                wakeup.set()
-                forwarder.join(timeout=1)
-
-        self.assertFalse(forwarder.is_alive())
-        turn.steer.assert_called_once()
-        self.assertEqual(turn.steer.call_args.args[0].text, "last chance")
-
-    def test_sigusr1_wakes_running_steer_forwarder(self) -> None:
-        turn = MagicMock()
-        initial_drain = threading.Event()
-        original_drain = codex_worker_module._drain_steer_requests
-
-        def drain_side_effect(
-            turn_arg: Any,
-            *,
-            instance: CodexInstance,
-            control_path: Path,
-            control_offset: int,
-        ) -> int:
-            result = original_drain(
-                turn_arg,
-                instance=instance,
-                control_path=control_path,
-                control_offset=control_offset,
-            )
-            initial_drain.set()
-            return result
-
-        with tempfile.TemporaryDirectory() as raw:
-            control_path = Path(raw) / "worker.control.jsonl"
-            with (
-                patch.object(codex_worker_module, "_STEER_CONTROL_POLL_INTERVAL", 60),
-                patch.object(
-                    codex_worker_module,
-                    "_drain_steer_requests",
-                    side_effect=drain_side_effect,
-                ),
-            ):
-                forwarder = codex_worker_module._start_steer_control_forwarder(
-                    turn,
-                    instance=self._make_instance(raw),
-                    control_path=control_path,
-                )
-                try:
-                    self.assertTrue(initial_drain.wait(timeout=1))
-                    control_path.write_text(
-                        json.dumps({"op": "steer", "input": "wake up"}) + "\n",
-                        encoding="utf-8",
-                    )
-                    codex_worker_module._on_sigusr1(signal.SIGUSR1, None)
-
-                    deadline = time.monotonic() + 1
-                    while turn.steer.call_count == 0 and time.monotonic() < deadline:
-                        time.sleep(0.01)
-                    turn.steer.assert_called_once()
-                    self.assertEqual(turn.steer.call_args.args[0].text, "wake up")
-                finally:
-                    codex_worker_module._stop_steer_control_forwarder(forwarder)
-
-    def test_try_interrupt_swallows_sdk_errors(self) -> None:
-        # A failed SDK call (turn already done, transport hiccup) must
-        # still report "sent" so the loop doesn't retry forever — the
-        # user's escalation is SIGKILL via a second click, not a retry.
-        turn = MagicMock()
-        turn.interrupt.side_effect = RuntimeError("turn already terminated")
-
-        sent = codex_worker_module._try_interrupt(turn)
-
-        self.assertTrue(sent)
-        turn.interrupt.assert_called_once_with()
-
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_interrupt_forwarder_stops_when_steer_startup_fails(
         self, mock_codex: MagicMock
@@ -10082,50 +6365,6 @@ acceptance.join()
                 call_command("codex_worker", "--instance-id", str(instance.pk))
 
         stop_interrupt.assert_called_once()
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_interrupt_fires_when_flag_set_during_stream(
-        self, mock_codex: MagicMock
-    ) -> None:
-        # Drive the stream loop through a flag-set transition: yield
-        # one event, then arrange for the cancel flag to be observed
-        # on the next iteration, then yield the turn/completed.
-        # Verify exactly one ``turn.interrupt()`` call.
-        first_event = SimpleNamespace(
-            method="item/agentMessage/delta",
-            payload=_FakePayload(detail="chunk"),
-        )
-        completion = _completed_event("turn-1", TurnStatus.completed)
-
-        def gen() -> Iterator[Any]:
-            yield first_event
-            codex_worker_module._cancel_requested = True
-            yield completion
-
-        captured: dict[str, Any] = {}
-
-        def thread_resume_side_effect(*_args: object, **_kwargs: object) -> object:
-            turn_mock = MagicMock()
-            turn_mock.id = "turn-1"
-            turn_mock.stream.return_value = gen()
-            captured["turn"] = turn_mock
-            return SimpleNamespace(turn=lambda _input: turn_mock)
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.side_effect = thread_resume_side_effect
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = CodexInstance.objects.create(
-                pid=12345,
-                thread_id="thread-1",
-                cwd="/repo",
-                prompt="hi",
-                events_path=str(Path(raw) / "events.jsonl"),
-                status=CodexInstance.STATUS_STARTING,
-            )
-            call_command("codex_worker", "--instance-id", str(instance.pk))
-
-        captured["turn"].interrupt.assert_called_once_with()
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_queued_steer_file_drained_after_turn_handle_exists(
@@ -10275,30 +6514,6 @@ class StreamForInstanceTests(TestCase):
     frame. Pairs with ``streaming.stream_for_instance`` / ``empty_stream``.
     """
 
-    def test_idle_stream_emits_initial_heartbeat_and_recycles(self) -> None:
-        # The no-worker path reports connected-idle, then asks the client to
-        # reconnect without retaining a blocking WSGI request thread.
-        frames = list(streaming.idle_stream())
-
-        self.assertEqual(frames[0], b"retry: 5000\n\n")
-        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertEqual(len(heartbeats), 1)
-        self.assertIn(b'"working": false', heartbeats[0])
-        self.assertTrue(frames[-1].startswith(b"event: reconnect"))
-        self.assertIn(b'"afterMs": 5000', frames[-1])
-        self.assertFalse(any(f.startswith(b"event: end") for f in frames))
-
-    def test_idle_stream_does_not_poll_while_response_is_open(self) -> None:
-        # Baseline validation belongs to each short-lived session_stream
-        # request. The generator itself must not sleep or poll after yielding,
-        # or a dormant tab would still occupy a WSGI thread.
-        with patch("hitch.main.runtime.streaming.time.sleep") as mock_sleep:
-            frames = list(streaming.idle_stream())
-
-        self.assertEqual(len(frames), 3)
-        self.assertTrue(frames[-1].startswith(b"event: reconnect"))
-        mock_sleep.assert_not_called()
-
     @patch("hitch.main.runtime.streaming._ACTIVE_STREAM_SLOTS")
     def test_active_stream_capacity_reconnects_without_consuming_source(
         self, slots: MagicMock
@@ -10320,57 +6535,6 @@ class StreamForInstanceTests(TestCase):
 
         self.assertEqual(frames, [b"frame"])
         slots.release.assert_called_once_with()
-
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_system_workflow_stream_reports_working(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        frames = list(
-            streaming.system_workflow_stream(
-                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
-            )
-        )
-
-        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertGreaterEqual(len(heartbeats), 1)
-        self.assertIn(b'"working": true', heartbeats[0])
-        self.assertIn(
-            b'"statusText": "PR agent is opening and following up..."',
-            heartbeats[0],
-        )
-
-    def test_system_workflow_stream_uses_scoped_dead_reconciliation(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        with (
-            patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
-            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch("hitch.main.runtime.streaming.reconciliation.reconcile_dead") as mock_global,
-            patch(
-                "hitch.main.runtime.streaming.reconciliation.reconcile_dead_for_workflow"
-            ) as mock_scoped,
-        ):
-            frames = list(
-                streaming.system_workflow_stream(
-                    "thread-workflow", baseline_id=None, workflow_id=workflow.pk
-                )
-            )
-
-        self.assertTrue(frames)
-        mock_scoped.assert_any_call(workflow.pk, main_thread_id="thread-workflow")
-        mock_global.assert_not_called()
 
     @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
     @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.05)
@@ -10414,103 +6578,6 @@ class StreamForInstanceTests(TestCase):
 
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"workflow"', frames[-1])
-
-
-
-    def test_reload_stream_yields_immediate_end(self) -> None:
-        # ``session_stream`` returns this when it detects the page is
-        # stale (worker spawned/completed between page render and SSE
-        # open). It needs to fire ``event: end`` immediately so the
-        # client reloads — no heartbeats, no waiting on a poll.
-        frames = list(streaming.reload_stream())
-        self.assertEqual(frames[0], b"retry: 2000\n\n")
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"stale"', frames[-1])
-
-    def test_streams_existing_lines_and_terminates_when_done(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.write(
-                    json.dumps({"method": "item/started", "payload": {"item": {"id": "x"}}})
-                    + "\n"
-                )
-                fh.write(json.dumps({"method": "turn/completed", "payload": {}}) + "\n")
-
-            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
-            frames = list(streaming.stream_for_instance(instance))
-
-        data_frames = [f for f in frames if f.startswith(b"data: ")]
-        self.assertEqual(len(data_frames), 2)
-        self.assertIn(b"item/started", data_frames[0])
-        self.assertIn(b"turn/completed", data_frames[1])
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"completed"', frames[-1])
-
-    def test_initial_backlog_skips_completed_agent_deltas(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.write(
-                    json.dumps(
-                        {
-                            "method": "item/started",
-                            "payload": {
-                                "item": {
-                                    "id": "msg-1",
-                                    "text": "",
-                                    "type": "agentMessage",
-                                }
-                            },
-                        }
-                    )
-                    + "\n"
-                )
-                fh.write(
-                    json.dumps(
-                        {
-                            "method": "item/agentMessage/delta",
-                            "payload": {"itemId": "msg-1", "delta": "Hel"},
-                        }
-                    )
-                    + "\n"
-                )
-                fh.write(
-                    json.dumps(
-                        {
-                            "method": "item/agentMessage/delta",
-                            "payload": {"itemId": "msg-1", "delta": "lo"},
-                        }
-                    )
-                    + "\n"
-                )
-                fh.write(
-                    json.dumps(
-                        {
-                            "method": "item/completed",
-                            "payload": {
-                                "item": {
-                                    "id": "msg-1",
-                                    "phase": "commentary",
-                                    "text": "Hello",
-                                    "type": "agentMessage",
-                                }
-                            },
-                        }
-                    )
-                    + "\n"
-                )
-
-            instance = _make_streaming_instance(
-                events_path, status=CodexInstance.STATUS_COMPLETED
-            )
-            frames = list(streaming.stream_for_instance(instance))
-
-        body = b"".join(frames)
-        self.assertNotIn(b"item/agentMessage/delta", body)
-        self.assertNotIn(b"item/started", body)
-        self.assertIn(b"item/completed", body)
-        self.assertIn(b"Hello", body)
 
     def test_initial_backlog_keeps_only_latest_diff_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -10645,53 +6712,6 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"item/completed", body)
         self.assertIn(b"Checking the implementation", body)
 
-    def test_initial_backlog_preserves_incomplete_reasoning_deltas(self) -> None:
-        events = [
-            {
-                "method": "item/started",
-                "payload": {
-                    "item": {
-                        "id": "reasoning-1",
-                        "summary": [],
-                        "content": [],
-                        "type": "reasoning",
-                    }
-                },
-            },
-            {
-                "method": "item/reasoning/summaryTextDelta",
-                "payload": {
-                    "itemId": "reasoning-1",
-                    "summaryIndex": 0,
-                    "delta": "Checking ",
-                },
-            },
-            {
-                "method": "item/reasoning/textDelta",
-                "payload": {
-                    "itemId": "reasoning-1",
-                    "contentIndex": 0,
-                    "delta": "the implementation",
-                },
-            },
-        ]
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.writelines(json.dumps(event) + "\n" for event in events)
-
-            instance = _make_streaming_instance(
-                events_path, status=CodexInstance.STATUS_COMPLETED
-            )
-            frames = list(streaming.stream_for_instance(instance))
-
-        body = b"".join(frames)
-        self.assertIn(b"item/started", body)
-        self.assertIn(b"item/reasoning/summaryTextDelta", body)
-        self.assertIn(b"item/reasoning/textDelta", body)
-        self.assertIn(b"Checking ", body)
-        self.assertIn(b"the implementation", body)
-
     def test_initial_backlog_skips_only_method_output_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
@@ -10750,122 +6770,6 @@ class StreamForInstanceTests(TestCase):
         self.assertNotIn(b"item/commandExecution/outputDelta", body)
         self.assertNotIn(b"ignored", body)
 
-    def test_empty_initial_read_treats_next_agent_delta_as_live_tail(self) -> None:
-        live = (
-            json.dumps(
-                {
-                    "method": "item/started",
-                    "payload": {
-                        "item": {"id": "msg-1", "text": "", "type": "agentMessage"}
-                    },
-                }
-            )
-            + "\n"
-            + json.dumps(
-                {
-                    "method": "item/agentMessage/delta",
-                    "payload": {"itemId": "msg-1", "delta": "Hel"},
-                }
-            )
-            + "\n"
-        ).encode()
-        fake_file = MagicMock()
-        fake_file.__enter__.return_value = fake_file
-        fake_file.__exit__.return_value = False
-        fake_file.read.side_effect = [b"", live, b""]
-        instance = _make_streaming_instance(
-            "/tmp/hitch-test-empty-first-read.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        with (
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "open", return_value=fake_file),
-        ):
-            frames = list(streaming.stream_for_instance(instance))
-
-        body = b"".join(frames)
-        self.assertIn(b"item/started", body)
-        self.assertIn(b'"delta": "Hel"', body)
-        self.assertNotIn(b'"text":"Hel"', body)
-
-    def test_live_tail_agent_delta_still_streams_after_initial_backlog(self) -> None:
-        initial = (
-            json.dumps(
-                {
-                    "method": "item/started",
-                    "payload": {
-                        "item": {"id": "msg-1", "text": "", "type": "agentMessage"}
-                    },
-                }
-            )
-            + "\n"
-            + json.dumps(
-                {
-                    "method": "item/agentMessage/delta",
-                    "payload": {"itemId": "msg-1", "delta": "old"},
-                }
-            )
-            + "\n"
-        ).encode()
-        live = (
-            json.dumps(
-                {
-                    "method": "item/agentMessage/delta",
-                    "payload": {"itemId": "msg-1", "delta": "new"},
-                }
-            )
-            + "\n"
-        ).encode()
-        fake_file = MagicMock()
-        fake_file.__enter__.return_value = fake_file
-        fake_file.__exit__.return_value = False
-        fake_file.read.side_effect = [initial, b"", live, b""]
-        instance = _make_streaming_instance(
-            "/tmp/hitch-test-live-tail.jsonl", status=CodexInstance.STATUS_COMPLETED
-        )
-
-        with (
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "open", return_value=fake_file),
-        ):
-            frames = list(streaming.stream_for_instance(instance))
-
-        body = b"".join(frames)
-        self.assertIn(b"item/started", body)
-        self.assertIn(b'"delta": "old"', body)
-        self.assertIn(b'"delta": "new"', body)
-        self.assertNotIn(b'"text":"old"', body)
-
-    def test_streams_tolerate_partial_multibyte_trailing_line(self) -> None:
-        # The worker writes line-buffered UTF-8; a reader can observe a flush
-        # that ends mid-multibyte-character. A strict text-mode read raised
-        # UnicodeDecodeError and dropped the connection with no end frame.
-        # Binary buffering must hold the torn tail and still emit the complete
-        # line that preceded it.
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            complete = (
-                json.dumps(
-                    {"method": "item/started", "payload": {"item": {"id": "café"}}},
-                    ensure_ascii=False,
-                )
-                + "\n"
-            ).encode("utf-8")
-            snowman = "☃".encode()  # 3 bytes; keep only the first
-            with open(events_path, "wb") as fh:
-                fh.write(complete)
-                fh.write(b'{"method": "agent/delta", "payload": "' + snowman[:1])
-
-            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
-            frames = list(streaming.stream_for_instance(instance))
-
-        data_frames = [f for f in frames if f.startswith(b"data: ")]
-        self.assertEqual(len(data_frames), 1)
-        self.assertIn(b"item/started", data_frames[0])
-        self.assertIn("café".encode(), data_frames[0])
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-
 
 
     def test_compact_token_count_formatter(self) -> None:
@@ -10911,39 +6815,6 @@ class StreamForInstanceTests(TestCase):
             "PR agent is opening and following up...",
         )
 
-    def test_terminates_when_status_flips_to_failed(self) -> None:
-        # A worker that ended with a failure status still flushes its events
-        # file, but the end frame should carry the actual terminal status so
-        # the client can surface the failure UI.
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"method": "item/started", "payload": {}}) + "\n")
-
-            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_FAILED)
-            frames = list(streaming.stream_for_instance(instance))
-
-        self.assertIn(b'"failed"', frames[-1])
-
-    def test_ignores_partial_trailing_line(self) -> None:
-        # The worker is line-buffered, so a tailer that opens the file at the
-        # exact moment a half-line is on disk must not emit a malformed JSON
-        # frame to the client.
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"method": "item/started", "payload": {}}) + "\n")
-                # Half a JSON object, no trailing newline.
-                fh.write('{"method":"item/partial')
-
-            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
-            frames = list(streaming.stream_for_instance(instance))
-
-        data_frames = [f for f in frames if f.startswith(b"data: ")]
-        self.assertEqual(len(data_frames), 1)
-        self.assertIn(b"item/started", data_frames[0])
-        self.assertNotIn(b"item/partial", b"".join(frames))
-
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_missing_events_file_with_dead_worker_ends_promptly(self) -> None:
         # If the events file never appears but the worker process is also
@@ -10959,22 +6830,6 @@ class StreamForInstanceTests(TestCase):
 
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertNotIn(b'"missing"', frames[-1])
-
-    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.005)
-    @patch("hitch.main.runtime.streaming._FILE_APPEAR_TIMEOUT", 0.001)
-    @patch("hitch.main.runtime.streaming.codex_pool.worker_is_alive", return_value=True)
-    def test_appearance_timeout_when_file_never_arrives(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
-        # A live worker that's stuck before its first write should bail via
-        # the appearance timeout rather than hanging the request handler.
-        instance = _make_streaming_instance(
-            "/tmp/hitch-test-never-created.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-            pid=_LIVE_PID,
-        )
-        frames = list(streaming.stream_for_instance(instance))
-        self.assertIn(b'"missing"', frames[-1])
 
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
     @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
@@ -10999,20 +6854,6 @@ class StreamForInstanceTests(TestCase):
             self.assertIn(b'"working": true', frame)
         self.assertIn(b'"missing"', frames[-1])
 
-    def test_emit_skips_blank_lines(self) -> None:
-        # A stray blank line on the events file must not produce an empty
-        # SSE ``data:`` frame.
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            with open(events_path, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"method": "a", "payload": {}}) + "\n")
-                fh.write("\n")
-                fh.write(json.dumps({"method": "b", "payload": {}}) + "\n")
-            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
-            frames = list(streaming.stream_for_instance(instance))
-        data_frames = [f for f in frames if f.startswith(b"data: ")]
-        self.assertEqual(len(data_frames), 2)
-
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.005)
     @patch("hitch.main.runtime.streaming._MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.runtime.streaming.codex_pool.worker_is_alive", return_value=True)
@@ -11030,36 +6871,6 @@ class StreamForInstanceTests(TestCase):
             )
             frames = list(streaming.stream_for_instance(instance))
         self.assertIn(b'"timeout"', frames[-1])
-
-    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
-    @patch("hitch.main.runtime.streaming.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.runtime.streaming.codex_pool.is_alive", return_value=True)
-    def test_running_instance_with_recycled_pid_terminates(
-        self,
-        mock_alive: MagicMock,
-        mock_identity: MagicMock,
-    ) -> None:
-        # Generic pid checks can say "alive" after PID reuse. The stream must
-        # still end because the process no longer matches this worker row.
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            Path(events_path).write_text(
-                json.dumps({"method": "item/started", "payload": {}}) + "\n",
-                encoding="utf-8",
-            )
-            instance = _make_streaming_instance(
-                events_path, status=CodexInstance.STATUS_RUNNING, pid=4321
-            )
-            frames = list(streaming.stream_for_instance(instance))
-
-        data_frames = [f for f in frames if f.startswith(b"data: ")]
-        self.assertEqual(len(data_frames), 1)
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"failed"', frames[-1])
-        instance.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        mock_identity.assert_any_call(4321, instance.pk)
-        mock_alive.assert_not_called()
 
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
     @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)

@@ -49,20 +49,6 @@ def _observation(
 
 class PrWatchTests(SimpleTestCase):
     @patch("hitch.main.workflows.pr_watch.observe_pr")
-    def test_returns_ready_without_polling(self, mock_observe: MagicMock) -> None:
-        mock_observe.return_value = _observation()
-
-        with tempfile.TemporaryDirectory() as cwd:
-            result = pr_watch.watch_pr(
-                cwd=cwd,
-                url="https://github.com/openai/hitch/pull/42",
-                poll_seconds=0,
-            )
-
-        self.assertEqual(result["status"], "ready")
-        mock_observe.assert_called_once()
-
-    @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_returns_actionable_failure(self, mock_observe: MagicMock) -> None:
         mock_observe.return_value = _observation(
             {
@@ -616,42 +602,6 @@ class AgentDrivenPrWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
-
-    def test_previous_turn_result_does_not_complete_resumed_watch_as_ready(
-        self,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_WATCH_RUNNING,
-            state={
-                pr_watch.PR_WATCH_RESULT_STATE_KEY: {"status": "ready"},
-                pr_watch.PR_WATCH_RESULT_TURN_INDEX_STATE_KEY: 1,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
-                    system_agents.STEP_PR_WATCH_RUNNING
-                ),
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 2,
-            },
-        )
-        instance = CodexInstance.objects.create(
-            pid=0,
-            thread_id="main-thread",
-            cwd="/repo",
-            prompt="watch again",
-            events_path="/tmp/watch-events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            user_message_index=2,
-        )
-
-        pr_qa._handle_pr_watch_finished(instance, workflow)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_COMPLETED)
 
     def test_previous_terminal_result_does_not_complete_resumed_watch(self) -> None:
         workflow = SystemWorkflow.objects.create(

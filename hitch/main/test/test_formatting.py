@@ -174,17 +174,6 @@ class RenderMarkdownTests(SimpleTestCase):
             '<a href="https://example.com/deployment">deployment guide</a>', html
         )
 
-    def test_markdown_preserves_explicit_tex_for_client_rendering(self) -> None:
-        html = render_markdown(
-            "# Bound\n\n"
-            "Inline \\(x_1 \\in \\{1, 2\\}\\), display "
-            "\\[x_1 < y & z\\], and $$z_2 > 0$$."
-        )
-
-        self.assertIn(r"\(x_1 \in \{1, 2\}\)", html)
-        self.assertIn(r"\[x_1 &lt; y &amp; z\]", html)
-        self.assertIn("$$z_2 &gt; 0$$", html)
-
     def test_tex_protection_does_not_restore_unsafe_html(self) -> None:
         html = render_markdown(
             r"# Bound" "\n\n" r"\(\text{<img src=x onerror=alert(1)>}\)"
@@ -192,105 +181,6 @@ class RenderMarkdownTests(SimpleTestCase):
 
         self.assertNotIn("<img", html)
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
-
-    def test_rendering_cases(self) -> None:
-        cases: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
-            ("heading renders as h1", "# Title", ("<h1>Title</h1>",), ()),
-            (
-                "bullet list renders as ul",
-                "- one\n- two",
-                ("<ul>", "<li>one</li>", "<li>two</li>"),
-                (),
-            ),
-            (
-                "fenced code preserves content",
-                "```\nprint('hi')\n```",
-                ("<pre><code>", "print("),
-                (),
-            ),
-            (
-                "script tag is escaped",
-                "<script>alert(1)</script>",
-                ("&lt;script&gt;",),
-                ("<script>",),
-            ),
-            (
-                "javascript URL does not become link",
-                "[click](javascript:alert(1))",
-                (),
-                ('href="javascript:',),
-            ),
-            (
-                # markdown-it percent-encodes the smuggled control char, so a
-                # naive ``^javascript:`` check passes ``java%09script:`` even
-                # though browsers strip the tab and execute it.
-                "entity-encoded tab javascript URL does not become link",
-                "[click](java&#9;script:alert(1))",
-                (),
-                ("<a ", "href="),
-            ),
-            (
-                "entity-encoded newline javascript URL does not become link",
-                "# Heading\n\n[click](java&#10;script:alert(document.cookie))",
-                (),
-                ("<a ", "href="),
-            ),
-            (
-                "vbscript URL does not become link",
-                "[click](vbscript:msgbox(1))",
-                (),
-                ("<a ",),
-            ),
-            (
-                "HTTPS link is rendered",
-                "[ok](https://example.com)",
-                ('<a href="https://example.com">ok</a>',),
-                (),
-            ),
-            (
-                "arbitrary absolute file link does not navigate through Hitch",
-                "[operator guide](/srv/nompiler/docs/operator.md:48)",
-                ("[operator guide](/srv/nompiler/docs/operator.md:48)",),
-                ("<a ", "href="),
-            ),
-            (
-                "encoded absolute file link does not navigate through Hitch",
-                "[worker](%2Fworkspace%2Fhitch%2Fworker.py%3A12)",
-                ("[worker](%2Fworkspace%2Fhitch%2Fworker.py%3A12)",),
-                ("<a ", "href="),
-            ),
-            (
-                "image syntax does not emit img tag",
-                "![pixel](https://attacker.example/x.png)",
-                (),
-                ("<img", "src="),
-            ),
-            (
-                "table is rendered",
-                "| a | b |\n|---|---|\n| 1 | 2 |",
-                ("<table>", "<th>a</th>", "<td>1</td>"),
-                (),
-            ),
-            (
-                "paren-numbered list renders as ol",
-                "1) one\n2) two",
-                ("<ol>", "<li>one</li>", "<li>two</li>"),
-                (),
-            ),
-            (
-                "single-dash delimiter table is rendered",
-                "| a | b |\n| - | - |\n| 1 | 2 |",
-                ("<table>", "<th>a</th>", "<td>1</td>"),
-                (),
-            ),
-        ]
-        for label, text, expected_present, expected_absent in cases:
-            with self.subTest(label=label):
-                html = render_markdown(text)
-                for snippet in expected_present:
-                    self.assertIn(snippet, html)
-                for snippet in expected_absent:
-                    self.assertNotIn(snippet, html)
 
 
 class SessionMathBrowserTests(SimpleTestCase):

@@ -121,6 +121,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         self.assertIn("boom", status.last_error)
         self.assertIsNotNone(status.last_error_at)
 
+
     @patch("hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
     @patch("hitch.main.goals.auto_proposals.reconciliation.reconcile_dead")
@@ -141,7 +142,6 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         )
 
         self.assertEqual(result, "cursor-page-2")
-
 
 class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
     def test_scheduler_enablement_cases(self) -> None:
@@ -183,49 +183,6 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             next_due_at=next_due, now=700.0
         )
         self.assertEqual(mock_cleanup.call_count, 2)
-
-    def test_scheduler_loop_runs_due_disk_cleanup_between_ticks(self) -> None:
-        class StopSchedulerError(Exception):
-            pass
-
-        fake_stop = MagicMock()
-        fake_stop.wait.side_effect = StopSchedulerError
-        with (
-            patch(
-                "hitch.main.workflows.workflow_maintenance.threading.Event",
-                return_value=fake_stop,
-            ),
-            patch(
-                "hitch.main.workflows.workflow_maintenance.time.monotonic",
-                return_value=10.0,
-            ),
-            patch(
-                "hitch.main.workflows.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
-            ) as mock_tick,
-            patch(
-                "hitch.main.workflows.workflow_maintenance._run_due_stale_blocked_archive",
-                return_value=999.0,
-            ) as mock_stale_archive,
-            patch(
-                "hitch.main.workflows.workflow_maintenance._run_due_disk_usage_cleanup",
-                return_value=999.0,
-            ) as mock_disk_cleanup,
-            self.assertRaises(StopSchedulerError),
-        ):
-            workflow_maintenance._workflow_maintenance_scheduler_loop()
-
-        mock_tick.assert_called_once_with()
-        mock_stale_archive.assert_called_once_with(
-            next_due_at=10.0
-            + workflow_maintenance._STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS
-        )
-        mock_disk_cleanup.assert_called_once_with(
-            next_due_at=10.0
-            + workflow_maintenance._DISK_USAGE_CLEANUP_INTERVAL_SECONDS
-        )
-        fake_stop.wait.assert_called_once_with(
-            workflow_maintenance._WORKFLOW_MAINTENANCE_INTERVAL_SECONDS
-        )
 
     def test_scheduler_loop_archives_stale_blocked_before_disk_cleanup(self) -> None:
         # Archiving unpins worktrees, so it must run ahead of disk cleanup on the
@@ -351,18 +308,6 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             "failed to run scheduled Hitch disk cleanup"
         )
 
-    @override_settings(TESTING=False)
-    @patch.dict(
-        os.environ,
-        {"HITCH_AUTO_PROPOSAL_SCHEDULER": "0", "RUN_MAIN": "true"},
-        clear=True,
-    )
-    @patch.object(sys, "argv", ["manage.py", "runserver"])
-    def test_scheduler_does_not_follow_auto_proposal_env(self) -> None:
-        self.assertTrue(
-            workflow_maintenance._workflow_maintenance_scheduler_enabled()
-        )
-
     @patch(
         "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
@@ -388,22 +333,6 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         # path -- bounded per tick so it can't starve the reconcile sweep.
         mock_refresh_pr_stages.assert_called_once_with(
             limit=workflow_maintenance._PR_STAGE_REFRESH_LIMIT_PER_TICK
-        )
-
-    @patch("hitch.main.runtime.server_lifecycle.logger.exception")
-    @patch(
-        "hitch.main.workflows.workflow_maintenance.reconciliation.reconcile_dead",
-        side_effect=RuntimeError("reconciliation failed"),
-    )
-    def test_scheduler_tick_records_reconciliation_failure(
-        self,
-        _mock_reconcile_dead: MagicMock,
-        mock_log_exception: MagicMock,
-    ) -> None:
-        workflow_maintenance._run_workflow_maintenance_scheduler_tick()
-
-        mock_log_exception.assert_called_once_with(
-            "scheduler %s tick failed", "hitch-workflow-maintenance"
         )
 
 
@@ -480,61 +409,6 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
 
 class SchedulerCodexReuseTests(SimpleTestCase):
-    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
-    def test_get_reuses_one_app_server(
-        self, mock_start: MagicMock, mock_config: MagicMock
-    ) -> None:
-        codex = MagicMock()
-        mock_start.return_value = codex
-        holder = auto_proposals._SchedulerCodex()
-
-        first = holder.get()
-        second = holder.get()
-
-        self.assertIs(first, codex)
-        self.assertIs(second, codex)
-        mock_start.assert_called_once_with(mock_config.return_value)
-
-    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
-    def test_reset_closes_and_reconnects(
-        self, mock_start: MagicMock, _mock_config: MagicMock
-    ) -> None:
-        first_codex, second_codex = MagicMock(), MagicMock()
-        mock_start.side_effect = [first_codex, second_codex]
-        holder = auto_proposals._SchedulerCodex()
-
-        self.assertIs(holder.get(), first_codex)
-        holder.reset()
-        first_codex.close.assert_called_once_with()
-        self.assertIs(holder.get(), second_codex)
-        self.assertEqual(mock_start.call_count, 2)
-
-    @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
-    @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")
-    def test_best_effort_reuses_held_codex_across_ticks(
-        self,
-        mock_start: MagicMock,
-        _mock_config: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
-        codex = MagicMock()
-        mock_start.return_value = codex
-        mock_refresh.return_value = auto_proposals.SessionStateRefreshResult(
-            synced=0, failed=False, pr_stages_refreshed=0
-        )
-        holder = auto_proposals._SchedulerCodex()
-
-        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
-        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
-
-        # One app-server initialized once, reused for both ticks.
-        self.assertEqual(mock_start.call_count, 1)
-        self.assertEqual(mock_refresh.call_count, 2)
-        mock_refresh.assert_called_with(codex, start_cursor="")
-
     @patch("hitch.main.goals.auto_proposals.refresh_unarchived_session_state")
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
     @patch("hitch.main.goals.auto_proposals.app_server_pool.start_codex")

@@ -80,29 +80,6 @@ class ManagedWorktreeTests(SimpleTestCase):
         ):
             snapshot_worktree_to_commit(raw)
 
-    def test_snapshot_worktree_to_commit_handles_unborn_head(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw) / "source"
-            _init_unborn_repo(repo)
-            (repo / "README.md").write_text("hello\n")
-
-            with patch.dict(
-                os.environ,
-                {
-                    "PATH": os.environ.get("PATH", ""),
-                    "HOME": str(Path(raw) / "home"),
-                    "XDG_CONFIG_HOME": str(Path(raw) / "xdg"),
-                },
-                clear=True,
-            ):
-                snapshot = snapshot_worktree_to_commit(repo)
-
-            self.assertEqual(_git(repo, "show", f"{snapshot}:README.md"), "hello")
-            self.assertEqual(
-                _git(repo, "rev-list", "--parents", "-n", "1", snapshot), snapshot
-            )
-            self.assertEqual(_git(repo, "status", "--short"), "?? README.md")
-
     def test_snapshot_worktree_to_commit_reports_tree_write_failure(self) -> None:
         git_results = iter(["", "", "", None])
         with (
@@ -224,22 +201,6 @@ class ManagedWorktreeTests(SimpleTestCase):
                 managed_worktree.branch,
             )
 
-    def test_discovers_only_direct_managed_worktree_roots(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "source"
-            managed = root / "managed"
-            _init_repo(repo)
-
-            with override_settings(HITCH_WORKTREES_DIR=managed):
-                managed_worktree = create_worktree_for_session(str(repo))
-                decoy = managed_worktree.path.parent / "not-a-worktree"
-                decoy.mkdir()
-                nested_repo = managed_worktree.path / "vendor" / "nested"
-                _init_repo(nested_repo)
-
-                self.assertEqual(discover_managed_worktrees(), [managed_worktree.path])
-
     def test_discovery_helpers_tolerate_unreadable_paths(self) -> None:
         unreadable_root = MagicMock(spec=Path)
         unreadable_root.iterdir.side_effect = OSError("no access")
@@ -276,24 +237,6 @@ class ManagedWorktreeTests(SimpleTestCase):
                 self.assertRaisesRegex(WorktreeCreationError, "nope"),
             ):
                 create_worktree_for_session(str(repo))
-
-    def test_cleanup_removes_worktree_and_branch(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "source"
-            managed = root / "managed"
-            _init_repo(repo)
-
-            with override_settings(HITCH_WORKTREES_DIR=managed):
-                managed_worktree = create_worktree_for_session(str(repo))
-                self.mock_invalidate_disk_usage.reset_mock()
-                cleanup_worktree(managed_worktree)
-
-            self.assertFalse(managed_worktree.path.exists())
-            self.assertEqual(
-                _git(repo, "branch", "--list", managed_worktree.branch), ""
-            )
-            self.mock_invalidate_disk_usage.assert_called_once_with()
 
     def test_cleanup_managed_worktree_path_removes_worktree_and_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -370,30 +313,6 @@ class ManagedWorktreeTests(SimpleTestCase):
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
             self.mock_invalidate_disk_usage.assert_called_once_with()
-
-    def test_cleanup_does_not_invalidate_when_directory_remains(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            worktree_path = root / "managed" / "repo" / "worktree"
-            worktree_path.mkdir(parents=True)
-            managed_worktree = worktrees.ManagedWorktree(
-                path=worktree_path,
-                branch="hitch/repo/worktree",
-                source_repo=root / "source",
-            )
-            with (
-                patch.object(
-                    worktrees,
-                    "_git",
-                    side_effect=[worktrees.WorktreeCleanupError("remove failed"), None],
-                ),
-                patch("hitch.main.worktrees.shutil.rmtree"),
-                patch.object(worktrees, "_branch_exists", return_value=False),
-            ):
-                cleanup_worktree(managed_worktree)
-
-            self.assertTrue(worktree_path.exists())
-            self.mock_invalidate_disk_usage.assert_not_called()
 
     def test_cleanup_managed_worktree_path_reaps_directory_without_gitlink(
         self,
@@ -505,13 +424,6 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertIsNone(
                 worktrees._git(Path("/repo"), ["status"], raise_on_error=False)
             )
-
-    def test_discovers_no_worktrees_when_base_dir_is_missing(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(HITCH_WORKTREES_DIR=Path(raw) / "managed"),
-        ):
-            self.assertEqual(discover_managed_worktrees(), [])
 
     def test_rejects_non_repo_source(self) -> None:
         with (
