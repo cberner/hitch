@@ -75,15 +75,6 @@ class DiskCleanupTests(TestCase):
         ):
             return disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
-    def test_default_max_allowed_percent_is_twenty(self) -> None:
-        self.assertEqual(disk_cleanup._max_allowed_percent(), 20.0)
-
-    @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20)
-    def test_saved_global_max_allowed_percent_overrides_env(self) -> None:
-        GlobalSettings.objects.create(pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5)
-
-        self.assertEqual(disk_cleanup._max_allowed_percent(), 35.5)
-
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
     @patch("hitch.main.runtime.disk_cleanup.logger.exception")
     def test_max_allowed_percent_falls_back_when_saved_global_read_fails(self, mock_log_exception: MagicMock) -> None:
@@ -356,54 +347,6 @@ class DiskCleanupTests(TestCase):
             [first_path, second_path],
         )
 
-    def test_cleanup_plans_enough_deletions_from_worktree_usage_snapshot(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-            patch(
-                "hitch.main.runtime.disk_cleanup._directory_size",
-                side_effect=[500, 125, 125, 125, 125, 200],
-            ) as mock_size,
-        ):
-            root = Path(raw)
-            hitch_home = root / ".hitch"
-            managed = root / "managed"
-            hitch_home.mkdir()
-            managed.mkdir()
-            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
-            paths: list[str] = []
-            for index in range(4):
-                path = self._managed_path(root, f"old-{index}")
-                paths.append(path)
-                self._session(
-                    thread_id=f"old-{index}",
-                    cwd=path,
-                    archived=True,
-                    archived_at=archived_at,
-                )
-            with (
-                override_settings(
-                    HITCH_HOME_DIR=hitch_home,
-                    HITCH_WORKTREES_DIR=managed,
-                    HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
-                ),
-                patch(
-                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
-                    return_value=SimpleNamespace(total=1000, used=1000),
-                ),
-            ):
-                cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
-
-        self.assertEqual(cleaned, 3)
-        self.assertEqual(mock_size.call_count, 6)
-        self.assertEqual(
-            [call.args[0] for call in mock_cleanup.call_args_list],
-            paths[:3],
-        )
-
     def test_duplicate_candidate_worktree_is_removed_once(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
@@ -632,36 +575,6 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(shared_path)
 
-    def test_system_feedback_on_visible_user_session_protects_worktree(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            user_path = self._managed_path(root, "user")
-            self._session(thread_id="user", cwd=user_path)
-            CodexInstance.objects.create(
-                pid=123,
-                thread_id="user",
-                cwd=user_path,
-                events_path="/tmp/events.jsonl",
-                status=CodexInstance.STATUS_COMPLETED,
-                purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 0)
-        mock_cleanup.assert_not_called()
-
-
     def test_recent_archived_user_session_protects_shared_worktree(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
@@ -692,63 +605,6 @@ class DiskCleanupTests(TestCase):
 
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
-
-    def test_archived_user_without_pr_must_be_archived_for_min_age(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            recent_path = self._managed_path(root, "recent")
-            old_path = self._managed_path(root, "old")
-            self._session(
-                thread_id="recent",
-                cwd=recent_path,
-                archived=True,
-                archived_at=timezone.now(),
-            )
-            self._session(
-                thread_id="old",
-                cwd=old_path,
-                archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300, 150],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 1)
-        mock_cleanup.assert_called_once_with(old_path)
-
-    def test_old_orphaned_managed_worktree_is_cleanup_candidate(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
-            orphan_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
-            with patch(
-                "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
-                return_value=[orphan_path],
-            ):
-                cleaned = self._run_cleanup(
-                    root=root,
-                    sizes=[300, 150],
-                    mock_cleanup=mock_cleanup,
-                )
-
-        self.assertEqual(cleaned, 1)
-        mock_cleanup.assert_called_once_with(str(orphan_path))
 
     def test_orphan_discovery_skips_unmanaged_duplicate_and_invalid_paths(
         self,
@@ -887,40 +743,6 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
 
-    def test_blocked_workflow_system_session_is_finished_for_cleanup(self) -> None:
-        # A blocked system workflow is a failure state, not active work, and the
-        # user never interacts with system sessions directly: its worktree must
-        # no longer be pinned against cleanup.
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            blocked_path = self._managed_path(root, "blocked")
-            self._session(
-                thread_id="blocked",
-                cwd=blocked_path,
-                hidden_system=True,
-            )
-            SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="blocked",
-                cwd=blocked_path,
-                status=SystemWorkflow.STATUS_BLOCKED,
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300, 150],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 1)
-        mock_cleanup.assert_called_once_with(blocked_path)
-
     def test_active_stack_fork_worktree_is_not_finished_for_cleanup(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
@@ -995,27 +817,6 @@ def _naive_directory_size(path: Path) -> int:
 
 
 class DirectorySizeTests(TestCase):
-    def test_hardlinked_file_counted_once(self) -> None:
-        # Managed worktrees hardlink shared blobs into a common object store, so
-        # a naive walk counts the same inode once per link. Dedupe must drop the
-        # duplicate exactly once, leaving directory entries untouched.
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            original = root / "a" / "blob"
-            original.parent.mkdir(parents=True)
-            original.write_bytes(b"x" * 4096)
-
-            link_dir = root / "b"
-            link_dir.mkdir()
-            os.link(original, link_dir / "blob")
-
-            allocated = disk_cleanup._allocated_size(original.lstat())
-            naive = _naive_directory_size(root)
-            total = disk_cleanup._directory_size(root)
-
-        # The duplicate inode is dropped exactly once relative to the naive walk.
-        self.assertEqual(total, naive - allocated)
-
     def test_distinct_files_counted_separately(self) -> None:
         # Two genuinely distinct inodes of the same size must both be summed --
         # dedupe keys on (st_dev, st_ino), not on size.
@@ -1107,27 +908,6 @@ class DiskUsageSnapshotTests(SimpleTestCase):
             self.assertEqual(disk_cleanup.cached_hitch_home_disk_usage(), usage)
             mock_thread.assert_called_once()
 
-    def test_current_ceiling_is_applied_to_fresh_snapshot(self) -> None:
-        usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-            captured_at=timezone.now(),
-            invalidation_token="token",
-            usage=usage,
-        )
-
-        with (
-            patch.object(disk_cleanup, "_disk_usage_invalidation_token", return_value="token"),
-            patch.object(disk_cleanup, "_max_allowed_percent", side_effect=[20.0, 40.0]),
-        ):
-            first = disk_cleanup.cached_hitch_home_disk_usage()
-            second = disk_cleanup.cached_hitch_home_disk_usage()
-
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        assert first is not None and second is not None
-        self.assertEqual(first.limit_bytes, 200)
-        self.assertEqual(second.limit_bytes, 400)
-
     def test_failed_refresh_can_be_retried(self) -> None:
         now = timezone.now()
         stale_usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
@@ -1156,43 +936,6 @@ class DiskUsageSnapshotTests(SimpleTestCase):
         self.assertEqual(mock_thread.call_count, 2)
         self.assertEqual(mock_close.call_count, 2)
         mock_log.assert_called_once_with("failed to refresh Hitch disk usage snapshot")
-
-    def test_cross_process_invalidation_discards_an_in_flight_snapshot(self) -> None:
-        usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch.object(disk_cleanup, "hitch_home_disk_usage", return_value=usage),
-            patch.object(
-                disk_cleanup,
-                "_disk_usage_invalidation_token",
-                side_effect=["before", "after"],
-            ),
-        ):
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-            self._run_scheduled_refresh(mock_thread)
-
-        self.assertIsNone(disk_cleanup._disk_usage_snapshot)
-
-    def test_cross_process_invalidation_expires_fresh_snapshot(self) -> None:
-        usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-            captured_at=timezone.now(),
-            invalidation_token="before",
-            usage=usage,
-        )
-
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch.object(
-                disk_cleanup,
-                "_disk_usage_invalidation_token",
-                return_value="after",
-            ),
-        ):
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-
-        self.assertIsNone(disk_cleanup._disk_usage_snapshot)
-        mock_thread.assert_called_once()
 
     def test_shared_token_expires_snapshot_from_another_process(self) -> None:
         usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)

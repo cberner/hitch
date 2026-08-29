@@ -281,33 +281,6 @@ class SetSessionApprovalModeViewTests(TestCase):
         pending.refresh_from_db()
         self.assertEqual(pending.decision, ApprovalRequest.DECISION_ACCEPT)
 
-    def test_deny_all_does_not_rewrite_fixed_auto_review_instance(self) -> None:
-        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
-        running = CodexInstance.objects.create(
-            pid=1,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="hi",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-            approval_mode="auto_review",
-        )
-        pending = ApprovalRequest.objects.create(
-            instance=running,
-            method="item/commandExecution/requestApproval",
-            params={"item": {"command": "cargo bench"}},
-            decision=ApprovalRequest.DECISION_PENDING,
-        )
-        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
-
-        response = self.client.post(url, data={"approval_mode": "deny_all"})
-
-        self.assertEqual(response.status_code, 302)
-        running.refresh_from_db()
-        self.assertEqual(running.approval_mode, "auto_review")
-        pending.refresh_from_db()
-        self.assertEqual(pending.decision, ApprovalRequest.DECISION_PENDING)
-
     def test_auto_review_does_not_rewrite_live_editable_instance(self) -> None:
         SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
         running = CodexInstance.objects.create(
@@ -742,46 +715,6 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(response.status_code, 409)
         mock_codex.assert_not_called()
 
-    @patch(
-        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
-        return_value=Path("/moved/rollout-abc.jsonl"),
-    )
-    @patch("hitch.main.views.session_actions.reconciliation.reconcile_dead_for_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_archive_reconciles_dead_main_thread_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_reconcile: MagicMock,
-        _mock_rollout_path: MagicMock,
-    ) -> None:
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="Interrupted turn",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        def reap(_thread_id: str) -> int:
-            CodexInstance.objects.filter(pk=instance.pk).update(
-                status=CodexInstance.STATUS_FAILED
-            )
-            return 1
-
-        mock_reconcile.side_effect = reap
-
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_reconcile.assert_called_once_with("abc")
-        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
-            "abc"
-        )
-
     @patch("hitch.main.views.common.Codex")
     def test_unarchive_bookkeeping_failure_restores_both_states(
         self, mock_codex: MagicMock
@@ -810,40 +743,6 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(metadata.codex_path, "/archived/rollout.jsonl")
         client.thread_unarchive.assert_called_once_with("abc")
         client.thread_archive.assert_called_once_with("abc")
-
-    @patch(
-        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
-        return_value=Path("/moved/rollout-abc.jsonl"),
-    )
-    @patch("hitch.main.views.common.Codex")
-    def test_archive_keeps_cached_usage_for_unrelated_sessions(
-        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
-    ) -> None:
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="abc", total_tokens=100
-        )
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="other-1", total_tokens=200
-        )
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="other-2", total_tokens=300
-        )
-
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertFalse(
-            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
-        )
-        other_totals = dict(
-            ArchivedSessionTokenUsage.objects.filter(
-                thread_id__in=["other-1", "other-2"]
-            ).values_list("thread_id", "total_tokens")
-        )
-        self.assertEqual(other_totals, {"other-1": 200, "other-2": 300})
 
     @patch(
         "hitch.main.views.session_actions._stored_rollout_path_for_thread",

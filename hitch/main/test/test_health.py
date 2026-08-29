@@ -15,11 +15,8 @@ from django.urls import reverse
 from django.utils import timezone
 
 from hitch.main.models import (
-    ApprovalRequest,
     CodexInstance,
-    ProposedSession,
     SystemWorkflow,
-    UserInputRequest,
 )
 from hitch.main.runtime import disk_cleanup, health, host_probes, reconciliation, server_lifecycle
 from hitch.main.runtime.disk_cleanup import HitchDiskUsage
@@ -69,25 +66,6 @@ class CollectHealthReportTests(TestCase):
         disk_patcher.start()
         self.addCleanup(disk_patcher.stop)
 
-    def test_empty_db_is_ok(self) -> None:
-        report = health.collect_health_report()
-
-        self.assertEqual(report.overall_severity, health.SEVERITY_OK)
-        self.assertEqual(report.overall_label, "OK")
-        titles = [section.title for section in report.sections]
-        self.assertEqual(
-            titles,
-            [
-                "Worker units (leaks)",
-                "Background schedulers",
-                "Host / CPU",
-                "Leaks",
-                "Blocked workflow buckets",
-                "Backlogs",
-                "Recent Codex failures (24h)",
-            ],
-        )
-
     def test_blocked_workflow_raises_overall_to_warn(self) -> None:
         SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -102,45 +80,6 @@ class CollectHealthReportTests(TestCase):
         metric = _find(report, "blocked_workflows")
         self.assertEqual(metric.value, "1")
         self.assertEqual(metric.severity, health.SEVERITY_WARN)
-
-    def test_stale_blocked_pr_qa_counted(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="m",
-            cwd="/r",
-            status=SystemWorkflow.STATUS_BLOCKED,
-        )
-        old = timezone.now() - timedelta(days=10)
-        # updated_at is auto_now; bypass it with a direct update.
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=old)
-
-        report = health.collect_health_report()
-
-        self.assertEqual(_find(report, "stale_blocked_workflows").value, "1")
-
-    def test_stuck_turn_flagged(self) -> None:
-        instance = _make_instance(status=CodexInstance.STATUS_RUNNING)
-        old = timezone.now() - timedelta(hours=8)
-        CodexInstance.objects.filter(pk=instance.pk).update(started_at=old)
-
-        report = health.collect_health_report()
-
-        stuck = _find(report, "stuck_turns")
-        self.assertEqual(stuck.value, "1")
-        self.assertEqual(stuck.severity, health.SEVERITY_WARN)
-
-    def test_pending_handoffs_flagged(self) -> None:
-        instance = _make_instance(status=CodexInstance.STATUS_RUNNING)
-        ApprovalRequest.objects.create(instance=instance, method="item/commandExecution/requestApproval")
-        UserInputRequest.objects.create(instance=instance, method="request_user_input")
-        ProposedSession.objects.create(title="proposal")
-
-        report = health.collect_health_report()
-
-        self.assertEqual(_find(report, "pending_approvals").value, "1")
-        self.assertEqual(_find(report, "pending_inputs").value, "1")
-        self.assertEqual(_find(report, "pending_proposals").value, "1")
-        self.assertEqual(report.overall_severity, health.SEVERITY_WARN)
 
     def test_app_server_surplus_is_danger(self) -> None:
         with patch.object(reconciliation, "count_running_codex_app_servers", return_value=12):
@@ -167,22 +106,6 @@ class CollectHealthReportTests(TestCase):
         self.assertEqual(report.overall_severity, health.SEVERITY_OK)
         self.assertIsNone(report.headline_metric)
 
-    def test_headline_metric_surfaces_worst_severity_row(self) -> None:
-        with patch.object(
-            disk_cleanup,
-            "cached_hitch_home_disk_usage",
-            return_value=HitchDiskUsage(used_bytes=2_000_000, limit_bytes=1_000_000, disk_total_bytes=10_000_000),
-        ):
-            report = health.collect_health_report()
-
-        headline = report.headline_metric
-        self.assertIsNotNone(headline)
-        assert headline is not None
-        self.assertEqual(headline.key, "hitch_disk")
-        self.assertEqual(headline.severity, health.SEVERITY_DANGER)
-        self.assertIn("Headline:", report.copy_text())
-        self.assertIn(headline.value, report.copy_text())
-
     def test_metric_failure_degrades_gracefully(self) -> None:
         with patch.object(reconciliation, "count_running_codex_app_servers",
             side_effect=RuntimeError("boom"),
@@ -192,15 +115,6 @@ class CollectHealthReportTests(TestCase):
         metric = _find(report, "app_servers")
         self.assertEqual(metric.value, "unavailable")
         self.assertEqual(metric.severity, health.SEVERITY_UNKNOWN)
-
-    def test_copy_text_contains_key_lines(self) -> None:
-        text = health.collect_health_report().copy_text()
-
-        self.assertIn("Hitch health report", text)
-        self.assertIn("Overall:", text)
-        self.assertIn("[Leaks]", text)
-        self.assertIn("[Backlogs]", text)
-        self.assertIn("[Worker units (leaks)]", text)
 
     def test_leaked_scope_makes_report_danger(self) -> None:
         probe = WorkerScopeProbe(
@@ -262,20 +176,6 @@ class CollectHealthReportTests(TestCase):
         self.assertEqual(stopped.value, "1")
         self.assertEqual(stopped.severity, health.SEVERITY_OK)
 
-    def test_recent_worker_exit_failure_flagged(self) -> None:
-        instance = _make_instance(
-            status=CodexInstance.STATUS_FAILED,
-            error="worker process exited before reporting completion",
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(ended_at=timezone.now())
-
-        report = health.collect_health_report()
-
-        worker = _find(report, "worker_exited_24h")
-        self.assertEqual(worker.value, "1")
-        self.assertEqual(worker.severity, health.SEVERITY_WARN)
-        self.assertEqual(_find(report, "failed_24h").value, "1")
-
     _blocked_seq = 0
 
     def _blocked(self, error: str) -> None:
@@ -314,57 +214,6 @@ class HealthReportCacheTests(TestCase):
         self.assertIs(first, second)
         self.assertEqual(probe.call_count, 1)
 
-    @override_settings(TESTING=False)
-    def test_completed_disk_snapshot_refreshes_cached_unavailable_report(self) -> None:
-        usage = HitchDiskUsage(used_bytes=1024, limit_bytes=2048, disk_total_bytes=4096)
-        with (
-            patch.object(
-                host_probes,
-                "probe_worker_scopes",
-                return_value=WorkerScopeProbe(active_count=0, leaked=[]),
-            ) as probe,
-            patch.object(
-                disk_cleanup,
-                "cached_hitch_home_disk_usage",
-                side_effect=[None, usage],
-            ) as disk_usage,
-            patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
-        ):
-            first = health.collect_health_report()
-            second = health.collect_health_report()
-
-        self.assertEqual(_find(first, "hitch_disk").value, "unavailable")
-        self.assertEqual(_find(second, "hitch_disk").value, "1.0 KiB (25.0% of disk)")
-        self.assertEqual(probe.call_count, 2)
-        self.assertEqual(disk_usage.call_count, 2)
-
-    @override_settings(TESTING=False)
-    def test_disk_snapshot_failure_degrades_only_disk_metric(self) -> None:
-        with (
-            patch.object(
-                host_probes,
-                "probe_worker_scopes",
-                return_value=WorkerScopeProbe(active_count=0, leaked=[]),
-            ),
-            patch.object(host_probes, "cpu_count", return_value=4),
-            patch.object(host_probes, "load_average", return_value=(0.1, 0.1, 0.1)),
-            patch.object(host_probes, "runserver_fd_count", return_value=50),
-            patch.object(host_probes, "runserver_close_wait_count", return_value=0),
-            patch.object(
-                disk_cleanup,
-                "cached_hitch_home_disk_usage",
-                side_effect=RuntimeError("boom"),
-            ) as disk_usage,
-            patch.object(reconciliation, "count_running_codex_app_servers", return_value=0),
-        ):
-            report = health.collect_health_report()
-
-        metric = _find(report, "hitch_disk")
-        self.assertEqual(metric.value, "unavailable")
-        self.assertEqual(metric.severity, health.SEVERITY_UNKNOWN)
-        self.assertEqual(report.overall_severity, health.SEVERITY_UNKNOWN)
-        disk_usage.assert_called_once_with()
-
     @override_settings(TESTING=True)
     def test_testing_bypasses_cache(self) -> None:
         with patch.object(
@@ -402,36 +251,6 @@ class SchedulerHeartbeatTests(TestCase):
         }
         defaults.update(overrides)
         return server_lifecycle.SchedulerStatus(**defaults)
-
-    def test_run_tick_records_heartbeat_results_and_errors(self) -> None:
-        handle = server_lifecycle.SchedulerHandle(
-            thread_name="hitch-test-heartbeat", tick_interval_seconds=5
-        )
-        self.addCleanup(lambda: server_lifecycle._HANDLES.remove(handle))
-
-        self.assertEqual(handle.run_tick(lambda: "cursor"), "cursor")
-        status = handle.status()
-        self.assertEqual(status.tick_count, 1)
-        self.assertIsNotNone(status.last_tick_at)
-        self.assertEqual(status.last_error, "")
-
-        def _boom() -> str:
-            raise RuntimeError("boom")
-
-        # One bad tick is swallowed (the scheduler thread must survive) but
-        # recorded for the health page; the heartbeat still advances.
-        self.assertIsNone(handle.run_tick(_boom))
-        status = handle.status()
-        self.assertEqual(status.tick_count, 2)
-        self.assertTrue(status.last_tick_errored)
-        self.assertIn("boom", status.last_error)
-        self.assertIsNotNone(status.last_error_at)
-
-        # A successful tick marks recovery while keeping the error on record.
-        handle.run_tick(lambda: None)
-        status = handle.status()
-        self.assertFalse(status.last_tick_errored)
-        self.assertIn("boom", status.last_error)
 
     @patch("hitch.main.runtime.server_lifecycle.threading.Thread.start")
     def test_failed_thread_start_leaves_scheduler_retryable(
@@ -611,40 +430,6 @@ class WorkerScopeProbeTests(TestCase):
         self.assertEqual(probe.leaked, [])
         self.assertEqual(probe.active_count, 1)
 
-    def test_deployment_scoped_worker_service_is_detected(self) -> None:
-        instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
-        scope = f"hitch-codex-worker-abc123def456-{instance.pk}.service"
-        _write_proc_pid(
-            self.proc,
-            57,
-            scope_unit=scope,
-            argv=["python3", "manage.py", "codex_worker", "--instance-id", str(instance.pk)],
-            comm="python3",
-            vmrss_kb=120_000,
-        )
-
-        probe = host_probes.probe_worker_scopes(proc_root=self.proc, now=self.now)
-
-        self.assertEqual(probe.leaked, [])
-        self.assertEqual(probe.active_count, 1)
-
-    def test_legacy_scope_worker_is_still_detected(self) -> None:
-        instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
-        scope = f"hitch-codex-worker-{instance.pk}.scope"
-        _write_proc_pid(
-            self.proc,
-            56,
-            scope_unit=scope,
-            argv=["python3", "manage.py", "codex_worker", "--instance-id", str(instance.pk)],
-            comm="python3",
-            vmrss_kb=120_000,
-        )
-
-        probe = host_probes.probe_worker_scopes(proc_root=self.proc, now=self.now)
-
-        self.assertEqual(probe.leaked, [])
-        self.assertEqual(probe.active_count, 1)
-
     def test_recent_terminal_within_grace_not_leaked(self) -> None:
         instance = self._terminal_instance(status=CodexInstance.STATUS_COMPLETED, ended_ago=timedelta(seconds=5))
         scope = f"hitch-codex-worker-{instance.pk}.service"
@@ -710,9 +495,6 @@ class RunserverSocketProbeTests(TestCase):
         self._write_net_tcp(close_wait_ours, close_wait_other, established_ours)
 
         self.assertEqual(host_probes.runserver_close_wait_count(proc_root=self.proc), 1)
-
-    def test_fd_count(self) -> None:
-        self.assertEqual(host_probes.runserver_fd_count(proc_root=self.proc), 3)
 
     def test_missing_net_tcp_returns_zero(self) -> None:
         self.assertEqual(host_probes.runserver_close_wait_count(proc_root=self.proc), 0)

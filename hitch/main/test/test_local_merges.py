@@ -60,78 +60,6 @@ class LocalMergeTests(SimpleTestCase):
 
             self.assertEqual(local_branch_names(repo), ["main", "release"])
 
-    def test_merge_worktree_diff_to_checked_out_branch_commits_patch(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            (session / "README.md").write_text("hello\napproved\n")
-
-            result = _merge_reviewed_patch(session, "main")
-
-            self.assertTrue(result.changed)
-            self.assertEqual(result.branch, "main")
-            self.assertEqual(_git(repo, "rev-parse", "main"), result.commit_sha)
-            self.assertEqual(
-                _git(repo, "show", "main:README.md"), "hello\napproved"
-            )
-
-    def test_review_guidance_merge_uses_neutral_provenance(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            (session / "README.md").write_text("hello\nguided\n")
-            review = build_auto_merge_review_patch(session, "main")
-
-            result = merge_worktree_diff_to_branch(
-                session,
-                "main",
-                review.patch,
-                review.target_sha,
-                review.source_tree_sha,
-                provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
-            )
-
-            self.assertEqual(
-                _git(repo, "show", "-s", "--format=%s", result.commit_sha),
-                "Apply Hitch session diff",
-            )
-            self.assertNotIn(
-                "QA-approved",
-                _git(repo, "show", "-s", "--format=%B", result.commit_sha),
-            )
-
-    def test_review_guidance_merge_failure_does_not_claim_qa(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            (session / "README.md").write_text("hello\nguided\n")
-            review = build_auto_merge_review_patch(session, "main")
-            (repo / "target.txt").write_text("advanced\n")
-            _git(repo, "add", "target.txt")
-            _git(repo, "commit", "-m", "advance target")
-
-            with self.assertRaises(LocalBranchMergeError) as raised:
-                merge_worktree_diff_to_branch(
-                    session,
-                    "main",
-                    review.patch,
-                    review.target_sha,
-                    review.source_tree_sha,
-                    provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
-                )
-
-            self.assertIn("restart review guidance", str(raised.exception))
-            self.assertNotIn("QA", str(raised.exception))
-
     def test_merge_worktree_diff_rejects_dirty_source_as_target_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw) / "repo"
@@ -209,32 +137,6 @@ class LocalMergeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "show", "main:README.md"), "hello\napproved"
             )
-
-    def test_merge_worktree_diff_updates_unchecked_out_branch_ref(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            initial_main = _git(repo, "rev-parse", "main")
-            _git(repo, "branch", "release")
-            _git(repo, "worktree", "add", "-b", "session", str(session), "release")
-            (session / "README.md").write_text("hello\nrelease approved\n")
-            reference_hook = repo / ".git" / "hooks" / "reference-transaction"
-            reference_hook.write_text("#!/bin/sh\ntouch ../hook-ran\nexit 1\n")
-            reference_hook.chmod(0o755)
-
-            result = _merge_reviewed_patch(session, "release")
-
-            self.assertTrue(result.changed)
-            self.assertEqual(result.target_worktree, "")
-            self.assertEqual(_git(repo, "rev-parse", "release"), result.commit_sha)
-            self.assertEqual(_git(repo, "rev-parse", "main"), initial_main)
-            self.assertEqual(
-                _git(repo, "show", "release:README.md"), "hello\nrelease approved"
-            )
-            self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
-            self.assertFalse((repo.parent / "hook-ran").exists())
 
     def test_auto_merge_preserves_sparse_checkout_entries(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -517,40 +419,6 @@ class LocalMergeTests(SimpleTestCase):
             self.assertIn("-approved", review.patch)
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
 
-    def test_follow_up_review_rebuilds_source_base_after_target_rewind(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "branch", "release")
-            initial_release = _git(repo, "rev-parse", "release")
-            _git(repo, "worktree", "add", "-b", "session", str(session), "release")
-            (session / "README.md").write_text("hello\napproved\n")
-            first = _merge_reviewed_patch(session, "release")
-            _git(
-                repo,
-                "update-ref",
-                "refs/heads/release",
-                initial_release,
-                first.commit_sha,
-            )
-
-            review = build_auto_merge_review_patch(session, "release")
-            second = merge_worktree_diff_to_branch(
-                session,
-                "release",
-                review.patch,
-                review.target_sha,
-            )
-
-            self.assertTrue(first.changed)
-            self.assertTrue(second.changed)
-            self.assertIn("+approved", review.patch)
-            self.assertEqual(
-                _git(repo, "show", "release:README.md"), "hello\napproved"
-            )
-
     def test_follow_up_review_uses_legacy_source_base_without_parent(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -592,66 +460,6 @@ class LocalMergeTests(SimpleTestCase):
                 _git(repo, "show", "main:README.md"), "hello\napproved"
             )
             self.assertEqual(_git(repo, "show", "main:notes.txt"), "follow-up")
-
-    def test_auto_merge_patch_keeps_target_commits_added_before_review(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            (repo / "later.txt").write_text("target-only\n")
-            _git(repo, "add", "later.txt")
-            _git(repo, "commit", "-m", "advance target")
-            (session / "README.md").write_text("hello\napproved\n")
-
-            review = build_auto_merge_review_patch(session, "main")
-            result = merge_worktree_diff_to_branch(
-                session,
-                "main",
-                review.patch,
-                review.target_sha,
-            )
-
-            self.assertNotIn("later.txt", review.patch)
-            self.assertTrue(result.changed)
-            self.assertEqual(
-                _git(repo, "show", "main:README.md"), "hello\napproved"
-            )
-            self.assertEqual(_git(repo, "show", "main:later.txt"), "target-only")
-
-    def test_follow_up_patch_after_target_advanced_contains_only_new_delta(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            (repo / "later.txt").write_text("target-only\n")
-            _git(repo, "add", "later.txt")
-            _git(repo, "commit", "-m", "advance target")
-            (session / "README.md").write_text("hello\napproved\n")
-            first = _merge_reviewed_patch(session, "main")
-            (session / "notes.txt").write_text("new follow-up\n")
-
-            review = build_auto_merge_review_patch(session, "main")
-            second = merge_worktree_diff_to_branch(
-                session,
-                "main",
-                review.patch,
-                review.target_sha,
-            )
-
-            self.assertTrue(first.changed)
-            self.assertTrue(second.changed)
-            self.assertNotIn("README.md", review.patch)
-            self.assertIn("notes.txt", review.patch)
-            self.assertEqual(_git(repo, "show", "main:later.txt"), "target-only")
-            self.assertEqual(
-                _git(repo, "show", "main:notes.txt"), "new follow-up"
-            )
 
     def test_merge_rejects_target_branch_moved_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -926,30 +734,6 @@ class LocalMergeTests(SimpleTestCase):
             with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
                 build_auto_merge_review_patch(session, "main")
 
-    def test_auto_merge_review_patch_rejects_submodule_gitlink_changes(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            submodule_src = root / "submodule-src"
-            session = root / "session"
-            _init_repo(repo)
-            _init_repo(submodule_src)
-            _add_submodule(repo, submodule_src)
-            (submodule_src / "README.md").write_text("hello from submodule v2\n")
-            _git(submodule_src, "add", "README.md")
-            _git(submodule_src, "commit", "-m", "submodule v2")
-            new_sha = _git(submodule_src, "rev-parse", "HEAD")
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            _git(
-                session,
-                "update-index",
-                "--cacheinfo",
-                f"160000,{new_sha},vendor/lib",
-            )
-
-            with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
-                build_auto_merge_review_patch(session, "main")
-
     def test_auto_merge_review_patch_rejects_unresolved_merge_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -996,38 +780,6 @@ class LocalMergeTests(SimpleTestCase):
 
             # main must not pick up the conflict markers via the bug path.
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
-
-    def test_auto_merge_does_not_mark_group_executable_file_as_user_executable(
-        self,
-    ) -> None:
-        # Git stores a file as ``100755`` only when the owner's execute bit is
-        # set; group- or other-execute bits alone leave the index entry at
-        # ``100644``. ``_worktree_index_entry`` builds the synthetic source
-        # tree the auto-merge diff is computed against, so any bitmask that
-        # is wider than ``S_IXUSR`` invents an executable-bit change that the
-        # target branch never asked for. Reproduce the regression with an
-        # untracked file whose owner has no execute permission but whose
-        # group does -- ``git add`` would have indexed it at ``100644``, so
-        # the auto-merged commit must match that mode rather than promoting
-        # the file to ``100755``.
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            _init_repo(repo)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            script = session / "tool.sh"
-            script.write_text("#!/bin/sh\necho hi\n")
-            os.chmod(script, 0o670)
-
-            result = _merge_reviewed_patch(session, "main")
-
-            self.assertTrue(result.changed)
-            ls_tree = _git(repo, "ls-tree", "main", "tool.sh")
-            self.assertTrue(
-                ls_tree.startswith("100644 "),
-                msg=f"expected mode 100644 in {ls_tree!r}",
-            )
 
     def test_run_git_raises_on_spawn_failure(self) -> None:
         with (

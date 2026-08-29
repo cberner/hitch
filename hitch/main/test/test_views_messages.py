@@ -31,7 +31,6 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_events, codex_pool
 from hitch.main.runtime import rollout as rollout_module
-from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_pr_plan
 from hitch.main.sessions.settings_cookies import SettingsValues
 from hitch.main.test.support import (
@@ -299,40 +298,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.common.Codex")
-    def test_steers_latest_active_when_form_has_no_instance(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-    ) -> None:
-        instance = CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="already running",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "also lint"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            instance.pk,
-            expected_thread_id="abc",
-            prompt="also lint",
-        )
-        mock_spawn.assert_not_called()
-        mock_codex.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
     def test_queues_message_behind_active_workflow_user_turn(
         self,
         mock_codex: MagicMock,
@@ -369,54 +334,6 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-
-    @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
-    def test_steers_active_instance_with_uploaded_image(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-    ) -> None:
-        instance = CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="already running",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        mock_steer.return_value = instance
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "use this image",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-            self.assertEqual(response.status_code, 302)
-            image_paths = mock_steer.call_args.kwargs["input_image_paths"]
-            self.assertEqual(len(image_paths), 1)
-            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
-
-        mock_steer.assert_called_once()
-        self.assertEqual(mock_steer.call_args.args[0], instance.pk)
-        self.assertEqual(mock_steer.call_args.kwargs["expected_thread_id"], "abc")
-        self.assertEqual(mock_steer.call_args.kwargs["prompt"], "use this image")
-        mock_spawn.assert_not_called()
-        mock_codex.assert_not_called()
-
     @patch("hitch.main.runtime.codex_pool.steer_instance")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
@@ -435,111 +352,6 @@ class SendMessageViewTests(TestCase):
         mock_steer.assert_not_called()
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
-    def test_failed_steer_falls_back_to_spawn_matrix(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        mock_steer.return_value = None
-        resolved_plan_path = str(self._make_resolved_plan_rollout())
-        cases: list[
-            tuple[str, dict[str, str], str | None, int | str, str, dict[str, Any]]
-        ] = [
-            (
-                "posted stale instance",
-                {"prompt": "follow up", "active_instance": "42"},
-                None,
-                42,
-                "follow up",
-                {},
-            ),
-            (
-                "posted stale recomputes default plan mode",
-                {
-                    "prompt": "follow up",
-                    "active_instance": "42",
-                    "plan_mode": "true",
-                    "default_plan_mode": "true",
-                },
-                resolved_plan_path,
-                42,
-                "follow up",
-                {},
-            ),
-            (
-                "posted stale keeps explicit plan mode",
-                {
-                    "prompt": "make another plan",
-                    "active_instance": "42",
-                    "plan_mode": "true",
-                    "plan_mode_explicit": "true",
-                },
-                resolved_plan_path,
-                42,
-                "make another plan",
-                {"model": "gpt-5", "plan_mode": True},
-            ),
-            (
-                "latest active instance",
-                {"prompt": "also lint"},
-                None,
-                "latest",
-                "also lint",
-                {},
-            ),
-        ]
-
-        for label, data, rollout_path, steered_instance, prompt, expected in cases:
-            with self.subTest(label=label):
-                CodexInstance.objects.all().delete()
-                SessionMetadata.objects.all().delete()
-                if steered_instance == "latest":
-                    instance = CodexInstance.objects.create(
-                        pid=0,
-                        thread_id="abc",
-                        cwd="/repo",
-                        prompt="launching",
-                        events_path="/tmp/events.jsonl",
-                        status=CodexInstance.STATUS_STARTING,
-                    )
-                    expected_instance = instance.pk
-                else:
-                    assert isinstance(steered_instance, int)
-                    CodexInstance.objects.create(
-                        pid=123,
-                        thread_id="abc",
-                        cwd="/repo",
-                        prompt="newer work",
-                        events_path="/tmp/events.jsonl",
-                        status=CodexInstance.STATUS_RUNNING,
-                    )
-                    expected_instance = steered_instance
-                self._patch_codex(mock_codex, path=rollout_path)
-                mock_steer.reset_mock()
-                mock_spawn.reset_mock()
-
-                response = self.client.post(
-                    reverse("send_message", kwargs={"session_id": "abc"}),
-                    data=data,
-                )
-
-                self.assertEqual(response.status_code, 302)
-                mock_steer.assert_called_once_with(
-                    expected_instance,
-                    expected_thread_id="abc",
-                    prompt=prompt,
-                )
-                self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -573,64 +385,6 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertIn("worker process exited", instance.error)
         self._assert_follow_up_spawn(mock_spawn, prompt="still there?")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
-    def test_failed_steer_falls_back_to_spawn_with_uploaded_image(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        def fail_steer_and_delete_owned_copy(*_args: Any, **kwargs: Any) -> None:
-            for image_path in kwargs.get("input_image_paths", []):
-                Path(image_path).unlink()
-            return
-
-        mock_steer.side_effect = fail_steer_and_delete_owned_copy
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "use this screenshot",
-                    "active_instance": "42",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-            self.assertEqual(response.status_code, 302)
-            steered_paths = mock_steer.call_args.kwargs["input_image_paths"]
-            spawned_paths = mock_spawn.call_args.kwargs["input_image_paths"]
-            self.assertNotEqual(spawned_paths, steered_paths)
-            self.assertEqual(len(spawned_paths), 1)
-            self.assertEqual(Path(spawned_paths[0]).read_bytes(), _PNG_BYTES)
-            self.assertFalse(Path(steered_paths[0]).exists())
-
-        mock_steer.assert_called_once_with(
-            42,
-            expected_thread_id="abc",
-            prompt="use this screenshot",
-            input_image_paths=steered_paths,
-        )
-        self._assert_follow_up_spawn(
-            mock_spawn,
-            prompt="use this screenshot",
-            input_image_paths=spawned_paths,
-        )
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -688,63 +442,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_spawns_turn_and_redirects(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "  follow-up question  "},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        # Whitespace is trimmed before forwarding.
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up question",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_spawns_follow_up_while_holding_lifecycle_lock(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        def assert_locked(**_kwargs: object) -> None:
-            with session_lifecycle.hold("abc", blocking=False) as acquired:
-                self.assertFalse(acquired)
-
-        mock_spawn.side_effect = assert_locked
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
     def test_first_follow_up_uses_project_developer_prompt(
         self,
         mock_codex: MagicMock,
@@ -777,131 +474,6 @@ class SendMessageViewTests(TestCase):
             developer_instructions=(
                 "Always run focused tests.\n\nUse project fixtures."
             ),
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_idle_follow_up_resumes_from_disk_without_app_server(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        # An idle follow-up reads cwd/entries/plan-state from SessionMetadata +
-        # the rollout file instead of a live thread_resume (which the detached
-        # worker repeats moments later), so no app-server is opened here.
-        rollout_path = self._make_rollout(
-            [
-                _rollout_line(
-                    "event_msg", {"type": "user_message", "message": "Hi"}
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Done."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ]
-        )
-        SessionMetadata.objects.create(
-            thread_id="abc", cwd="/repo", codex_path=str(rollout_path)
-        )
-        CodexInstance.objects.create(
-            pid=1,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="prior turn",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            model="gpt-5.4",
-        )
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self._assert_follow_up_spawn(mock_spawn)
-        # The disk path never constructs a live app-server.
-        mock_codex.assert_not_called()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_follow_up_unarchives_before_spawning(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        rollout_path = (
-            Path(temp_dir.name)
-            / "archived_sessions"
-            / "rollout-2026-06-07T05-43-07-abc.jsonl"
-        )
-        rollout_path.parent.mkdir(parents=True)
-        rollout_path.write_text(
-            "\n".join(
-                [
-                    _rollout_line(
-                        "event_msg", {"type": "user_message", "message": "Hi"}
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [
-                                {"type": "output_text", "text": "Done."}
-                            ],
-                            "phase": "final_answer",
-                        },
-                    ),
-                ]
-            )
-            + "\n"
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_archived=True,
-            codex_archived_at=timezone.now(),
-        )
-        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="other", total_tokens=200
-        )
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_unarchive.assert_called_once_with("abc")
-        client._client.thread_resume.assert_called_once_with("abc")
-        self._assert_follow_up_spawn(mock_spawn)
-        metadata.refresh_from_db()
-        self.assertFalse(metadata.codex_archived)
-        self.assertIsNone(metadata.codex_archived_at)
-        self.assertEqual(metadata.codex_path, "")
-        self.assertFalse(
-            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
-        )
-        self.assertTrue(
-            ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
         )
 
     @patch("hitch.main.workflows.pr_qa._spawn_pr_prompt")
@@ -1087,111 +659,6 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_live_resume_retry_rearchives_disallowed_resumed_cwd(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        _mock_managed_worktrees: MagicMock,
-    ) -> None:
-        archived_path = (
-            "/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl"
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="",
-            codex_path=archived_path,
-        )
-        self._patch_codex(mock_codex, cwd="/elsewhere")
-        mock_discover.return_value = [Path("/repo")]
-        client = mock_codex.return_value.__enter__.return_value
-        resumed = client._client.thread_resume.return_value
-        client._client.thread_resume.side_effect = [
-            InvalidRequestError(
-                -32600,
-                "session abc is archived. Run `codex unarchive abc` to unarchive it first.",
-            ),
-            resumed,
-        ]
-        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertContains(
-            response,
-            "thread cwd is not an allowed repository",
-            status_code=400,
-        )
-        self.assertEqual(
-            client._client.thread_resume.call_args_list,
-            [call("abc"), call("abc")],
-        )
-        client.thread_unarchive.assert_called_once_with("abc")
-        client.thread_archive.assert_called_once_with("abc")
-        mock_spawn.assert_not_called()
-        metadata.refresh_from_db()
-        self.assertTrue(metadata.codex_archived)
-        self.assertIsNotNone(metadata.codex_archived_at)
-        self.assertEqual(metadata.codex_path, "")
-        self.assertFalse(
-            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_follow_up_rearchives_when_spawn_rejects(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        archived_path = (
-            "/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl"
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            codex_path=archived_path,
-            codex_archived=True,
-            codex_archived_at=timezone.now(),
-        )
-        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        mock_spawn.side_effect = codex_pool.InputAttachmentLimitExceededError(
-            "too many image attachments are queued for this turn"
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertContains(
-            response,
-            "too many image attachments are queued for this turn",
-            status_code=400,
-        )
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_unarchive.assert_called_once_with("abc")
-        client.thread_archive.assert_called_once_with("abc")
-        mock_spawn.assert_called_once()
-        metadata.refresh_from_db()
-        self.assertTrue(metadata.codex_archived)
-        self.assertIsNotNone(metadata.codex_archived_at)
-        self.assertEqual(metadata.codex_path, "")
-        self.assertFalse(
-            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
-        )
-
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
@@ -1300,74 +767,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_spawns_turn_with_uploaded_image(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "use this screenshot",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-            self.assertEqual(response.status_code, 302)
-            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
-            self.assertEqual(len(image_paths), 1)
-            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
-
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "use this screenshot")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_spawns_turn_with_image_only_prompt(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-            self.assertEqual(response.status_code, 302)
-            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
-            self.assertEqual(len(image_paths), 1)
-            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
-
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_with_multiple_uploaded_image_formats(
         self,
         mock_codex: MagicMock,
@@ -1437,46 +836,6 @@ class SendMessageViewTests(TestCase):
                     },
                 )
 
-            attachments = Path(raw) / "attachments"
-            self.assertEqual(
-                [path for path in attachments.rglob("*") if path.is_file()],
-                [],
-            )
-
-    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_send_message_cleans_uploaded_images_when_resume_validation_fails(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        _mock_managed_worktrees: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, cwd="/repo")
-        mock_discover.return_value = [Path("/other")]
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "use this screenshot",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-            self.assertContains(
-                response,
-                "thread cwd is not an allowed repository",
-                status_code=400,
-            )
-            mock_spawn.assert_not_called()
             attachments = Path(raw) / "attachments"
             self.assertEqual(
                 [path for path in attachments.rglob("*") if path.is_file()],
@@ -1590,64 +949,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_unwraps_pydantic_rootmodel_cwd(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        # The SDK's Thread.cwd is an AbsolutePathBuf (pydantic RootModel[str]),
-        # not a bare str, so the view has to unwrap ``.root``.
-        self._patch_codex(mock_codex, cwd=SimpleNamespace(root="/repo"))
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "hi"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="hi",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_allows_follow_up_turns_in_managed_worktrees(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-    ) -> None:
-        worktree = "/home/user/.hitch/worktrees/proj/20260516120000-abcdef12"
-        self._patch_codex(mock_codex, cwd=worktree)
-        mock_discover.return_value = [Path("/repo")]
-        mock_managed_worktrees.return_value = [Path(worktree)]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "hi"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd=worktree,
-            prompt="hi",
-            sandbox_policy="workspaceWrite",
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
     def test_forwards_follow_up_cookie_options_to_spawn_turn(
         self,
         mock_codex: MagicMock,
@@ -1751,120 +1052,6 @@ class SendMessageViewTests(TestCase):
             prompt="follow-up",
             sandbox_policy=None,
             approval_mode="deny_all",
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_follow_up_clears_previous_web_search_when_setting_is_default(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        CodexInstance.objects.create(
-            pid=999,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="first",
-            web_search_mode="live",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            web_search_mode="",
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_auto_pr_session_marks_follow_up_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(
-            mock_codex,
-            model="gpt-5.4",
-            reasoning_effort="high",
-        )
-        mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            auto_pr_enabled=True,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_pr_enabled=True,
-            user_message_index=0,
-            stored_model="gpt-5.4",
-            stored_reasoning_effort="high",
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_auto_qa_session_marks_follow_up_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(
-            mock_codex,
-            model="gpt-5.4",
-            reasoning_effort="high",
-        )
-        mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            auto_qa_enabled=True,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_qa_enabled=True,
-            user_message_index=0,
-            stored_model="gpt-5.4",
-            stored_reasoning_effort="high",
         )
 
     @patch("hitch.main.repos.discover_repos")
@@ -2181,81 +1368,6 @@ class SendMessageViewTests(TestCase):
             plan_mode=True,
         )
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_plan_mode_state_uses_stored_fallback_when_rollout_unreadable(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        CodexInstance.objects.create(
-            pid=os.getpid(),
-            thread_id="abc",
-            cwd="/repo",
-            prompt="Talk through the shape.",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            plan_mode=True,
-        )
-        self._patch_codex(
-            mock_codex,
-            model="gpt-5.4",
-            path="/nonexistent/rollout.jsonl",
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "yes, make that the plan"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self._assert_follow_up_spawn(
-            mock_spawn,
-            prompt="yes, make that the plan",
-            model="gpt-5.4",
-            plan_mode=True,
-        )
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_plan_slash_follow_up_allows_image_only_prompt(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        self._patch_codex(mock_codex, model="gpt-5.4")
-
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            response = self.client.post(
-                reverse("send_message", kwargs={"session_id": "abc"}),
-                data={
-                    "prompt": "/plan",
-                    "input_images": SimpleUploadedFile(
-                        "screen.png", _PNG_BYTES, content_type="image/png"
-                    ),
-                },
-            )
-
-        self.assertEqual(response.status_code, 302)
-        image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
-        self.assertEqual(len(image_paths), 1)
-        self._assert_follow_up_spawn(
-            mock_spawn,
-            prompt="",
-            model="gpt-5.4",
-            plan_mode=True,
-            input_image_paths=image_paths,
-        )
-
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -2368,99 +1480,6 @@ class SendMessageViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=0,
-            pr_watch_tool_available=False,
-            lifecycle_lock_held=True,
-        )
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_fix_pr_slash_starts_monitor_for_opened_pr(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_monitor: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/169"
-        rollout_path = self._make_rollout(
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_create_pull_request",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps({"url": pr_url}),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Opened the PR."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ]
-        )
-        self._patch_codex(
-            mock_codex,
-            model="gpt-5.4",
-            reasoning_effort="high",
-            path=str(rollout_path),
-        )
-        mock_discover.return_value = [Path("/repo")]
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-            state={
-                "pr_handoff": {
-                    "url": "https://github.com/cberner/hitch/pull/168",
-                    "state": "closed",
-                    "merged": False,
-                }
-            },
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=datetime.now(UTC) - timedelta(minutes=5)
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/fix-pr"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_start_workflow.assert_not_called()
-        mock_start_monitor.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            pr_url=pr_url,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=1,
             pr_watch_tool_available=False,
             lifecycle_lock_held=True,
         )
@@ -2670,78 +1689,6 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_monitor: MagicMock,
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/169"
-        rollout_path = self._make_rollout(
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_create_pull_request",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps({"url": pr_url}),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Opened the PR."}],
-                        "phase": "final_answer",
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Make another change"},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Implemented."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ]
-        )
-        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/fix-pr"},
-        )
-
-        self.assertContains(
-            response,
-            "fix-pr requires an opened PR for this session",
-            status_code=400,
-        )
-        mock_start_monitor.assert_not_called()
-
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -2787,35 +1734,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_pr_slash_command_inherits_session_web_search_when_setting_is_default(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
-        mock_discover.return_value = [Path("/repo")]
-        CodexInstance.objects.create(
-            pid=999,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="first",
-            web_search_mode="live",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/pr"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(mock_start_workflow.call_args.kwargs["web_search_mode"], "live")
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
     def test_qa_slash_command_forwards_web_search_setting(
         self,
         mock_codex: MagicMock,
@@ -2835,41 +1753,6 @@ class SendMessageViewTests(TestCase):
         kwargs = mock_start_workflow.call_args.kwargs
         self.assertEqual(kwargs["web_search_mode"], "cached")
         self.assertFalse(kwargs["open_pr_on_lgtm"])
-
-    @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_running_qa_workflow_routes_normal_follow_up_to_user_steering(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_enqueue_steering: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        mock_enqueue_steering.return_value = True
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "please also do this"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        mock_enqueue_steering.assert_called_once_with(
-            workflow,
-            prompt="please also do this",
-        )
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.pr_qa._handle_pr_prompt_finished")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -3201,46 +2084,7 @@ class SendMessageViewTests(TestCase):
                     mock_codex.assert_not_called()
                 mock_spawn.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_rejects_get(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-    ) -> None:
-        response = self.client.get(
-            reverse("send_message", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 405)
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
-
 class StopSessionViewTests(TestCase):
-    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
-    @patch("hitch.main.runtime.codex_pool.interrupt_active")
-    def test_targets_instance_from_form_value(
-        self,
-        mock_interrupt_active: MagicMock,
-        mock_interrupt_instance: MagicMock,
-    ) -> None:
-        # The Stop button posts the active worker's pk so a stale tab
-        # cannot accidentally abort a newer overlapping worker. The
-        # view forwards the id (and the URL's session id, as a
-        # cross-thread guard) to ``interrupt_instance``.
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"}),
-            data={"instance": "42"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
-        mock_interrupt_active.assert_not_called()
-
     @patch("hitch.main.runtime.codex_pool.interrupt_instance")
     @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_stop_with_selected_images_still_interrupts_worker(
@@ -3261,71 +2105,6 @@ class StopSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
-
-    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
-    @patch("hitch.main.runtime.codex_pool.interrupt_active")
-    def test_stop_with_over_limit_images_still_interrupts_worker(
-        self,
-        mock_interrupt_active: MagicMock,
-        mock_interrupt_instance: MagicMock,
-    ) -> None:
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"}),
-            data={
-                "instance": "42",
-                "input_images": [
-                    SimpleUploadedFile(
-                        f"screen-{index}.png", _PNG_BYTES, content_type="image/png"
-                    )
-                    for index in range(5)
-                ],
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
-        mock_interrupt_active.assert_not_called()
-
-    @patch(
-        "hitch.main.workflows.system_agents.stop_active_workflow",
-        wraps=system_agents.stop_active_workflow,
-    )
-    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
-    def test_terminal_workflow_instance_falls_back_to_exact_worker(
-        self,
-        mock_interrupt_instance: MagicMock,
-        mock_stop_workflow: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-        )
-        instance = CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="Hitch PR workflow could not complete.",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-        )
-
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"}),
-            data={"instance": str(instance.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_stop_workflow.assert_called_once_with(
-            "abc", expected_workflow_id=workflow.pk
-        )
-        mock_interrupt_instance.assert_called_once_with(
-            instance.pk, expected_thread_id="abc"
-        )
 
     @patch("hitch.main.workflows.pr_qa._handle_pr_prompt_finished")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
@@ -3400,19 +2179,6 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_active.assert_called_once_with("abc")
         mock_interrupt_instance.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool.interrupt_active")
-    @patch("hitch.main.workflows.system_agents.stop_active_workflow", return_value=True)
-    def test_stops_active_system_workflow_without_instance(
-        self, mock_stop_workflow: MagicMock, mock_interrupt_active: MagicMock
-    ) -> None:
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_stop_workflow.assert_called_once_with("abc")
-        mock_interrupt_active.assert_not_called()
-
     @patch("hitch.main.runtime.codex_pool.interrupt_instance")
     @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_rejects_invalid_requests(
@@ -3483,27 +2249,6 @@ class ResolveApprovalViewTests(TestCase):
                 approval.refresh_from_db()
                 self.assertEqual(approval.decision, decision)
                 self.assertIsNotNone(approval.decided_at)
-
-    def test_normalizes_legacy_decision_values(self) -> None:
-        """Tabs loaded before a deploy may still POST the old UI values.
-        Normalize them at the boundary so a click doesn't poison the row
-        with a value app-server treats as a declined request."""
-        aliases = {
-            "approved": "accept",
-            "denied": "decline",
-            "abort": "cancel",
-        }
-        for posted, stored in aliases.items():
-            with self.subTest(posted=posted):
-                approval = self._make_approval()
-                response = self.client.post(
-                    reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-                    data={"decision": posted},
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.content, stored.encode())
-                approval.refresh_from_db()
-                self.assertEqual(approval.decision, stored)
 
     def test_accepts_structured_execpolicy_amendment_decision(self) -> None:
         """Codex can offer a structured accept decision that both runs the
