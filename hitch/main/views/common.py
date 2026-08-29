@@ -38,7 +38,6 @@ from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import DiffView, build_worktree_diff
 from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
-from hitch.main.local_merges import local_branch_names as local_branch_names
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,

@@ -46,7 +46,6 @@ from hitch.main.sessions.session_entry_display import (
     _workflow_accepts_steering,
 )
 from hitch.main.sessions.session_pr_plan import (
-    _auto_merge_to_local_branch_for_session,
     _auto_pr_enabled_for_session,
     _auto_qa_enabled_for_session,
     _count_user_entries,
@@ -555,18 +554,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         auto_qa_enabled = (
             False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
         )
-        auto_merge_to_local_branch, auto_merge_branch = (
-            _auto_merge_to_local_branch_for_session(session_id)
-        )
-        # ``auto_merge_branch`` is the gated value used by the auto-review
-        # spawn path (only forwarded when auto_qa is enabled). The manual
-        # ``/qa`` and ``/pr`` activations should honor the session-configured
-        # merge target regardless of the auto_qa flag, since the user is
-        # explicitly opting into the QA workflow at that moment.
-        session_auto_merge_branch = auto_merge_branch
-        if not auto_qa_enabled:
-            auto_merge_to_local_branch = False
-            auto_merge_branch = ""
         if qa_workflow_activation:
             workflow_model, workflow_reasoning_effort = _stored_model_and_effort(
                 resumed, settings
@@ -613,12 +600,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 return redirect("session", session_id=session_id)
             if qa_activation:
                 workflow_kwargs["open_pr_on_lgtm"] = False
-            # Honor the session's auto-merge target the same way auto_qa /
-            # auto_pr workflows do, so manual /qa and /pr respect the user's
-            # "merge into a local branch instead of opening a PR" setting
-            # rather than silently dropping it.
-            if session_auto_merge_branch:
-                workflow_kwargs["auto_merge_branch"] = session_auto_merge_branch
             pr_qa.start_pr_qa_workflow(**workflow_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
@@ -648,9 +629,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
             spawn_kwargs["stored_model"] = auto_review_model or None
             spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
-            if auto_merge_to_local_branch:
-                spawn_kwargs["auto_merge_to_local_branch"] = True
-                spawn_kwargs["auto_merge_branch"] = auto_merge_branch
         if plan_mode:
             if not collaboration_model:
                 raise _TurnRejectedError(

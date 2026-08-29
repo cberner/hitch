@@ -1057,35 +1057,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_auto_merge_session_marks_follow_up_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(mock_spawn.call_args.kwargs["auto_qa_enabled"])
-        self.assertTrue(mock_spawn.call_args.kwargs["auto_merge_to_local_branch"])
-        self.assertEqual(mock_spawn.call_args.kwargs["auto_merge_branch"], "main")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
     def test_plan_routing_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
@@ -1688,48 +1659,6 @@ class SendMessageViewTests(TestCase):
             status_code=400,
         )
         mock_start_monitor.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_slash_commands_forward_session_auto_merge_branch_to_workflow(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        # SessionMetadata says "after QA approves, merge into ``release``
-        # locally instead of opening a PR". The auto-review code path in
-        # ``system_agents`` already honors this for auto_qa/auto_pr workers;
-        # the manual /qa and /pr slash activations must too, or the user's
-        # configured local merge silently disappears every time they trigger
-        # QA from the composer.
-        mock_discover.return_value = [Path("/repo")]
-        project = _make_project()
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            project=project,
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
-        )
-
-        for prompt in ("/qa", "/pr"):
-            with self.subTest(prompt=prompt):
-                self._patch_codex(mock_codex, model="gpt-5.4")
-                mock_start_workflow.reset_mock()
-
-                response = self.client.post(
-                    reverse("send_message", kwargs={"session_id": "abc"}),
-                    data={"prompt": prompt},
-                )
-
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(
-                    mock_start_workflow.call_args.kwargs["auto_merge_branch"],
-                    "release",
-                )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")

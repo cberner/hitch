@@ -3,7 +3,7 @@
 New workflows start with one coding turn that recommends, but does not require,
 the native ``hitch_reviewer`` subagent. PR workflows then publish and hand the
 watch/fix cycle to that visible agent through ``hitch.watch_pr``; QA-only
-workflows complete or merge to a configured local branch.
+workflows complete after review guidance.
 
 Shared spawn/transition/blocking helpers stay in ``system_agents`` and are
 reached through the module object so test patches on that namespace keep
@@ -21,13 +21,6 @@ from typing import Any, override
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from hitch.main.local_merges import (
-    REVIEW_GUIDANCE_LOCAL_MERGE,
-    LocalBranchMergeError,
-    LocalBranchMergeResult,
-    build_auto_merge_review_patch,
-    merge_worktree_diff_to_branch,
-)
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
@@ -114,15 +107,12 @@ def start_pr_qa_workflow(
     web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
-    auto_merge_branch: str = "",
     pr_title: str = "",
     pr_watch_tool_available: bool = True,
     lifecycle_lock_held: bool = False,
 ) -> SystemWorkflow:
     """Start one coding turn with optional review guidance before handoff."""
-    auto_merge_branch = auto_merge_branch.strip()
     pr_title = " ".join(pr_title.split())
-    open_pr_on_lgtm = open_pr_on_lgtm and not auto_merge_branch
     if open_pr_on_lgtm:
         _require_pr_watch_tool(pr_watch_tool_available)
     try:
@@ -141,7 +131,6 @@ def start_pr_qa_workflow(
                 state={
                     "pr_prompt": optional_review_prompt(
                         prepare_pull_request=open_pr_on_lgtm,
-                        auto_merge_branch=auto_merge_branch,
                     ),
                     "sandbox_policy": sandbox_policy or "",
                     "approval_mode": approval_mode or "",
@@ -153,7 +142,6 @@ def start_pr_qa_workflow(
                     "next_user_message_index": max(initial_user_message_index, 0),
                     system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
                     "open_pr_on_lgtm": open_pr_on_lgtm,
-                    "auto_merge_branch": auto_merge_branch,
                     "pr_title": pr_title,
                 },
             )
@@ -218,7 +206,6 @@ def start_pr_now_workflow(
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": True,
-                    "auto_merge_branch": "",
                     "pr_title": "",
                 },
             )
@@ -287,7 +274,6 @@ def start_pr_watch_workflow(
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": True,
-                    "auto_merge_branch": "",
                     system_agents._PR_HANDOFF_STATE_KEY: pr_handoff,
                 },
             )
@@ -425,13 +411,6 @@ def _steering_inbox_is_empty(workflow: SystemWorkflow) -> bool:
 # engine.SHARED_STATE_KEYS).
 _PR_QA_STATE_KEYS = frozenset(
     {
-        "auto_merge_branch",
-        "auto_merge_to_local_branch",
-        "auto_merge_result",
-        "auto_merge_reviewed_diff",
-        "auto_merge_reviewed_target_sha",
-        "auto_merge_reviewed_source_tree",
-        "auto_merge_session_base_sha",
         "auto_pull_result",
         "hitch_pr_handoff",
         "open_pr_on_lgtm",
@@ -463,7 +442,6 @@ _PR_QA_STEPS = frozenset(
         system_agents.STEP_PR_READY,
         system_agents.STEP_PR_CLOSED,
         system_agents.STEP_PR_NO_CHANGES,
-        system_agents.STEP_LOCAL_BRANCH_MERGED,
     }
 )
 
@@ -527,16 +505,6 @@ def _recover_pr_prompt_turn(workflow: SystemWorkflow) -> None:
         failure=failure,
     )
 
-
-def _local_branch_merge_result_dict(
-    result: LocalBranchMergeResult,
-) -> dict[str, str | bool]:
-    return {
-        "branch": result.branch,
-        "commit_sha": result.commit_sha,
-        "target_worktree": result.target_worktree,
-        "changed": result.changed,
-    }
 
 def _handle_user_steering_finished(
     instance: CodexInstance, workflow: SystemWorkflow
@@ -840,15 +808,6 @@ def _handle_pr_watch_finished(instance: CodexInstance, workflow: SystemWorkflow)
 def _complete_review_prompt_result(
     workflow: SystemWorkflow, instance: CodexInstance
 ) -> None:
-    auto_merge_branch = _state_string(workflow, "auto_merge_branch")
-    if auto_merge_branch:
-        _complete_local_branch_merge_after_review_prompt(
-            workflow,
-            instance,
-            auto_merge_branch,
-        )
-        return
-
     def _complete(locked: SystemWorkflow) -> bool:
         system_agents._complete_workflow(
             locked, system_agents.STEP_REVIEW_COMPLETED
@@ -873,104 +832,6 @@ def _complete_review_prompt_result(
             workflow,
             expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
-
-
-def _complete_local_branch_merge_after_review_prompt(
-    workflow: SystemWorkflow,
-    instance: CodexInstance,
-    branch: str,
-) -> None:
-    if not _claim_pr_publication(
-        workflow,
-        instance,
-        expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-    ):
-        _start_queued_user_steering(
-            workflow,
-            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        return
-
-    try:
-        with session_lifecycle.hold(workflow.main_thread_id):
-            workflow.refresh_from_db()
-            if (
-                not workflow.is_active
-                or workflow.step != system_agents.STEP_PR_PROMPT_RUNNING
-                or workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
-                != instance.pk
-            ):
-                return
-            review_patch = build_auto_merge_review_patch(workflow.cwd, branch)
-            result = merge_worktree_diff_to_branch(
-                workflow.cwd,
-                branch,
-                review_patch.patch,
-                review_patch.target_sha,
-                review_patch.source_tree_sha,
-                provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
-            )
-
-            def _record_merged(locked: SystemWorkflow) -> bool:
-                locked.state = {
-                    **locked.state,
-                    system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: (
-                        review_patch.patch
-                    ),
-                    system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: (
-                        review_patch.target_sha
-                    ),
-                    system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY: (
-                        review_patch.base_sha
-                    ),
-                    system_agents.AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY: (
-                        review_patch.source_tree_sha
-                    ),
-                    "auto_merge_result": _local_branch_merge_result_dict(result),
-                }
-                locked.state.pop(_PR_PUBLICATION_INSTANCE_STATE_KEY, None)
-                system_agents._complete_workflow(
-                    locked,
-                    system_agents.STEP_LOCAL_BRANCH_MERGED,
-                )
-                return True
-
-            engine.claim_workflow_transition(
-                workflow,
-                _record_merged,
-                expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
-                guard=lambda locked: (
-                    locked.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
-                    == instance.pk
-                ),
-            )
-    except LocalBranchMergeError as exc:
-        _block_pr_step_if_owned(
-            workflow,
-            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-            error=f"auto merge to local branch failed: {exc}",
-            instance=instance,
-        )
-        system_agents._record_auto_merge_result_for_proposals(
-            workflow,
-            {
-                "auto_merge_status": "failed",
-                "auto_merge_branch": branch,
-                "auto_merge_error": str(exc),
-            },
-        )
-        return
-
-    system_agents._record_auto_merge_result_for_proposals(
-        workflow,
-        {
-            "auto_merge_status": "merged" if result.changed else "already_applied",
-            "auto_merge_branch": result.branch,
-            "auto_merge_commit_sha": result.commit_sha,
-        },
-    )
-
-
 def _claim_pr_publication(
     workflow: SystemWorkflow,
     instance: CodexInstance,

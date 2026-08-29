@@ -597,8 +597,7 @@ class WorktreeDiffTests(SimpleTestCase):
 
     def test_untracked_file_without_trailing_newline_marks_eof(self) -> None:
         # The synthetic untracked-file diff is rendered into the session view
-        # and -- when auto-merge is disabled -- forwarded verbatim to the QA
-        # reviewer prompt via ``build_worktree_diff_text``. Without the
+        # and exposed verbatim through ``build_worktree_diff_text``. Without the
         # ``\ No newline at end of file`` marker the diff is indistinguishable
         # from a file that does end with ``\n``, so the reviewer cannot tell
         # whether the new file is missing the trailing newline that lint tools

@@ -322,6 +322,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'data-run-status-dialog')
+        self.assertNotContains(response, "Auto merge")
         self.assertContains(response, 'data-state="blocked"')
         self.assertContains(
             response, 'data-run-status-title="Autonomous goal is blocked"'
@@ -1497,31 +1498,6 @@ class AutonomousGoalViewTests(TestCase):
                     "web_search_mode": "maybe",
                 },
                 "web search setting is invalid",
-            ),
-            (
-                {
-                    "title": "Improve docs",
-                    "goal": "Find useful docs increments.",
-                    "ambition": AutonomousGoal.AMBITION_HIGH,
-                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
-                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
-                    "auto_merge_to_local_branch": "true",
-                    "auto_merge_branch": "main",
-                },
-                "auto merge requires auto-QA",
-            ),
-            (
-                {
-                    "title": "Improve docs",
-                    "goal": "Find useful docs increments.",
-                    "ambition": AutonomousGoal.AMBITION_HIGH,
-                    "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
-                    "auto_qa": "true",
-                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
-                    "auto_merge_to_local_branch": "true",
-                    "auto_merge_branch": "missing",
-                },
-                "auto merge branch is invalid",
             ),
         ):
             with self.subTest(message=message):

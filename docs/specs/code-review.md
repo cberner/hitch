@@ -28,14 +28,14 @@ that replaces the framework-driven QA verdict-and-repair loop.
 - Keep review delegation inside Codex's native subagent lifecycle.
 - Give the reviewer the coding session's checkout and effective model settings
   while preventing ordinary filesystem writes.
-- Preserve QA, PR, and local-merge triggers without orchestrating a hidden
-  review-and-repair loop.
+- Preserve QA and PR triggers without orchestrating a hidden review-and-repair
+  loop.
 
 ### 2.2 Non-Goals
 
 - Hitch does not decide whether a review finding is valid.
-- Hitch does not require review before work can complete, merge locally, or
-  proceed to PR publication.
+- Hitch does not require review before work can complete or proceed to PR
+  publication.
 - Hitch does not build a second app-server, tool protocol, cancellation router,
   or capability sandbox around native subagents.
 
@@ -95,16 +95,13 @@ that replaces the framework-driven QA verdict-and-repair loop.
   modes do not suppress the automatic trigger.
 - `REVIEW-qa-completion`: A QA-only workflow completes after its guidance turn
   succeeds, whether or not review was delegated.
+- `REVIEW-no-local-merge`: Review guidance never applies session changes
+  directly to another local branch.
 - `REVIEW-pr-handoff`: A PR workflow proceeds to publication and one visible,
   agent-driven `hitch.watch_pr` follow-up turn after its guidance turn succeeds.
-- `REVIEW-local-merge-handoff`: A configured local auto-merge captures the final
-  change set after guidance, applies that exact change set to the target branch,
-  and reports the branch and commit. Messages use neutral review-guidance
-  terminology and do not claim QA approval.
-- `REVIEW-guidance-steering`: User steering during QA-only or local-merge
-  guidance resumes guidance without PR preparation, commit, push, or PR
-  publication instructions. Guidance failures are attributed to the review
-  workflow.
+- `REVIEW-guidance-steering`: User steering during QA-only guidance resumes
+  guidance without PR preparation, commit, push, or PR publication
+  instructions. Guidance failures are attributed to the review workflow.
 - `REVIEW-qa-display`: `/qa` is displayed as a coding-agent inspection with an
   optional reviewer subagent.
 - `REVIEW-pr-now`: `/pr-now` continues to skip review guidance and proceeds

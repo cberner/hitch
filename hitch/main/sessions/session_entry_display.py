@@ -406,22 +406,7 @@ def _apply_system_author(entry: dict[str, Any], system_authors: dict[int, str], 
 
 
 def _apply_workflow_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-    workflow_entries = sorted(_review_merge_entries(session_id), key=lambda item: item[0])
-    if not workflow_entries:
-        result = entries
-    else:
-        result = []
-        user_message_index = 0
-        pending = workflow_entries.copy()
-        for entry in entries:
-            if entry.get("kind") == "user":
-                while pending and pending[0][0] == user_message_index:
-                    _index, workflow_entry = pending.pop(0)
-                    result.append(workflow_entry)
-                user_message_index += 1
-            result.append(entry)
-        result.extend(workflow_entry for _index, workflow_entry in pending)
-    return _apply_workflow_auto_pull_messages(result, session_id)
+    return _apply_workflow_auto_pull_messages(entries, session_id)
 
 
 def _apply_workflow_auto_pull_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
@@ -453,50 +438,6 @@ def _workflow_auto_pull_entries(session_id: str) -> Iterator[dict[str, Any]]:
             "html": render_markdown(text),
             "timestamp": int(workflow.updated_at.timestamp()),
         }
-
-
-def _review_merge_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]]:
-    workflows = (
-        SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id=session_id,
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
-        )
-        .order_by("created_at")
-    )
-    for workflow in workflows:
-        if not system_agents.is_review_guidance_only_workflow(workflow):
-            continue
-        next_user_message_index = workflow.state.get("next_user_message_index")
-        if not isinstance(next_user_message_index, int):
-            continue
-        text = _review_merge_result_text(workflow)
-        yield next_user_message_index, {
-            "kind": "agent",
-            "display_author": system_agents.REVIEW_WORKFLOW_DISPLAY_AUTHOR,
-            "text": text,
-            "html": render_markdown(text),
-            "timestamp": int(workflow.updated_at.timestamp()),
-        }
-
-
-def _review_merge_result_text(workflow: SystemWorkflow) -> str:
-    result = workflow.state.get("auto_merge_result")
-    if not isinstance(result, dict):
-        return "Hitch merged the session changes into the configured local branch."
-    branch = result.get("branch")
-    commit_sha = result.get("commit_sha")
-    changed = result.get("changed")
-    if not isinstance(branch, str) or not branch.strip():
-        return "Hitch merged the session changes into the configured local branch."
-    if changed is False:
-        text = f"Hitch found the session changes already applied to {branch.strip()}."
-    else:
-        text = f"Hitch merged the session changes into {branch.strip()}."
-    if isinstance(commit_sha, str) and commit_sha.strip():
-        text = f"{text}\n\nCommit: {commit_sha.strip()}"
-    return text
 
 
 def _auto_pull_text(result: object) -> str:

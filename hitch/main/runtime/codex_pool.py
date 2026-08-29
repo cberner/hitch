@@ -140,8 +140,6 @@ def spawn_new_session(
     user_message_index: int | None = 0,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    auto_merge_to_local_branch: bool = False,
-    auto_merge_branch: str = "",
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -228,8 +226,6 @@ def spawn_new_session(
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
     )
     if thread_path:
         setattr(instance, _CODEX_THREAD_PATH_ATTR, thread_path)
@@ -326,8 +322,6 @@ def spawn_turn(
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    auto_merge_to_local_branch: bool = False,
-    auto_merge_branch: str = "",
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt.
 
@@ -364,8 +358,6 @@ def spawn_turn(
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
     )
 
 
@@ -1668,8 +1660,6 @@ def _spawn_worker(
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    auto_merge_to_local_branch: bool = False,
-    auto_merge_branch: str = "",
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1710,8 +1700,6 @@ def _spawn_worker(
             plan_mode=plan_mode,
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
-            auto_merge_to_local_branch=auto_merge_to_local_branch,
-            auto_merge_branch=auto_merge_branch,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

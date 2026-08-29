@@ -36,8 +36,6 @@ class AutonomousGoalValues(NamedTuple):
     proposal_budget: int | None
     confidence_threshold: str
     web_search_mode: str
-    auto_merge_to_local_branch: bool
-    auto_merge_branch: str
 
 
 def _validated_autonomous_goal_title(raw_title: str) -> tuple[str, str | None]:
@@ -58,7 +56,6 @@ def _validated_autonomous_goal_values(
     auto_proposal_default: bool = False,
     stacked_diff_depth_default: int = AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
     proposal_budget_default: int | None = None,
-    local_branches: list[str] | None = None,
 ) -> tuple[AutonomousGoalValues | None, str | None]:
     title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
     if error is not None:
@@ -121,21 +118,6 @@ def _validated_autonomous_goal_values(
     )
     if web_search_mode not in {"", *_VALID_WEB_SEARCH_MODES}:
         return None, "web search setting is invalid"
-    auto_merge = request.POST.get("auto_merge_to_local_branch", "").strip()
-    if auto_merge not in {"", "false", "true"}:
-        return None, "auto merge setting is invalid"
-    auto_merge_to_local_branch = auto_merge == "true"
-    auto_merge_branch = request.POST.get("auto_merge_branch", "").strip()
-    valid_local_branches = set(local_branches or [])
-    if auto_merge_to_local_branch:
-        if not auto_qa_enabled:
-            return None, "auto merge requires auto-QA"
-        if not auto_merge_branch:
-            return None, "auto merge branch is required"
-        if auto_merge_branch not in valid_local_branches:
-            return None, "auto merge branch is invalid"
-    else:
-        auto_merge_branch = ""
     return AutonomousGoalValues(
         title=title,
         goal=goal,
@@ -147,8 +129,6 @@ def _validated_autonomous_goal_values(
         proposal_budget=proposal_budget,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
     ), None
 
 

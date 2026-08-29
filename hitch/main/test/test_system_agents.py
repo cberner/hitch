@@ -21,12 +21,6 @@ from openai_codex import CodexError
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
-from hitch.main.local_merges import (
-    REVIEW_GUIDANCE_LOCAL_MERGE,
-    AutoMergeReviewPatch,
-    LocalBranchMergeError,
-    LocalBranchMergeResult,
-)
 from hitch.main.models import (
     AutonomousGoal,
     AutonomousGoalMemory,
@@ -67,8 +61,6 @@ def _instance(
     display_author: str = "",
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    auto_merge_to_local_branch: bool = False,
-    auto_merge_branch: str = "",
     plan_mode: bool = False,
     model: str = "",
     reasoning_effort: str = "",
@@ -96,8 +88,6 @@ def _instance(
         plan_mode=plan_mode,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
         events_path=events_path,
         status=status,
         purpose=purpose,
@@ -346,7 +336,6 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertEqual(workflow.state["next_user_message_index"], 5)
-        self.assertEqual(workflow.state["auto_merge_branch"], "")
         self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
         mock_spawn_new_session.assert_not_called()
         mock_spawn_turn.assert_called_once_with(
@@ -679,123 +668,6 @@ class SessionPrStageRefreshTests(TestCase):
 
 
 class SystemAgentWorkflowTests(TestCase):
-    @patch(
-        "hitch.main.workflows.pr_qa.build_auto_merge_review_patch",
-        return_value=AutoMergeReviewPatch(
-            patch="diff --git",
-            target_sha="base123",
-            base_sha="session-base123",
-            source_tree_sha="tree123",
-        ),
-    )
-    @patch(
-        "hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch",
-        return_value=LocalBranchMergeResult(
-            branch="main",
-            commit_sha="merge123",
-            target_worktree="/repo",
-            changed=True,
-        ),
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_local_auto_merge_builds_and_merges_patch_after_coding_turn(
-        self,
-        mock_spawn: MagicMock,
-        mock_merge: MagicMock,
-        mock_patch: MagicMock,
-    ) -> None:
-        spawned: list[CodexInstance] = []
-
-        def spawn(**kwargs: Any) -> CodexInstance:
-            instance = _instance(
-                thread_id=kwargs["thread_id"],
-                prompt=kwargs["prompt"],
-                purpose=kwargs["purpose"],
-                workflow_id=kwargs["workflow_id"],
-                user_message_index=kwargs["user_message_index"],
-            )
-            spawned.append(instance)
-            return instance
-
-        mock_spawn.side_effect = spawn
-
-        workflow = pr_qa.start_pr_qa_workflow(
-            main_thread_id="main-thread",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_merge_branch="main",
-        )
-
-        mock_patch.assert_not_called()
-        self.assertIn("local branch `main`", spawned[0].prompt)
-        system_agents.on_codex_instance_finished(spawned[0])
-
-        workflow.refresh_from_db()
-        mock_patch.assert_called_once_with("/repo", "main")
-        mock_merge.assert_called_once_with(
-            "/repo",
-            "main",
-            "diff --git",
-            "base123",
-            "tree123",
-            provenance=REVIEW_GUIDANCE_LOCAL_MERGE,
-        )
-        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
-            "diff --git",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
-            "base123",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY],
-            "session-base123",
-        )
-
-    @patch(
-        "hitch.main.workflows.pr_qa.build_auto_merge_review_patch",
-        side_effect=LocalBranchMergeError("no merge base"),
-    )
-    @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_local_auto_merge_workflow_blocks_when_final_patch_is_invalid(
-        self,
-        mock_spawn: MagicMock,
-        _mock_surface: MagicMock,
-        _mock_patch: MagicMock,
-    ) -> None:
-        spawned: list[CodexInstance] = []
-
-        def spawn(**kwargs: Any) -> CodexInstance:
-            instance = _instance(
-                thread_id=kwargs["thread_id"],
-                prompt=kwargs["prompt"],
-                purpose=kwargs["purpose"],
-                workflow_id=kwargs["workflow_id"],
-                user_message_index=kwargs["user_message_index"],
-            )
-            spawned.append(instance)
-            return instance
-
-        mock_spawn.side_effect = spawn
-        workflow = pr_qa.start_pr_qa_workflow(
-            main_thread_id="main-thread",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_merge_branch="main",
-        )
-
-        system_agents.on_codex_instance_finished(spawned[0])
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertIn("no merge base", workflow.state["error"])
-
-
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
         existing = SystemWorkflow.objects.create(
@@ -972,53 +844,6 @@ class SystemAgentWorkflowTests(TestCase):
                     mock_start.call_args.kwargs["approval_mode"], approval_mode
                 )
         self.assertEqual(mock_start.call_count, 2)
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    def test_auto_merge_start_block_records_failed_metadata(self, mock_start: MagicMock) -> None:
-        project = _make_project()
-        metadata = SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/repo",
-            project=project,
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            title="Add parser coverage",
-            accepted_session=metadata,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={},
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-            state={
-                "auto_merge_branch": "main",
-                "error": "review workflow failed: no merge base",
-            },
-        )
-        mock_start.return_value = workflow
-        instance = _instance(
-            thread_id="main-thread",
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "failed")
-        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
-        self.assertEqual(
-            proposal.outcome_metadata["auto_merge_error"],
-            "review workflow failed: no merge base",
-        )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_does_not_stamp_when_workflow_start_fails(self, mock_start: MagicMock) -> None:
@@ -5901,56 +5726,6 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch(
-        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
-        return_value="a" * 40,
-    )
-    @patch(
-        "hitch.main.workflows.autonomous_goals.commit_hash_for_ref",
-        return_value="b" * 40,
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_with_auto_merge_uses_target_branch_snapshot(
-        self,
-        mock_spawn: MagicMock,
-        mock_ref_sha: MagicMock,
-        mock_default_sha: MagicMock,
-    ) -> None:
-        project = _make_project()
-        autonomous_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Keep release tests current",
-            goal="Find useful test improvements for release.",
-            auto_proposal_enabled=True,
-            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
-        )
-        mock_spawn.return_value = _instance(
-            thread_id="candidate-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        )
-
-        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
-
-        self.assertEqual(started, 1)
-        workflow = SystemWorkflow.objects.get()
-        self.assertEqual(workflow.state["default_branch_sha"], "b" * 40)
-        mock_ref_sha.assert_called_once_with("/repo", "refs/heads/release")
-        mock_default_sha.assert_not_called()
-        self.mock_create_worktree.assert_called_with(
-            "/repo",
-            base_ref="b" * 40,
-            disable_hooks=True,
-        )
-        self.assertEqual(
-            workflow.main_thread_id,
-            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
-        )
-        mock_spawn.assert_called_once()
-
     @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_lock(
@@ -6026,36 +5801,6 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_called_once_with("/repo")
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.autonomous_goals.commit_hash_for_ref")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_rechecks_base_selection_after_sha_lookup(
-        self, mock_spawn: MagicMock, mock_ref_sha: MagicMock
-    ) -> None:
-        project = _make_project()
-        autonomous_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Keep release tests current",
-            goal="Find useful test improvements for release.",
-            auto_proposal_enabled=True,
-            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="release",
-        )
-
-        def retarget_goal(_repo_path: str, _ref: str) -> str:
-            AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(auto_merge_branch="main")
-            return "b" * 40
-
-        mock_ref_sha.side_effect = retarget_goal
-
-        started = autonomous_goals._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
-
-        self.assertFalse(started)
-        self.assertFalse(SystemWorkflow.objects.exists())
-        mock_ref_sha.assert_called_once_with("/repo", "refs/heads/release")
         mock_spawn.assert_not_called()
 
     def test_auto_proposal_batch_survives_a_goal_raising_mid_iteration(self) -> None:

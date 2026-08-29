@@ -39,7 +39,6 @@ _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY = (
     "proposal_budget_tokens_used"
 )
 _DONE_ACCEPTED_SESSION_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
-_DONE_ACCEPTED_SESSION_WORKFLOW_STEPS = frozenset({"local_branch_merged"})
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
 
 
@@ -438,8 +437,6 @@ def _accepted_session_done_workflows_by_thread_id(
 
 
 def _accepted_session_workflow_is_done(workflow: SystemWorkflow) -> bool:
-    if workflow.step in _DONE_ACCEPTED_SESSION_WORKFLOW_STEPS:
-        return True
     state = workflow.state if isinstance(workflow.state, Mapping) else {}
     return _pr_snapshot_done_stage_key(state.get(_PR_HANDOFF_STATE_KEY)) is not None
 

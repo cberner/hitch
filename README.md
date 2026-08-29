@@ -40,8 +40,7 @@ the top level:
 - `goals/` -- autonomous goals: goal forms/prompts, proposal lifecycle and
   stacked-diff continuation, and the auto-proposal scheduler.
 - top level -- `views`, `models`, `caches`, `formatting`, and the
-  git/repo utilities (`repos`, `worktrees`, `git_support`, `local_merges`,
-  `diffs`).
+  git/repo utilities (`repos`, `worktrees`, `git_support`, `diffs`).
 
 ## Major frameworks and dependencies
 

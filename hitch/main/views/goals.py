@@ -79,11 +79,6 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
         if current_project is not None
         else []
     )
-    local_branch_choices = (
-        common.local_branch_names(current_project.repo_path)
-        if current_project is not None
-        else []
-    )
     _attach_autonomous_goal_run_state(goals)
     _attach_autonomous_goal_display_state(goals)
     settings_context = common._settings_context(current_settings, models_data)
@@ -118,7 +113,6 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
             "default_web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
-            "local_branch_choices": local_branch_choices,
             "title_max_len": _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
             **settings_context,
         },
@@ -131,10 +125,7 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    values, error = _validated_autonomous_goal_values(
-        request,
-        local_branches=common.local_branch_names(project.repo_path),
-    )
+    values, error = _validated_autonomous_goal_values(request)
     if error is not None:
         return HttpResponseBadRequest(error)
     assert values is not None
@@ -150,8 +141,6 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
         proposal_budget=values.proposal_budget,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
-        auto_merge_to_local_branch=values.auto_merge_to_local_branch,
-        auto_merge_branch=values.auto_merge_branch,
     )
     return redirect("autonomous_goals")
 
@@ -175,7 +164,6 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         auto_proposal_default=autonomous_goal.auto_proposal_enabled,
         stacked_diff_depth_default=autonomous_goal.stacked_diff_depth,
         proposal_budget_default=autonomous_goal.proposal_budget,
-        local_branches=common.local_branch_names(project.repo_path),
     )
     if error is not None:
         return HttpResponseBadRequest(error)
@@ -193,8 +181,6 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         "proposal_budget",
         "confidence_threshold",
         "web_search_mode",
-        "auto_merge_to_local_branch",
-        "auto_merge_branch",
     ):
         value = getattr(values, field)
         if getattr(autonomous_goal, field) != value:

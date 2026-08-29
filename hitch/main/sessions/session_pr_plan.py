@@ -2,7 +2,7 @@
 
 This module owns the helpers that read a thread's rollout, workflow, and
 metadata to derive its PR state (URLs, snapshots, observation epochs), its
-Plan Mode state, and its auto-PR/auto-QA/auto-merge session settings. It is a
+Plan Mode state, and its auto-PR/auto-QA session settings. It is a
 leaf module: it depends only on the sibling helpers and never imports views.
 """
 
@@ -511,15 +511,3 @@ def _auto_qa_enabled_for_session(session_id: str) -> bool:
     return SessionMetadata.objects.filter(
         thread_id=session_id, auto_qa_enabled=True
     ).exists()
-
-
-def _auto_merge_to_local_branch_for_session(session_id: str) -> tuple[bool, str]:
-    metadata = (
-        SessionMetadata.objects.filter(thread_id=session_id)
-        .only("auto_merge_to_local_branch", "auto_merge_branch")
-        .first()
-    )
-    if metadata is None or not metadata.auto_merge_to_local_branch:
-        return False, ""
-    branch = metadata.auto_merge_branch.strip()
-    return bool(branch), branch
