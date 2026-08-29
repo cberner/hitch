@@ -2381,6 +2381,7 @@ class SendMessageViewTests(TestCase):
                     "developer_instructions": None,
                     "enable_memories": False,
                     "initial_user_message_index": 0,
+                    "pr_watch_tool_available": False,
                     "lifecycle_lock_held": True,
                 }
                 workflow_kwargs.update(expected)
@@ -2417,11 +2418,12 @@ class SendMessageViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=0,
+            pr_watch_tool_available=False,
             lifecycle_lock_held=True,
         )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_starts_monitor_for_opened_pr(
@@ -2509,10 +2511,11 @@ class SendMessageViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=1,
+            pr_watch_tool_available=False,
             lifecycle_lock_held=True,
         )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_keeps_handoff_after_workflow_owned_failure_activity(
@@ -2693,7 +2696,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(owned_current, owned_workflow)
         self.assertIsNone(current)
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_requires_opened_pr(
@@ -2717,7 +2720,7 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_monitor_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
@@ -3089,7 +3092,7 @@ class SendMessageViewTests(TestCase):
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_MONITORING,
+            step=system_agents.STEP_PR_WATCH_RUNNING,
         )
         unrelated = CodexInstance.objects.create(
             pid=1,

@@ -135,6 +135,41 @@ def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
     yield from _entries_from_lines(lines)
 
 
+def has_dynamic_tool(
+    rollout_path: Path, *, namespace: str, name: str
+) -> bool:
+    """Return whether the persisted thread registered one dynamic tool."""
+    try:
+        with rollout_path.open(encoding="utf-8") as handle:
+            first_line = handle.readline(1024 * 1024)
+    except (OSError, UnicodeError):
+        return False
+    try:
+        entry = json.loads(first_line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+        return False
+    payload = entry.get("payload")
+    tools = payload.get("dynamic_tools") if isinstance(payload, dict) else None
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("namespace") == namespace and tool.get("name") == name:
+            return True
+        if tool.get("type") != "namespace" or tool.get("name") != namespace:
+            continue
+        namespace_tools = tool.get("tools")
+        if isinstance(namespace_tools, list) and any(
+            isinstance(item, dict) and item.get("name") == name
+            for item in namespace_tools
+        ):
+            return True
+    return False
+
+
 _HISTORY_RECORD_MAX_BYTES = 64 * 1024
 _HISTORY_STRUCTURAL_BYTES = 4 * 1024
 _HISTORY_SCAN_MAX_BYTES = 8 * 1024 * 1024

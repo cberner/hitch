@@ -127,14 +127,6 @@ def _refresh_session_pr_stage(session_id: str) -> None:
             and activity_ownership.get(latest_pr_workflow.pk)
         ),
     )
-    if (
-        stage_pr_workflow is not None
-        and pr_qa.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
-    ):
-        pr_qa.refresh_due_pr_monitor_backoffs(
-            limit=1, workflow_id=stage_pr_workflow.pk
-        )
-        return
     if stage_pr_workflow is not None:
         pr_qa.refreshed_pr_handoff_for_stage(stage_pr_workflow)
         return
@@ -243,9 +235,9 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # waiting-for-input row shows its own stage, and flagging that refreshing
         # would schedule a needless worker and reload.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
-        refresh_due = pr_stage_displayed and (
-            pr_qa.pr_handoff_stage_refresh_due(stage_workflow)
-            or pr_qa.pr_monitor_backoff_stage_refresh_due(stage_workflow)
+        refresh_due = (
+            pr_stage_displayed
+            and pr_qa.pr_handoff_stage_refresh_due(stage_workflow)
         )
         if (
             pr_stage_displayed

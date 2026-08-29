@@ -96,8 +96,8 @@ that replaces the framework-driven QA verdict-and-repair loop.
   modes do not suppress the automatic trigger.
 - `REVIEW-qa-completion`: A QA-only workflow completes after its guidance turn
   succeeds, whether or not review was delegated.
-- `REVIEW-pr-handoff`: A PR workflow proceeds to publication and monitoring
-  after its guidance turn succeeds.
+- `REVIEW-pr-handoff`: A PR workflow proceeds to publication and one visible,
+  agent-driven `hitch.watch_pr` follow-up turn after its guidance turn succeeds.
 - `REVIEW-local-merge-handoff`: A configured local auto-merge captures the final
   change set after guidance, applies that exact change set to the target branch,
   and reports the branch and commit independently of legacy QA runs. Messages

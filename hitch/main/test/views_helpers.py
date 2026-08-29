@@ -29,7 +29,6 @@ from hitch.main.sessions import (
 from hitch.main.test.support import (
     _rollout_line,
 )
-from hitch.main.workflows import system_agents
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 _JPEG_BYTES = b"\xff\xd8\xff\xe0JFIF"
@@ -151,46 +150,6 @@ def _basic_session_rollout_lines(user_message: str, assistant_text: str) -> list
             },
         ),
     ]
-
-
-def _due_pr_monitor_state(
-    *, pr_url: str, repo: str, pr_number: int, now: datetime
-) -> dict[str, object]:
-    return {
-        system_agents._PR_HANDOFF_STATE_KEY: {
-            "url": pr_url,
-            "repository_full_name": repo,
-            "pr_number": pr_number,
-            "state": "open",
-            "merged": False,
-        },
-        system_agents._PR_PENDING_CHECKS_STATE_KEY: 1,
-        system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
-            "reason": "pending_gates",
-            "scheduled_at": int(now.timestamp()) - 301,
-            "next_attempt_at": int(now.timestamp()) - 1,
-            "delay_seconds": 300,
-        },
-    }
-
-
-def _merged_pr_monitor_observation(
-    *, pr_url: str, repo: str, pr_number: int
-) -> dict[str, object]:
-    return {
-        "status": "terminal",
-        "summary": "PR was merged.",
-        "feedback": "",
-        "pr": {
-            "url": pr_url,
-            "repository_full_name": repo,
-            "pr_number": pr_number,
-            "state": "closed",
-            "merged": True,
-            "merged_at": "2026-06-05T05:20:00Z",
-        },
-        "blockers": [],
-    }
 
 
 def _seed_usage_metadata(

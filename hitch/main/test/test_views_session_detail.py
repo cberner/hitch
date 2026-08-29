@@ -39,9 +39,7 @@ from hitch.main.test.support import (
 from hitch.main.test.views_helpers import (
     _basic_session_rollout_lines,
     _cache_token_usage,
-    _due_pr_monitor_state,
     _make_rollout,
-    _merged_pr_monitor_observation,
     _session,
     _token_count_line,
     _write_codex_home_rollout,
@@ -2202,69 +2200,6 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
-        self,
-        mock_codex: MagicMock,
-        _start_models_refresh: MagicMock,
-        mock_observe: MagicMock,
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/60"
-        repo = "cberner/hitch"
-        pr_number = 60
-        rollout_path = _make_rollout(
-            self,
-            _basic_session_rollout_lines("Open a PR", "Opened."),
-        )
-        now = datetime.now(UTC)
-        SessionMetadata.objects.create(
-            thread_id="monitor-pr-merged-detail",
-            cwd=str(rollout_path.parent),
-            codex_path=str(rollout_path),
-            codex_name="Monitor PR merged detail",
-            codex_preview="Open a PR",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="monitor-pr-merged-detail",
-            cwd=str(rollout_path.parent),
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_MONITORING,
-            state=_due_pr_monitor_state(
-                pr_url=pr_url, repo=repo, pr_number=pr_number, now=now
-            ),
-        )
-        mock_observe.return_value = _merged_pr_monitor_observation(
-            pr_url=pr_url, repo=repo, pr_number=pr_number
-        )
-
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "monitor-pr-merged-detail"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
-        )
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertTrue(workflow.state["pr_handoff"]["merged"])
-        mock_observe.assert_called_once()
-
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "monitor-pr-merged-detail"})
-        )
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
-        mock_observe.assert_called_once()
-
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -4092,40 +4027,6 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
 
         self.assertIn(b'"prWorkflowProgress": []', body)
-
-    def test_active_instance_stream_includes_pr_progress(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-active-progress",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
-            state={
-                "pr_gates": [
-                    {
-                        "key": "review",
-                        "label": "Review",
-                        "status": "blocked",
-                        "summary": "Review changes requested.",
-                    }
-                ]
-            },
-        )
-        instance = self._make(
-            thread_id="thread-active-progress",
-            workflow_id=workflow.pk,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
-            display_author=system_agents.PR_MONITOR_DISPLAY_AUTHOR,
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-
-        stream = streaming.stream_for_instance(instance)
-        body = next(stream) + next(stream)
-
-        self.assertIn(b'"prWorkflowProgress"', body)
-        self.assertIn(b'"label": "Review"', body)
-        self.assertIn(b'"statusLabel": "Blocked"', body)
 
     def test_reloads_when_page_render_state_is_stale(self) -> None:
         # The classic out-of-band-spawn race: page rendered with no

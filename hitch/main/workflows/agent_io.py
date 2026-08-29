@@ -22,7 +22,6 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_pool
 from hitch.main.runtime.sdk_values import truncate_for_prompt
-from hitch.main.workflows.pr_handoff import _compact_pr_handoff
 
 _AUTONOMOUS_GOAL_INLINE_HISTORY_CHARS = 10_000
 _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS = 10_000
@@ -552,31 +551,6 @@ def _parse_autonomous_goal_judge_output(raw_output: str) -> dict[str, str] | Non
         "confidence": confidence,
         "summary": summary.strip(),
         "rationale": rationale.strip(),
-    }
-
-
-def _parse_pr_monitor_output(raw_output: str) -> dict[str, Any] | None:
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    status = parsed.get("status")
-    summary = parsed.get("summary")
-    feedback = parsed.get("feedback")
-    pr = parsed.get("pr")
-    if status == "ready":
-        status = "blocked"
-    if status not in {"blocked", "terminal"}:
-        return None
-    if not isinstance(summary, str) or not isinstance(feedback, str):
-        return None
-    if not isinstance(pr, dict):
-        return None
-    return {
-        "status": status,
-        "summary": summary.strip(),
-        "feedback": feedback.strip(),
-        "pr": _compact_pr_handoff(pr),
-        "blockers": _string_list(parsed.get("blockers")),
     }
 
 

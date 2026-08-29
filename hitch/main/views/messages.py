@@ -62,6 +62,7 @@ from hitch.main.sessions.session_resume import (
     _session_detail_metadata,
     _thread_resume_archived_error,
     _unarchive_session_for_turn,
+    thread_has_dynamic_tool,
 )
 from hitch.main.sessions.session_settings import (
     _effective_approval_mode_for_session,
@@ -580,6 +581,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 "developer_instructions": developer_instructions or None,
                 "enable_memories": settings.enable_memories,
                 "initial_user_message_index": _count_user_entries(thread_entries),
+                "pr_watch_tool_available": thread_has_dynamic_tool(
+                    session_id,
+                    namespace="hitch",
+                    name="watch_pr",
+                ),
             }
             if should_forward_web_search_mode:
                 workflow_kwargs["web_search_mode"] = web_search_mode
@@ -595,7 +601,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                             "fix-pr requires an opened PR for this session"
                         )
                     )
-                pr_qa.start_pr_monitor_workflow(
+                pr_qa.start_pr_watch_workflow(
                     pr_url=pr_url,
                     **workflow_kwargs,
                 )
@@ -672,6 +678,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         restore_archived_session_for_rejected_turn()
         common._cleanup_saved_input_images(input_image_paths)
         return rejected.response
+    except pr_qa.PrWatchUnavailableError as exc:
+        restore_archived_session_for_rejected_turn()
+        common._cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest(str(exc))
     except system_agents.WorkflowStartBlockedByArchiveError:
         restore_archived_session_for_rejected_turn()
         common._cleanup_saved_input_images(input_image_paths)

@@ -42,6 +42,42 @@ def _write_rollout(lines: list[str]) -> Path:
 
 
 class SessionHistoryPageTests(TestCase):
+    def test_detects_persisted_namespaced_dynamic_tool(self) -> None:
+        path = _write_rollout(
+            [
+                _line(
+                    "session_meta",
+                    {
+                        "dynamic_tools": [
+                            {
+                                "type": "namespace",
+                                "name": "hitch",
+                                "tools": [
+                                    {"type": "function", "name": "watch_pr"}
+                                ],
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        self.addCleanup(path.unlink, missing_ok=True)
+
+        self.assertTrue(
+            rollout.has_dynamic_tool(
+                path,
+                namespace="hitch",
+                name="watch_pr",
+            )
+        )
+        self.assertFalse(
+            rollout.has_dynamic_tool(
+                path,
+                namespace="hitch",
+                name="missing",
+            )
+        )
+
     def test_reads_message_pages(self) -> None:
         lines = [_line("session_meta", {"id": "session"})]
         for index in range(4):

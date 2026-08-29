@@ -2455,6 +2455,7 @@ class NewSessionViewTests(TestCase):
                     "developer_instructions": None,
                     "enable_memories": False,
                     "initial_user_message_index": 0,
+                    "pr_watch_tool_available": False,
                 }
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
@@ -2596,6 +2597,7 @@ class NewSessionViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=0,
+            pr_watch_tool_available=False,
             open_pr_on_lgtm=False,
             auto_merge_branch="release",
         )

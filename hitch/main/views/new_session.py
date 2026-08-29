@@ -55,6 +55,7 @@ from hitch.main.sessions.session_resume import (
     _restore_archived_session_for_rejected_turn,
     _session_detail_metadata,
     _unarchive_session_for_turn,
+    thread_has_dynamic_tool,
 )
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
@@ -714,6 +715,11 @@ def _start_candidate_proposal_session(
                             settings,
                         )
                     ),
+                    "pr_watch_tool_available": thread_has_dynamic_tool(
+                        candidate_session.thread_id,
+                        namespace="hitch",
+                        name="watch_pr",
+                    ),
                 }
                 if web_search_mode:
                     workflow_kwargs["web_search_mode"] = web_search_mode
@@ -730,6 +736,9 @@ def _start_candidate_proposal_session(
         except _RecoverySourceBusyError:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             return HttpResponseBadRequest(_RECOVERY_SOURCE_BUSY_MESSAGE)
+        except pr_qa.PrWatchUnavailableError as exc:
+            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
+            return HttpResponseBadRequest(str(exc))
         except Exception:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             raise

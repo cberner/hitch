@@ -432,7 +432,7 @@ def _rate_limit_window_auto_proposal_quota_status(
     try:
         used = float(used_percent)
         reset_timestamp = float(resets_at)
-        duration_seconds = float(duration_mins) * system_agents._SECONDS_PER_MINUTE
+        duration_seconds = float(duration_mins) * 60
     except (TypeError, ValueError):
         return None
     if duration_seconds <= 0:

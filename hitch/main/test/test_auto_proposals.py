@@ -374,15 +374,10 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
-    @patch(
-        "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_due_pr_monitor_backoffs",
-        return_value=2,
-    )
     @patch("hitch.main.workflows.workflow_maintenance.reconciliation.reconcile_dead")
-    def test_scheduler_tick_reconciles_and_refreshes_pr_monitor_backoffs(
+    def test_scheduler_tick_reconciles_and_refreshes_pr_stages(
         self,
         mock_reconcile_dead: MagicMock,
-        mock_refresh: MagicMock,
         mock_refresh_pr_stages: MagicMock,
         mock_reap_qa_handoffs: MagicMock,
         mock_disk_cleanup: MagicMock,
@@ -394,11 +389,6 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         # Disk cleanup runs only on the separate 10-minute cadence, never as
         # part of the 60-second maintenance tick.
         mock_disk_cleanup.assert_not_called()
-        # PR-monitor backoff polling shells out to gh per due monitor, so it is
-        # bounded per tick like the PR-stage sweep below.
-        mock_refresh.assert_called_once_with(
-            limit=workflow_maintenance._PR_MONITOR_BACKOFF_LIMIT_PER_TICK
-        )
         # The maintenance scheduler runs under production server commands, so it
         # owns background PR-stage convergence to keep gh out of the request
         # path -- bounded per tick so it can't starve the reconcile sweep.

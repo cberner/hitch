@@ -30,8 +30,8 @@ the top level:
   tools), `codex_review` (native reviewer-role registration), `streaming` (SSE),
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
   `disk_cleanup`, `health`, and process/host infrastructure.
-- `workflows/` -- the system-agent workflow engine: `system_agents` (the
-  optional-review handoff, PR monitor, and autonomous-goal runner state
+- `workflows/` -- the workflow engine: `system_agents` (the optional-review and
+  agent-driven PR-watch handoffs and autonomous-goal runner state
   machines), their prompts, `gh` CLI integration, and PR handoff/stage
   bookkeeping.
 - `sessions/` -- session-page support: entry/metadata display, settings and

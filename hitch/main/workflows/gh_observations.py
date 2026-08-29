@@ -380,7 +380,7 @@ def _safe_gh_review_thread_identifier(thread: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _gh_monitor_summary(gates: list[dict[str, Any]], pr: dict[str, Any]) -> str:
+def _gh_watch_summary(gates: list[dict[str, Any]], pr: dict[str, Any]) -> str:
     if _pr_handoff_is_terminal(pr):
         return "The PR is merged or closed."
     if _pr_gates_all_passed(gates):
@@ -394,7 +394,7 @@ def _gh_monitor_summary(gates: list[dict[str, Any]], pr: dict[str, Any]) -> str:
     return "Hitch checked the PR gates."
 
 
-def _gh_monitor_blockers(gates: list[dict[str, Any]]) -> list[str]:
+def _gh_watch_blockers(gates: list[dict[str, Any]]) -> list[str]:
     blockers = []
     for gate in gates:
         if gate.get("status") != _PR_GATE_BLOCKED:
@@ -405,7 +405,7 @@ def _gh_monitor_blockers(gates: list[dict[str, Any]]) -> list[str]:
     return blockers
 
 
-def _gh_monitor_feedback(
+def _gh_watch_feedback(
     payload: dict[str, Any],
     review_threads: list[dict[str, Any]],
     pr: dict[str, Any],
@@ -418,7 +418,7 @@ def _gh_monitor_feedback(
     if thread_text:
         sections.append("Unresolved review threads:\n" + thread_text)
     # Pending jobs are fully represented by the deterministic CI gate and PR
-    # handoff. Only failure details need interpretation by the monitor agent.
+    # handoff. Only failure details need interpretation by the coding agent.
     ci_text = (
         _ci_feedback_details(pr)
         if _pr_list_has_items(pr.get("failing_jobs"))
