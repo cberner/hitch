@@ -591,11 +591,11 @@ def _finalize_reaped_instance(instance_id: int) -> None:
 
     Things the killed worker never got to handle itself:
 
-    * finish routing: a terminal demo/system-agent (or workflow-owned user) turn
+    * finish routing: a terminal system-agent (or workflow-owned user) turn
       relies on ``_notify_system_agents_if_needed`` to route its post-terminal
       hooks, the same idempotent callback ``_mark_dead_instances_failed`` runs for
       rows that died after saving terminal status; without it the
-      ``SessionDemo``/``SystemAgentRun``/workflow follow-up is stranded;
+      ``SystemAgentRun``/workflow follow-up is stranded;
     * a ``FAILED`` turn's dangling prompts: ``codex_worker`` cancels its pending
       approval/input prompts before exiting, and reaped terminal rows never pass
       through ``_mark_dead_instances_failed`` (which does the same), so otherwise
@@ -617,7 +617,7 @@ def _finalize_reaped_instance(instance_id: int) -> None:
         return
     if instance.status == CodexInstance.STATUS_FAILED:
         codex_pool._resolve_dangling_requests(instance.pk)
-    # Idempotent finish routing for demo/system-agent/workflow-owned rows (a
+    # Idempotent finish routing for system-agent/workflow-owned rows (a
     # no-op for a plain user turn, which the lost-auto-review check below covers).
     _notify_system_agents_if_needed(instance)
     codex_pool.cleanup_requested_input_images_for(instance)
@@ -731,10 +731,8 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         if rows == 0:
             # The worker reached a terminal state in the gap. Preserve its
             # status (don't count it as a kill), but still run finish routing:
-            # demo system-agent rows are excluded from
-            # reconcile_terminal_workflow_instances() and rely on this callback,
-            # so a worker that died after saving its status but before notifying
-            # would otherwise strand the SessionDemo/SystemAgentRun. Routing is
+            # A worker that died after saving its status but before notifying
+            # would otherwise strand its SystemAgentRun. Routing is
             # idempotent, so a worker that already notified is a no-op.
             try:
                 instance.refresh_from_db()
@@ -777,7 +775,6 @@ def _prune_reaped_workers() -> None:
         codex_pool._REAPED_WORKERS.intersection_update(active_workers)
 
 def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
-    system_agents_handled = False
     if instance.purpose in (
         CodexInstance.PURPOSE_SYSTEM_AGENT,
         CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
@@ -788,28 +785,12 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
         try:
             from hitch.main.workflows import system_agents
 
-            system_agents_handled = system_agents.on_codex_instance_finished(instance)
+            system_agents.on_codex_instance_finished(instance)
         except Exception:
             codex_pool.logger.exception(
                 "failed to notify system workflow for reconciled instance %s",
                 instance.pk,
             )
-    try:
-        from hitch.main import demo
-
-        if (
-            system_agents_handled
-            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and instance.agent_kind == demo.DEMO_AGENT_KIND
-        ):
-            return
-        demo.on_codex_instance_finished(instance)
-    except Exception:
-        codex_pool.logger.exception(
-            "failed to notify demo workflow for reconciled instance %s",
-            instance.pk,
-        )
-
 def _reconcile_terminal_workflow_instances(
     *, main_thread_id: str | None = None, workflow_id: int | None = None
 ) -> None:

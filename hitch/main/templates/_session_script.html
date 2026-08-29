@@ -1072,11 +1072,11 @@
                 return JSON.stringify(item, null, 2);
             }
 
-            function demoCommandDetail(command) {
-                return String(command || "").trim() ? "Command details hidden in demo panel." : "";
+            function redactedCommandDetail(command) {
+                return String(command || "").trim() ? "Command details hidden for this system agent." : "";
             }
 
-            function demoFileChangeDetail(changes) {
+            function redactedFileChangeDetail(changes) {
                 const count = (changes || []).filter((c) => c.path).length;
                 if (!count) return "";
                 return count === 1 ? "1 file" : count + " files";
@@ -1085,16 +1085,16 @@
             function sanitizedApprovalDetail(method, params) {
                 const item = (params && params.item) || params || {};
                 if (method === "item/commandExecution/requestApproval") {
-                    const detail = demoCommandDetail(item.command || "");
-                    if (detail) return "Demo setup command approval requested. " + detail;
-                    return "Demo setup command approval requested.";
+                    const detail = redactedCommandDetail(item.command || "");
+                    if (detail) return "System agent command approval requested. " + detail;
+                    return "System agent command approval requested.";
                 }
                 if (method === "item/fileChange/requestApproval") {
-                    const detail = demoFileChangeDetail(item.changes || []);
-                    if (detail) return "Demo setup file change approval requested. " + detail;
-                    return "Demo setup file change approval requested.";
+                    const detail = redactedFileChangeDetail(item.changes || []);
+                    if (detail) return "System agent file change approval requested. " + detail;
+                    return "System agent file change approval requested.";
                 }
-                return "Demo setup approval requested.";
+                return "System agent approval requested.";
             }
 
             function execpolicyAmendmentDecision(params) {
@@ -1119,13 +1119,13 @@
 
             function sanitizedToolDetail(item) {
                 if (item.type === "commandExecution") {
-                    return demoCommandDetail(item.command || "") || "Demo setup command details hidden.";
+                    return redactedCommandDetail(item.command || "") || "System agent command details hidden.";
                 }
                 if (item.type === "fileChange") {
-                    return demoFileChangeDetail(item.changes || []) || "Demo setup file change";
+                    return redactedFileChangeDetail(item.changes || []) || "System agent file change";
                 }
                 if (item.type === "reasoning") {
-                    return "Reasoning details hidden in demo panel.";
+                    return "Reasoning details hidden for this system agent.";
                 }
                 if (
                     item.type === "mcpToolCall"

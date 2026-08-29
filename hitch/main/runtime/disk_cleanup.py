@@ -17,7 +17,6 @@ from django.conf import settings
 from django.db import close_old_connections, models
 from django.utils import timezone
 
-from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -27,6 +26,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
+from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -244,12 +244,7 @@ def cached_hitch_home_disk_usage() -> HitchDiskUsage | None:
             needs_refresh = False
         else:
             needs_refresh = True
-            snapshot = (
-                cached.usage
-                if cached is not None
-                and cached.invalidation_token == invalidation_token
-                else None
-            )
+            snapshot = cached.usage if cached is not None and cached.invalidation_token == invalidation_token else None
             if cached is not None and snapshot is None:
                 _disk_usage_snapshot = None
                 _disk_usage_generation += 1
@@ -284,10 +279,7 @@ def _refresh_disk_usage_snapshot(generation: int, invalidation_token: str) -> No
     with _disk_usage_snapshot_lock:
         if snapshot is None:
             _disk_usage_snapshot = None
-        elif (
-            generation == _disk_usage_generation
-            and invalidation_token == current_invalidation_token
-        ):
+        elif generation == _disk_usage_generation and invalidation_token == current_invalidation_token:
             _disk_usage_snapshot = _DiskUsageSnapshot(
                 captured_at=timezone.now(),
                 invalidation_token=current_invalidation_token,
@@ -399,15 +391,11 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         .values_list("cwd", flat=True)
     )
     active_workflows = list(
-        SystemWorkflow.objects.filter(status__in=SystemWorkflow.ACTIVE_STATUSES).only(
-            "main_thread_id", "cwd", "state"
-        )
+        SystemWorkflow.objects.filter(status__in=SystemWorkflow.ACTIVE_STATUSES).only("main_thread_id", "cwd", "state")
     )
     active_workflow_paths = set(_active_workflow_paths(active_workflows))
     active_workflow_thread_ids = frozenset(
-        workflow.main_thread_id
-        for workflow in active_workflows
-        if workflow.main_thread_id
+        workflow.main_thread_id for workflow in active_workflows if workflow.main_thread_id
     ) | frozenset(
         SystemAgentRun.objects.filter(workflow__status__in=SystemWorkflow.ACTIVE_STATUSES)
         .exclude(thread_id="")
@@ -429,9 +417,7 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
         active_workflow_thread_ids=active_workflow_thread_ids,
-        protected_worktree_paths=frozenset(
-            _normalized_managed_paths(path for path in protected_paths if path)
-        ),
+        protected_worktree_paths=frozenset(_normalized_managed_paths(path for path in protected_paths if path)),
     )
 
 
@@ -451,9 +437,7 @@ def _session_metadata_rows() -> list[SessionMetadata]:
     )
 
 
-def _safe_to_remove_worktree(
-    metadata: SessionMetadata, context: _CleanupContext
-) -> bool:
+def _safe_to_remove_worktree(metadata: SessionMetadata, context: _CleanupContext) -> bool:
     if metadata.pk in context.protected_proposal_session_ids:
         return False
     if metadata.thread_id in context.active_thread_ids:
@@ -464,18 +448,11 @@ def _safe_to_remove_worktree(
     return normalized is not None and normalized not in context.protected_worktree_paths
 
 
-def _is_system_session(
-    metadata: SessionMetadata, context: _CleanupContext
-) -> bool:
-    return (
-        metadata.is_hidden_system_session
-        or metadata.thread_id in context.hidden_system_thread_ids
-    )
+def _is_system_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
+    return metadata.is_hidden_system_session or metadata.thread_id in context.hidden_system_thread_ids
 
 
-def _archived_pr_done_user_session(
-    metadata: SessionMetadata, context: _CleanupContext
-) -> bool:
+def _archived_pr_done_user_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
     return (
         metadata.codex_archived
         and _is_user_session(metadata, context)
@@ -483,9 +460,7 @@ def _archived_pr_done_user_session(
     )
 
 
-def _old_archived_user_session(
-    metadata: SessionMetadata, context: _CleanupContext, *, now: datetime
-) -> bool:
+def _old_archived_user_session(metadata: SessionMetadata, context: _CleanupContext, *, now: datetime) -> bool:
     return (
         metadata.codex_archived
         and _is_user_session(metadata, context)
@@ -494,25 +469,16 @@ def _old_archived_user_session(
     )
 
 
-def _is_user_session(
-    metadata: SessionMetadata, context: _CleanupContext
-) -> bool:
-    return (
-        not _is_system_session(metadata, context)
-        or metadata.thread_id in context.accepted_visible_thread_ids
-    )
+def _is_user_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
+    return not _is_system_session(metadata, context) or metadata.thread_id in context.accepted_visible_thread_ids
 
 
-def _metadata_cleanup_candidate(
-    metadata: SessionMetadata, *, reason: str
-) -> _CleanupCandidate:
+def _metadata_cleanup_candidate(metadata: SessionMetadata, *, reason: str) -> _CleanupCandidate:
     return _CleanupCandidate(
         cwd=metadata.cwd,
         reason=reason,
         thread_id=metadata.thread_id,
-        timestamp=metadata.codex_archived_at
-        or metadata.codex_updated_at
-        or _EARLIEST,
+        timestamp=metadata.codex_archived_at or metadata.codex_updated_at or _EARLIEST,
         sequence=metadata.pk or 0,
     )
 
@@ -551,12 +517,7 @@ def _orphaned_worktree_candidates(
 
 def _managed_worktree_created_at(path: Path) -> datetime | None:
     timestamp, separator, suffix = path.name.partition("-")
-    if (
-        separator != "-"
-        or len(timestamp) != 14
-        or len(suffix) != 8
-        or not suffix.isalnum()
-    ):
+    if separator != "-" or len(timestamp) != 14 or len(suffix) != 8 or not suffix.isalnum():
         return None
     try:
         created_at = datetime.strptime(timestamp, _WORKTREE_DIR_TIMESTAMP_FORMAT)
@@ -604,9 +565,7 @@ def _protected_proposal_session_ids() -> set[int]:
     for field in _PROPOSAL_SESSION_ID_FIELDS:
         session_ids.update(
             value
-            for value in protected.exclude(**{field: None}).values_list(
-                field, flat=True
-            )
+            for value in protected.exclude(**{field: None}).values_list(field, flat=True)
             if isinstance(value, int)
         )
     return session_ids
@@ -614,15 +573,14 @@ def _protected_proposal_session_ids() -> set[int]:
 
 def _hidden_system_thread_ids() -> set[str]:
     thread_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        system_session_owner_rows(SystemAgentRun.objects.exclude(thread_id=""))
         .values_list("thread_id", flat=True)
         .distinct()
     )
     thread_ids.update(
-        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        system_session_owner_rows(
+            CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT).exclude(thread_id="")
+        )
         .values_list("thread_id", flat=True)
         .distinct()
     )
@@ -645,11 +603,7 @@ def _active_workflow_paths(workflows: list[SystemWorkflow]) -> set[str]:
 def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
     if not session_ids:
         return set()
-    return set(
-        SessionMetadata.objects.filter(pk__in=session_ids)
-        .exclude(cwd="")
-        .values_list("cwd", flat=True)
-    )
+    return set(SessionMetadata.objects.filter(pk__in=session_ids).exclude(cwd="").values_list("cwd", flat=True))
 
 
 def _protected_visible_user_worktree_paths(
@@ -661,8 +615,7 @@ def _protected_visible_user_worktree_paths(
     paths: set[str] = set()
     rows = (
         SessionMetadata.objects.filter(
-            models.Q(is_hidden_system_session=False)
-            | models.Q(thread_id__in=accepted_visible_thread_ids)
+            models.Q(is_hidden_system_session=False) | models.Q(thread_id__in=accepted_visible_thread_ids)
         )
         .exclude(cwd="")
         .only(
@@ -675,18 +628,12 @@ def _protected_visible_user_worktree_paths(
         )
     )
     for metadata in rows:
-        is_system = (
-            metadata.is_hidden_system_session
-            or metadata.thread_id in hidden_system_thread_ids
-        )
+        is_system = metadata.is_hidden_system_session or metadata.thread_id in hidden_system_thread_ids
         if is_system and metadata.thread_id not in accepted_visible_thread_ids:
             continue
         if not metadata.codex_archived or (
             metadata.derived_stage not in _PR_DONE_STAGE_KEYS
-            and (
-                metadata.codex_archived_at is None
-                or metadata.codex_archived_at > now - ARCHIVED_USER_SESSION_MIN_AGE
-            )
+            and (metadata.codex_archived_at is None or metadata.codex_archived_at > now - ARCHIVED_USER_SESSION_MIN_AGE)
         ):
             paths.add(metadata.cwd)
     return paths
@@ -720,9 +667,7 @@ def _max_allowed_percent() -> float:
     raw = getattr(settings, "HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT", None)
     if raw is None:
         raw = DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT
-    return _validated_max_allowed_percent(
-        raw, setting_name="HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT"
-    )
+    return _validated_max_allowed_percent(raw, setting_name="HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT")
 
 
 def _saved_max_allowed_percent() -> float | None:
@@ -737,14 +682,10 @@ def _saved_max_allowed_percent() -> float | None:
         return None
     if saved is None:
         return None
-    return _validated_max_allowed_percent(
-        saved, setting_name="GlobalSettings.disk_usage_max_percent"
-    )
+    return _validated_max_allowed_percent(saved, setting_name="GlobalSettings.disk_usage_max_percent")
 
 
-def _validated_max_allowed_percent(
-    raw: str | int | float, *, setting_name: str
-) -> float:
+def _validated_max_allowed_percent(raw: str | int | float, *, setting_name: str) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):

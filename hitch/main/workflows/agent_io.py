@@ -9,8 +9,6 @@ context blocks injected into candidate prompts.
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,11 +23,6 @@ from hitch.main.models import (
 from hitch.main.runtime import codex_pool
 from hitch.main.runtime.sdk_values import truncate_for_prompt
 from hitch.main.workflows.pr_handoff import _compact_pr_handoff
-
-SPEC_REQUIREMENTS_AGENT_KIND = "spec_critic_requirements"
-SPEC_RISK_AGENT_KIND = "spec_critic_risks"
-SPEC_TEST_AGENT_KIND = "spec_critic_tests"
-SPEC_SYNTHESIZER_AGENT_KIND = "spec_critic_synthesizer"
 
 _AUTONOMOUS_GOAL_INLINE_HISTORY_CHARS = 10_000
 _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS = 10_000
@@ -359,43 +352,6 @@ def _write_autonomous_goal_history_files(
     return [str(path)]
 
 
-def _parse_spec_critic_output(agent_kind: str, raw_output: str) -> dict[str, Any] | None:
-    if agent_kind == SPEC_REQUIREMENTS_AGENT_KIND:
-        return _parse_spec_section_output(raw_output, "requirements")
-    if agent_kind == SPEC_RISK_AGENT_KIND:
-        return _parse_spec_section_output(raw_output, "risk")
-    if agent_kind == SPEC_TEST_AGENT_KIND:
-        return _parse_spec_section_output(raw_output, "test")
-    if agent_kind == SPEC_SYNTHESIZER_AGENT_KIND:
-        return _parse_spec_synthesis_output(raw_output)
-    return None
-
-
-def _parse_spec_section_output(raw_output: str, section: str) -> dict[str, Any] | None:
-    """Parse one spec-critic analysis section: a JSON object with a required
-    string ``summary`` plus the section's list fields."""
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    summary = parsed.get("summary")
-    if not isinstance(summary, str):
-        return None
-    result: dict[str, Any] = {"summary": summary.strip()}
-    for key, normalize in _SPEC_SECTION_FIELDS[section].items():
-        result[key] = normalize(parsed.get(key))
-    return result
-
-
-def _parse_spec_synthesis_output(raw_output: str) -> dict[str, str] | None:
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    brief = parsed.get("brief")
-    if not isinstance(brief, str) or not brief.strip():
-        return None
-    return {"brief": brief.strip()}
-
-
 def _parse_json_object(raw_output: str) -> dict[str, Any] | None:
     text = _strip_json_markdown_fence(raw_output)
     try:
@@ -646,64 +602,6 @@ def _strip_json_markdown_fence(raw_output: str) -> str:
     return text
 
 
-def _normalize_spec_questions(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    questions: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            continue
-        qid = _spec_question_id(str(item.get("id") or ""), index)
-        if qid in seen_ids:
-            qid = f"{qid}_{index + 1}"
-        header = str(item.get("header") or qid.replace("_", " ").title()).strip()[:24]
-        question = str(item.get("question") or "").strip()
-        options = _normalize_spec_question_options(item.get("options"))
-        if not qid or not question or len(options) < 2:
-            continue
-        safe_default = item.get("safe_default")
-        if not isinstance(safe_default, str) or not safe_default.strip():
-            safe_default = ""
-        else:
-            safe_default = safe_default.strip()
-        questions.append(
-            {
-                "id": qid,
-                "header": header or qid,
-                "question": question,
-                "required": item.get("required") is not False,
-                "allow_safe_default": item.get("allow_safe_default") is True,
-                "safe_default": safe_default,
-                "options": options[:3],
-            }
-        )
-        seen_ids.add(qid)
-    return questions[:3]
-
-
-def _normalize_spec_question_options(value: Any) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        return []
-    options: list[dict[str, str]] = []
-    seen_labels: set[str] = set()
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        label = str(item.get("label") or "").strip()
-        description = str(item.get("description") or "").strip()
-        if not label or label in seen_labels:
-            continue
-        options.append({"label": label[:80], "description": description[:180]})
-        seen_labels.add(label)
-    return options
-
-
-def _spec_question_id(raw: str, index: int) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
-    return slug[:48] or f"decision_{index + 1}"
-
-
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -725,22 +623,3 @@ def _merge_string_lists(*values: list[str]) -> list[str]:
             if item and item not in merged:
                 merged.append(item)
     return merged
-
-
-_SPEC_SECTION_FIELDS: dict[str, dict[str, Callable[[Any], Any]]] = {
-    "requirements": {
-        "requirements": _string_list,
-        "assumptions": _string_list,
-        "repo_signals": _string_list,
-    },
-    "risk": {
-        "ambiguities": _string_list,
-        "risks": _string_list,
-        "questions": _normalize_spec_questions,
-    },
-    "test": {
-        "acceptance_criteria": _string_list,
-        "test_strategy": _string_list,
-        "manual_checks": _string_list,
-    },
-}

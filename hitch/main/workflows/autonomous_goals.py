@@ -90,11 +90,6 @@ from hitch.main.workflows.agent_io import (
     _string_list,
     _write_autonomous_goal_history_files,
 )
-from hitch.main.workflows.spec_critic_prompts import (
-    _below_threshold_notice_summary,
-    _below_threshold_notice_title,
-    _candidate_notice_title,
-)
 from hitch.main.workflows.workflow_state import (
     _confidence_meets_threshold,
     _session_metadata_from_state,
@@ -188,6 +183,50 @@ _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
 
 _AUTO_PROPOSAL_QUEUE_LOCK_KEY = "autonomous_goal:auto_proposal_queue"
+
+
+def _below_threshold_notice_title(
+    candidate: dict[str, Any], autonomous_goal: AutonomousGoal
+) -> str:
+    candidate_title = _candidate_notice_title(candidate)
+    if candidate_title:
+        title = f"Skipped proposal: {candidate_title}"
+    else:
+        title = f"Skipped proposal from {autonomous_goal.title}"
+    return title[:_AUTONOMOUS_GOAL_TITLE_MAX_LEN]
+
+
+def _below_threshold_notice_summary(
+    candidate: dict[str, Any], judgment: dict[str, str], threshold: str
+) -> str:
+    confidence = _confidence_label(judgment["confidence"])
+    threshold_label = _confidence_label(threshold)
+    candidate_title = _candidate_notice_title(candidate)
+    if candidate_title:
+        prefix = (
+            f'Found candidate "{candidate_title}", but judge confidence was '
+            f"{confidence} and this goal requires {threshold_label}."
+        )
+    else:
+        prefix = (
+            f"Found a candidate, but judge confidence was {confidence} and "
+            f"this goal requires {threshold_label}."
+        )
+    summary = judgment["summary"].strip()
+    if not summary:
+        return prefix
+    return f"{prefix} Judge summary: {summary}"
+
+
+def _candidate_notice_title(candidate: dict[str, Any]) -> str:
+    title = candidate.get("title")
+    if not isinstance(title, str):
+        return ""
+    return " ".join(title.split())
+
+
+def _confidence_label(value: str) -> str:
+    return value.replace("_", " ") or "unknown"
 
 _AUTONOMOUS_GOAL_HISTORY_SUMMARY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1316,7 +1355,7 @@ def _handle_autonomous_goal_agent_finished(
     # Read and parse the agent's JSONL events file before taking the write
     # lock: doing it inside the IMMEDIATE/select_for_update transaction below
     # would hold SQLite's single global writer for the whole (unbounded) file
-    # read+parse. Mirrors the QA/spec-critic finish handlers, which all read
+    # read+parse. Mirrors the QA finish handlers, which read
     # ``_final_agent_text`` before their locked section.
     raw_output = system_agents._final_agent_text(instance.events_path)
     tokens_used = _autonomous_goal_instance_tokens_used(instance)

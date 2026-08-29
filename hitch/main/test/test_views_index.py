@@ -1,6 +1,5 @@
 """Session index, project views, and PR-stage refresh scheduling tests."""
 
-
 import base64
 import html
 import json
@@ -27,7 +26,7 @@ from openai_codex.generated.v2_all import (
     ThreadSource,
 )
 
-from hitch.main import caches, demo
+from hitch.main import caches
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -38,7 +37,6 @@ from hitch.main.models import (
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
-    UserInputRequest,
 )
 from hitch.main.runtime.rollout_state import _RolloutFileState
 from hitch.main.sessions import (
@@ -79,7 +77,7 @@ from hitch.main.test.views_helpers import (
 from hitch.main.views import common as common_views
 from hitch.main.views import session_list
 from hitch.main.views import settings as settings_views
-from hitch.main.workflows import agent_io, gh_cli, pr_stage_refresh_state, system_agents
+from hitch.main.workflows import gh_cli, pr_stage_refresh_state, system_agents
 
 
 class IndexViewTests(TestCase):
@@ -223,9 +221,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Closed PR")
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Closed</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Closed</span>')
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_closed")
         mock_codex.assert_not_called()
@@ -399,9 +395,7 @@ class IndexViewTests(TestCase):
 
         # The next load reads the refreshed terminal stage from cache, no gh.
         response = self.client.get(reverse("index"))
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
@@ -445,13 +439,9 @@ class IndexViewTests(TestCase):
             cwd=str(rollout_path.parent),
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
-            state=_due_pr_monitor_state(
-                pr_url=pr_url, repo=repo, pr_number=pr_number, now=now
-            ),
+            state=_due_pr_monitor_state(pr_url=pr_url, repo=repo, pr_number=pr_number, now=now),
         )
-        mock_observe.return_value = _merged_pr_monitor_observation(
-            pr_url=pr_url, repo=repo, pr_number=pr_number
-        )
+        mock_observe.return_value = _merged_pr_monitor_observation(pr_url=pr_url, repo=repo, pr_number=pr_number)
 
         response = self.client.get(reverse("index"))
 
@@ -470,9 +460,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
         response = self.client.get(reverse("index"))
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         mock_observe.assert_called_once()
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
@@ -527,9 +515,7 @@ class IndexViewTests(TestCase):
                         {
                             "type": "function_call_output",
                             "call_id": "call-pr",
-                            "output": json.dumps(
-                                {"url": pr_url, "state": "closed", "merged": True}
-                            ),
+                            "output": json.dumps({"url": pr_url, "state": "closed", "merged": True}),
                         },
                     ),
                     _rollout_line(
@@ -652,9 +638,7 @@ class IndexViewTests(TestCase):
                 },
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
         mock_gh_pr_view.return_value = {
             "url": pr_url,
             "repository_full_name": "cberner/hitch",
@@ -686,9 +670,7 @@ class IndexViewTests(TestCase):
 
         # The next load reads the refreshed terminal stage from cache, no gh.
         response = self.client.get(reverse("index"))
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.repos.discover_repos")
@@ -983,86 +965,6 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_flags_pending_spec_critic_input(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Build this feature."},
-                ),
-            ],
-        )
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="needs-input",
-            cwd="/repo",
-            codex_display_title="Needs input",
-            codex_preview="Build this feature.",
-            codex_path=str(rollout_path),
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-            derived_stage="implementation",
-            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
-            main_thread_id="needs-input",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="spec-hidden",
-            cwd="/repo",
-            prompt="Clarify",
-            events_path="/tmp/spec-events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
-            display_author=system_agents.SPEC_CRITIC_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
-            thread_id="spec-hidden",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        UserInputRequest.objects.create(
-            instance=instance,
-            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD,
-            params={"questions": []},
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Needs input")
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="warning">Awaiting Input</span>',
-        )
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "implementation")
-        mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
-
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1210,9 +1112,7 @@ class IndexViewTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="idle">Implementation</span>',
         )
-        self.assertNotContains(
-            response, '<span class="stage-badge" data-tone="default">New</span>'
-        )
+        self.assertNotContains(response, '<span class="stage-badge" data-tone="default">New</span>')
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
@@ -1297,9 +1197,7 @@ class IndexViewTests(TestCase):
                     {
                         "type": "function_call_output",
                         "call_id": "call-pr",
-                        "output": json.dumps(
-                            {"url": pr_url, "state": "closed", "merged": False}
-                        ),
+                        "output": json.dumps({"url": pr_url, "state": "closed", "merged": False}),
                     },
                 ),
                 _rollout_line(
@@ -1344,9 +1242,7 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_COMPLETED,
             step=system_agents.STEP_PR_READY,
-            state={
-                "pr_handoff": {"url": pr_url, "state": "closed", "merged": False}
-            },
+            state={"pr_handoff": {"url": pr_url, "state": "closed", "merged": False}},
         )
 
         response = self.client.get(reverse("index"))
@@ -1431,17 +1327,13 @@ class IndexViewTests(TestCase):
             step=system_agents.STEP_PR_READY,
             state={"pr_handoff": {"url": pr_url, "state": "open"}},
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
 
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Terminal cache stale workflow")
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         self.assertNotContains(response, "PR #98")
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
@@ -1477,9 +1369,7 @@ class IndexViewTests(TestCase):
                     {
                         "type": "function_call_output",
                         "call_id": "call-pr",
-                        "output": json.dumps(
-                            {"url": pr_url, "state": "closed", "merged": True}
-                        ),
+                        "output": json.dumps({"url": pr_url, "state": "closed", "merged": True}),
                     },
                 ),
                 _rollout_line(
@@ -1560,9 +1450,7 @@ class IndexViewTests(TestCase):
                     {
                         "type": "function_call_output",
                         "call_id": "call-pr",
-                        "output": json.dumps(
-                            {"url": pr_url, "state": "closed", "merged": True}
-                        ),
+                        "output": json.dumps({"url": pr_url, "state": "closed", "merged": True}),
                     },
                 ),
                 _rollout_line(
@@ -1706,9 +1594,7 @@ class IndexViewTests(TestCase):
         # The next load derives the terminal stage from the closed workflow, no
         # gh call (the same PR is debounced).
         response = self.client.get(reverse("index"))
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
-        )
+        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.workflows.pr_qa._gh_pr_view")
@@ -1787,9 +1673,7 @@ class IndexViewTests(TestCase):
             timeout_seconds: int,
         ) -> dict[str, object]:
             self.assertEqual(source_tool, "gh_pr_stage_refresh")
-            self.assertEqual(
-                timeout_seconds, system_agents._PR_STAGE_REFRESH_TIMEOUT_SECONDS
-            )
+            self.assertEqual(timeout_seconds, system_agents._PR_STAGE_REFRESH_TIMEOUT_SECONDS)
             self.assertIsNotNone(selector)
             pr_number = int(str(selector).rsplit("/", 1)[1])
             return {
@@ -1812,11 +1696,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Ready PR refresh cap 0")
         self.assertContains(response, "Ready PR refresh cap 1")
         self.assertContains(response, 'data-refreshing="true"')
-        steps = list(
-            SystemWorkflow.objects.order_by("main_thread_id").values_list(
-                "step", flat=True
-            )
-        )
+        steps = list(SystemWorkflow.objects.order_by("main_thread_id").values_list("step", flat=True))
         self.assertEqual(steps.count(system_agents.STEP_PR_CLOSED), 1)
         self.assertEqual(steps.count(system_agents.STEP_PR_READY), 1)
         mock_gh_pr_view.assert_called_once()
@@ -1825,9 +1705,7 @@ class IndexViewTests(TestCase):
 
         # A second render refreshes the remaining due PR (one more gh call).
         self.client.get(reverse("index"))
-        steps = list(
-            SystemWorkflow.objects.values_list("step", flat=True)
-        )
+        steps = list(SystemWorkflow.objects.values_list("step", flat=True))
         self.assertEqual(steps.count(system_agents.STEP_PR_CLOSED), 2)
         self.assertEqual(mock_gh_pr_view.call_count, 2)
 
@@ -1988,9 +1866,7 @@ class IndexViewTests(TestCase):
                 }
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
 
         response = self.client.get(reverse("index"))
 
@@ -2078,9 +1954,7 @@ class IndexViewTests(TestCase):
                 }
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
 
         response = self.client.get(reverse("index"))
 
@@ -2147,9 +2021,7 @@ class IndexViewTests(TestCase):
                 }
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
 
         response = self.client.get(reverse("index"))
 
@@ -2227,9 +2099,7 @@ class IndexViewTests(TestCase):
                 },
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now + timedelta(minutes=1)
-        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now + timedelta(minutes=1))
 
         response = self.client.get(reverse("index"))
 
@@ -2288,59 +2158,6 @@ class IndexViewTests(TestCase):
         self.assertContains(system_response, "Legacy system")
         self.assertContains(system_response, "Hitch system")
         self.assertContains(system_response, "untracked")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_demo_upsert_keeps_main_session_visible(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=demo.DEMO_WORKFLOW_KIND,
-            main_thread_id="demo-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_FAILED,
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="demo-thread",
-            cwd="/repo",
-            prompt="Start an interactive web demo",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=demo.DEMO_AGENT_KIND,
-            display_author=demo.DEMO_DISPLAY_AUTHOR,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=demo.DEMO_AGENT_KIND,
-            thread_id="demo-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_FAILED,
-        )
-
-        system_response = self.client.get(reverse("system_sessions"))
-
-        self.assertEqual(system_response.status_code, 200)
-        self.assertContains(system_response, demo.DEMO_DISPLAY_AUTHOR)
-        metadata = SessionMetadata.objects.get(thread_id="demo-thread")
-        self.assertFalse(metadata.is_hidden_system_session)
-
-        index_response = self.client.get(reverse("index"))
-
-        self.assertEqual(index_response.status_code, 200)
-        self.assertContains(index_response, demo.DEMO_DISPLAY_AUTHOR)
-        client.thread_list.assert_not_called()
 
     def test_update_cached_name_preserves_activity_timestamp(self) -> None:
         old_updated_at = datetime.fromtimestamp(1000, UTC)
@@ -2608,9 +2425,7 @@ class IndexViewTests(TestCase):
             self.assertContains(response, "System 49")
             self.assertNotContains(response, "System 50")
             expected_first_page_ids = [f"system-{i:02d}" for i in range(50)]
-            self.assertEqual(
-                list(runs_by_thread_id.call_args.args[0]), expected_first_page_ids
-            )
+            self.assertEqual(list(runs_by_thread_id.call_args.args[0]), expected_first_page_ids)
             self.assertEqual(
                 list(instances_by_thread_id.call_args.args[0]),
                 expected_first_page_ids,
@@ -2630,12 +2445,8 @@ class IndexViewTests(TestCase):
             self.assertContains(response, "System 50")
             self.assertNotContains(response, "System 49")
             self.assertNotContains(response, "New front system")
-            self.assertEqual(
-                list(runs_by_thread_id.call_args.args[0]), ["system-50"]
-            )
-            self.assertEqual(
-                list(instances_by_thread_id.call_args.args[0]), ["system-50"]
-            )
+            self.assertEqual(list(runs_by_thread_id.call_args.args[0]), ["system-50"])
+            self.assertEqual(list(instances_by_thread_id.call_args.args[0]), ["system-50"])
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
@@ -2793,13 +2604,9 @@ class IndexViewTests(TestCase):
         for updated_at, precision in cases:
             with self.subTest(updated_at=updated_at, precision=precision):
                 cursor_payload = f'{{"updated_at":{updated_at},"id":"a"{precision}}}'
-                cursor = "idx:" + base64.urlsafe_b64encode(
-                    cursor_payload.encode()
-                ).decode()
+                cursor = "idx:" + base64.urlsafe_b64encode(cursor_payload.encode()).decode()
 
-                response = self.client.get(
-                    reverse("system_sessions"), {"cursor": cursor}
-                )
+                response = self.client.get(reverse("system_sessions"), {"cursor": cursor})
 
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, "System")
@@ -2855,9 +2662,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_full_refresh_invalidates_absent_active_rows(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_full_refresh_invalidates_absent_active_rows(self, mock_codex: MagicMock) -> None:
         now = datetime.now(UTC)
         SessionMetadata.objects.create(
             thread_id="stale-active",
@@ -2879,18 +2684,12 @@ class IndexViewTests(TestCase):
         )
 
         self.assertFalse(
-            session_index.indexed_sessions()
-            .filter(thread_id="stale-active", codex_archived=False)
-            .exists()
+            session_index.indexed_sessions().filter(thread_id="stale-active", codex_archived=False).exists()
         )
-        self.assertTrue(
-            session_index.indexed_sessions().filter(thread_id="fresh-active").exists()
-        )
+        self.assertTrue(session_index.indexed_sessions().filter(thread_id="fresh-active").exists())
 
     @patch("hitch.main.views.common.Codex")
-    def test_refresh_marks_legacy_autonomous_goal_prompt_hidden(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_refresh_marks_legacy_autonomous_goal_prompt_hidden(self, mock_codex: MagicMock) -> None:
         candidate = _session(
             "legacy-candidate",
             name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
@@ -2916,9 +2715,7 @@ class IndexViewTests(TestCase):
         self.assertTrue(metadata.is_hidden_system_session)
 
     @patch("hitch.main.views.common.Codex")
-    def test_state_db_refresh_does_not_invalidate_absent_active_rows(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_state_db_refresh_does_not_invalidate_absent_active_rows(self, mock_codex: MagicMock) -> None:
         now = datetime.now(UTC)
         SessionMetadata.objects.create(
             thread_id="cached-active",
@@ -2939,17 +2736,11 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
         )
 
-        self.assertTrue(
-            session_index.indexed_sessions().filter(thread_id="cached-active").exists()
-        )
-        self.assertTrue(
-            session_index.indexed_sessions().filter(thread_id="fresh-active").exists()
-        )
+        self.assertTrue(session_index.indexed_sessions().filter(thread_id="cached-active").exists())
+        self.assertTrue(session_index.indexed_sessions().filter(thread_id="fresh-active").exists())
 
     @patch("hitch.main.views.common.Codex")
-    def test_background_session_index_refresh_uses_state_db_only(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_background_session_index_refresh_uses_state_db_only(self, mock_codex: MagicMock) -> None:
         active = _session("active", name="Active session")
         archived = _session(
             "archived",
@@ -2982,17 +2773,10 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
         )
         self.assertTrue(
-            all(
-                mock_call.kwargs["use_state_db_only"] is True
-                for mock_call in client.thread_list.call_args_list
-            )
+            all(mock_call.kwargs["use_state_db_only"] is True for mock_call in client.thread_list.call_args_list)
         )
-        active_state = SessionIndexSyncState.objects.get(
-            source=SessionIndexSyncState.SOURCE_ACTIVE
-        )
-        archived_state = SessionIndexSyncState.objects.get(
-            source=SessionIndexSyncState.SOURCE_ARCHIVED
-        )
+        active_state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ACTIVE)
+        archived_state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ARCHIVED)
         self.assertFalse(active_state.is_complete)
         self.assertFalse(archived_state.is_complete)
 
@@ -3035,9 +2819,7 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("index"))
@@ -3071,9 +2853,7 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("index"))
@@ -3113,9 +2893,7 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("index"))
@@ -3155,9 +2933,7 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.caches._start_models_refresh_thread"),
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("index"))
@@ -3169,9 +2945,7 @@ class IndexViewTests(TestCase):
         self.assertNotIn("cursor=page-2", load_more_url)
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
-        state = SessionIndexSyncState.objects.get(
-            source=SessionIndexSyncState.SOURCE_ACTIVE
-        )
+        state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ACTIVE)
         self.assertTrue(state.is_complete)
         self.assertEqual(state.next_cursor, "")
         start_index_refresh.assert_called_once_with(
@@ -3198,12 +2972,10 @@ class IndexViewTests(TestCase):
             ],
         )
         metadata = _seed_usage_metadata("usage-thread", path=rollout_path)
-        SessionMetadata.objects.filter(pk=metadata.pk).update(
-            usage_last_checked_at=now
+        SessionMetadata.objects.filter(pk=metadata.pk).update(usage_last_checked_at=now)
+        SessionIndexSyncState.objects.filter(source=SessionIndexSyncState.SOURCE_ACTIVE).update(
+            last_synced_at=now - timedelta(minutes=5), next_cursor="page-2"
         )
-        SessionIndexSyncState.objects.filter(
-            source=SessionIndexSyncState.SOURCE_ACTIVE
-        ).update(last_synced_at=now - timedelta(minutes=5), next_cursor="page-2")
         _cache_token_usage(
             "usage-thread",
             input_tokens=400,
@@ -3220,9 +2992,7 @@ class IndexViewTests(TestCase):
                 "hitch.main.caches._rate_limits_for_usage_context",
                 return_value=caches._RateLimitsUsageState(None, False),
             ),
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -3280,9 +3050,7 @@ class IndexViewTests(TestCase):
         self.assertNotIn("cursor=page-2", load_more_url)
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
-        state = SessionIndexSyncState.objects.get(
-            source=SessionIndexSyncState.SOURCE_ACTIVE
-        )
+        state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ACTIVE)
         self.assertTrue(state.is_complete)
         self.assertEqual(state.next_cursor, "")
 
@@ -3403,10 +3171,7 @@ class IndexViewTests(TestCase):
     def test_incomplete_session_index_uses_codex_cursor_pagination(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        cached_page = [
-            _session(f"thread-{i}", name=f"Cached {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        cached_page = [_session(f"thread-{i}", name=f"Cached {i}", updated_at=1000 - i) for i in range(50)]
         client = _setup_codex(mock_codex)
         client.thread_list.return_value = SimpleNamespace(
             data=cached_page,
@@ -3473,14 +3238,8 @@ class IndexViewTests(TestCase):
     def test_empty_session_index_self_primes_from_index_view(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        first_page = [
-            _session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
-        second_page = [
-            _session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i)
-            for i in range(50, 60)
-        ]
+        first_page = [_session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i) for i in range(50)]
+        second_page = [_session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i) for i in range(50, 60)]
         client = _setup_codex(mock_codex)
 
         def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
@@ -3510,9 +3269,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_renders_empty_state_and_new_session_button(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_renders_empty_state_and_new_session_button(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = []
         response = self.client.get(reverse("index"))
@@ -3525,9 +3282,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_hides_project_banner_when_project_exists(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_hides_project_banner_when_project_exists(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _make_project()
         _setup_codex(mock_codex)
         mock_discover.return_value = []
@@ -3539,9 +3294,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_hides_system_agent_threads(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_hides_system_agent_threads(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         visible = _session("visible", preview="Visible")
         hidden = _session("qa-thread", preview="Hidden QA")
         _setup_codex(mock_codex, threads=[visible, hidden])
@@ -3636,9 +3389,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_hides_orphan_hitch_system_prompt_threads(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_hides_orphan_hitch_system_prompt_threads(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         visible = _session("visible", name="Visible")
         candidate = _session(
             "orphan-candidate",
@@ -3663,18 +3414,14 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
         self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertNotContains(
-            response, "You are Hitch&#x27;s autonomous goal confidence judge."
-        )
+        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal confidence judge.")
 
         system_response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(system_response.status_code, 200)
         self.assertNotContains(system_response, "Visible")
         self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertContains(
-            system_response, "You are Hitch&#x27;s autonomous goal confidence judge."
-        )
+        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal confidence judge.")
         self.assertContains(
             system_response,
             reverse("system_session", kwargs={"session_id": "orphan-candidate"}),
@@ -3682,9 +3429,7 @@ class IndexViewTests(TestCase):
         self.assertContains(system_response, "Hitch system", count=2)
         self.assertContains(system_response, "untracked", count=2)
 
-        detail_response = self.client.get(
-            reverse("system_session", kwargs={"session_id": "orphan-candidate"})
-        )
+        detail_response = self.client.get(reverse("system_session", kwargs={"session_id": "orphan-candidate"}))
 
         self.assertEqual(detail_response.status_code, 200)
         self.assertContains(detail_response, '<body class="read-only"')
@@ -3751,26 +3496,18 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
         self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertNotContains(
-            response, "You are Hitch&#x27;s autonomous goal confidence judge."
-        )
+        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal confidence judge.")
         self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
-        self.assertNotContains(
-            response, "You are Hitch&#x27;s standing order confidence judge."
-        )
+        self.assertNotContains(response, "You are Hitch&#x27;s standing order confidence judge.")
 
         system_response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(system_response.status_code, 200)
         self.assertNotContains(system_response, "Visible")
         self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertContains(
-            system_response, "You are Hitch&#x27;s autonomous goal confidence judge."
-        )
+        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal confidence judge.")
         self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
-        self.assertContains(
-            system_response, "You are Hitch&#x27;s standing order confidence judge."
-        )
+        self.assertContains(system_response, "You are Hitch&#x27;s standing order confidence judge.")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -3790,13 +3527,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response, "You are Hitch&#x27;s autonomous goal agent. Please help"
-        )
+        self.assertContains(response, "You are Hitch&#x27;s autonomous goal agent. Please help")
 
-        system_detail_response = self.client.get(
-            reverse("system_session", kwargs={"session_id": "user-prefixed"})
-        )
+        system_detail_response = self.client.get(reverse("system_session", kwargs={"session_id": "user-prefixed"}))
 
         self.assertEqual(system_detail_response.status_code, 404)
 
@@ -3808,10 +3541,7 @@ class IndexViewTests(TestCase):
         user_thread = _session(
             "user-exact-title",
             name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
-            preview=(
-                f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
-                "Please explain this."
-            ),
+            preview=(f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\nPlease explain this."),
         )
         _setup_codex(mock_codex, threads=[user_thread])
         mock_discover.return_value = []
@@ -3827,63 +3557,43 @@ class IndexViewTests(TestCase):
         self.assertNotContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
 
     @patch("hitch.main.views.common.Codex")
-    def test_untracked_system_session_resume_error_is_not_404(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_untracked_system_session_resume_error_is_not_404(self, mock_codex: MagicMock) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = CodexError("app server down")
 
         with self.assertRaises(CodexError):
-            self.client.get(
-                reverse("system_session", kwargs={"session_id": session_id})
-            )
+            self.client.get(reverse("system_session", kwargs={"session_id": session_id}))
 
     @patch("hitch.main.views.common.Codex")
-    def test_untracked_system_session_missing_thread_is_404(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_untracked_system_session_missing_thread_is_404(self, mock_codex: MagicMock) -> None:
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = InvalidRequestError(
-            -32600, "thread orphan-system not found"
-        )
+        client._client.thread_resume.side_effect = InvalidRequestError(-32600, "thread orphan-system not found")
 
-        response = self.client.get(
-            reverse("system_session", kwargs={"session_id": "orphan-system"})
-        )
+        response = self.client.get(reverse("system_session", kwargs={"session_id": "orphan-system"}))
 
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.views.common.Codex")
-    def test_untracked_system_session_invalid_session_id_is_404(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_untracked_system_session_invalid_session_id_is_404(self, mock_codex: MagicMock) -> None:
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = InvalidRequestError(
             -32600,
             "invalid session id: invalid character: expected an optional prefix",
         )
 
-        response = self.client.get(
-            reverse("system_session", kwargs={"session_id": "orphan-system"})
-        )
+        response = self.client.get(reverse("system_session", kwargs={"session_id": "orphan-system"}))
 
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.views.common.Codex")
-    def test_untracked_system_session_non_thread_invalid_request_is_not_404(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_untracked_system_session_non_thread_invalid_request_is_not_404(self, mock_codex: MagicMock) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = InvalidRequestError(
-            -32600, "model provider not found"
-        )
+        client._client.thread_resume.side_effect = InvalidRequestError(-32600, "model provider not found")
 
         with self.assertRaises(InvalidRequestError):
-            self.client.get(
-                reverse("system_session", kwargs={"session_id": session_id})
-            )
+            self.client.get(reverse("system_session", kwargs={"session_id": session_id}))
 
     @patch("hitch.main.workflows.system_agents.accepted_visible_system_thread_ids")
     @patch("hitch.main.repos.discover_repos")
@@ -3948,10 +3658,7 @@ class IndexViewTests(TestCase):
     def test_session_list_self_primes_initial_page_and_links_next_offset(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        first_page = [
-            _session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        first_page = [_session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i) for i in range(50)]
         second_page = [_session("thread-50", name="Session 50", updated_at=900)]
         client = _setup_codex(mock_codex)
 
@@ -3976,10 +3683,7 @@ class IndexViewTests(TestCase):
     def test_historical_qa_run_does_not_disable_cursor_pagination(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        first_page = [
-            _session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        first_page = [_session(f"thread-{i}", name=f"Session {i}", updated_at=1000 - i) for i in range(50)]
         second_page = [_session("thread-50", name="Session 50", updated_at=900)]
         client = _setup_codex(mock_codex)
 
@@ -4029,12 +3733,8 @@ class IndexViewTests(TestCase):
 
         def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
             if cursor == "b":
-                return SimpleNamespace(
-                    data=[_session("session-b", name="Session B")], next_cursor="a"
-                )
-            return SimpleNamespace(
-                data=[_session("session-a", name="Session A")], next_cursor="b"
-            )
+                return SimpleNamespace(data=[_session("session-b", name="Session B")], next_cursor="a")
+            return SimpleNamespace(data=[_session("session-a", name="Session A")], next_cursor="b")
 
         client.thread_list.side_effect = thread_list
         mock_discover.return_value = []
@@ -4051,18 +3751,9 @@ class IndexViewTests(TestCase):
     def test_load_more_resumes_partially_consumed_codex_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        page_one_visible = [
-            _session(f"p1-{i}", name=f"Page 1 visible {i}", updated_at=300 - i)
-            for i in range(30)
-        ]
-        page_one_hidden = [
-            _session(f"hidden-{i}", name=f"Hidden {i}", updated_at=200 - i)
-            for i in range(20)
-        ]
-        page_two = [
-            _session(f"p2-{i}", name=f"Page 2 visible {i}", updated_at=100 - i)
-            for i in range(50)
-        ]
+        page_one_visible = [_session(f"p1-{i}", name=f"Page 1 visible {i}", updated_at=300 - i) for i in range(30)]
+        page_one_hidden = [_session(f"hidden-{i}", name=f"Hidden {i}", updated_at=200 - i) for i in range(20)]
+        page_two = [_session(f"p2-{i}", name=f"Page 2 visible {i}", updated_at=100 - i) for i in range(50)]
         client = _setup_codex(mock_codex)
 
         def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
@@ -4070,9 +3761,7 @@ class IndexViewTests(TestCase):
                 return SimpleNamespace(data=page_two, next_cursor="c3")
             if cursor == "c3":
                 return SimpleNamespace(data=[])
-            return SimpleNamespace(
-                data=[*page_one_visible, *page_one_hidden], next_cursor="c2"
-            )
+            return SimpleNamespace(data=[*page_one_visible, *page_one_hidden], next_cursor="c2")
 
         client.thread_list.side_effect = thread_list
         mock_discover.return_value = []
@@ -4117,14 +3806,10 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         hidden = _session("qa-thread", preview="Hidden QA", updated_at=2000)
-        visible = _session(
-            "visible-next-page", preview="Visible next page", updated_at=1000
-        )
+        visible = _session("visible-next-page", preview="Visible next page", updated_at=1000)
         client = _setup_codex(mock_codex)
 
-        def thread_list(
-            *, archived: bool | None = None, cursor: str | None = None, **_: Any
-        ) -> SimpleNamespace:
+        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
             if archived:
                 return SimpleNamespace(data=[])
             if cursor == "page-2":
@@ -4166,10 +3851,7 @@ class IndexViewTests(TestCase):
     def test_qa_activity_can_promote_main_session_from_later_codex_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        ordinary = [
-            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
         hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
         main = _session("main-thread", name="Main session", updated_at=1)
         client = _setup_codex(mock_codex)
@@ -4222,10 +3904,7 @@ class IndexViewTests(TestCase):
     def test_qa_activity_can_promote_main_session_from_later_in_fetch_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        ordinary = [
-            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
         hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
         main = _session("main-thread", name="Main session", updated_at=1)
         _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
@@ -4266,14 +3945,8 @@ class IndexViewTests(TestCase):
     def test_mid_pagination_qa_activity_keeps_cursor_order(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        first_page = [
-            _session(f"first-{i}", name=f"First {i}", updated_at=3000 - i)
-            for i in range(50)
-        ]
-        second_page = [
-            _session(f"second-{i}", name=f"Second {i}", updated_at=2000 - i)
-            for i in range(50)
-        ]
+        first_page = [_session(f"first-{i}", name=f"First {i}", updated_at=3000 - i) for i in range(50)]
+        second_page = [_session(f"second-{i}", name=f"Second {i}", updated_at=2000 - i) for i in range(50)]
         hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
         main = _session("main-thread", name="Main session", updated_at=1)
         client = _setup_codex(mock_codex)
@@ -4370,17 +4043,12 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        ordinary = [
-            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
         hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
         main = _session("main-thread", name="Main session", updated_at=1)
         client = _setup_codex(mock_codex)
 
-        def thread_list(
-            *, archived: bool | None = None, cursor: str | None = None, **_: Any
-        ) -> SimpleNamespace:
+        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
             if archived:
                 return SimpleNamespace(data=[])
             if cursor == "page-2":
@@ -4426,10 +4094,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        ordinary = [
-            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
-            for i in range(50)
-        ]
+        ordinary = [_session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i) for i in range(50)]
         hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
         main = _session("main-thread", name="Main session", updated_at=1)
         _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
@@ -4466,9 +4131,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "materialized_order=1")
 
     @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_lists_hidden_threads_as_read_only_links(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_system_sessions_lists_hidden_threads_as_read_only_links(self, mock_codex: MagicMock) -> None:
         visible = _session("visible", preview="Visible")
         hidden = _session("qa-thread", preview="Hidden QA")
         _setup_codex(mock_codex, threads=[visible, hidden])
@@ -4506,17 +4169,13 @@ class IndexViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("index")}" role="menuitem"')
         self.assertContains(response, ">Sessions<")
         self.assertContains(response, "Hidden QA")
-        self.assertContains(
-            response, reverse("system_session", kwargs={"session_id": "qa-thread"})
-        )
+        self.assertContains(response, reverse("system_session", kwargs={"session_id": "qa-thread"}))
         self.assertContains(response, "QA agent")
         self.assertContains(response, "completed")
         self.assertNotContains(response, "Visible")
         self.assertNotContains(response, 'aria-label="Session actions"')
         self.assertNotContains(response, "data-session-archive-url")
-        self.assertNotContains(
-            response, '<dialog class="new-session" data-new-session-dialog', html=False
-        )
+        self.assertNotContains(response, '<dialog class="new-session" data-new-session-dialog', html=False)
 
     def test_system_session_helpers_defer_large_payload_fields(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -4562,14 +4221,8 @@ class IndexViewTests(TestCase):
         )
 
         with CaptureQueriesContext(connection) as captured:
-            runs_by_thread_id = (
-                system_agent_summary._system_agent_runs_by_thread_id(["qa-thread"])
-            )
-            instances_by_thread_id = (
-                system_agent_summary._system_agent_instances_by_thread_id(
-                    ["instance-only-thread"]
-                )
-            )
+            runs_by_thread_id = system_agent_summary._system_agent_runs_by_thread_id(["qa-thread"])
+            instances_by_thread_id = system_agent_summary._system_agent_instances_by_thread_id(["instance-only-thread"])
             run = runs_by_thread_id["qa-thread"]
             instance = instances_by_thread_id["instance-only-thread"]
             self.assertEqual(
@@ -4591,21 +4244,9 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(len(captured), 2)
         self.assertNotIn("main_systemworkflow", captured[0]["sql"])
-        self.assertTrue(
-            {"input", "output", "raw_output", "error"}.issubset(
-                run.get_deferred_fields()
-            )
-        )
-        self.assertTrue(
-            {"prompt", "developer_instructions"}.issubset(
-                run.instance.get_deferred_fields()
-            )
-        )
-        self.assertTrue(
-            {"prompt", "developer_instructions"}.issubset(
-                instance.get_deferred_fields()
-            )
-        )
+        self.assertTrue({"input", "output", "raw_output", "error"}.issubset(run.get_deferred_fields()))
+        self.assertTrue({"prompt", "developer_instructions"}.issubset(run.instance.get_deferred_fields()))
+        self.assertTrue({"prompt", "developer_instructions"}.issubset(instance.get_deferred_fields()))
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -4623,9 +4264,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_lists_sessions_sorted_descending(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_lists_sessions_sorted_descending(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         sessions = [
             _session("older", name="Older session", updated_at=1000),
             _session("newer", name="Newer session", updated_at=2000),
@@ -4638,26 +4277,20 @@ class IndexViewTests(TestCase):
         body = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("session", kwargs={"session_id": "newer"}))
         self.assertContains(
-            response, reverse("session", kwargs={"session_id": "newer"})
+            response,
+            'data-session-archive-url="' + reverse("set_session_archived", kwargs={"session_id": "newer"}) + '"',
         )
         self.assertContains(
             response,
-            'data-session-archive-url="'
-            + reverse("set_session_archived", kwargs={"session_id": "newer"})
-            + '"',
-        )
-        self.assertContains(
-            response,
-            'data-session-name-url="'
-            + reverse("set_session_name", kwargs={"session_id": "newer"})
-            + '"',
+            'data-session-name-url="' + reverse("set_session_name", kwargs={"session_id": "newer"}) + '"',
         )
         self.assertContains(response, 'data-session-archived="false"')
         self.assertContains(response, 'aria-label="Session actions"')
-        self.assertContains(response, 'data-session-rename-open')
-        self.assertContains(response, 'data-archived-visibility-form')
-        self.assertContains(response, 'data-visible-projects-open')
+        self.assertContains(response, "data-session-rename-open")
+        self.assertContains(response, "data-archived-visibility-form")
+        self.assertContains(response, "data-visible-projects-open")
         self.assertContains(response, "Visible projects")
         self.assertContains(
             response,
@@ -4666,7 +4299,7 @@ class IndexViewTests(TestCase):
         )
         self.assertContains(response, 'name="name" value="Newer session" maxlength="200"')
         self.assertContains(response, 'name="next" value="index"')
-        self.assertContains(response, 'data-session-archive-label>Archive</button>')
+        self.assertContains(response, "data-session-archive-label>Archive</button>")
         self.assertContains(response, "data-archive-undo")
         self.assertContains(response, "data-archived-visibility-fallback")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
@@ -4674,9 +4307,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_index_keeps_pending_archive_rows_hidden(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_index_keeps_pending_archive_rows_hidden(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex, threads=[_session("abc", name="Session")])
         mock_discover.return_value = []
 
@@ -4725,9 +4356,7 @@ class IndexViewTests(TestCase):
         sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            [session["id"] for session in sessions_context], ["active", "other"]
-        )
+        self.assertEqual([session["id"] for session in sessions_context], ["active", "other"])
         self.assertEqual(sessions_context[0]["updated_at"], 2000)
         self.assertContains(response, 'data-updated-at="2000"')
         self.assertLess(body.index("Active session"), body.index("Other session"))
@@ -4784,28 +4413,20 @@ class IndexViewTests(TestCase):
         current_time = datetime.fromtimestamp(2000, UTC)
         newer_old_time = datetime.fromtimestamp(3000, UTC)
         SystemWorkflow.objects.filter(pk=current_workflow.pk).update(updated_at=old_time)
-        SystemAgentRun.objects.filter(pk=current_run.pk).update(
-            updated_at=current_time
-        )
-        SystemWorkflow.objects.filter(pk=old_workflow.pk).update(
-            updated_at=newer_old_time
-        )
+        SystemAgentRun.objects.filter(pk=current_run.pk).update(updated_at=current_time)
+        SystemWorkflow.objects.filter(pk=old_workflow.pk).update(updated_at=newer_old_time)
         SystemAgentRun.objects.filter(pk=old_run.pk).update(updated_at=newer_old_time)
 
-        updated_at_by_main_thread = (
-            system_agent_summary._qa_activity_updated_at_by_main_thread_id(
-                [_session("active", updated_at=1000)],
-                system_agents.hidden_thread_ids(),
-            )
+        updated_at_by_main_thread = system_agent_summary._qa_activity_updated_at_by_main_thread_id(
+            [_session("active", updated_at=1000)],
+            system_agents.hidden_thread_ids(),
         )
 
         self.assertEqual(updated_at_by_main_thread, {"active": 2000})
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_selected_project_filters_sessions(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_selected_project_filters_sessions(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project()
         other = _make_project(name="Other", repo_path="/other")
         sessions = [
@@ -4814,9 +4435,7 @@ class IndexViewTests(TestCase):
         ]
         _setup_codex(mock_codex, threads=sessions)
         mock_discover.return_value = [Path("/repo"), Path("/other")]
-        SessionMetadata.objects.create(
-            thread_id="matching", cwd="/repo", project=project
-        )
+        SessionMetadata.objects.create(thread_id="matching", cwd="/repo", project=project)
         SessionMetadata.objects.create(thread_id="other", cwd="/other", project=other)
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
@@ -4887,11 +4506,40 @@ class IndexViewTests(TestCase):
         mock_hidden_thread_ids.assert_not_called()
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.views.common.Codex")
+    def test_warm_index_keeps_legacy_demo_user_session_visible(self, mock_codex: MagicMock) -> None:
+        now = timezone.now()
+        SessionMetadata.objects.create(
+            thread_id="legacy-demo-user",
+            cwd="/repo",
+            codex_display_title="Visible legacy demo session",
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="legacy-demo-user",
+            cwd="/repo",
+            prompt="Registration token: historical-secret",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind="demo",
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible legacy demo session")
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_visible_projects_filter_sessions(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_visible_projects_filter_sessions(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project()
         other = _make_project(name="Other", repo_path="/other")
         sessions = [
@@ -4901,9 +4549,7 @@ class IndexViewTests(TestCase):
         ]
         _setup_codex(mock_codex, threads=sessions)
         mock_discover.return_value = [Path("/repo"), Path("/other")]
-        SessionMetadata.objects.create(
-            thread_id="matching", cwd="/repo", project=project
-        )
+        SessionMetadata.objects.create(thread_id="matching", cwd="/repo", project=project)
         SessionMetadata.objects.create(thread_id="other", cwd="/other", project=other)
         SessionMetadata.objects.create(thread_id="no-project", cwd="/elsewhere")
 
@@ -4936,9 +4582,7 @@ class IndexViewTests(TestCase):
         "hitch.main.views.settings._visible_session_project_ids_cookie_fits",
         return_value=False,
     )
-    def test_visible_projects_rejects_oversized_guest_cookie(
-        self, mock_cookie_fits: MagicMock
-    ) -> None:
+    def test_visible_projects_rejects_oversized_guest_cookie(self, mock_cookie_fits: MagicMock) -> None:
         project = _make_project()
 
         response = self.client.post(
@@ -5125,9 +4769,7 @@ class IndexViewTests(TestCase):
         project = _make_project()
         _setup_codex(mock_codex, threads=[_session("cleared", name="Cleared", cwd="/repo")])
         mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="cleared", cwd="/repo", project=None, project_cleared=True
-        )
+        SessionMetadata.objects.create(thread_id="cleared", cwd="/repo", project=None, project_cleared=True)
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
         response = self.client.get(reverse("index"))
@@ -5137,9 +4779,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_session_list_omits_token_usage(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_session_list_omits_token_usage(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5180,9 +4820,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_uses_cached_usage_and_refreshes_rollout_async(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_uses_cached_usage_and_refreshes_rollout_async(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5239,9 +4877,7 @@ class IndexViewTests(TestCase):
             encoding="utf-8",
         )
         os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
-        SessionMetadata.objects.filter(thread_id="archived").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="archived").update(usage_last_checked_at=datetime.now(UTC))
 
         with (
             patch("hitch.main.runtime.rollout.latest_token_usage") as latest_usage,
@@ -5249,9 +4885,7 @@ class IndexViewTests(TestCase):
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
-            patch(
-                "hitch.main.sessions.token_usage._rollout_file_state_from_value"
-            ) as rollout_state,
+            patch("hitch.main.sessions.token_usage._rollout_file_state_from_value") as rollout_state,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -5270,9 +4904,7 @@ class IndexViewTests(TestCase):
 
         SessionMetadata.objects.filter(thread_id="archived").update(
             usage_last_checked_at=(
-                datetime.now(UTC)
-                - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
-                - timedelta(seconds=1)
+                datetime.now(UTC) - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL - timedelta(seconds=1)
             )
         )
         with (
@@ -5281,9 +4913,7 @@ class IndexViewTests(TestCase):
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
-            patch(
-                "hitch.main.sessions.token_usage._rollout_file_state_from_value"
-            ) as rollout_state,
+            patch("hitch.main.sessions.token_usage._rollout_file_state_from_value") as rollout_state,
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -5319,9 +4949,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
 
     @patch("hitch.main.caches.Codex")
-    def test_usage_page_refreshes_rate_limits_after_first_render(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_refreshes_rate_limits_after_first_render(self, mock_codex: MagicMock) -> None:
         session_index.mark_synced(archived=False, complete=True)
         session_index.mark_synced(archived=True, complete=True)
         client = _setup_codex(mock_codex)
@@ -5407,9 +5035,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
 
-        with patch(
-            "hitch.main.sessions.token_usage._rollout_file_state_from_value"
-        ) as rollout_state:
+        with patch("hitch.main.sessions.token_usage._rollout_file_state_from_value") as rollout_state:
             lifetime_usage = token_usage._lifetime_token_usage_for_metadata([metadata])
 
         rollout_state.assert_not_called()
@@ -5421,9 +5047,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(len(lifetime_usage["total"]["chart"]), 1)
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_schedules_initial_active_and_archived_index_refresh(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_schedules_initial_active_and_archived_index_refresh(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5447,15 +5071,11 @@ class IndexViewTests(TestCase):
         )
         client = _setup_codex(
             mock_codex,
-            archived_threads=[
-                _session("archived", name="Archived", path=str(rollout_path))
-            ],
+            archived_threads=[_session("archived", name="Archived", path=str(rollout_path))],
         )
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -5474,17 +5094,13 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_throttles_recent_incomplete_index_refresh(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_throttles_recent_incomplete_index_refresh(self, mock_codex: MagicMock) -> None:
         session_index.mark_synced(archived=False, complete=False)
         session_index.mark_synced(archived=True, complete=False)
         client = _setup_codex(mock_codex)
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -5499,17 +5115,13 @@ class IndexViewTests(TestCase):
         start_index_refresh.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_renders_zero_usage_when_complete_index_is_empty(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_renders_zero_usage_when_complete_index_is_empty(self, mock_codex: MagicMock) -> None:
         session_index.mark_synced(archived=False, complete=True)
         session_index.mark_synced(archived=True, complete=True)
         client = _setup_codex(mock_codex)
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -5527,9 +5139,7 @@ class IndexViewTests(TestCase):
         start_index_refresh.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_schedules_stale_index_refresh_and_renders_cached_usage(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_schedules_stale_index_refresh_and_renders_cached_usage(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5550,18 +5160,12 @@ class IndexViewTests(TestCase):
             total_tokens=1_000,
             path=rollout_path,
         )
-        SessionMetadata.objects.filter(thread_id="stale").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
-        SessionIndexSyncState.objects.update(
-            last_synced_at=datetime(2025, 1, 1, tzinfo=UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="stale").update(usage_last_checked_at=datetime.now(UTC))
+        SessionIndexSyncState.objects.update(last_synced_at=datetime(2025, 1, 1, tzinfo=UTC))
         client = _setup_codex(mock_codex, threads=[], archived_threads=[])
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -5584,9 +5188,7 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_hides_totals_until_active_and_archived_indexes_complete(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_hides_totals_until_active_and_archived_indexes_complete(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -5616,9 +5218,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -5738,27 +5338,21 @@ class IndexViewTests(TestCase):
         # matching path+mtime but a stale logic version must not be treated as a
         # match, so a counting-logic bump forces a recompute even when the
         # rollout file is byte-for-byte unchanged.
-        rollout_state = _RolloutFileState(
-            path=Path("/codex/archived/rollout.jsonl"), mtime_ns=1_234
-        )
+        rollout_state = _RolloutFileState(path=Path("/codex/archived/rollout.jsonl"), mtime_ns=1_234)
         current = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path=str(rollout_state.path),
             rollout_mtime_ns=rollout_state.mtime_ns,
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
-        self.assertTrue(
-            token_usage._cached_token_usage_matches_rollout_state(current, rollout_state)
-        )
+        self.assertTrue(token_usage._cached_token_usage_matches_rollout_state(current, rollout_state))
         legacy = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path=str(rollout_state.path),
             rollout_mtime_ns=rollout_state.mtime_ns,
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
-        self.assertFalse(
-            token_usage._cached_token_usage_matches_rollout_state(legacy, rollout_state)
-        )
+        self.assertFalse(token_usage._cached_token_usage_matches_rollout_state(legacy, rollout_state))
 
     def test_stale_logic_version_cache_is_not_current_without_rollout_path(
         self,
@@ -5772,17 +5366,13 @@ class IndexViewTests(TestCase):
             rollout_path="",
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
-        self.assertTrue(
-            token_usage._cached_token_usage_is_current_for_state(current, None)
-        )
+        self.assertTrue(token_usage._cached_token_usage_is_current_for_state(current, None))
         legacy = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path="",
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
-        self.assertFalse(
-            token_usage._cached_token_usage_is_current_for_state(legacy, None)
-        )
+        self.assertFalse(token_usage._cached_token_usage_is_current_for_state(legacy, None))
 
     def test_usage_token_cache_state_rejects_stale_version_pathless_rows(self) -> None:
         # The lifetime-aggregation usability check must also reject stale-version
@@ -5828,9 +5418,7 @@ class IndexViewTests(TestCase):
                     daily_usage={"2025-01-05": {"input": 1}},
                 )
 
-                with patch(
-                    "hitch.main.sessions.token_usage._rollout_file_state_from_value"
-                ) as rollout_state:
+                with patch("hitch.main.sessions.token_usage._rollout_file_state_from_value") as rollout_state:
                     cache_state = token_usage._usage_token_cache_state(metadata, cache)
 
                 rollout_state.assert_not_called()
@@ -5950,9 +5538,7 @@ class IndexViewTests(TestCase):
                 os.utime(path, ns=(post_mtime, post_mtime))
             return lines
 
-        with patch.object(
-            rollout, "_load_rollout_lines", side_effect=load_then_append
-        ):
+        with patch.object(rollout, "_load_rollout_lines", side_effect=load_then_append):
             snapshot = token_usage._token_usage_snapshot_for(thread)
 
         assert snapshot is not None
@@ -5970,9 +5556,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_hides_archived_sessions_by_default(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_hides_archived_sessions_by_default(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         active = _session("active", name="Active session")
         archived = _session(
             "archived",
@@ -6010,10 +5594,7 @@ class IndexViewTests(TestCase):
         active = _session(
             "active",
             name="Active session",
-            path=(
-                "/data/archived_sessions/projects/me/.codex/sessions/"
-                "2026/05/15/rollout-active.jsonl"
-            ),
+            path=("/data/archived_sessions/projects/me/.codex/sessions/2026/05/15/rollout-active.jsonl"),
         )
         _setup_codex(mock_codex, threads=[active])
         mock_discover.return_value = []
@@ -6021,11 +5602,7 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertContains(response, "Active session")
-        self.assertTrue(
-            SessionMetadata.objects.filter(
-                thread_id="active", codex_archived=False
-            ).exists()
-        )
+        self.assertTrue(SessionMetadata.objects.filter(thread_id="active", codex_archived=False).exists())
 
     def test_upsert_thread_uses_codex_sdk_archived_flag(self) -> None:
         # Regression: ``session_index._thread_is_archived`` consulted only
@@ -6060,10 +5637,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        active = [
-            _session(f"active-{i}", name=f"Active {i}", updated_at=100 - i)
-            for i in range(50)
-        ]
+        active = [_session(f"active-{i}", name=f"Active {i}", updated_at=100 - i) for i in range(50)]
         archived_page_1 = [
             _session(
                 f"archived-1-{i}",
@@ -6084,9 +5658,7 @@ class IndexViewTests(TestCase):
         ]
         client = _setup_codex(mock_codex)
 
-        def thread_list(
-            *, archived: bool | None = None, cursor: str | None = None, **_: Any
-        ) -> SimpleNamespace:
+        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
             if archived and cursor == "archived-2":
                 return SimpleNamespace(data=archived_page_2)
             if archived:
@@ -6121,9 +5693,7 @@ class IndexViewTests(TestCase):
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
         client = _setup_codex(mock_codex)
 
-        def thread_list(
-            *, archived: bool | None = None, cursor: str | None = None, **_: Any
-        ) -> SimpleNamespace:
+        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
             if archived and cursor == "a":
                 return SimpleNamespace(data=[], next_cursor="b")
             if archived and cursor == "b":
@@ -6147,10 +5717,7 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        threads = [
-            _session(f"active-{i}", name=f"Active {i}", updated_at=100 - i)
-            for i in range(3)
-        ]
+        threads = [_session(f"active-{i}", name=f"Active {i}", updated_at=100 - i) for i in range(3)]
         _setup_codex(mock_codex, threads=threads, archived_threads=[])
         mock_discover.return_value = []
 
@@ -6188,7 +5755,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Archived session")
         self.assertContains(response, '<span class="archive-badge">Archived</span>')
         self.assertContains(response, 'data-session-archived="true"')
-        self.assertContains(response, 'data-session-archive-label>Unarchive</button>')
+        self.assertContains(response, "data-session-archive-label>Unarchive</button>")
         self.assertContains(response, 'name="archived" value="false"')
         self.assertLess(body.index("Archived session"), body.index("Active session"))
         client = mock_codex.return_value.__enter__.return_value
@@ -6207,9 +5774,7 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_sums_lifetime_token_usage_without_cached_double_count(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_sums_lifetime_token_usage_without_cached_double_count(self, mock_codex: MagicMock) -> None:
         active_path = _make_rollout(
             self,
             [
@@ -6364,9 +5929,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_profile_shows_selected_project_token_usage(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_profile_shows_selected_project_token_usage(self, mock_codex: MagicMock) -> None:
         project = _make_project()
         other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
@@ -6458,9 +6021,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_buckets_orphan_hitch_system_prompt_threads(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_buckets_orphan_hitch_system_prompt_threads(self, mock_codex: MagicMock) -> None:
         session_path = _make_rollout(
             self,
             [
@@ -6569,9 +6130,7 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_backfills_legacy_empty_daily_usage_cache(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_backfills_legacy_empty_daily_usage_cache(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -6600,9 +6159,7 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(
-            response, '<span class="lifetime-chart-label">01-05</span>'
-        )
+        self.assertNotContains(response, '<span class="lifetime-chart-label">01-05</span>')
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.daily_usage, {})
         client.thread_list.assert_not_called()
@@ -6618,9 +6175,7 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_reuses_cached_active_session_usage(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_reuses_cached_active_session_usage(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -6641,9 +6196,7 @@ class IndexViewTests(TestCase):
             total_tokens=1_000,
             path=rollout_path,
         )
-        SessionMetadata.objects.filter(thread_id="active").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="active").update(usage_last_checked_at=datetime.now(UTC))
         client = _setup_codex(mock_codex)
 
         with (
@@ -6676,13 +6229,9 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_schedules_recent_invalid_path_for_repair(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_schedules_recent_invalid_path_for_repair(self, mock_codex: MagicMock) -> None:
         _seed_usage_metadata("missing", path="/nonexistent/rollout.jsonl")
-        SessionMetadata.objects.filter(thread_id="missing").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="missing").update(usage_last_checked_at=datetime.now(UTC))
         _cache_token_usage(
             "missing",
             input_tokens=400,
@@ -6714,9 +6263,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].codex_path, "/nonexistent/rollout.jsonl")
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_rechecks_expired_missing_path_observation(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_rechecks_expired_missing_path_observation(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing", path=missing_path)
         SessionMetadata.objects.filter(thread_id="missing").update(
@@ -6738,9 +6285,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch(
-                "hitch.main.sessions.token_usage._start_usage_token_refresh_thread"
-            ) as start_refresh,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -6760,9 +6305,7 @@ class IndexViewTests(TestCase):
         rollout_path.unlink()
         metadata = _seed_usage_metadata("restored", path=rollout_path)
         metadata.usage_last_checked_at = (
-            datetime.now(UTC)
-            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
-            - timedelta(seconds=1)
+            datetime.now(UTC) - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL - timedelta(seconds=1)
         )
         metadata.save(update_fields=["usage_last_checked_at"])
         cache = ArchivedSessionTokenUsage.objects.create(
@@ -6773,9 +6316,7 @@ class IndexViewTests(TestCase):
         )
         candidates = token_usage._usage_token_refresh_candidates([metadata])
 
-        self.assertTrue(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertTrue(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         rollout_path.write_text(
             _token_count_line(
                 input_tokens=400,
@@ -6792,14 +6333,10 @@ class IndexViewTests(TestCase):
         cache.refresh_from_db()
         self.assertGreater(cache.rollout_mtime_ns, 0)
         self.assertEqual(cache.total_tokens, 1_000)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_sweep_repairs_expired_terminal_blank_path(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_sweep_repairs_expired_terminal_blank_path(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -6813,9 +6350,7 @@ class IndexViewTests(TestCase):
         )
         metadata = _seed_usage_metadata("restored")
         metadata.usage_last_checked_at = (
-            datetime.now(UTC)
-            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
-            - timedelta(seconds=1)
+            datetime.now(UTC) - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL - timedelta(seconds=1)
         )
         metadata.save(update_fields=["usage_last_checked_at"])
         cache = ArchivedSessionTokenUsage.objects.create(
@@ -6830,9 +6365,7 @@ class IndexViewTests(TestCase):
         )
         candidates = token_usage._usage_token_refresh_candidates([metadata])
 
-        self.assertTrue(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertTrue(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
 
         token_usage._refresh_usage_token_cache_best_effort(candidates)
@@ -6843,14 +6376,10 @@ class IndexViewTests(TestCase):
         self.assertEqual(metadata.codex_path, str(rollout_path))
         self.assertEqual(cache.rollout_path, str(rollout_path))
         self.assertEqual(cache.total_tokens, 1_000)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_sweep_repairs_expired_terminal_missing_path(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_sweep_repairs_expired_terminal_missing_path(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -6865,9 +6394,7 @@ class IndexViewTests(TestCase):
         missing_path = "/nonexistent/rollout.jsonl"
         metadata = _seed_usage_metadata("restored", path=missing_path)
         metadata.usage_last_checked_at = (
-            datetime.now(UTC)
-            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
-            - timedelta(seconds=1)
+            datetime.now(UTC) - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL - timedelta(seconds=1)
         )
         metadata.save(update_fields=["usage_last_checked_at"])
         cache = ArchivedSessionTokenUsage.objects.create(
@@ -6882,9 +6409,7 @@ class IndexViewTests(TestCase):
         )
         candidates = token_usage._usage_token_refresh_candidates([metadata])
 
-        self.assertTrue(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertTrue(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
 
         token_usage._refresh_usage_token_cache_best_effort(candidates)
@@ -6895,20 +6420,14 @@ class IndexViewTests(TestCase):
         self.assertEqual(metadata.codex_path, str(rollout_path))
         self.assertEqual(cache.rollout_path, str(rollout_path))
         self.assertEqual(cache.total_tokens, 1_000)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_sweep_settles_unrepairable_terminal_headline_only_cache(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_sweep_settles_unrepairable_terminal_headline_only_cache(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         metadata = _seed_usage_metadata("missing", path=missing_path)
         metadata.usage_last_checked_at = (
-            datetime.now(UTC)
-            - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL
-            - timedelta(seconds=1)
+            datetime.now(UTC) - token_usage._USAGE_TOKEN_REFRESH_CHECK_INTERVAL - timedelta(seconds=1)
         )
         metadata.save(update_fields=["usage_last_checked_at"])
         cache = ArchivedSessionTokenUsage.objects.create(
@@ -6926,9 +6445,7 @@ class IndexViewTests(TestCase):
         client._client.thread_resume.side_effect = CodexError("resume failed")
         candidates = token_usage._usage_token_refresh_candidates([metadata])
 
-        self.assertTrue(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertTrue(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         token_usage._refresh_usage_token_cache_best_effort(candidates)
 
         client._client.thread_resume.assert_called_once_with("missing")
@@ -6936,14 +6453,10 @@ class IndexViewTests(TestCase):
         cache.refresh_from_db()
         self.assertEqual(cache.total_tokens, 1_000)
         self.assertEqual(cache.daily_usage, {})
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
 
     @patch("hitch.main.views.common.Codex")
-    def test_usage_page_uses_indexed_usage_when_session_list_fails(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_uses_indexed_usage_when_session_list_fails(self, mock_codex: MagicMock) -> None:
         client = _setup_codex(mock_codex)
         client.thread_list.side_effect = CodexError("thread list unavailable")
         _seed_usage_metadata("indexed")
@@ -6973,9 +6486,7 @@ class IndexViewTests(TestCase):
         client.thread_list.side_effect = CodexError("thread list unavailable")
 
         with (
-            patch(
-                "hitch.main.views.common._start_usage_session_index_refresh_thread"
-            ) as start_index_refresh,
+            patch("hitch.main.views.common._start_usage_session_index_refresh_thread") as start_index_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -6994,9 +6505,7 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_page_schedules_missing_metadata_path_refresh(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_page_schedules_missing_metadata_path_refresh(self, mock_codex: MagicMock) -> None:
         rollout_path = _make_rollout(
             self,
             [
@@ -7042,16 +6551,12 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 1_000)
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_caches_zero_when_missing_path_cannot_be_repaired(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_caches_zero_when_missing_path_cannot_be_repaired(self, mock_codex: MagicMock) -> None:
         _seed_usage_metadata("missing-path")
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = CodexError("resume failed")
 
-        token_usage._refresh_usage_token_cache_best_effort(
-            [token_usage._UsageTokenRefreshItem("missing-path", "")]
-        )
+        token_usage._refresh_usage_token_cache_best_effort([token_usage._UsageTokenRefreshItem("missing-path", "")])
 
         metadata = SessionMetadata.objects.get(thread_id="missing-path")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
@@ -7059,15 +6564,11 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 0)
         self.assertEqual(cache.daily_usage, {})
         self.assertIsNotNone(metadata.usage_last_checked_at)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_caches_zero_when_repaired_path_is_blank(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_caches_zero_when_repaired_path_is_blank(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
         client = _setup_codex(mock_codex)
@@ -7084,20 +6585,14 @@ class IndexViewTests(TestCase):
         self.assertEqual(metadata.codex_path, "")
         self.assertEqual(cache.rollout_path, "")
         self.assertEqual(cache.total_tokens, 0)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_stamps_disappeared_file_cache_after_failed_repair(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_stamps_disappeared_file_cache_after_failed_repair(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
-        SessionMetadata.objects.filter(thread_id="missing-path").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="missing-path").update(usage_last_checked_at=datetime.now(UTC))
         cache = ArchivedSessionTokenUsage.objects.create(
             thread_id="missing-path",
             rollout_path=missing_path,
@@ -7128,15 +6623,11 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_path, missing_path)
         self.assertEqual(cache.rollout_mtime_ns, 0)
         self.assertEqual(cache.total_tokens, 1_000)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_keeps_existing_terminal_missing_path_cache(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_keeps_existing_terminal_missing_path_cache(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
         ArchivedSessionTokenUsage.objects.create(
@@ -7162,29 +6653,21 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_path, missing_path)
         self.assertEqual(cache.rollout_mtime_ns, 0)
         self.assertEqual(cache.total_tokens, 1_000)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_missing_metadata_path_handles_unexpected_resume_error(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_missing_metadata_path_handles_unexpected_resume_error(self, mock_codex: MagicMock) -> None:
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = RuntimeError("boom")
 
-        refreshed_path = token_usage._refresh_missing_usage_metadata_path(
-            client, "missing-path", projects=[]
-        )
+        refreshed_path = token_usage._refresh_missing_usage_metadata_path(client, "missing-path", projects=[])
 
         self.assertIsNone(refreshed_path)
 
     def test_usage_refresh_keeps_pathless_old_cache_repair_pending(self) -> None:
         _seed_usage_metadata("missing-path")
-        SessionMetadata.objects.filter(thread_id="missing-path").update(
-            usage_last_checked_at=datetime.now(UTC)
-        )
+        SessionMetadata.objects.filter(thread_id="missing-path").update(usage_last_checked_at=datetime.now(UTC))
         cache = ArchivedSessionTokenUsage.objects.create(
             thread_id="missing-path",
             rollout_path="/old/rollout.jsonl",
@@ -7205,9 +6688,7 @@ class IndexViewTests(TestCase):
         self.assertTrue(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_caches_zero_for_unrepairable_invalid_path(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_caches_zero_for_unrepairable_invalid_path(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("missing-path", path=missing_path)
         client = _setup_codex(mock_codex)
@@ -7221,13 +6702,9 @@ class IndexViewTests(TestCase):
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
         self.assertEqual(cache.rollout_path, missing_path)
         self.assertEqual(cache.total_tokens, 0)
-        self.assertEqual(
-            cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION
-        )
+        self.assertEqual(cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION)
         self.assertIsNotNone(metadata.usage_last_checked_at)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
@@ -7260,15 +6737,11 @@ class IndexViewTests(TestCase):
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="missing-path")
         self.assertEqual(cache.rollout_path, missing_path)
         self.assertEqual(cache.total_tokens, 0)
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_replaces_unusable_cache_when_path_cannot_be_repaired(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_replaces_unusable_cache_when_path_cannot_be_repaired(self, mock_codex: MagicMock) -> None:
         missing_path = "/nonexistent/rollout.jsonl"
         _seed_usage_metadata("stale-cache", path=missing_path)
         ArchivedSessionTokenUsage.objects.create(
@@ -7293,12 +6766,8 @@ class IndexViewTests(TestCase):
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="stale-cache")
         self.assertEqual(cache.rollout_path, missing_path)
         self.assertEqual(cache.total_tokens, 0)
-        self.assertEqual(
-            cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION
-        )
-        self.assertFalse(
-            token_usage._usage_token_cache_state(metadata, cache).refresh_pending
-        )
+        self.assertEqual(cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION)
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, cache).refresh_pending)
         self.assertFalse(token_usage._usage_token_refresh_needed(metadata, cache))
 
     def test_usage_refresh_zeros_stale_cache_when_rollout_has_no_usage(self) -> None:
@@ -7327,9 +6796,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.daily_usage, {})
 
     @patch("hitch.main.sessions.token_usage.Codex")
-    def test_usage_refresh_preserves_cache_when_rollout_path_missing(
-        self, mock_codex: MagicMock
-    ) -> None:
+    def test_usage_refresh_preserves_cache_when_rollout_path_missing(self, mock_codex: MagicMock) -> None:
         _seed_usage_metadata("missing", path="/nonexistent/rollout.jsonl")
         cache = ArchivedSessionTokenUsage.objects.create(
             thread_id="missing",
@@ -7384,9 +6851,7 @@ class IndexViewTests(TestCase):
             )
 
         update_queries = [
-            query
-            for query in queries.captured_queries
-            if 'UPDATE "main_sessionmetadata"' in query["sql"]
+            query for query in queries.captured_queries if 'UPDATE "main_sessionmetadata"' in query["sql"]
         ]
         self.assertEqual(len(update_queries), 3)
         self.assertEqual(
@@ -7407,9 +6872,7 @@ class IndexViewTests(TestCase):
             self.assertLogs("hitch.main.sessions.token_usage", level="ERROR"),
             patch("hitch.main.sessions.token_usage.threading.Thread", return_value=thread),
         ):
-            token_usage._start_usage_token_refresh_thread(
-                [token_usage._UsageTokenRefreshItem("thread", "")]
-            )
+            token_usage._start_usage_token_refresh_thread([token_usage._UsageTokenRefreshItem("thread", "")])
 
         self.assertFalse(token_usage._USAGE_TOKEN_REFRESH_IN_FLIGHT)
 
@@ -7422,9 +6885,7 @@ class IndexViewTests(TestCase):
             token_usage._UsageTokenRefreshItem("thread-b", ""),
         ]
 
-        with patch(
-            "hitch.main.sessions.token_usage.threading.Thread", return_value=thread
-        ) as thread_cls:
+        with patch("hitch.main.sessions.token_usage.threading.Thread", return_value=thread) as thread_cls:
             token_usage._start_usage_token_refresh_thread(iter(items))
 
         thread_cls.assert_called_once()
@@ -7485,9 +6946,7 @@ class IndexViewTests(TestCase):
             usage_last_checked_at=datetime(2025, 1, 6, tzinfo=UTC)
         )
         rows = list(SessionMetadata.objects.order_by("thread_id"))
-        second_batch_ids = [
-            item.thread_id for item in token_usage._usage_token_refresh_items(rows, {})
-        ]
+        second_batch_ids = [item.thread_id for item in token_usage._usage_token_refresh_items(rows, {})]
 
         self.assertEqual(
             second_batch_ids[:5],
@@ -7515,9 +6974,7 @@ class IndexViewTests(TestCase):
             os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
             thread_id = f"stale-{index}"
             stale_thread_ids.append(thread_id)
-            _seed_usage_metadata(
-                thread_id, path=rollout_path, mark_index_complete=False
-            )
+            _seed_usage_metadata(thread_id, path=rollout_path, mark_index_complete=False)
             ArchivedSessionTokenUsage.objects.create(
                 thread_id=thread_id,
                 rollout_path=str(rollout_path),
@@ -7528,13 +6985,9 @@ class IndexViewTests(TestCase):
                 total_tokens=120,
             )
         rows = list(SessionMetadata.objects.order_by("thread_id"))
-        caches = token_usage._token_usage_caches_by_thread_ids(
-            row.thread_id for row in rows
-        )
+        caches = token_usage._token_usage_caches_by_thread_ids(row.thread_id for row in rows)
 
-        batch_ids = [
-            item.thread_id for item in token_usage._usage_token_refresh_items(rows, caches)
-        ]
+        batch_ids = [item.thread_id for item in token_usage._usage_token_refresh_items(rows, caches)]
 
         self.assertEqual(len(batch_ids), 25)
         for thread_id in stale_thread_ids:
@@ -7578,9 +7031,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_repo_dropdown_selects_saved_repo(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_repo_dropdown_selects_saved_repo(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _seed_cookies(
             self.client,
             **{_LAST_SELECTED_REPO_COOKIE: "/home/user/proj-b"},
@@ -7595,9 +7046,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_project_dropdown_selects_saved_repo_project(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_project_dropdown_selects_saved_repo_project(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _make_project(name="Project A", repo_path="/home/user/proj-a")
         project_b = _make_project(name="Project B", repo_path="/home/user/proj-b")
         _seed_cookies(
@@ -7627,17 +7076,13 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("new_session"))
 
-        self.assertContains(
-            response, f'value="{session_settings._BARE_REPO_PROJECT_VALUE}" selected'
-        )
+        self.assertContains(response, f'value="{session_settings._BARE_REPO_PROJECT_VALUE}" selected')
         self.assertNotContains(response, "data-new-session-repo-field hidden")
         self.assertContains(response, 'value="/home/user/bare" selected')
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_project_dropdown_ignores_stale_saved_repo(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_project_dropdown_ignores_stale_saved_repo(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project(name="Project A", repo_path="/home/user/proj-a")
         _seed_cookies(
             self.client,
@@ -7670,9 +7115,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_new_session_page_exposes_plan_slash_command(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_new_session_page_exposes_plan_slash_command(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj")]
 
@@ -7694,9 +7137,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_new_session_page_exposes_worktree_override(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_new_session_page_exposes_worktree_override(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj")]
         _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
@@ -7712,9 +7153,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_title_rendering(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_title_rendering(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         """Per-row title display: user-set name wins, otherwise the preview's
         first line clipped to 80 chars, otherwise the bare id."""
         long_text = "x" * 200
@@ -7742,6 +7181,7 @@ class IndexViewTests(TestCase):
         # No name + no preview → fall back to the id.
         self.assertContains(response, ">bare-id<")
 
+
 class ProjectViewTests(TestCase):
     def test_projects_default_to_follow_global_auto_pr(self) -> None:
         project = _make_project()
@@ -7768,16 +7208,12 @@ class ProjectViewTests(TestCase):
         _make_project(name="Two", repo_path="/repo-two")
 
         with self.assertNumQueries(1):
-            creatable = settings_views._creatable_project_repos(
-                ["/repo-one", "/new-one", "/new-two"]
-            )
+            creatable = settings_views._creatable_project_repos(["/repo-one", "/new-one", "/new-two"])
 
         self.assertEqual(creatable, ["/new-one", "/new-two"])
 
     @patch("hitch.main.repos.discover_repos")
-    def test_new_project_form_hides_repos_that_already_have_projects(
-        self, mock_discover: MagicMock
-    ) -> None:
+    def test_new_project_form_hides_repos_that_already_have_projects(self, mock_discover: MagicMock) -> None:
         _make_project(name="Existing")
         mock_discover.return_value = [Path("/repo"), Path("/other")]
 
@@ -7948,8 +7384,7 @@ class ProjectViewTests(TestCase):
                 {
                     "project": str(project.pk),
                     "name": "Renamed",
-                    "extra_system_prompt": "x"
-                    * (settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN + 1),
+                    "extra_system_prompt": "x" * (settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN + 1),
                     "auto_pr_mode": Project.AUTO_PR_ON,
                 },
                 "extra system prompt is too long",
@@ -7978,9 +7413,7 @@ class ProjectViewTests(TestCase):
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.repos.discover_repos")
-    def test_rejects_invalid_project_posts(
-        self, mock_discover: MagicMock, mock_codex: MagicMock
-    ) -> None:
+    def test_rejects_invalid_project_posts(self, mock_discover: MagicMock, mock_codex: MagicMock) -> None:
         mock_discover.return_value = [Path("/repo")]
         _setup_codex(mock_codex)
 
@@ -7992,6 +7425,7 @@ class ProjectViewTests(TestCase):
                 response = self.client.post(reverse("new_project"), data=data)
                 self.assertContains(response, message, status_code=400)
 
+
 class PrStageRefreshSchedulingTests(TestCase):
     @override
     def tearDown(self) -> None:
@@ -8001,9 +7435,7 @@ class PrStageRefreshSchedulingTests(TestCase):
             session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT.clear()
 
     @patch("hitch.main.sessions.session_stage_refresh._refresh_session_pr_stage")
-    def test_schedule_runs_inline_under_testing(
-        self, mock_refresh: MagicMock
-    ) -> None:
+    def test_schedule_runs_inline_under_testing(self, mock_refresh: MagicMock) -> None:
         session_stage_refresh._schedule_pr_stage_refresh("sess-1")
         mock_refresh.assert_called_once_with("sess-1")
 
@@ -8038,14 +7470,12 @@ class PrStageRefreshSchedulingTests(TestCase):
         rollout_state = _RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
         session = {"cwd": "/repo", "stage_pr_refresh_attempted_at": None}
 
-        _stage, _snap, remaining, refreshing = (
-            session_stage_refresh._stage_from_cached_session_row(
-                "sess-budget",
-                session,
-                rollout_state=rollout_state,
-                cached_stage=session_stage.PR,
-                pr_stage_refreshes_remaining=1,
-            )
+        _stage, _snap, remaining, refreshing = session_stage_refresh._stage_from_cached_session_row(
+            "sess-budget",
+            session,
+            rollout_state=rollout_state,
+            cached_stage=session_stage.PR,
+            pr_stage_refreshes_remaining=1,
         )
         self.assertTrue(refreshing)
         self.assertEqual(remaining, 0)
@@ -8053,14 +7483,12 @@ class PrStageRefreshSchedulingTests(TestCase):
 
         mock_schedule.reset_mock()
 
-        _stage, _snap, remaining, refreshing = (
-            session_stage_refresh._stage_from_cached_session_row(
-                "sess-exhausted",
-                session,
-                rollout_state=rollout_state,
-                cached_stage=session_stage.PR,
-                pr_stage_refreshes_remaining=0,
-            )
+        _stage, _snap, remaining, refreshing = session_stage_refresh._stage_from_cached_session_row(
+            "sess-exhausted",
+            session,
+            rollout_state=rollout_state,
+            cached_stage=session_stage.PR,
+            pr_stage_refreshes_remaining=0,
         )
         self.assertFalse(refreshing)
         self.assertEqual(remaining, 0)
@@ -8095,9 +7523,7 @@ class ArchiveUndoToastTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_rapid_archive_keeps_every_row_undoable(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_rapid_archive_keeps_every_row_undoable(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         client = _setup_codex(mock_codex)
         client.thread_list.side_effect = CodexError("thread list unavailable")
         self._seed_two_sessions()
@@ -8122,14 +7548,9 @@ class ArchiveUndoToastTests(TestCase):
                 page.set_content(page_html, wait_until="load")
                 # Archive POSTs always succeed in this test; the 5s finalize
                 # timers never fire within the test window.
-                page.evaluate(
-                    "() => { window.fetch = () => Promise.resolve({ ok: true }); }"
-                )
+                page.evaluate("() => { window.fetch = () => Promise.resolve({ ok: true }); }")
                 self.assertEqual(
-                    page.evaluate(
-                        "() => document.querySelectorAll("
-                        "'[data-session-archive-form]').length"
-                    ),
+                    page.evaluate("() => document.querySelectorAll('[data-session-archive-form]').length"),
                     2,
                 )
                 # Archive both rows in quick succession.
@@ -8143,41 +7564,20 @@ class ArchiveUndoToastTests(TestCase):
                     }
                     """
                 )
-                page.wait_for_function(
-                    "document.querySelectorAll("
-                    "'[data-session-row].pending-archive').length === 2"
-                )
-                self.assertFalse(
-                    page.evaluate(
-                        "() => document.querySelector('[data-archive-toast]').hidden"
-                    )
-                )
+                page.wait_for_function("document.querySelectorAll('[data-session-row].pending-archive').length === 2")
+                self.assertFalse(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
 
                 undo = "() => document.querySelector('[data-archive-undo]').click()"
                 # First Undo restores the most recently archived row; the toast
                 # stays up because the other row's grace period is still open.
                 page.evaluate(undo)
-                page.wait_for_function(
-                    "document.querySelectorAll("
-                    "'[data-session-row].pending-archive').length === 1"
-                )
-                self.assertFalse(
-                    page.evaluate(
-                        "() => document.querySelector('[data-archive-toast]').hidden"
-                    )
-                )
+                page.wait_for_function("document.querySelectorAll('[data-session-row].pending-archive').length === 1")
+                self.assertFalse(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
                 # Second Undo restores the earlier row -- the case the single-slot
                 # implementation dropped on the floor.
                 page.evaluate(undo)
-                page.wait_for_function(
-                    "document.querySelectorAll("
-                    "'[data-session-row].pending-archive').length === 0"
-                )
-                self.assertTrue(
-                    page.evaluate(
-                        "() => document.querySelector('[data-archive-toast]').hidden"
-                    )
-                )
+                page.wait_for_function("document.querySelectorAll('[data-session-row].pending-archive').length === 0")
+                self.assertTrue(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
             finally:
                 browser.close()
 
@@ -8239,10 +7639,7 @@ class ArchiveUndoToastTests(TestCase):
                 # ordering by POST completion would get wrong.
                 page.evaluate("() => window.__archive['sess-2']()")
                 page.evaluate("() => window.__archive['sess-1']()")
-                page.wait_for_function(
-                    "document.querySelectorAll("
-                    "'[data-session-row].pending-archive').length === 2"
-                )
+                page.wait_for_function("document.querySelectorAll('[data-session-row].pending-archive').length === 2")
 
                 undo = "() => document.querySelector('[data-archive-undo]').click()"
                 resolve_undo = "() => window.__undo.shift()()"
@@ -8309,14 +7706,12 @@ class UnarchiveFailureTests(TestCase):
                 page = browser.new_page()
                 page.set_content(page_html, wait_until="load")
                 # The unarchive POST fails (non-OK response).
-                page.evaluate(
-                    "() => { window.fetch = () => Promise.resolve({ ok: false }); }"
-                )
+                page.evaluate("() => { window.fetch = () => Promise.resolve({ ok: false }); }")
                 # Submitting an archived row's form takes the unarchive branch.
                 page.evaluate(
                     "() => document.querySelector("
                     "\"[data-session-archive-url*='arch-1'] "
-                    "[data-session-archive-form]\").requestSubmit()"
+                    '[data-session-archive-form]").requestSubmit()'
                 )
                 page.wait_for_function(
                     "() => { const t = document.querySelector("
@@ -8326,16 +7721,10 @@ class UnarchiveFailureTests(TestCase):
                     ".includes('Couldn'); }"
                 )
                 # No successful-archive notice, and the row stays archived.
-                self.assertTrue(
-                    page.evaluate(
-                        "() => document.querySelector('[data-archive-toast]').hidden"
-                    )
-                )
+                self.assertTrue(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
                 self.assertEqual(
                     page.evaluate(
-                        "() => document.querySelector("
-                        "\"[data-session-archive-url*='arch-1']\")"
-                        ".dataset.sessionArchived"
+                        "() => document.querySelector(\"[data-session-archive-url*='arch-1']\").dataset.sessionArchived"
                     ),
                     "true",
                 )
@@ -8358,15 +7747,9 @@ class ThreadListSortTests(TestCase):
             SimpleNamespace(id="epoch", updated_at=1_700_000_000),
             SimpleNamespace(id="dt", updated_at=datetime(2025, 1, 2, tzinfo=UTC)),
         ]
-        codex = SimpleNamespace(
-            thread_list=lambda **kwargs: SimpleNamespace(
-                data=list(threads), next_cursor=""
-            )
-        )
+        codex = SimpleNamespace(thread_list=lambda **kwargs: SimpleNamespace(data=list(threads), next_cursor=""))
 
-        page = session_list._thread_list_page(
-            cast(Any, codex), archived=False, cursor=""
-        )
+        page = session_list._thread_list_page(cast(Any, codex), archived=False, cursor="")
 
         # Newest first: the 2025 datetime, then the 2023 epoch, then the
         # timestampless thread (treated as oldest).
@@ -8412,9 +7795,7 @@ class UsageTileAccessibilityTests(TestCase):
                 "chart_axis": [],
             },
         }
-        return render_to_string(
-            "_usage_sections.html", {"lifetime_usage": lifetime_usage}
-        )
+        return render_to_string("_usage_sections.html", {"lifetime_usage": lifetime_usage})
 
     def test_only_charted_tiles_are_interactive(self) -> None:
         html = self._render(sessions_chart=True, system_chart=False)
@@ -8441,9 +7822,7 @@ class SharedCsrfHelperTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_csrf_helper_falls_back_to_form_input(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_csrf_helper_falls_back_to_form_input(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex, threads=[])
         html = self.client.get(reverse("index")).content.decode()
         self.assertIn("window.hitch.csrfToken", html)
@@ -8491,9 +7870,7 @@ class SharedPostFormHelperTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_postform_headers_and_xhr_opt_in(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_postform_headers_and_xhr_opt_in(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex, threads=[])
         html = self.client.get(reverse("index")).content.decode()
 
@@ -8538,9 +7915,7 @@ class SharedPostFormHelperTests(TestCase):
                 for call in result:
                     self.assertEqual(call["method"], "POST")
                     self.assertEqual(call["credentials"], "same-origin")
-                    self.assertEqual(
-                        call["contentType"], "application/x-www-form-urlencoded"
-                    )
+                    self.assertEqual(call["contentType"], "application/x-www-form-urlencoded")
                     self.assertTrue(call["hasCsrf"])
                 self.assertEqual(with_xhr["xhr"], "XMLHttpRequest")
                 self.assertIsNone(no_xhr["xhr"])
@@ -8557,9 +7932,7 @@ class SharedTimeHelperTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_relative_from_now(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_relative_from_now(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex, threads=[])
         html = self.client.get(reverse("index")).content.decode()
         self.assertIn("window.hitch.relativeFromNow", html)
@@ -8598,9 +7971,7 @@ class SharedTimeHelperTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_index_refreshes_relative_timestamps(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_index_refreshes_relative_timestamps(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex, threads=[])
         html = self.client.get(reverse("index")).content.decode()
         script_marker = """<script>

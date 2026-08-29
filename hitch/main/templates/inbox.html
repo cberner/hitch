@@ -392,9 +392,10 @@
                             data-proposed-session-id="{{ proposed_session.pk }}"
                             data-proposed-session-title="{{ proposed_session.title }}"
                             data-proposed-session-project="{{ proposed_session.accept_project_id }}"
+                            data-proposed-session-cwd="{{ proposed_session.accept_cwd }}"
                             data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
-                            data-proposed-session-auto-pr="{% if proposed_session.autonomous_goal %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
-                            data-proposed-session-auto-qa="{% if proposed_session.autonomous_goal %}{% if proposed_session.accept_auto_qa %}true{% else %}false{% endif %}{% endif %}"
+                            data-proposed-session-auto-pr="{% if proposed_session.accept_auto_review_explicit %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
+                            data-proposed-session-auto-qa="{% if proposed_session.accept_auto_review_explicit %}{% if proposed_session.accept_auto_qa %}true{% else %}false{% endif %}{% endif %}"
                         >Do it</button>
                         {% endif %}
                     </div>
@@ -452,6 +453,7 @@
         <form method="post" action="{% url 'new_session' %}" data-do-session-form>
             {% csrf_token %}
             <input type="hidden" name="project" data-do-session-project>
+            <input type="hidden" name="cwd" data-do-session-cwd>
             <input type="hidden" name="proposed_session" data-do-session-id>
             <input type="hidden" name="auto_pr" data-do-session-auto-pr>
             <input type="hidden" name="auto_qa" data-do-session-auto-qa>
@@ -477,6 +479,7 @@
             const doHeading = doDialog && doDialog.querySelector("#do-session-title");
             const doPrompt = doDialog && doDialog.querySelector("[data-do-session-prompt]");
             const doProject = doDialog && doDialog.querySelector("[data-do-session-project]");
+            const doCwd = doDialog && doDialog.querySelector("[data-do-session-cwd]");
             const doId = doDialog && doDialog.querySelector("[data-do-session-id]");
             const doAutoPr = doDialog && doDialog.querySelector("[data-do-session-auto-pr]");
             const doAutoQa = doDialog && doDialog.querySelector("[data-do-session-auto-qa]");
@@ -509,6 +512,7 @@
                     if (doTitle) doTitle.textContent = button.dataset.proposedSessionTitle || "";
                     if (doPrompt) doPrompt.value = button.dataset.proposedSessionPrompt || "";
                     if (doProject) doProject.value = button.dataset.proposedSessionProject || "";
+                    if (doCwd) doCwd.value = button.dataset.proposedSessionCwd || "";
                     if (doId) doId.value = button.dataset.proposedSessionId || "";
                     if (doAutoPr) {
                         doAutoPr.value = button.dataset.proposedSessionAutoPr || "";

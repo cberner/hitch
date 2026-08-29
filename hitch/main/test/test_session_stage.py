@@ -91,9 +91,9 @@ class SessionStageTests(SimpleTestCase):
 
     def test_pending_user_input_overrides_running_system_workflow(self) -> None:
         workflow = SystemWorkflow(
-            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            kind=SystemWorkflow.KIND_PR_QA,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
+            step=system_agents.STEP_QA_RUNNING,
         )
 
         stage = session_stage.derive_stage(

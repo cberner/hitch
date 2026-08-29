@@ -199,7 +199,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
     auto_qa = request.POST.get("auto_qa", "").strip()
-    spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_disk_usage_max_percent = request.POST.get("disk_usage_max_percent")
     posted_initial_disk_usage_max_percent = request.POST.get(
@@ -248,9 +247,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_qa not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-QA setting")
     auto_qa = "true" if auto_qa == "true" else "false"
-    if spec_critic not in {"", "true"}:
-        return HttpResponseBadRequest("invalid Spec Critic setting")
-    spec_critic = "true" if spec_critic == "true" else "false"
     if web_search_mode and web_search_mode not in _VALID_WEB_SEARCH_MODES:
         return HttpResponseBadRequest("invalid web search setting")
     disk_usage_max_percent: float | None = None
@@ -323,7 +319,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
         auto_qa_enabled=auto_qa == "true",
-        spec_critic_enabled=spec_critic == "true",
         web_search_mode=web_search_mode,
         show_archived_sessions=(
             stored.show_archived_sessions

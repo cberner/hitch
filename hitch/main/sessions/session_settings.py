@@ -563,6 +563,17 @@ def _project_for_proposed_session(
     return None
 
 
+def _target_cwd_for_proposed_session(
+    proposed_session: ProposedSession | None,
+) -> str:
+    project = _project_for_proposed_session(proposed_session)
+    if project is not None:
+        return project.repo_path
+    if proposed_session is None or proposed_session.source_session is None:
+        return ""
+    return proposed_session.source_session.cwd.strip()
+
+
 def _allowed_session_cwds() -> set[str]:
     return {
         str(p)

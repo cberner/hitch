@@ -31,7 +31,6 @@ from django.db import close_old_connections
 from hitch.main import formatting
 from hitch.main.models import (
     CodexInstance,
-    SessionDemo,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -96,7 +95,6 @@ _FILE_APPEAR_TIMEOUT = 30.0
 def stream_for_instance(
     instance: CodexInstance,
     *,
-    demo_baseline: str | None = None,
     steering_revision: int | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames (as bytes) for a single CodexInstance.
@@ -135,9 +133,6 @@ def stream_for_instance(
     while not path.exists():
         if steering_changed():
             yield _end_frame("steering")
-            return
-        if _demo_changed(instance.thread_id, demo_baseline):
-            yield _end_frame("demo")
             return
         if _is_done(instance.pk):
             yield _end_frame(_current_status(instance.pk))
@@ -178,17 +173,10 @@ def stream_for_instance(
                     initial_backlog = False
                 else:
                     buffer = yield from _emit_complete_lines(buffer)
-                if _demo_changed(instance.thread_id, demo_baseline):
-                    yield _end_frame("demo")
-                    return
                 continue
 
             if initial_backlog:
                 initial_backlog = False
-
-            if _demo_changed(instance.thread_id, demo_baseline):
-                yield _end_frame("demo")
-                return
 
             done = _is_done(instance.pk)
             if done:
@@ -235,7 +223,7 @@ def capacity_limited_stream(stream: Iterator[bytes]) -> Iterator[bytes]:
 def idle_stream() -> Iterator[bytes]:
     """Send one idle heartbeat and direct the client to reconnect shortly.
 
-    ``session_stream`` validates the page's worker/demo baselines on every
+    ``session_stream`` validates the page's worker and workflow baselines on every
     connection. Reconnecting therefore retains out-of-band change detection
     without holding one blocking WSGI thread per idle browser tab.
     """
@@ -324,22 +312,6 @@ def _reconnect_frame() -> bytes:
     ).encode()
 
 
-def demo_stream_token(session_id: str) -> str:
-    try:
-        row = (
-            SessionDemo.objects.filter(thread_id=session_id)
-            .values_list("status", "updated_at")
-            .first()
-        )
-    finally:
-        close_old_connections()
-    if row is None:
-        return ""
-    status, updated_at = row
-    timestamp = updated_at.timestamp() if updated_at is not None else 0
-    return f"{status}:{timestamp}"
-
-
 def workflow_steering_revision(workflow: SystemWorkflow | None) -> int:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return 0
@@ -358,10 +330,6 @@ def _current_workflow_steering_revision(workflow_id: int) -> int:
         return workflow_steering_revision(workflow)
     finally:
         close_old_connections()
-
-
-def _demo_changed(session_id: str, demo_baseline: str | None) -> bool:
-    return demo_baseline is not None and demo_stream_token(session_id) != demo_baseline
 
 
 def _emit_complete_lines(buffer: bytes) -> Generator[bytes, None, bytes]:
@@ -669,16 +637,6 @@ def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
 def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow is None:
         return ""
-    if workflow.kind == system_agents.SPEC_CRITIC_WORKFLOW_KIND:
-        if workflow.step == system_agents.STEP_SPEC_CRITIC_CLARIFYING:
-            return "Spec Critic is waiting for clarification..."
-        if workflow.step == system_agents.STEP_SPEC_CRITIC_SYNTHESIZING:
-            return "Spec Critic is synthesizing the brief..."
-        if workflow.step == system_agents.STEP_SPEC_CRITIC_CLASSIFYING:
-            return "Spec Critic is reviewing the request..."
-        if workflow.step == system_agents.STEP_SPEC_CRITIC_ANALYZING:
-            return "Spec Critic is analyzing the request..."
-        return "Spec Critic is preparing the implementation..."
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."
     if workflow.step == system_agents.STEP_FEEDBACK_RUNNING:

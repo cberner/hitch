@@ -403,6 +403,14 @@ def update_proposed_session_outcome(
         and outcome_status != ProposedSession.OUTCOME_DISMISSED
     ):
         return HttpResponseBadRequest("outcome status is invalid")
+    if (
+        outcome_status == ProposedSession.OUTCOME_ACCEPTED
+        and proposed_session.candidate_session is None
+    ):
+        # This endpoint can adopt an existing candidate, but proposals that
+        # need a new turn (including upgrade recovery) must retain their
+        # provisional state until the new-session flow starts that turn.
+        return HttpResponseBadRequest("proposal must be started before acceptance")
     update_values: dict[str, Any] = {
         "outcome_status": outcome_status,
         "outcome_notes": outcome_notes,

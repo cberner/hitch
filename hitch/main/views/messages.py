@@ -73,7 +73,7 @@ from hitch.main.sessions.settings_cookies import (
     _valid_web_search_mode_or_default,
 )
 from hitch.main.views import common
-from hitch.main.workflows import pr_qa, spec_critic, system_agents
+from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -661,43 +661,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["collaboration_mode"] = collaboration_mode
-        # The should-run classifier runs inside the workflow on a background
-        # thread, so sending a message never blocks on it.
-        if (
-            settings.spec_critic_enabled
-            and not input_image_paths
-            and not plan_mode
-            and not collaboration_mode
-        ):
-            workflow_model, workflow_reasoning_effort = _stored_model_and_effort(
-                resumed, settings
-            )
-            spec_workflow_kwargs: dict[str, Any] = {
-                "main_thread_id": session_id,
-                "cwd": cwd,
-                "prompt": prompt,
-                "sandbox_policy": sandbox_policy or None,
-                "approval_mode": approval_mode,
-                "model": workflow_model or None,
-                "reasoning_effort": workflow_reasoning_effort or None,
-                "developer_instructions": developer_instructions or None,
-                "enable_memories": settings.enable_memories,
-                "initial_user_message_index": _count_user_entries(thread_entries),
-                "auto_pr_enabled": auto_pr_enabled,
-                "auto_qa_enabled": auto_qa_enabled,
-            }
-            if auto_merge_to_local_branch:
-                spec_workflow_kwargs["auto_merge_to_local_branch"] = True
-                spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-            if should_forward_web_search_mode:
-                spec_workflow_kwargs["web_search_mode"] = web_search_mode
-            if lifecycle_lock_held:
-                spec_workflow_kwargs["lifecycle_lock_held"] = True
-            if session_unarchived_for_turn:
-                record_session_unarchived_for_accepted_turn(best_effort=False)
-            spec_critic.start_spec_critic_workflow(**spec_workflow_kwargs)
-            record_session_unarchived_for_accepted_turn()
-            return redirect("session", session_id=session_id)
         codex_pool.spawn_turn(**spawn_kwargs)
         # Ownership transfers the moment the spawn succeeds (matching
         # new_session): any bookkeeping failure after this point must not

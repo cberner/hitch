@@ -7,13 +7,12 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast, override
+from typing import Any, cast
 
 from django.db import models, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from hitch.main import demo
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.git_support import resolved_path
 from hitch.main.goals.autonomous_goal_proposal_stack import (
@@ -49,10 +48,8 @@ from hitch.main.sessions.pr_prompts import (
     PR_SLASH_DISPLAY_PROMPT as PR_SLASH_DISPLAY_PROMPT,
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT as PR_SLASH_PROMPT
+from hitch.main.sessions.system_session_ownership import system_session_owner_rows
 from hitch.main.workflows import engine
-from hitch.main.workflows.agent_io import (
-    SPEC_SYNTHESIZER_AGENT_KIND,
-)
 from hitch.main.workflows.gh_cli import (
     _GH_PR_MONITOR_TIMEOUT_SECONDS,
     _GH_REVIEW_THREAD_PAGE_LIMIT,
@@ -64,9 +61,6 @@ from hitch.main.workflows.pr_handoff import (
     _PR_HANDOFF_INTEGER_FIELDS,
     _PR_HANDOFF_LIST_FIELDS,
     _PR_SAFE_LIST_ITEM_FIELDS,
-)
-from hitch.main.workflows.spec_critic_prompts import (
-    _SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
 )
 from hitch.main.workflows.workflow_state import (
     _session_metadata_from_state,
@@ -82,7 +76,6 @@ PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 AUTONOMOUS_GOAL_AGENT_KIND: str = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
 AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
-SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 QA_DISPLAY_AUTHOR = "QA agent"
 REVIEW_WORKFLOW_DISPLAY_AUTHOR = "Review workflow"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
@@ -99,7 +92,6 @@ WorkflowStartBlockedByArchiveError = session_lifecycle.WorkflowStartBlockedError
 
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
-SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 QA_SLASH_DISPLAY_PROMPT = (
     "Ask the coding agent to inspect the changes and optionally use a reviewer subagent"
 )
@@ -130,12 +122,6 @@ STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING = "autonomous_goal_history_summarizing"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
 STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
-STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
-STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
-STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
-STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
-STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
-
 PR_QA_STEERABLE_STEPS = frozenset(
     {
         STEP_QA_RUNNING,
@@ -146,9 +132,6 @@ PR_QA_STEERABLE_STEPS = frozenset(
         STEP_PR_FEEDBACK_RUNNING,
     }
 )
-SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
-
-
 # The scheduler ticks once a minute, but the account rate-limit query that
 # backs the quota pause is a remote round-trip to the Codex backend. Cache its
 # verdict so the network call fires at most once per this interval regardless
@@ -171,12 +154,6 @@ _WORKFLOW_FAILURE_OWNER_REVIEW = "review"
 _WORKFLOW_FAILURE_OWNER_PR = "pr"
 REVIEW_GUIDANCE_STATE_KEY = "review_guidance"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
-# A Spec Critic classification runs in an in-process daemon thread, so it is
-# lost if the web process restarts mid-flight. Reconciliation re-arms a
-# CLASSIFYING workflow whose timestamp is older than this; the window is well
-# above a normal classification (a few seconds) to avoid racing a live thread.
-
-
 # A PR-QA workflow commits its next transient step (qa_running, feedback_running,
 # pr_prompt_running, ...) and *then* spawns the worker for it inside the
 # just-finished worker process (or the web request). If that process dies before
@@ -217,12 +194,8 @@ _WORKFLOW_TURN_OWNER_INDEX_STATE_KEY = "workflow_turn_owner_index"
 _WORKFLOW_TURN_OWNER_STEP_STATE_KEY = "workflow_turn_owner_step"
 _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
 _WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
-_WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
-    "worker process exited before reporting completion"
-)
-_LEGACY_SERVER_OVERLOADED_ERROR = (
-    "Selected model is at capacity. Please try a different model."
-)
+_WORKER_EXITED_BEFORE_COMPLETION_ERROR = "worker process exited before reporting completion"
+_LEGACY_SERVER_OVERLOADED_ERROR = "Selected model is at capacity. Please try a different model."
 
 
 _SECONDS_PER_MINUTE = 60
@@ -266,8 +239,7 @@ _GH_MONITOR_TEXT_MAX_CHARS = 6000
 # the workflow stuck for the full lease. The poll is now bounded by the monitor
 # timeout (gh pr view + the two paginated page caps), so derive it from that.
 _PR_MONITOR_BACKOFF_CLAIM_SECONDS = (
-    _GH_PR_MONITOR_TIMEOUT_SECONDS
-    * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
+    _GH_PR_MONITOR_TIMEOUT_SECONDS * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
     + _SECONDS_PER_MINUTE
 )
 _PR_MONITOR_RETRY_LIMIT_REASONS = frozenset({"missing_cwd", "gh_error"})
@@ -298,8 +270,7 @@ def _pr_handoff_output_property_schema(field: str) -> dict[str, Any]:
                         "additionalProperties": False,
                         "required": list(_PR_SAFE_LIST_ITEM_FIELDS),
                         "properties": {
-                            key: {"type": ["string", "integer", "null"]}
-                            for key in _PR_SAFE_LIST_ITEM_FIELDS
+                            key: {"type": ["string", "integer", "null"]} for key in _PR_SAFE_LIST_ITEM_FIELDS
                         },
                     },
                 ]
@@ -312,95 +283,7 @@ _PR_HANDOFF_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": list(_PR_HANDOFF_FIELDS),
-    "properties": {
-        field: _pr_handoff_output_property_schema(field)
-        for field in _PR_HANDOFF_FIELDS
-    },
-}
-
-_SPEC_REQUIREMENTS_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "requirements", "assumptions", "repo_signals"],
-    "properties": {
-        "summary": {"type": "string"},
-        "requirements": {"type": "array", "items": {"type": "string"}},
-        "assumptions": {"type": "array", "items": {"type": "string"}},
-        "repo_signals": {"type": "array", "items": {"type": "string"}},
-    },
-}
-
-_SPEC_RISK_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "ambiguities", "risks", "questions"],
-    "properties": {
-        "summary": {"type": "string"},
-        "ambiguities": {"type": "array", "items": {"type": "string"}},
-        "risks": {"type": "array", "items": {"type": "string"}},
-        "questions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "id",
-                    "header",
-                    "question",
-                    "required",
-                    "allow_safe_default",
-                    "safe_default",
-                    "options",
-                ],
-                "properties": {
-                    "id": {"type": "string"},
-                    "header": {"type": "string"},
-                    "question": {"type": "string"},
-                    "required": {"type": "boolean"},
-                    "allow_safe_default": {"type": "boolean"},
-                    "safe_default": {"type": ["string", "null"]},
-                    "options": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["label", "description"],
-                            "properties": {
-                                "label": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    },
-}
-
-_SPEC_TEST_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "summary",
-        "acceptance_criteria",
-        "test_strategy",
-        "manual_checks",
-    ],
-    "properties": {
-        "summary": {"type": "string"},
-        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-        "test_strategy": {"type": "array", "items": {"type": "string"}},
-        "manual_checks": {"type": "array", "items": {"type": "string"}},
-    },
-}
-
-_SPEC_SYNTHESIS_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["brief"],
-    "properties": {
-        "brief": {"type": "string"},
-    },
+    "properties": {field: _pr_handoff_output_property_schema(field) for field in _PR_HANDOFF_FIELDS},
 }
 
 _PR_MONITOR_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -430,9 +313,7 @@ _LEGACY_QA_PANEL_AGENT_KINDS = (
     *_LEGACY_QA_PANEL_LANE_AGENT_KINDS,
     "pr_qa_panel_synthesizer",
 )
-_LEGACY_QA_PANEL_CANCELLED_ERROR = (
-    "legacy QA panel run cancelled because the QA panel feature was removed"
-)
+_LEGACY_QA_PANEL_CANCELLED_ERROR = "legacy QA panel run cancelled because the QA panel feature was removed"
 _QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND,)
 _QA_INTERRUPTIBLE_AGENT_KINDS = (
     *_QA_VERDICT_AGENT_KINDS,
@@ -456,19 +337,16 @@ def accepted_visible_system_thread_ids() -> set[str]:
     )
 
 
-def hidden_thread_ids(
-    *, accepted_visible_thread_ids: set[str] | None = None
-) -> set[str]:
+def hidden_thread_ids(*, accepted_visible_thread_ids: set[str] | None = None) -> set[str]:
     hidden_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .exclude(agent_kind="demo")
+        system_session_owner_rows(SystemAgentRun.objects.exclude(thread_id=""))
         .values_list("thread_id", flat=True)
         .distinct()
     )
     hidden_ids.update(
-        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        system_session_owner_rows(
+            CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT).exclude(thread_id="")
+        )
         .values_list("thread_id", flat=True)
         .distinct()
     )
@@ -489,8 +367,7 @@ def hidden_thread_ids_from_threads(
     hidden_ids = {
         thread_id
         for thread in threads
-        if isinstance(thread_id := getattr(thread, "id", None), str)
-        and hitch_system_agent_thread(thread)
+        if isinstance(thread_id := getattr(thread, "id", None), str) and hitch_system_agent_thread(thread)
     }
     if accepted_visible_thread_ids is None:
         accepted_visible_thread_ids = accepted_visible_system_thread_ids()
@@ -511,9 +388,7 @@ def _thread_metadata_value(value: Any) -> str:
     return raw if isinstance(raw, str) else ""
 
 
-def active_workflow_for_thread(
-    main_thread_id: str, *, reconcile: bool = True
-) -> SystemWorkflow | None:
+def active_workflow_for_thread(main_thread_id: str, *, reconcile: bool = True) -> SystemWorkflow | None:
     if reconcile:
         reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
     return active_workflow_snapshot_for_thread(main_thread_id)
@@ -525,7 +400,7 @@ def active_workflow_snapshot_for_thread(
     """Read the active workflow without routing terminal workers."""
     return (
         SystemWorkflow.objects.filter(
-            kind__in=(SystemWorkflow.KIND_PR_QA, SPEC_CRITIC_WORKFLOW_KIND),
+            kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id=main_thread_id,
             status=SystemWorkflow.STATUS_RUNNING,
         )
@@ -535,27 +410,18 @@ def active_workflow_snapshot_for_thread(
 
 
 def workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
-    publication_owner = (
-        workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
-        if workflow is not None
-        else None
-    )
+    publication_owner = workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY) if workflow is not None else None
     return (
         workflow is not None
         and workflow.kind == SystemWorkflow.KIND_PR_QA
         and workflow.is_active
         and workflow.step in PR_QA_STEERABLE_STEPS
         and workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
-        and not (
-            isinstance(publication_owner, int)
-            and not isinstance(publication_owner, bool)
-        )
+        and not (isinstance(publication_owner, int) and not isinstance(publication_owner, bool))
     )
 
 
-def reconcile_terminal_workflow_instances(
-    *, main_thread_id: str | None = None, workflow_id: int | None = None
-) -> int:
+def reconcile_terminal_workflow_instances(*, main_thread_id: str | None = None, workflow_id: int | None = None) -> int:
     """Route terminal workflow-owned workers that missed their finish callback."""
     workflows = list(
         _running_workflows_for_reconciliation(
@@ -623,10 +489,7 @@ def _escalate_stale_user_steering_interrupts(
             status=SystemWorkflow.STATUS_RUNNING,
             step=STEP_USER_STEERING_RUNNING,
         ).first()
-        if (
-            workflow is None
-            or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is True
-        ):
+        if workflow is None or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is True:
             continue
         if instance.interrupt_requested_at is None:
             if workflow.updated_at > stale_before:
@@ -667,9 +530,7 @@ def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:
             continue
         if not spec.needs_recovery(workflow):
             continue
-        locked = _claim_stale_workflow_step(
-            workflow, step=workflow.step, stale_before=stale_before
-        )
+        locked = _claim_stale_workflow_step(workflow, step=workflow.step, stale_before=stale_before)
         if locked is None or not spec.needs_recovery(locked):
             continue
         spec.recover(locked)
@@ -695,11 +556,8 @@ def _block_zombie_workflow_turn(workflow: SystemWorkflow) -> None:
     label = _ZOMBIE_TURN_STEP_MESSAGES[expected_step]
     _block_workflow(
         workflow,
-        f"{label} never started: its spawn handler died before the worker "
-        "launched. Restart the workflow to continue.",
-        only_if=lambda locked: (
-            locked.is_active and locked.step == expected_step
-        ),
+        f"{label} never started: its spawn handler died before the worker launched. Restart the workflow to continue.",
+        only_if=lambda locked: (locked.is_active and locked.step == expected_step),
     )
 
 
@@ -712,9 +570,7 @@ def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:
     will advance the step. In either case the workflow is not yet a zombie.
     """
     instances = CodexInstance.objects.filter(workflow_id=workflow.pk)
-    if instances.filter(
-        status__in=CodexInstance.ACTIVE_STATUSES
-    ).exists():
+    if instances.filter(status__in=CodexInstance.ACTIVE_STATUSES).exists():
         return True
     fresh_claim = timezone.now() - _WORKFLOW_ROUTE_CLAIM_TIMEOUT
     owned_indices = _workflow_turn_owned_indices(workflow)
@@ -742,14 +598,10 @@ def _workflow_turn_owned_indices(workflow: SystemWorkflow) -> tuple[int, ...]:
     ):
         return (owner_index,)
     current_index = _state_int(workflow, "next_user_message_index") - 1
-    return tuple(
-        index for index in (current_index, current_index + 1) if index >= 0
-    )
+    return tuple(index for index in (current_index, current_index + 1) if index >= 0)
 
 
-def _claim_stale_workflow_step(
-    workflow: SystemWorkflow, *, step: str, stale_before: datetime
-) -> SystemWorkflow | None:
+def _claim_stale_workflow_step(workflow: SystemWorkflow, *, step: str, stale_before: datetime) -> SystemWorkflow | None:
     """Lock and claim a stale RUNNING workflow still at ``step``.
 
     Returns the locked row (with ``updated_at`` bumped so concurrent reconcilers
@@ -801,7 +653,6 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
         )
         .filter(_unclaimed_workflow_instance_filter())
         .exclude(agent_kind="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
         .exclude(
             system_agent_runs__status__in=(
                 SystemAgentRun.STATUS_COMPLETED,
@@ -832,12 +683,6 @@ def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str
                 *_QA_INTERRUPTIBLE_AGENT_KINDS,
                 PR_FOLLOWUP_MONITOR_AGENT_KIND,
             )
-        return ()
-    if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
-        if workflow.step == STEP_SPEC_CRITIC_ANALYZING:
-            return _SPEC_CRITIC_ANALYSIS_AGENT_KINDS
-        if workflow.step == STEP_SPEC_CRITIC_SYNTHESIZING:
-            return (SPEC_SYNTHESIZER_AGENT_KIND,)
         return ()
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         if workflow.step == STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
@@ -874,10 +719,14 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
             has_turn_filter = True
     if not has_turn_filter:
         return 0
-    instances = CodexInstance.objects.filter(
-        filters,
-        status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED),
-    ).filter(_unclaimed_workflow_instance_filter()).order_by("started_at", "id")
+    instances = (
+        CodexInstance.objects.filter(
+            filters,
+            status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED),
+        )
+        .filter(_unclaimed_workflow_instance_filter())
+        .order_by("started_at", "id")
+    )
     reconciled = 0
     for instance in instances:
         if _route_terminal_workflow_instance(instance):
@@ -887,9 +736,7 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
 
 def _unclaimed_workflow_instance_filter() -> models.Q:
     stale_before = timezone.now() - _WORKFLOW_ROUTE_CLAIM_TIMEOUT
-    return models.Q(workflow_routing_started_at__isnull=True) | models.Q(
-        workflow_routing_started_at__lt=stale_before
-    )
+    return models.Q(workflow_routing_started_at__isnull=True) | models.Q(workflow_routing_started_at__lt=stale_before)
 
 
 def _route_terminal_workflow_instance(instance: CodexInstance) -> bool:
@@ -903,16 +750,11 @@ def _route_terminal_workflow_instance(instance: CodexInstance) -> bool:
         return False
 
 
-def stop_active_workflow(
-    main_thread_id: str, *, expected_workflow_id: int | None = None
-) -> bool:
+def stop_active_workflow(main_thread_id: str, *, expected_workflow_id: int | None = None) -> bool:
     deferred_workflow_id: int | None = None
     with session_lifecycle.hold(main_thread_id):
         workflow = active_workflow_snapshot_for_thread(main_thread_id)
-        if workflow is None or (
-            expected_workflow_id is not None
-            and workflow.pk != expected_workflow_id
-        ):
+        if workflow is None or (expected_workflow_id is not None and workflow.pk != expected_workflow_id):
             return False
         runs = list(
             workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING)
@@ -935,34 +777,47 @@ def stop_active_workflow(
                 workflow.save(update_fields=["state", "updated_at"])
                 _block_workflow(workflow, _workflow_stopped_error(workflow))
                 return True
-            if (
-                workflow.kind == SystemWorkflow.KIND_PR_QA
-                and (
-                    workflow.step
-                    in (
-                        STEP_QA_RUNNING,
-                        STEP_FEEDBACK_RUNNING,
-                        STEP_USER_STEERING_RUNNING,
-                        STEP_PR_PROMPT_RUNNING,
-                        STEP_PR_MONITORING,
-                        STEP_PR_FEEDBACK_RUNNING,
-                    )
-                    or workflow.steering_messages.exists()
+            if workflow.kind == SystemWorkflow.KIND_PR_QA and (
+                workflow.step
+                in (
+                    STEP_QA_RUNNING,
+                    STEP_FEEDBACK_RUNNING,
+                    STEP_USER_STEERING_RUNNING,
+                    STEP_PR_PROMPT_RUNNING,
+                    STEP_PR_MONITORING,
+                    STEP_PR_FEEDBACK_RUNNING,
                 )
+                or workflow.steering_messages.exists()
             ):
                 _block_workflow(workflow, _workflow_stopped_error(workflow))
                 return True
-            if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
-                error = "Spec Critic workflow stopped by user"
-                spec_critic._cancel_pending_spec_critic_input_requests(workflow, error)
-                spec_critic._block_spec_critic_workflow(workflow, error)
-                return True
             return False
         live_runs = [run for run in runs if run.instance.is_active]
-        if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
+        # The claim distinguishes a user Stop from steering interrupts.
+        # Persist it before signaling so a fast terminal callback cannot
+        # resume the workflow while another worker remains live.
+        workflow.state = {
+            **workflow.state,
+            _WORKFLOW_STOP_REQUESTED_STATE_KEY: True,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+        workers = [*(run.instance for run in live_runs), *turns]
+        if any(
+            worker.pid <= 0 or (worker.systemd_scope_unit and worker.status == CodexInstance.STATUS_STARTING)
+            for worker in workers
+        ):
+            # A launch has not published a safe signal target yet. Keep
+            # the workflow active so the next Stop can retry it.
+            return False
+        error = _workflow_stopped_error(workflow)
+        # Retire signalable runs before their asynchronous finish callbacks
+        # can advance the workflow. If any worker cannot be signaled, put
+        # only that run back and keep the workflow active so Stop remains
+        # available for another attempt.
+        with transaction.atomic():
+            _mark_system_agent_runs_failed(runs, error)
             interrupted_runs = _interrupt_system_agent_runs(live_runs)
-            terminal_runs = [run for run in runs if not run.instance.is_active]
-            retired_runs = [*terminal_runs, *interrupted_runs]
+            interrupted_run_ids = {run.pk for run in interrupted_runs}
             interrupted_turns = [
                 turn
                 for turn in turns
@@ -971,87 +826,41 @@ def stop_active_workflow(
                 )
                 is not None
             ]
-            if not retired_runs and not interrupted_turns:
-                return False
-            error = "Spec Critic workflow stopped by user"
-            spec_critic._cancel_pending_spec_critic_input_requests(workflow, error)
-            _mark_system_agent_runs_failed(retired_runs, error)
-            spec_critic._block_spec_critic_workflow(workflow, error)
-        else:
-            # The claim distinguishes a user Stop from steering interrupts.
-            # Persist it before signaling so a fast terminal callback cannot
-            # resume the workflow while another worker remains live.
-            workflow.state = {
-                **workflow.state,
-                _WORKFLOW_STOP_REQUESTED_STATE_KEY: True,
-            }
-            workflow.save(update_fields=["state", "updated_at"])
-            workers = [*(run.instance for run in live_runs), *turns]
-            if any(
-                worker.pid <= 0
-                or (
-                    worker.systemd_scope_unit
-                    and worker.status == CodexInstance.STATUS_STARTING
-                )
-                for worker in workers
-            ):
-                # A launch has not published a safe signal target yet. Keep
-                # the workflow active so the next Stop can retry it.
-                return False
-            error = _workflow_stopped_error(workflow)
-            # Retire signalable runs before their asynchronous finish callbacks
-            # can advance the workflow. If any worker cannot be signaled, put
-            # only that run back and keep the workflow active so Stop remains
-            # available for another attempt.
-            with transaction.atomic():
-                _mark_system_agent_runs_failed(runs, error)
-                interrupted_runs = _interrupt_system_agent_runs(live_runs)
-                interrupted_run_ids = {run.pk for run in interrupted_runs}
-                interrupted_turns = [
-                    turn
-                    for turn in turns
-                    if codex_pool.interrupt_instance(
-                        turn.pk, expected_thread_id=turn.thread_id
-                    )
-                    is not None
-                ]
-                interrupted_turn_ids = {turn.pk for turn in interrupted_turns}
-                unresolved_run_ids = set(
-                    CodexInstance.objects.filter(
-                        pk__in=[
-                            run.instance_id
-                            for run in live_runs
-                            if run.pk not in interrupted_run_ids
-                        ],
-                        status__in=CodexInstance.ACTIVE_STATUSES,
-                    ).values_list("pk", flat=True)
-                )
-                unresolved_runs = [
-                    run
-                    for run in live_runs
-                    if run.instance_id in unresolved_run_ids
-                ]
-                unresolved_turns_exist = CodexInstance.objects.filter(
+            interrupted_turn_ids = {turn.pk for turn in interrupted_turns}
+            unresolved_run_ids = set(
+                CodexInstance.objects.filter(
                     pk__in=[
-                        turn.pk
-                        for turn in turns
-                        if turn.pk not in interrupted_turn_ids
+                        run.instance_id
+                        for run in live_runs
+                        if run.pk not in interrupted_run_ids
                     ],
-                    workflow_id=workflow.pk,
                     status__in=CodexInstance.ACTIVE_STATUSES,
-                ).exists()
-                if unresolved_runs or unresolved_turns_exist:
-                    for run in unresolved_runs:
-                        run.status = SystemAgentRun.STATUS_RUNNING
-                        run.error = ""
-                        run.save(update_fields=["status", "error", "updated_at"])
-                    return False
-                _block_workflow(
-                    workflow,
-                    error,
-                    defer_surface_until_workers_stop=True,
-                )
-            deferred_workflow_id = workflow.pk
+                ).values_list("pk", flat=True)
+            )
+            unresolved_runs = [
+                run for run in live_runs if run.instance_id in unresolved_run_ids
+            ]
+            unresolved_turns_exist = CodexInstance.objects.filter(
+                pk__in=[
+                    turn.pk
+                    for turn in turns
+                    if turn.pk not in interrupted_turn_ids
+                ],
+                workflow_id=workflow.pk,
+                status__in=CodexInstance.ACTIVE_STATUSES,
+            ).exists()
+            if unresolved_runs or unresolved_turns_exist:
+                for run in unresolved_runs:
+                    run.status = SystemAgentRun.STATUS_RUNNING
+                    run.error = ""
+                    run.save(update_fields=["status", "error", "updated_at"])
+                return False
+            _block_workflow(
+                workflow,
+                error,
+                defer_surface_until_workers_stop=True,
+            )
+        deferred_workflow_id = workflow.pk
     if deferred_workflow_id is not None:
         _finish_deferred_workflow_block_if_settled(deferred_workflow_id)
     return True
@@ -1071,16 +880,11 @@ def on_codex_instance_finished(instance: CodexInstance) -> bool:
             _clear_workflow_instance_routing_claim(instance)
         raise
     finally:
-        if (
-            instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and instance.agent_kind == PR_QA_AGENT_KIND
-        ):
+        if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT and instance.agent_kind == PR_QA_AGENT_KIND:
             try:
                 pr_qa._cleanup_qa_review_handoff_for_instance(instance)
             except Exception:
-                logger.exception(
-                    "failed to clean QA review handoff for instance %s", instance.pk
-                )
+                logger.exception("failed to clean QA review handoff for instance %s", instance.pk)
 
 
 def _route_finished_codex_instance(instance: CodexInstance) -> bool:
@@ -1094,10 +898,7 @@ def _route_finished_codex_instance(instance: CodexInstance) -> bool:
         _dispatch_workflow_event(instance, "on_feedback_finished")
         _finish_deferred_workflow_block_if_settled(instance.workflow_id)
         return True
-    if (
-        instance.purpose == CodexInstance.PURPOSE_USER
-        and instance.workflow_id is not None
-    ):
+    if instance.purpose == CodexInstance.PURPOSE_USER and instance.workflow_id is not None:
         _dispatch_workflow_event(instance, "on_user_turn_finished")
         _finish_deferred_workflow_block_if_settled(instance.workflow_id)
         return True
@@ -1113,18 +914,12 @@ def _settle_requested_pr_qa_stop(instance: CodexInstance) -> bool:
         workflow = SystemWorkflow.objects.get(pk=instance.workflow_id)
     except SystemWorkflow.DoesNotExist:
         return False
-    if (
-        workflow.kind != SystemWorkflow.KIND_PR_QA
-        or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
-    ):
+    if workflow.kind != SystemWorkflow.KIND_PR_QA or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True:
         return False
     settled_workflow_id: int | None = None
     with session_lifecycle.hold(workflow.main_thread_id):
         workflow.refresh_from_db()
-        if (
-            not workflow.is_active
-            or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
-        ):
+        if not workflow.is_active or workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True:
             return True
         if CodexInstance.objects.filter(
             workflow_id=workflow.pk,
@@ -1133,9 +928,7 @@ def _settle_requested_pr_qa_stop(instance: CodexInstance) -> bool:
             return True
         error = _workflow_stopped_error(workflow)
         with transaction.atomic():
-            remaining_runs = list(
-                workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING)
-            )
+            remaining_runs = list(workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING))
             _mark_system_agent_runs_failed(remaining_runs, error)
             _block_workflow(
                 workflow,
@@ -1202,9 +995,7 @@ def _clear_workflow_instance_routing_claim(instance: CodexInstance) -> None:
         instance.workflow_routing_started_at = None
 
 
-def _maybe_start_auto_review_workflow(
-    instance: CodexInstance, *, lifecycle_lock_held: bool = False
-) -> None:
+def _maybe_start_auto_review_workflow(instance: CodexInstance, *, lifecycle_lock_held: bool = False) -> None:
     if (
         instance.purpose != CodexInstance.PURPOSE_USER
         or instance.workflow_id is not None
@@ -1216,11 +1007,7 @@ def _maybe_start_auto_review_workflow(
     if _completed_turn_has_pending_proposed_plan(instance):
         return
     automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
-    trigger_field = (
-        "auto_pr_triggered_at"
-        if automation == "auto_pr"
-        else "auto_qa_triggered_at"
-    )
+    trigger_field = "auto_pr_triggered_at" if automation == "auto_pr" else "auto_qa_triggered_at"
     claimed = CodexInstance.objects.filter(
         pk=instance.pk,
         **{f"{trigger_field}__isnull": True},
@@ -1246,11 +1033,7 @@ def _maybe_start_auto_review_workflow(
                 workflow_kwargs["pr_title"] = pr_title
         if automation == "auto_qa":
             workflow_kwargs["open_pr_on_lgtm"] = False
-        auto_merge_branch = (
-            instance.auto_merge_branch.strip()
-            if instance.auto_merge_to_local_branch
-            else ""
-        )
+        auto_merge_branch = instance.auto_merge_branch.strip() if instance.auto_merge_to_local_branch else ""
         if auto_merge_branch:
             workflow_kwargs["open_pr_on_lgtm"] = False
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -1258,9 +1041,7 @@ def _maybe_start_auto_review_workflow(
             workflow_kwargs["lifecycle_lock_held"] = True
         workflow = pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         if isinstance(workflow, SystemWorkflow):
-            _record_auto_review_workflow_for_proposals(
-                instance, workflow, automation=automation
-            )
+            _record_auto_review_workflow_for_proposals(instance, workflow, automation=automation)
     except WorkflowStartBlockedByArchiveError:
         CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
         return
@@ -1269,9 +1050,7 @@ def _maybe_start_auto_review_workflow(
         raise
 
 
-def retry_deferred_auto_review_for_thread(
-    thread_id: str, *, lifecycle_lock_held: bool = False
-) -> None:
+def retry_deferred_auto_review_for_thread(thread_id: str, *, lifecycle_lock_held: bool = False) -> None:
     """Retry the latest auto-review deferred while its session was archived."""
     instance = (
         CodexInstance.objects.filter(
@@ -1293,9 +1072,7 @@ def retry_deferred_auto_review_for_thread(
         .first()
     )
     if instance is not None:
-        _maybe_start_auto_review_workflow(
-            instance, lifecycle_lock_held=lifecycle_lock_held
-        )
+        _maybe_start_auto_review_workflow(instance, lifecycle_lock_held=lifecycle_lock_held)
 
 
 def _accepted_auto_pr_proposal_title(thread_id: str) -> str:
@@ -1337,9 +1114,7 @@ def _completed_turn_has_pending_proposed_plan(instance: CodexInstance) -> bool:
     if rollout_pending is not None:
         return rollout_pending
     final_text = _final_agent_text(instance.events_path)
-    plan_text = (
-        rollout.proposed_plan_text_from_agent_text(final_text) if final_text else None
-    )
+    plan_text = rollout.proposed_plan_text_from_agent_text(final_text) if final_text else None
     return plan_text is not None and rollout.looks_like_plan_text(plan_text)
 
 
@@ -1386,9 +1161,7 @@ def _record_auto_review_workflow_for_proposals(
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 
-def _record_auto_merge_result_for_proposals(
-    workflow: SystemWorkflow, updates: dict[str, object]
-) -> None:
+def _record_auto_merge_result_for_proposals(workflow: SystemWorkflow, updates: dict[str, object]) -> None:
     metadata = SessionMetadata.objects.filter(thread_id=workflow.main_thread_id).first()
     if metadata is None:
         return
@@ -1451,11 +1224,7 @@ def _maybe_auto_pull_default_repo_after_pr_monitor_merge(
 
 
 def _auto_pull_project_for_workflow(workflow: SystemWorkflow) -> Project | None:
-    metadata = (
-        SessionMetadata.objects.select_related("project")
-        .filter(thread_id=workflow.main_thread_id)
-        .first()
-    )
+    metadata = SessionMetadata.objects.select_related("project").filter(thread_id=workflow.main_thread_id).first()
     if metadata is None:
         return None
     return metadata.project
@@ -1475,9 +1244,7 @@ def _auto_pull_skip_reason(workflow: SystemWorkflow, project: Project) -> str:
 def _same_checkout(cwd: str, repo_path: str) -> bool:
     cwd_root = repo_root(cwd)
     cwd_path = cwd_root if cwd_root is not None else Path(cwd).expanduser()
-    return resolved_path(cwd_path) == resolved_path(
-        Path(repo_path).expanduser()
-    )
+    return resolved_path(cwd_path) == resolved_path(Path(repo_path).expanduser())
 
 
 def _auto_pull_result_dict(result: AutoPullResult) -> dict[str, object]:
@@ -1490,9 +1257,7 @@ def _auto_pull_result_dict(result: AutoPullResult) -> dict[str, object]:
     }
 
 
-def _record_auto_pull_result(
-    workflow: SystemWorkflow, result: dict[str, object]
-) -> None:
+def _record_auto_pull_result(workflow: SystemWorkflow, result: dict[str, object]) -> None:
     try:
         with transaction.atomic():
             locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
@@ -1503,9 +1268,7 @@ def _record_auto_pull_result(
             locked.save(update_fields=["state"])
             workflow.state = locked.state
     except Exception:
-        logger.exception(
-            "failed to record auto-pull result for workflow %s", workflow.pk
-        )
+        logger.exception("failed to record auto-pull result for workflow %s", workflow.pk)
 
 
 def _handle_system_agent_finished(instance: CodexInstance) -> bool:
@@ -1517,9 +1280,7 @@ def _handle_system_agent_finished(instance: CodexInstance) -> bool:
     return True
 
 
-def _route_system_agent_finished(
-    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
-) -> None:
+def _route_system_agent_finished(instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow) -> None:
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
         autonomous_goals._cleanup_cancelled_autonomous_goal_terminal_run(instance, run, workflow)
         return
@@ -1530,55 +1291,11 @@ def _route_system_agent_finished(
     handler.on_agent_finished(instance, run, workflow)
 
 
-@engine.register
-class _DemoHandler(engine.WorkflowHandler):
-    kind = demo.DEMO_WORKFLOW_KIND
-    # The demo subsystem owns its workflow lifecycle end to end.
-    steps = None
-
-    @override
-    def matches_run(self, run: SystemAgentRun, instance: CodexInstance) -> bool:
-        return (
-            run.agent_kind == demo.DEMO_AGENT_KIND
-            and instance.agent_kind == demo.DEMO_AGENT_KIND
-        )
-
-    @override
-    def on_agent_finished(
-        self,
-        instance: CodexInstance,
-        run: SystemAgentRun,
-        workflow: SystemWorkflow,
-    ) -> None:
-        _handle_demo_agent_finished(instance, run, workflow)
-
-
 # Shared by the PR-QA review phases and the followup monitor, which run in
 # the same KIND_PR_QA workflow row.
 
 
-def _handle_demo_agent_finished(
-    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
-) -> None:
-    try:
-        demo.on_codex_instance_finished(instance)
-    except Exception as exc:
-        logger.exception(
-            "failed to route completed worker %s to demo workflow", instance.pk
-        )
-        error = f"demo workflow router failed: {exc}"
-        if run.status not in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
-            run.status = SystemAgentRun.STATUS_FAILED
-            run.error = error
-            run.save(update_fields=["status", "error", "updated_at"])
-        if workflow.is_active:
-            workflow.status = SystemWorkflow.STATUS_FAILED
-            workflow.save(update_fields=["status", "updated_at"])
-
-
-def _claim_workflow_turn_retry(
-    workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str
-) -> bool:
+def _claim_workflow_turn_retry(workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str) -> bool:
     """Record one more bounded retry for a transient workflow-turn failure.
 
     Single source of the retry rule shared by every workflow turn: the
@@ -1631,9 +1348,7 @@ def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
     return retries
 
 
-def _state_without_workflow_turn_death_retry(
-    state: Mapping[str, Any], retry_kind: str
-) -> dict[str, Any]:
+def _state_without_workflow_turn_death_retry(state: Mapping[str, Any], retry_kind: str) -> dict[str, Any]:
     retries = _workflow_turn_death_retries(state)
     if retry_kind not in retries:
         return dict(state)
@@ -1655,10 +1370,7 @@ def _is_retryable_workflow_turn_error(instance: CodexInstance) -> bool:
     if error_info is not None:
         return error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED
     normalized = instance.error.strip()
-    return (
-        _is_worker_exited_before_completion_error(normalized)
-        or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
-    )
+    return _is_worker_exited_before_completion_error(normalized) or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
 
 
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
@@ -1674,9 +1386,7 @@ def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
         pr_qa._handle_pr_prompt_finished(instance, workflow)
 
 
-def _copy_gh_string(
-    source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str
-) -> None:
+def _copy_gh_string(source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str) -> None:
     value = string_from_any(source.get(source_key))
     if value:
         target[target_key] = value
@@ -1702,14 +1412,11 @@ def _run_gh_observation_fallback(run: SystemAgentRun) -> dict[str, Any]:
 
 
 _PR_MONITOR_MAX_ITERATIONS_FEEDBACK = (
-    "PR follow-up monitor reached the maximum feedback loop count "
-    "without reaching a clean PR state."
+    "PR follow-up monitor reached the maximum feedback loop count without reaching a clean PR state."
 )
 
 
-def _fail_unsupported_system_agent_run(
-    run: SystemAgentRun, workflow: SystemWorkflow
-) -> None:
+def _fail_unsupported_system_agent_run(run: SystemAgentRun, workflow: SystemWorkflow) -> None:
     error = f"system workflow kind {workflow.kind!r} is no longer supported"
     if workflow.is_active:
         _fail_run_and_block_workflow(run, error, surface_to_thread=False)
@@ -1733,9 +1440,7 @@ def _resolved_stack_proposal_candidate_cleanup_cwd(
     return candidate.cwd if candidate is not None and candidate.cwd else ""
 
 
-def _state_without_current_candidate_result(
-    state: Mapping[str, Any]
-) -> dict[str, Any]:
+def _state_without_current_candidate_result(state: Mapping[str, Any]) -> dict[str, Any]:
     next_state = dict(state)
     for key in ("candidate", "judgment", "judge_session_id", "history_files"):
         next_state.pop(key, None)
@@ -1773,9 +1478,7 @@ def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
     return raw_patch.decode("utf-8", errors="backslashreplace")
 
 
-def _spawn_workflow_failure_turn(
-    workflow: SystemWorkflow, error: str
-) -> CodexInstance:
+def _spawn_workflow_failure_turn(workflow: SystemWorkflow, error: str) -> CodexInstance:
     headline, display_author = _workflow_failure_turn_context(workflow, error)
     workflow_label = (
         "review workflow"
@@ -1912,19 +1615,13 @@ def _spawn_workflow_turn(
         web_search_mode=_workflow_web_search_mode(workflow),
         purpose=purpose,
         workflow_id=workflow.pk,
-        agent_kind=(
-            agent_kind or PR_QA_AGENT_KIND
-            if purpose != CodexInstance.PURPOSE_USER
-            else ""
-        ),
+        agent_kind=(agent_kind or PR_QA_AGENT_KIND if purpose != CodexInstance.PURPOSE_USER else ""),
         display_author=display_author,
         user_message_index=user_message_index,
     )
     workflow.state = {
         **workflow.state,
-        "next_user_message_index": max(
-            next_user_message_index, user_message_index + 1
-        ),
+        "next_user_message_index": max(next_user_message_index, user_message_index + 1),
     }
     workflow.save(update_fields=["state", "updated_at"])
     return instance
@@ -1933,9 +1630,7 @@ def _spawn_workflow_turn(
 def _interrupt_system_agent_runs(runs: list[SystemAgentRun]) -> list[SystemAgentRun]:
     interrupted_runs: list[SystemAgentRun] = []
     for run in runs:
-        interrupted = codex_pool.interrupt_instance(
-            run.instance_id, expected_thread_id=run.thread_id
-        )
+        interrupted = codex_pool.interrupt_instance(run.instance_id, expected_thread_id=run.thread_id)
         if interrupted is not None:
             interrupted_runs.append(run)
     return interrupted_runs
@@ -2046,9 +1741,7 @@ def _fail_run(
     _block_workflow(workflow, error, surface_to_thread=surface_to_thread)
 
 
-def archive_stale_blocked_workflows(
-    *, older_than: datetime, apply: bool
-) -> list[int]:
+def archive_stale_blocked_workflows(*, older_than: datetime, apply: bool) -> list[int]:
     """Archive blocked PR-QA workflows last updated before ``older_than``.
 
     Historical failures keep surfacing as a Blocked stage in the session inbox
@@ -2104,9 +1797,7 @@ def _complete_workflow(
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
-def _advance_workflow_step(
-    workflow: SystemWorkflow, step: str, *, bump_iteration: bool = False
-) -> None:
+def _advance_workflow_step(workflow: SystemWorkflow, step: str, *, bump_iteration: bool = False) -> None:
     """Advance a running workflow to its next transient step and persist it.
 
     Counterpart of _complete_workflow for non-terminal transitions; callers
@@ -2130,9 +1821,7 @@ def _validate_workflow_step(workflow: SystemWorkflow, step: str) -> None:
     """
     legal = engine.legal_steps(workflow.kind)
     if legal is not None and step not in legal:
-        raise ValueError(
-            f"illegal step {step!r} for workflow kind {workflow.kind!r}"
-        )
+        raise ValueError(f"illegal step {step!r} for workflow kind {workflow.kind!r}")
 
 
 def _block_workflow(
@@ -2157,9 +1846,7 @@ def _block_workflow(
         _persist_workflow_block(locked, error)
         return True
 
-    blocked = engine.claim_workflow_transition(
-        workflow, _block, guard=only_if, require_active=False
-    )
+    blocked = engine.claim_workflow_transition(workflow, _block, guard=only_if, require_active=False)
     if not blocked:
         return False
     if defer_surface_until_workers_stop:
@@ -2193,29 +1880,19 @@ def _finish_deferred_workflow_block_if_settled(
                 thread_id=locked.main_thread_id,
             )
             .exclude(workflow_id=locked.pk)
-            .filter(
-                models.Q(status__in=CodexInstance.ACTIVE_STATUSES)
-                | models.Q(started_at__gt=locked.updated_at)
-            )
+            .filter(models.Q(status__in=CodexInstance.ACTIVE_STATUSES) | models.Q(started_at__gt=locked.updated_at))
             .exists()
             or SystemWorkflow.objects.filter(
                 main_thread_id=locked.main_thread_id,
             )
             .exclude(pk=locked.pk)
-            .filter(
-                models.Q(status=SystemWorkflow.STATUS_RUNNING)
-                | models.Q(created_at__gt=locked.updated_at)
-            )
+            .filter(models.Q(status=SystemWorkflow.STATUS_RUNNING) | models.Q(created_at__gt=locked.updated_at))
             .exists()
         )
         error = _state_string(locked, "error")
         locked.state = dict(locked.state)
         locked.state.pop(_DEFERRED_FAILURE_SURFACE_STATE_KEY, None)
-        locked.save(
-            update_fields=(
-                ["state"] if newer_session_work else ["state", "updated_at"]
-            )
-        )
+        locked.save(update_fields=(["state"] if newer_session_work else ["state", "updated_at"]))
         return True, "" if newer_session_work else error
 
     workflow = SystemWorkflow.objects.filter(pk=workflow_id).first()
@@ -2267,7 +1944,7 @@ def _finish_workflow_block(
 def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
     # Make the check-then-set atomic per workflow so concurrent failure routes
     # cannot double-post the failure message or double-increment the user
-    # message index. Mirrors _surface_spec_critic_failure.
+    # message index.
     def _mark_surfaced(locked: SystemWorkflow) -> bool:
         failure_owner = _workflow_failure_owner(locked, error)
         locked.state = {
@@ -2289,18 +1966,14 @@ def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
     try:
         _spawn_workflow_failure_turn(workflow, error)
     except Exception:
-        logger.exception(
-            "failed to surface system workflow failure for workflow %s", workflow.pk
-        )
+        logger.exception("failed to surface system workflow failure for workflow %s", workflow.pk)
 
 
 def _question_for_user_input(question: dict[str, Any]) -> dict[str, Any]:
     required = question.get("required") is True
     safe_default = question.get("safe_default")
     has_safe_default = (
-        question.get("allow_safe_default") is True
-        and isinstance(safe_default, str)
-        and bool(safe_default.strip())
+        question.get("allow_safe_default") is True and isinstance(safe_default, str) and bool(safe_default.strip())
     )
     return {
         "id": question["id"],
@@ -2365,9 +2038,7 @@ def _system_agent_run_for_instance(instance: CodexInstance) -> SystemAgentRun | 
     return run
 
 
-def _recovered_system_agent_run_input(
-    instance: CodexInstance, workflow: SystemWorkflow
-) -> dict[str, Any]:
+def _recovered_system_agent_run_input(instance: CodexInstance, workflow: SystemWorkflow) -> dict[str, Any]:
     run_input: dict[str, Any] = {"cwd": instance.cwd}
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return run_input
@@ -2391,4 +2062,4 @@ def _recovered_system_agent_run_input(
 # Imported last: the kind modules register their WorkflowHandler with the
 # engine and reach back into this module for the shared spawn/transition
 # helpers, so they need its namespace to be fully initialized.
-from hitch.main.workflows import autonomous_goals, pr_qa, spec_critic  # noqa: E402
+from hitch.main.workflows import autonomous_goals, pr_qa  # noqa: E402

@@ -109,8 +109,8 @@ class SessionHistoryPageTests(TestCase):
         )
         self.assertEqual(page.flat_entries[1]["phase"], "commentary")
 
-    def test_marks_one_oversized_hidden_demo_prompt(self) -> None:
-        hidden_prompt = "secret demo prompt " * 5000
+    def test_marks_one_oversized_legacy_redacted_prompt(self) -> None:
+        hidden_prompt = "secret retired-feature prompt " * 5000
         path = _write_rollout(
             [
                 _line(
@@ -133,7 +133,7 @@ class SessionHistoryPageTests(TestCase):
 
         self.assertIsNotNone(page)
         assert page is not None
-        self.assertTrue(page.flat_entries[0]["_hitch_hidden_demo"])
+        self.assertTrue(page.flat_entries[0]["_hitch_hidden_user"])
 
     def test_bounds_scan_without_an_earlier_user_message(self) -> None:
         path = _write_rollout(
@@ -281,8 +281,8 @@ class SessionHistoryPageTests(TestCase):
             [f"Answer {index}" for index in range(6)],
         )
 
-    def test_scan_cap_keeps_unknown_leading_demo_context_hidden(self) -> None:
-        hidden_prompt = "Hidden demo prompt"
+    def test_scan_cap_keeps_unknown_leading_redacted_context_hidden(self) -> None:
+        hidden_prompt = "Hidden retired-feature prompt"
         path = _write_rollout(
             [
                 _line(

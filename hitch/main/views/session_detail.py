@@ -1,7 +1,6 @@
 """The session detail page, SSE stream, and intermediate-entry endpoint."""
 from typing import Any
 
-from django.core import signing
 from django.http import (
     Http404,
     HttpRequest,
@@ -11,7 +10,6 @@ from django.http import (
 from django.shortcuts import render
 from django.views.decorators.http import require_http_methods
 
-from hitch.main import demo
 from hitch.main.runtime import codex_pool, reconciliation, rollout, streaming
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
@@ -29,17 +27,14 @@ from hitch.main.sessions.session_entry_display import (
     _active_stream_owns_turn,
     _apply_qa_approval_messages,
     _apply_system_authors,
-    _demo_agent_prompts,
-    _filter_demo_agent_entries,
+    _filter_legacy_redacted_entries,
+    _legacy_redacted_prompts,
     _trim_in_progress_turn,
 )
 from hitch.main.sessions.session_resume import (
     _entries_include_transcript,
     _rollout_path_for_session_detail,
     _session_detail_metadata,
-)
-from hitch.main.sessions.system_agent_summary import (
-    _system_agent_run_for_thread,
 )
 from hitch.main.views import common
 from hitch.main.workflows import system_agents
@@ -65,15 +60,9 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         partial_record_end = int(raw_record_end) if raw_record_end else None
     except ValueError as exc:
         raise Http404("history page not found") from exc
-    raw_demo_context = request.GET.get("demo_context", "")
-    show_demo_entries = _session_intermediate_allows_demo_entries(
-        session_id, raw_demo_context
-    )
-    hidden_demo_prompts = (
-        frozenset() if show_demo_entries else _demo_agent_prompts(session_id)
-    )
     active_instance = _active_instance_for(session_id)
     active_user_identity = _active_history_user_identity(active_instance)
+    legacy_redacted_prompts = _legacy_redacted_prompts(session_id)
     # The parent page selects one transcript source for its whole lifecycle.
     # Fragments inherit that choice; only direct or legacy fragment URLs need
     # to detect ownership from the current worker state.
@@ -97,7 +86,7 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         before_offset=before_offset,
         partial_record_end=partial_record_end,
         message_target=common._SESSION_HISTORY_MESSAGE_TARGET,
-        hidden_user_prompts=hidden_demo_prompts,
+        hidden_user_prompts=legacy_redacted_prompts,
         active_user_identity=active_user_identity,
     )
     if page is None:
@@ -115,11 +104,10 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
             trailing_turn_continues=newer_turn_continues,
         )
     )
-    entries = _filter_demo_agent_entries(
+    entries = _filter_legacy_redacted_entries(
         entries,
-        session_id,
         initial_user_text=page.leading_user_text,
-        hidden_prompts=hidden_demo_prompts,
+        redacted_prompts=legacy_redacted_prompts,
     )
     entries = _trim_in_progress_turn(
         entries,
@@ -142,7 +130,6 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
                         if page.flat_entries
                         else newer_turn_continues
                     ),
-                    demo_context=raw_demo_context if show_demo_entries else "",
                     active_transcript_owner=active_transcript_owner,
                 )
                 if page.has_older
@@ -157,13 +144,11 @@ def _cached_intermediate_detail(
     *,
     session_id: str,
     rollout_state: _RolloutFileState,
-    hide_demo_agent_entries: bool,
     entry_index: int,
 ) -> dict[str, Any] | None:
     key = common._intermediate_detail_cache_key(
         session_id=session_id,
         rollout_state=rollout_state,
-        hide_demo_agent_entries=hide_demo_agent_entries,
         entry_index=entry_index,
     )
     with common._INTERMEDIATE_DETAIL_CACHE_LOCK:
@@ -178,13 +163,9 @@ def session_intermediate(
 ) -> HttpResponse:
     if entry_index < 0:
         raise Http404("intermediate entry not found")
-    hide_demo_agent_entries = not _session_intermediate_allows_demo_entries(
-        session_id, request.GET.get("demo_context", "")
-    )
     entry = _rollout_intermediate_entry_for_detail(
         session_id,
         entry_index=entry_index,
-        hide_demo_agent_entries=hide_demo_agent_entries,
     )
     response = render(request, "_session_intermediate_body.html", {"entry": entry})
     # The body depends on the current rollout contents; with no validators a
@@ -192,28 +173,8 @@ def session_intermediate(
     # stale block after the rollout entry changes.
     return common._prevent_stale_cache(response)
 
-def _session_intermediate_allows_demo_entries(
-    session_id: str, raw_context: str | None
-) -> bool:
-    if not raw_context:
-        return False
-    try:
-        context = signing.loads(
-            raw_context,
-            salt=common._SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT,
-        )
-    except signing.BadSignature:
-        return False
-    if not isinstance(context, dict) or context.get("session_id") != session_id:
-        return False
-    run_id = context.get("run_id")
-    if not isinstance(run_id, int) or run_id <= 0:
-        return False
-    run = _system_agent_run_for_thread(session_id, run_id=run_id)
-    return run is not None and run.agent_kind == demo.DEMO_AGENT_KIND
-
 def _rollout_intermediate_entry_for_detail(
-    session_id: str, *, entry_index: int, hide_demo_agent_entries: bool
+    session_id: str, *, entry_index: int
 ) -> dict[str, Any]:
     metadata = _session_detail_metadata(session_id)
     if metadata is None:
@@ -224,7 +185,6 @@ def _rollout_intermediate_entry_for_detail(
     cached = _cached_intermediate_detail(
         session_id=session_id,
         rollout_state=rollout_state,
-        hide_demo_agent_entries=hide_demo_agent_entries,
         entry_index=entry_index,
     )
     if cached is not None:
@@ -243,8 +203,10 @@ def _rollout_intermediate_entry_for_detail(
         raise Http404("session not found")
     entries = _apply_system_authors(entries, session_id)
     entries = _apply_qa_approval_messages(entries, session_id)
-    if hide_demo_agent_entries:
-        entries = _filter_demo_agent_entries(entries, session_id)
+    entries = _filter_legacy_redacted_entries(
+        entries,
+        redacted_prompts=_legacy_redacted_prompts(session_id),
+    )
     if entry_index >= len(entries):
         raise Http404("intermediate entry not found")
     entry = entries[entry_index]
@@ -253,7 +215,6 @@ def _rollout_intermediate_entry_for_detail(
     common._cache_intermediate_detail(
         session_id=session_id,
         rollout_state=rollout_state,
-        hide_demo_agent_entries=hide_demo_agent_entries,
         entry_index=entry_index,
         entry=entry,
     )
@@ -279,7 +240,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     steering_param = request.GET.get("steering", "")
-    demo_param = request.GET.get("demo", "")
+    legacy_demo_param = request.GET.get("demo", "")
     active = _active_instance_for(session_id)
     active_workflow = system_agents.active_workflow_for_thread(
         session_id,
@@ -302,14 +263,12 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     current_steering_str = (
         str(current_steering_revision) if active_workflow is not None else ""
     )
-    current_demo_str = streaming.demo_stream_token(session_id)
-
     if (
-        baseline_param != current_latest_str
+        legacy_demo_param
+        or baseline_param != current_latest_str
         or active_param != current_active_str
         or workflow_param != current_workflow_str
         or steering_param != current_steering_str
-        or demo_param != current_demo_str
     ):
         response = StreamingHttpResponse(
             streaming.reload_stream(), content_type="text/event-stream"
@@ -319,7 +278,6 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
             streaming.capacity_limited_stream(
                 streaming.stream_for_instance(
                     active,
-                    demo_baseline=current_demo_str,
                     steering_revision=(
                         current_steering_revision
                         if active_workflow is not None
