@@ -19,6 +19,7 @@ from hitch.main.sessions import lifecycle as session_lifecycle
 
 logger = logging.getLogger(__name__)
 
+SESSION_NAME_MAX_LEN = 200
 DISPLAY_TITLE_MAX_LEN = 80
 THREAD_LIST_FETCH_LIMIT = 100
 ARCHIVED_SESSIONS_DIR = "archived_sessions"

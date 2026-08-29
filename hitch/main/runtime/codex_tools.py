@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.db import connection, transaction
+from openai_codex import Codex
+from openai_codex.errors import InvalidRequestError
 
 from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
@@ -18,6 +20,7 @@ from hitch.main.goals.proposed_sessions import (
     update_proposed_session,
 )
 from hitch.main.models import AutonomousGoal, SystemWorkflow
+from hitch.main.sessions import session_index
 from hitch.main.workflows import pr_watch
 from hitch.main.workflows.gh_observations import _pr_handoff_from_github_url
 from hitch.main.workflows.pr_handoff import (
@@ -30,6 +33,7 @@ logger = logging.getLogger(__name__)
 _TOOL_CALL_METHOD = "item/tool/call"
 _HITCH_NAMESPACE = "hitch"
 _PROPOSE_SESSION_TOOL = "propose_session"
+_RENAME_SESSION_TOOL = "rename_session"
 _WATCH_PR_TOOL = "watch_pr"
 
 
@@ -44,6 +48,8 @@ class ToolContext:
     workflow_id: int | None = None
     user_message_index: int | None = None
     cancel_requested: Callable[[], bool] = _not_cancelled
+    enable_memories: bool = False
+    web_search_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,10 @@ class HitchTool:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[[dict[str, Any], ToolContext], str]
+
+
+class HitchToolError(RuntimeError):
+    pass
 
 
 def is_dynamic_tool_call(method: str) -> bool:
@@ -94,7 +104,7 @@ def handle_dynamic_tool_call(
             message = tool.handler(arguments, context)
         finally:
             connection.close()
-    except (ProposedSessionError, pr_watch.PrWatchError) as exc:
+    except (HitchToolError, ProposedSessionError, pr_watch.PrWatchError) as exc:
         return _tool_response(str(exc), success=False)
     except Exception:
         # The handler runs on the SDK's reader thread: an exception escaping
@@ -146,6 +156,31 @@ def _handle_propose_session(arguments: dict[str, Any], context: ToolContext) -> 
         )
     )
     return f"Created proposed session #{proposal.pk}: {proposal.title}"
+
+
+def _handle_rename_session(arguments: dict[str, Any], context: ToolContext) -> str:
+    name = _string_arg(arguments, "name").strip()
+    if not name:
+        raise HitchToolError("name is required")
+    if len(name) > session_index.SESSION_NAME_MAX_LEN:
+        raise HitchToolError("name is too long")
+
+    # Dynamic-tool handlers execute on the active worker app-server's reader
+    # thread. Use a separate pooled app-server so this call does not deadlock by
+    # making a re-entrant request on the transport waiting for our response.
+    from hitch.main.runtime import app_server_pool
+
+    try:
+        app_server_pool.run_borrowed_op_with_retry(
+            Codex,
+            lambda codex: codex._client.thread_set_name(context.thread_id, name),
+            enable_memories=context.enable_memories,
+            web_search_mode=context.web_search_mode,
+        )
+    except InvalidRequestError as exc:
+        raise HitchToolError("current session is archived or unknown") from exc
+    session_index.update_cached_name(context.thread_id, name)
+    return f"Renamed current session to: {name}"
 
 
 def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
@@ -381,6 +416,28 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_propose_session,
+    ),
+    (_HITCH_NAMESPACE, _RENAME_SESSION_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_RENAME_SESSION_TOOL,
+        description=(
+            "Rename the current Hitch coding session. Use this when the user asks "
+            "to change the current session's name or title."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "New name for the current session.",
+                    "minLength": 1,
+                    "maxLength": session_index.SESSION_NAME_MAX_LEN,
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        handler=_handle_rename_session,
     ),
     (_HITCH_NAMESPACE, _WATCH_PR_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
