@@ -703,9 +703,9 @@ def _render_session_detail(
         # marking that live badge refreshing would let the reload script tear
         # down the running EventSource transcript.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
-        stage_refreshing = pr_stage_displayed and (
-            pr_qa.pr_handoff_stage_refresh_due(stage_pr_workflow)
-            or pr_qa.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
+        stage_refreshing = (
+            pr_stage_displayed
+            and pr_qa.pr_handoff_stage_refresh_due(stage_pr_workflow)
         )
         log_pr_snapshot = pr_observation.snapshot
         if (

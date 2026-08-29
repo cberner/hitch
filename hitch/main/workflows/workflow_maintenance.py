@@ -23,14 +23,10 @@ _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS = 60 * 60
 _ROW_RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
 _ROW_RETENTION_STARTUP_DELAY_SECONDS = 15 * 60
 # Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
-# view timeout, and this tick also owns reconcile_dead and PR-monitor backoff
-# polling, so an unbounded sweep over dozens of stale sessions would delay the
-# next reconcile by minutes and revive the stale-running-badge problem. The
-# leftover rows converge on later ticks (and on demand from the request path).
+# view timeout, so an unbounded sweep over dozens of stale sessions would delay
+# the next reconcile by minutes. Leftover rows converge on later ticks and on
+# demand from the request path.
 _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
-# Same rationale for the PR-monitor backoff sweep: each due monitor shells out to
-# gh, so cap how many one tick polls and let the rest converge on later ticks.
-_PR_MONITOR_BACKOFF_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
 _scheduler = server_lifecycle.SchedulerHandle(
@@ -106,11 +102,6 @@ def _workflow_maintenance_tick() -> None:
                 logger.info("reaped %s stale QA review handoff(s)", reaped)
         except Exception:
             logger.exception("failed to reap stale QA review handoffs")
-    refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
-        limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
-    )
-    if refreshed:
-        logger.info("refreshed %s PR monitor backoff workflow(s)", refreshed)
     # Converge GitHub-backed PR stages in the background. This scheduler
     # runs under production server commands (gunicorn et al.), whereas the
     # auto-proposal scheduler does not, so without this the per-session

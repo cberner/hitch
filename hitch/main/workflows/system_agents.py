@@ -38,10 +38,7 @@ from hitch.main.repos import (
     same_repo_or_worktree,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout
-from hitch.main.runtime.sdk_values import (
-    is_nonbool_int,
-    string_from_any,
-)
+from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
 from hitch.main.sessions.pr_prompts import (
@@ -49,19 +46,7 @@ from hitch.main.sessions.pr_prompts import (
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT as PR_SLASH_PROMPT
 from hitch.main.sessions.system_session_ownership import system_session_owner_rows
-from hitch.main.workflows import engine
-from hitch.main.workflows.gh_cli import (
-    _GH_PR_MONITOR_TIMEOUT_SECONDS,
-    _GH_REVIEW_THREAD_PAGE_LIMIT,
-    _GH_STATUS_CHECK_PAGE_LIMIT,
-)
-from hitch.main.workflows.pr_handoff import (
-    _PR_HANDOFF_BOOLEAN_FIELDS,
-    _PR_HANDOFF_FIELDS,
-    _PR_HANDOFF_INTEGER_FIELDS,
-    _PR_HANDOFF_LIST_FIELDS,
-    _PR_SAFE_LIST_ITEM_FIELDS,
-)
+from hitch.main.workflows import engine, pr_watch
 from hitch.main.workflows.workflow_state import (
     _session_metadata_from_state,
     _state_bool,
@@ -72,14 +57,12 @@ from hitch.main.workflows.workflow_state import (
 logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
-PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 AUTONOMOUS_GOAL_AGENT_KIND: str = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
 AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 QA_DISPLAY_AUTHOR = "QA agent"
 REVIEW_WORKFLOW_DISPLAY_AUTHOR = "Review workflow"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
-PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
 AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR = "Autonomous goal history"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
@@ -110,8 +93,8 @@ STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
 STEP_QA_APPROVED = "qa_approved"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
 STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
-STEP_PR_MONITORING = "pr_monitoring"
-STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
+STEP_PR_WATCH_RUNNING = pr_watch.STEP_PR_WATCH_RUNNING
+STEP_PR_WATCH_COMPLETED = pr_watch.STEP_PR_WATCH_COMPLETED
 STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
 STEP_PR_NO_CHANGES = "pr_no_changes"
@@ -128,8 +111,7 @@ PR_QA_STEERABLE_STEPS = frozenset(
         STEP_FEEDBACK_RUNNING,
         STEP_USER_STEERING_RUNNING,
         STEP_PR_PROMPT_RUNNING,
-        STEP_PR_MONITORING,
-        STEP_PR_FEEDBACK_RUNNING,
+        STEP_PR_WATCH_RUNNING,
     }
 )
 # The scheduler ticks once a minute, but the account rate-limit query that
@@ -166,7 +148,7 @@ _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # The window sits well above ``_WORKFLOW_ROUTE_CLAIM_TIMEOUT`` so a slow-but-live
 # spawn is never raced into a double review or a spurious failure.
 _WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
-# A steering message supersedes hidden QA/monitor output, but first gives the
+# A steering message supersedes hidden QA output, but first gives the
 # worker a brief graceful-cancellation window to emit its terminal event. Native
 # review cancellation can be ignored indefinitely, so reconciliation force-stops
 # only that obsolete hidden run after this bound.
@@ -179,17 +161,10 @@ _USER_STEERING_INTERRUPT_GRACE = timedelta(seconds=10)
 # whose prompt is reconstructable from state.)
 _ZOMBIE_TURN_STEP_MESSAGES = {
     STEP_FEEDBACK_RUNNING: "QA feedback turn",
-    STEP_PR_FEEDBACK_RUNNING: "PR follow-up turn",
     STEP_USER_STEERING_RUNNING: "coding turn",
 }
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
-_PR_MONITOR_STATE_KEY = "last_pr_monitor"
-_PR_MONITOR_BACKOFF_STATE_KEY = "pr_monitor_backoff"
-_PR_MONITOR_FEEDBACK_OBSERVATION_KEY = "monitor_feedback_observation"
-_PR_MONITOR_REINTERPRETATION_REQUIRED_KEY = "monitor_reinterpretation_required"
 _PR_GATES_STATE_KEY = "pr_gates"
-_PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
-_PR_PENDING_SINCE_STATE_KEY = "pr_pending_since"
 _WORKFLOW_TURN_OWNER_INDEX_STATE_KEY = "workflow_turn_owner_index"
 _WORKFLOW_TURN_OWNER_STEP_STATE_KEY = "workflow_turn_owner_step"
 _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
@@ -198,7 +173,6 @@ _WORKER_EXITED_BEFORE_COMPLETION_ERROR = "worker process exited before reporting
 _LEGACY_SERVER_OVERLOADED_ERROR = "Selected model is at capacity. Please try a different model."
 
 
-_SECONDS_PER_MINUTE = 60
 QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
 AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
 AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
@@ -206,102 +180,6 @@ AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
 AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY = "auto_merge_reviewed_source_tree"
 AUTO_PULL_RESULT_STATE_KEY = "auto_pull_result"
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
-_PR_MONITOR_PENDING_POLL_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
-_PR_MONITOR_PENDING_POLL_MAX_SECONDS = 30 * _SECONDS_PER_MINUTE
-_GH_PR_VIEW_FIELDS = (
-    "url",
-    "number",
-    "state",
-    "isDraft",
-    "title",
-    "baseRefName",
-    "headRefName",
-    "headRefOid",
-    "mergeable",
-    "mergeCommit",
-    "createdAt",
-    "updatedAt",
-    "closedAt",
-    "mergedAt",
-)
-_GH_PR_MONITOR_FIELDS = (
-    *_GH_PR_VIEW_FIELDS,
-    "comments",
-    "latestReviews",
-    "reactionGroups",
-    "reviewDecision",
-    "reviews",
-)
-_GH_MONITOR_TEXT_MAX_CHARS = 6000
-# The claim lease must cover the worst-case poll so a crash between claiming a
-# workflow and advancing/rescheduling its backoff doesn't re-expose it sooner
-# than a poll could still be running -- but no longer, or a crashed poll leaves
-# the workflow stuck for the full lease. The poll is now bounded by the monitor
-# timeout (gh pr view + the two paginated page caps), so derive it from that.
-_PR_MONITOR_BACKOFF_CLAIM_SECONDS = (
-    _GH_PR_MONITOR_TIMEOUT_SECONDS * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
-    + _SECONDS_PER_MINUTE
-)
-_PR_MONITOR_RETRY_LIMIT_REASONS = frozenset({"missing_cwd", "gh_error"})
-
-
-def _nullable_schema(schema_type: str) -> dict[str, Any]:
-    return {"type": [schema_type, "null"]}
-
-
-def _pr_handoff_output_property_schema(field: str) -> dict[str, Any]:
-    if field in _PR_HANDOFF_BOOLEAN_FIELDS:
-        return _nullable_schema("boolean")
-    if field in _PR_HANDOFF_INTEGER_FIELDS:
-        return _nullable_schema("integer")
-    if field == "ci_status":
-        return {
-            "type": ["string", "null"],
-            "enum": ["success", "pending", "failure", None],
-        }
-    if field in _PR_HANDOFF_LIST_FIELDS:
-        return {
-            "type": ["array", "null"],
-            "items": {
-                "anyOf": [
-                    {"type": "string"},
-                    {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": list(_PR_SAFE_LIST_ITEM_FIELDS),
-                        "properties": {
-                            key: {"type": ["string", "integer", "null"]} for key in _PR_SAFE_LIST_ITEM_FIELDS
-                        },
-                    },
-                ]
-            },
-        }
-    return _nullable_schema("string")
-
-
-_PR_HANDOFF_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": list(_PR_HANDOFF_FIELDS),
-    "properties": {field: _pr_handoff_output_property_schema(field) for field in _PR_HANDOFF_FIELDS},
-}
-
-_PR_MONITOR_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["status", "summary", "feedback", "pr", "blockers"],
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": ["blocked", "terminal"],
-        },
-        "summary": {"type": "string"},
-        "feedback": {"type": "string"},
-        "pr": _PR_HANDOFF_OUTPUT_SCHEMA,
-        "blockers": {"type": "array", "items": {"type": "string"}},
-    },
-}
-
 _LEGACY_QA_PANEL_LANE_AGENT_KINDS = (
     "pr_qa_correctness",
     "pr_qa_tests",
@@ -314,6 +192,11 @@ _LEGACY_QA_PANEL_AGENT_KINDS = (
     "pr_qa_panel_synthesizer",
 )
 _LEGACY_QA_PANEL_CANCELLED_ERROR = "legacy QA panel run cancelled because the QA panel feature was removed"
+_REMOVED_PR_WORKFLOW_STEPS = frozenset({"pr_monitoring", "pr_feedback_running"})
+_REMOVED_PR_WORKFLOW_ERROR = (
+    "The framework-driven PR monitor was removed. Start a new session to use "
+    "hitch.watch_pr."
+)
 _QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND,)
 _QA_INTERRUPTIBLE_AGENT_KINDS = (
     *_QA_VERDICT_AGENT_KINDS,
@@ -429,7 +312,12 @@ def reconcile_terminal_workflow_instances(*, main_thread_id: str | None = None, 
             workflow_id=workflow_id,
         )
     )
-    reconciled = 0
+    reconciled = _retire_removed_pr_workflows(workflows)
+    workflows = [
+        workflow
+        for workflow in workflows
+        if workflow.step not in _REMOVED_PR_WORKFLOW_STEPS
+    ]
     if workflows:
         _escalate_stale_user_steering_interrupts(workflows)
         reconciled += _reconcile_terminal_system_agent_instances(workflows)
@@ -447,6 +335,32 @@ def reconcile_terminal_workflow_instances(*, main_thread_id: str | None = None, 
         if _finish_deferred_workflow_block_if_settled(deferred_id):
             reconciled += 1
     return reconciled
+
+
+def _retire_removed_pr_workflows(
+    workflows: Iterable[SystemWorkflow],
+) -> int:
+    retired = 0
+    for workflow in workflows:
+        if (
+            workflow.kind != SystemWorkflow.KIND_PR_QA
+            or workflow.step not in _REMOVED_PR_WORKFLOW_STEPS
+        ):
+            continue
+        if stop_active_workflow(
+            workflow.main_thread_id,
+            expected_workflow_id=workflow.pk,
+        ):
+            retired += 1
+            continue
+        if CodexInstance.objects.filter(
+            workflow_id=workflow.pk,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+        ).exists():
+            continue
+        if _block_workflow(workflow, _REMOVED_PR_WORKFLOW_ERROR):
+            retired += 1
+    return retired
 
 
 def _escalate_stale_user_steering_interrupts(
@@ -475,10 +389,7 @@ def _escalate_stale_user_steering_interrupts(
     instances = CodexInstance.objects.filter(
         workflow_id__in=workflow_ids,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        agent_kind__in=(
-            *_QA_INTERRUPTIBLE_AGENT_KINDS,
-            PR_FOLLOWUP_MONITOR_AGENT_KIND,
-        ),
+        agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
         status__in=CodexInstance.ACTIVE_STATUSES,
     ).order_by("started_at", "id")
     for instance in instances:
@@ -676,13 +587,8 @@ def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str
     if workflow.kind == SystemWorkflow.KIND_PR_QA:
         if workflow.step == STEP_QA_RUNNING:
             return _QA_INTERRUPTIBLE_AGENT_KINDS
-        if workflow.step == STEP_PR_MONITORING:
-            return (PR_FOLLOWUP_MONITOR_AGENT_KIND,)
         if workflow.step == STEP_USER_STEERING_RUNNING:
-            return (
-                *_QA_INTERRUPTIBLE_AGENT_KINDS,
-                PR_FOLLOWUP_MONITOR_AGENT_KIND,
-            )
+            return _QA_INTERRUPTIBLE_AGENT_KINDS
         return ()
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         if workflow.step == STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
@@ -703,14 +609,18 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
         turn_indices = _workflow_turn_owned_indices(workflow)
         if not turn_indices:
             continue
-        if workflow.step in (STEP_FEEDBACK_RUNNING, STEP_PR_FEEDBACK_RUNNING):
+        if workflow.step == STEP_FEEDBACK_RUNNING:
             filters |= models.Q(
                 workflow_id=workflow.pk,
                 purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
                 user_message_index__in=turn_indices,
             )
             has_turn_filter = True
-        elif workflow.step in (STEP_USER_STEERING_RUNNING, STEP_PR_PROMPT_RUNNING):
+        elif workflow.step in (
+            STEP_USER_STEERING_RUNNING,
+            STEP_PR_PROMPT_RUNNING,
+            STEP_PR_WATCH_RUNNING,
+        ):
             filters |= models.Q(
                 workflow_id=workflow.pk,
                 purpose=CodexInstance.PURPOSE_USER,
@@ -771,12 +681,6 @@ def stop_active_workflow(main_thread_id: str, *, expected_workflow_id: int | Non
             .order_by("-started_at", "-pk")
         )
         if not runs and not turns:
-            if pr_qa._workflow_waits_on_pr_monitor_backoff(workflow):
-                workflow.state = dict(workflow.state)
-                workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-                workflow.save(update_fields=["state", "updated_at"])
-                _block_workflow(workflow, _workflow_stopped_error(workflow))
-                return True
             if workflow.kind == SystemWorkflow.KIND_PR_QA and (
                 workflow.step
                 in (
@@ -784,8 +688,7 @@ def stop_active_workflow(main_thread_id: str, *, expected_workflow_id: int | Non
                     STEP_FEEDBACK_RUNNING,
                     STEP_USER_STEERING_RUNNING,
                     STEP_PR_PROMPT_RUNNING,
-                    STEP_PR_MONITORING,
-                    STEP_PR_FEEDBACK_RUNNING,
+                    STEP_PR_WATCH_RUNNING,
                 )
                 or workflow.steering_messages.exists()
             ):
@@ -1015,6 +918,8 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance, *, lifecycle_lock
     if not claimed:
         return
     try:
+        from hitch.main.sessions.session_resume import thread_has_dynamic_tool
+
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": instance.thread_id,
             "cwd": instance.cwd,
@@ -1026,6 +931,11 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance, *, lifecycle_lock
             "enable_memories": instance.enable_memories,
             "web_search_mode": instance.web_search_mode or None,
             "initial_user_message_index": (instance.user_message_index or 0) + 1,
+            "pr_watch_tool_available": thread_has_dynamic_tool(
+                instance.thread_id,
+                namespace="hitch",
+                name="watch_pr",
+            ),
         }
         if automation == "auto_pr":
             pr_title = _accepted_auto_pr_proposal_title(instance.thread_id)
@@ -1043,6 +953,9 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance, *, lifecycle_lock
         if isinstance(workflow, SystemWorkflow):
             _record_auto_review_workflow_for_proposals(instance, workflow, automation=automation)
     except WorkflowStartBlockedByArchiveError:
+        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
+        return
+    except pr_qa.PrWatchUnavailableError:
         CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
         return
     except Exception:
@@ -1098,7 +1011,25 @@ def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
     expected rather than a dropped follow-up. The orphan reaper uses this so it
     does not rewrite such an intentionally-skipped successful turn as failed.
     """
-    return _completed_turn_has_pending_proposed_plan(instance)
+    return _completed_turn_has_pending_proposed_plan(instance) or _auto_pr_watch_unavailable(instance)
+
+
+def _auto_pr_watch_unavailable(instance: CodexInstance) -> bool:
+    if (
+        not instance.auto_pr_enabled
+        or (
+            instance.auto_merge_to_local_branch
+            and bool(instance.auto_merge_branch.strip())
+        )
+    ):
+        return False
+    from hitch.main.sessions.session_resume import thread_has_dynamic_tool
+
+    return not thread_has_dynamic_tool(
+        instance.thread_id,
+        namespace="hitch",
+        name="watch_pr",
+    )
 
 
 def auto_review_waits_for_unarchive(instance: CodexInstance) -> bool:
@@ -1170,7 +1101,7 @@ def _record_auto_merge_result_for_proposals(workflow: SystemWorkflow, updates: d
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 
-def _maybe_auto_pull_default_repo_after_pr_monitor_merge(
+def _maybe_auto_pull_default_repo_after_pr_merge(
     workflow: SystemWorkflow,
 ) -> None:
     if workflow.step != STEP_PR_CLOSED:
@@ -1291,8 +1222,7 @@ def _route_system_agent_finished(instance: CodexInstance, run: SystemAgentRun, w
     handler.on_agent_finished(instance, run, workflow)
 
 
-# Shared by the PR-QA review phases and the followup monitor, which run in
-# the same KIND_PR_QA workflow row.
+# Shared by the PR-QA workflow phases that run in one KIND_PR_QA row.
 
 
 def _claim_workflow_turn_retry(workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str) -> bool:
@@ -1384,36 +1314,15 @@ def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
         return
     if workflow.step == STEP_PR_PROMPT_RUNNING:
         pr_qa._handle_pr_prompt_finished(instance, workflow)
-
-
-def _copy_gh_string(source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str) -> None:
-    value = string_from_any(source.get(source_key))
-    if value:
-        target[target_key] = value
-
-
-def _gh_mergeable_value(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    if normalized in {"mergeable", "clean", "has_hooks", "unstable"}:
-        return True
-    if normalized in {"conflicting", "dirty", "blocked"}:
-        return False
-    return None
+        return
+    if workflow.step == STEP_PR_WATCH_RUNNING:
+        pr_qa._handle_pr_watch_finished(instance, workflow)
 
 
 def _run_gh_observation_fallback(run: SystemAgentRun) -> dict[str, Any]:
     run_input = run.input if isinstance(run.input, dict) else {}
     gh_observation = run_input.get("gh_observation")
     return gh_observation if isinstance(gh_observation, dict) else {}
-
-
-_PR_MONITOR_MAX_ITERATIONS_FEEDBACK = (
-    "PR follow-up monitor reached the maximum feedback loop count without reaching a clean PR state."
-)
 
 
 def _fail_unsupported_system_agent_run(run: SystemAgentRun, workflow: SystemWorkflow) -> None:
@@ -1538,6 +1447,8 @@ def is_review_guidance_only_workflow(workflow: SystemWorkflow) -> bool:
 
 
 def _workflow_stopped_error(workflow: SystemWorkflow) -> str:
+    if workflow.step in _REMOVED_PR_WORKFLOW_STEPS:
+        return _REMOVED_PR_WORKFLOW_ERROR
     if is_review_guidance_only_workflow(workflow):
         return "Review workflow stopped by user"
     if workflow.state.get(REVIEW_GUIDANCE_STATE_KEY) is True:
@@ -1552,8 +1463,7 @@ def _workflow_failure_owner_for_step(step: str) -> str:
         STEP_USER_STEERING_RUNNING,
         STEP_PR_PROMPT_SPAWNED,
         STEP_PR_PROMPT_RUNNING,
-        STEP_PR_MONITORING,
-        STEP_PR_FEEDBACK_RUNNING,
+        STEP_PR_WATCH_RUNNING,
     }:
         return _WORKFLOW_FAILURE_OWNER_PR
     return ""
@@ -2042,12 +1952,9 @@ def _recovered_system_agent_run_input(instance: CodexInstance, workflow: SystemW
     run_input: dict[str, Any] = {"cwd": instance.cwd}
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return run_input
-    if instance.agent_kind == PR_FOLLOWUP_MONITOR_AGENT_KIND:
-        revision_key = "pr_monitor_revision"
-    elif instance.agent_kind in _QA_INTERRUPTIBLE_AGENT_KINDS:
-        revision_key = "qa_review_revision"
-    else:
+    if instance.agent_kind not in _QA_INTERRUPTIBLE_AGENT_KINDS:
         return run_input
+    revision_key = "qa_review_revision"
     revision = instance.user_message_index
     run_input[revision_key] = revision if revision is not None else 0
     if instance.agent_kind == PR_QA_AGENT_KIND:

@@ -14,7 +14,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Approval mode: How Hitch resolves Codex escalation requests.
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
-- System session: A Hitch-owned background session for workflows such as Autonomous Goals or PR monitoring.
+- System session: A Hitch-owned background session for workflows such as Autonomous Goals. The visible coding turn that invokes `hitch.watch_pr` is a user session, not a system session.
 - Separate worktree: A git worktree distinct from the associated user session's active checkout.
 
 ## 2. Goals and Non-Goals
@@ -90,7 +90,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 
 ### 4.5 System Sessions
 
-- `PERM-system-read-only-preferred`: System sessions use Read only when writes are unnecessary, including AG summarization, evaluation, classification, synthesis, and monitoring.
+- `PERM-system-read-only-preferred`: System sessions use Read only when writes are unnecessary, including AG summarization, evaluation, classification, and synthesis.
 - `PERM-system-inherit-sandbox`: Write-capable system sessions with an associated user session use a sandbox no broader than that user session unless an explicit workflow policy allows more; writes require a separate worktree or equivalent isolation.
 - `PERM-system-sandbox-consent-cap`: Without an explicit workflow policy, system sessions cannot exceed the associated user session's sandbox; they must downgrade, run read-only, or fail closed.
 - `PERM-system-sandbox-fresh-consent`: Delayed system sessions must re-check current sandbox settings and workflow policy immediately before using write-capable or broader sandboxing.

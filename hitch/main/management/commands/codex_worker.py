@@ -1903,7 +1903,13 @@ def _make_approval_handler(
         if is_dynamic_tool_call(method):
             return handle_dynamic_tool_call(
                 params,
-                ToolContext(cwd=instance.cwd, thread_id=instance.thread_id),
+                ToolContext(
+                    cwd=instance.cwd,
+                    thread_id=instance.thread_id,
+                    workflow_id=instance.workflow_id,
+                    user_message_index=instance.user_message_index,
+                    cancel_requested=lambda: _cancel_requested,
+                ),
             )
         if _is_user_input_request_method(method):
             return _handle_user_input_request(

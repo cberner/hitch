@@ -1613,7 +1613,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         # information" and skipped it, so the snapshot kept the stale thread
         # from the first observation alongside ``unresolved_thread_count=0``.
         # That inconsistent state propagates into ``workflow.state.pr_handoff``
-        # and is rendered verbatim into the next PR follow-up monitor agent's
+        # and is rendered verbatim into the next PR follow-up turn's
         # prompt via ``_format_pr_handoff``; the persisted-handoff text the
         # agent reads then contradicts itself, which can mislead the monitor
         # into reporting the stale thread back as still-unresolved and stall

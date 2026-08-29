@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Any, Protocol
 
 from hitch.main.git_support import hermetic_git_env
 from hitch.main.models import SystemWorkflow
@@ -21,16 +21,34 @@ from hitch.main.runtime.sdk_values import string_from_any
 from hitch.main.workflows.gh_observations import _review_threads_page, _status_checks_page
 from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
+
+class _CwdContext(Protocol):
+    cwd: Any
+
 _GH_PR_CREATE_TIMEOUT_SECONDS = 120
+_GH_PR_VIEW_FIELDS = (
+    "url",
+    "number",
+    "state",
+    "isDraft",
+    "title",
+    "baseRefName",
+    "headRefName",
+    "headRefOid",
+    "mergeable",
+    "mergeCommit",
+    "createdAt",
+    "updatedAt",
+    "closedAt",
+    "mergedAt",
+)
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5
 _GH_STATUS_CHECK_PAGE_LIMIT = 10
-# PR monitor polling (gh pr view + paginated reviewThreads/statusCheckRollup
-# GraphQL) runs on the background workflow-maintenance tick. Without a bound
-# each gh call inherits the 120s create timeout, so a slow GitHub could stall a
-# single poll for ~1800s and starve the tick's reconcile_dead sweep -- leaving
-# finished workers showing a stale "running" badge in the UI. These are
-# read-only polls that normally return in a couple seconds, so cap each call.
-_GH_PR_MONITOR_TIMEOUT_SECONDS = 20
+# PR watching uses gh pr view plus paginated
+# reviewThreads/statusCheckRollup GraphQL reads. Without a bound, one watch can
+# inherit the 120s create timeout for every request. These reads normally return in a
+# couple seconds, so cap each call.
+_GH_PR_VIEW_TIMEOUT_SECONDS = 20
 _GH_REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -214,12 +232,12 @@ def _origin_default_git_branch(workflow: SystemWorkflow) -> str:
 
 
 def _gh_pr_view_payload(
-    workflow: SystemWorkflow,
+    workflow: _CwdContext,
     *,
     selector: str | None,
     fields: Iterable[str],
     optional: bool = False,
-    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
+    timeout_seconds: float = _GH_PR_CREATE_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     args = ["pr", "view"]
     if selector:
@@ -240,10 +258,10 @@ def _gh_pr_view_payload(
 
 
 def _run_gh_cli(
-    workflow: SystemWorkflow,
+    workflow: _CwdContext,
     args: list[str],
     *,
-    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
+    timeout_seconds: float = _GH_PR_CREATE_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
     command = ["gh", *args]
@@ -295,7 +313,10 @@ def _gh_error(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def _gh_pr_review_threads(
-    workflow: SystemWorkflow, handoff: dict[str, Any]
+    workflow: _CwdContext,
+    handoff: dict[str, Any],
+    *,
+    command_timeout_seconds: Callable[[], float] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
@@ -320,7 +341,13 @@ def _gh_pr_review_threads(
         if after:
             args.extend(["-F", f"after={after}"])
         result = _run_gh_cli(
-            workflow, args, timeout_seconds=_GH_PR_MONITOR_TIMEOUT_SECONDS
+            workflow,
+            args,
+            timeout_seconds=(
+                command_timeout_seconds()
+                if command_timeout_seconds is not None
+                else _GH_PR_VIEW_TIMEOUT_SECONDS
+            ),
         )
         if result.returncode != 0:
             raise _GhPrOpenError(f"`gh api graphql` failed: {_gh_error(result)}")
@@ -339,7 +366,10 @@ def _gh_pr_review_threads(
 
 
 def _gh_pr_status_checks(
-    workflow: SystemWorkflow, handoff: dict[str, Any]
+    workflow: _CwdContext,
+    handoff: dict[str, Any],
+    *,
+    command_timeout_seconds: Callable[[], float] | None = None,
 ) -> tuple[Any, bool]:
     repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
@@ -364,7 +394,13 @@ def _gh_pr_status_checks(
         if after:
             args.extend(["-F", f"after={after}"])
         result = _run_gh_cli(
-            workflow, args, timeout_seconds=_GH_PR_MONITOR_TIMEOUT_SECONDS
+            workflow,
+            args,
+            timeout_seconds=(
+                command_timeout_seconds()
+                if command_timeout_seconds is not None
+                else _GH_PR_VIEW_TIMEOUT_SECONDS
+            ),
         )
         if result.returncode != 0:
             raise _GhPrOpenError(f"`gh api graphql` failed: {_gh_error(result)}")

@@ -65,11 +65,8 @@ from hitch.main.test.views_helpers import (
     _SHOW_NO_PROJECT_SESSIONS_COOKIE,
     _USE_WORKTREES_COOKIE,
     _VISIBLE_SESSION_PROJECTS_COOKIE,
-    _basic_session_rollout_lines,
     _cache_token_usage,
-    _due_pr_monitor_state,
     _make_rollout,
-    _merged_pr_monitor_observation,
     _seed_usage_metadata,
     _session,
     _token_count_line,
@@ -397,71 +394,6 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
         self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
         mock_gh_pr_view.assert_called_once()
-
-    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_refreshes_due_pr_monitor_backoff_to_done_merged(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_observe: MagicMock,
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        pr_url = "https://github.com/cberner/hitch/pull/60"
-        repo = "cberner/hitch"
-        pr_number = 60
-        rollout_path = _make_rollout(
-            self,
-            _basic_session_rollout_lines("Open a PR", "Opened."),
-        )
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="monitor-pr-merged-list",
-            cwd=str(rollout_path.parent),
-            codex_display_title="Monitor PR merged list",
-            codex_preview="Open a PR",
-            codex_path=str(rollout_path),
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="monitor-pr-merged-list",
-            cwd=str(rollout_path.parent),
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_MONITORING,
-            state=_due_pr_monitor_state(pr_url=pr_url, repo=repo, pr_number=pr_number, now=now),
-        )
-        mock_observe.return_value = _merged_pr_monitor_observation(pr_url=pr_url, repo=repo, pr_number=pr_number)
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Monitor PR merged list")
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #60</span>',
-        )
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertTrue(workflow.state["pr_handoff"]["merged"])
-        mock_observe.assert_called_once()
-        mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
-
-        response = self.client.get(reverse("index"))
-        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
-        mock_observe.assert_called_once()
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.workflows.pr_qa.pr_snapshot_stage_refresh_due", return_value=True)

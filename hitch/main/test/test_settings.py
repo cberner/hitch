@@ -601,7 +601,9 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Follow global")
         self.assertContains(response, 'name="auto_pull"')
         self.assertContains(response, "Auto-pull")
-        self.assertContains(response, "After the PR monitor sees a GitHub PR merge")
+        self.assertContains(
+            response, "After the coding agent's PR watch sees a GitHub merge"
+        )
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")

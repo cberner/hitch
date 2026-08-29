@@ -122,7 +122,7 @@ class WorkflowHandler:
 
     Subclasses set ``kind`` and ``steps`` (or ``None`` to opt out of step
     validation) and implement ``on_agent_finished``. Kinds with several
-    agent shapes (e.g. the PR-QA workflow's followup monitor) register
+    agent shapes (e.g. an Autonomous Goal's candidate and judge) register
     multiple handlers for the same kind and discriminate in
     ``matches_run``; registration order decides precedence.
     """

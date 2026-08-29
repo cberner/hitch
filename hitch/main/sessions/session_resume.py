@@ -184,6 +184,28 @@ def _stored_rollout_path_for_thread(
     return None
 
 
+def thread_has_dynamic_tool(
+    thread_id: str, *, namespace: str, name: str
+) -> bool:
+    """Check the immutable dynamic-tool registration in a thread rollout."""
+    metadata_path = (
+        SessionMetadata.objects.filter(thread_id=thread_id)
+        .values_list("codex_path", flat=True)
+        .first()
+    )
+    rollout_path = _rollout_path_from_value(metadata_path)
+    if rollout_path is None or not rollout_path.is_file():
+        rollout_path = _stored_rollout_path_for_thread(thread_id)
+    return bool(
+        rollout_path is not None
+        and rollout.has_dynamic_tool(
+            rollout_path,
+            namespace=namespace,
+            name=name,
+        )
+    )
+
+
 def _rollout_path_for_session_detail(
     session_id: str, metadata: SessionMetadata | None
 ) -> Path | None:

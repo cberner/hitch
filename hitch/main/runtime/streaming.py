@@ -618,14 +618,6 @@ def _pr_gate_status_label(status: str) -> str:
 def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
     if instance is None:
         return ""
-    if instance.agent_kind == system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND:
-        tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
-        if tokens_used is None:
-            return "PR follow-up agent working..."
-        return (
-            "PR follow-up agent working..."
-            f"{formatting.format_token_count(tokens_used)} tokens"
-        )
     if not _is_qa_agent_instance(instance):
         return ""
     tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
@@ -645,8 +637,8 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         if system_agents.is_review_guidance_only_workflow(workflow):
             return "Coding agent is reviewing the changes..."
         return "PR agent is opening and following up..."
-    if workflow.step == system_agents.STEP_PR_FEEDBACK_RUNNING:
-        return "PR follow-up agent is fixing feedback..."
+    if workflow.step == system_agents.STEP_PR_WATCH_RUNNING:
+        return "Coding agent is watching and following up on the PR..."
     if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
         if CodexInstance.objects.filter(
             workflow_id=workflow.pk,
@@ -655,11 +647,6 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         ).exists():
             return "Coding agent is working..."
         return "Coding agent is waiting for the current workflow turn..."
-    if workflow.step == system_agents.STEP_PR_MONITORING:
-        instance = _running_system_agent_instance(workflow.pk)
-        if instance is not None and instance.agent_kind == system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND:
-            return "PR monitor is checking GitHub..."
-        return "PR monitor is waiting..."
     instance = _running_system_agent_instance(workflow.pk)
     status_text = qa_agent_status_text_for_instance(instance)
     return status_text or "QA agent working..."
