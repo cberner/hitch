@@ -276,7 +276,7 @@ def create_session_thread(
 # Upper bound for the auto-derived thread name. Matches the
 # ``_NAME_MAX_LEN`` cap that ``set_session_name`` enforces on user-supplied
 # names so the two write paths stay consistent.
-_INITIAL_THREAD_NAME_MAX_LEN = 200
+_INITIAL_THREAD_NAME_MAX_LEN = session_index.SESSION_NAME_MAX_LEN
 
 
 def _initial_thread_name(prompt: str) -> str:

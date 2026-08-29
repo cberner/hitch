@@ -8830,6 +8830,9 @@ class ApprovalHandlerTests(TestCase):
 
     def test_handler_routes_dynamic_tool_calls(self) -> None:
         instance = self._make_instance()
+        instance.enable_memories = True
+        instance.web_search_mode = "live"
+        instance.save(update_fields=["enable_memories", "web_search_mode"])
         handler = _make_approval_handler(
             instance=instance,
             write_event=lambda _method, _payload: None,
@@ -8854,6 +8857,8 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(params, {"args": {"name": "value"}})
         self.assertEqual(context.cwd, "/repo")
         self.assertEqual(context.thread_id, "thread-approval")
+        self.assertTrue(context.enable_memories)
+        self.assertEqual(context.web_search_mode, "live")
 
     def test_dynamic_tool_call_contains_handler_exceptions(self) -> None:
         # Tool handlers run on the SDK reader thread; an escaping exception

@@ -1825,6 +1825,8 @@ def _make_approval_handler(
                     workflow_id=instance.workflow_id,
                     user_message_index=instance.user_message_index,
                     cancel_requested=lambda: _cancel_requested,
+                    enable_memories=instance.enable_memories,
+                    web_search_mode=instance.web_search_mode or None,
                 ),
             )
         if _is_user_input_request_method(method):
