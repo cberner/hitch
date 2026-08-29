@@ -367,10 +367,6 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
     @patch(
-        "hitch.main.workflows.workflow_maintenance.qa_prompts.reap_stale_qa_handoffs",
-        return_value=3,
-    )
-    @patch(
         "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
@@ -379,13 +375,11 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         self,
         mock_reconcile_dead: MagicMock,
         mock_refresh_pr_stages: MagicMock,
-        mock_reap_qa_handoffs: MagicMock,
         mock_disk_cleanup: MagicMock,
     ) -> None:
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
-        mock_reap_qa_handoffs.assert_called_once()
         # Disk cleanup runs only on the separate 10-minute cadence, never as
         # part of the 60-second maintenance tick.
         mock_disk_cleanup.assert_not_called()
@@ -398,21 +392,16 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
 
     @patch("hitch.main.runtime.server_lifecycle.logger.exception")
     @patch(
-        "hitch.main.workflows.workflow_maintenance.qa_prompts.reap_stale_qa_handoffs"
-    )
-    @patch(
         "hitch.main.workflows.workflow_maintenance.reconciliation.reconcile_dead",
         side_effect=RuntimeError("reconciliation failed"),
     )
-    def test_scheduler_tick_reaps_qa_handoffs_when_reconciliation_fails(
+    def test_scheduler_tick_records_reconciliation_failure(
         self,
         _mock_reconcile_dead: MagicMock,
-        mock_reap_qa_handoffs: MagicMock,
         mock_log_exception: MagicMock,
     ) -> None:
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
 
-        mock_reap_qa_handoffs.assert_called_once()
         mock_log_exception.assert_called_once_with(
             "scheduler %s tick failed", "hitch-workflow-maintenance"
         )

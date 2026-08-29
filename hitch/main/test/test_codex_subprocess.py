@@ -67,7 +67,6 @@ from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
     SessionMetadata,
-    SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
 )
@@ -7685,136 +7684,7 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
 
-    @patch("hitch.main.management.commands.codex_worker._bind_submitted_turn_handle")
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_qa_worker_uses_native_codex_review(
-        self,
-        mock_codex: MagicMock,
-        mock_bind_submitted_turn_handle: MagicMock,
-    ) -> None:
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(
-            id="thread-1", turn=MagicMock()
-        )
-        codex_ctx._client.request.return_value = SimpleNamespace(
-            review_thread_id="thread-1",
-            turn=SimpleNamespace(id="review-turn-1"),
-        )
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
-            "review-turn-1", TurnStatus.completed
-        )
 
-        with tempfile.TemporaryDirectory() as raw:
-            rollout_path = Path(raw) / "rollout-thread-1.jsonl"
-            review_output = {
-                "findings": [],
-                "overall_correctness": "patch is correct",
-                "overall_explanation": (
-                    "No actionable correctness issues were found in the diff."
-                ),
-                "overall_confidence_score": 0.97,
-            }
-            rollout_path.write_text(
-                json.dumps(
-                    {
-                        "type": "event_msg",
-                        "payload": {
-                            "type": "exited_review_mode",
-                            "turn_id": "review-turn-1",
-                            "review_output": review_output,
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            codex_ctx._client.thread_read.return_value = SimpleNamespace(
-                thread=SimpleNamespace(path=str(rollout_path))
-            )
-            instance = self._make_instance(Path(raw), prompt="Review this diff")
-            instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
-            instance.agent_kind = system_agents.PR_QA_AGENT_KIND
-            instance.save(update_fields=["purpose", "agent_kind"])
-            call_command(
-                "codex_worker",
-                "--instance-id",
-                str(instance.pk),
-                "--model",
-                "gpt-5.4",
-                "--reasoning-effort",
-                "high",
-                "--sandbox-policy",
-                "readOnly",
-                "--approval-mode",
-                "auto_review",
-            )
-            with open(instance.events_path, encoding="utf-8") as fh:
-                worker_events = [json.loads(line) for line in fh]
-
-        codex_ctx.thread_resume.return_value.turn.assert_not_called()
-        mock_bind_submitted_turn_handle.assert_not_called()
-        codex_ctx.thread_resume.assert_called_once_with(
-            "thread-1",
-            approval_mode=ApprovalMode.auto_review,
-            model="gpt-5.4",
-            config={"model_reasoning_effort": "high"},
-            sandbox=Sandbox.read_only,
-        )
-        codex_ctx._client.request.assert_called_once()
-        method, params = codex_ctx._client.request.call_args.args
-        self.assertEqual(method, "review/start")
-        config = mock_codex.call_args.kwargs["config"]
-        self.assertFalse(
-            any(
-                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.")
-                for value in config.config_overrides
-            )
-        )
-        self.assertEqual(
-            params,
-            {
-                "threadId": "thread-1",
-                "delivery": "inline",
-                "target": {
-                    "type": "custom",
-                    "instructions": "Review this diff",
-                },
-            },
-        )
-        response_model = codex_ctx._client.request.call_args.kwargs["response_model"]
-        self.assertEqual(response_model.__name__, "ReviewStartResponse")
-        structured_event = next(
-            event
-            for event in worker_events
-            if event["method"] == codex_events.NATIVE_REVIEW_COMPLETED_METHOD
-        )
-        self.assertEqual(structured_event["payload"]["reviewOutput"], review_output)
-
-    def test_native_review_handle_claims_notifications_and_parent_thread(self) -> None:
-        client = MagicMock()
-        client.request.return_value = SimpleNamespace(
-            review_thread_id="review-presentation-thread",
-            turn=SimpleNamespace(id="review-turn-1"),
-        )
-        codex = cast(Codex, SimpleNamespace(_client=client))
-        thread = cast(Thread, SimpleNamespace(id="parent-thread"))
-
-        handle = codex_worker_module._start_native_review_turn(
-            codex, thread, prompt="Review this diff"
-        )
-
-        self.assertEqual(handle.thread_id, "parent-thread")
-        self.assertEqual(handle.id, "review-turn-1")
-        client.register_turn_notifications.assert_called_once_with("review-turn-1")
-        handle.interrupt()
-        handle.steer("Include the latest changes")
-        client.turn_interrupt.assert_called_once_with(
-            "parent-thread", "review-turn-1"
-        )
-        self.assertEqual(
-            client.turn_steer.call_args.args[:2],
-            ("parent-thread", "review-turn-1"),
-        )
 
     def test_ordinary_typed_start_injects_client_message_id(self) -> None:
         client = MagicMock()
@@ -7882,27 +7752,6 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(handle.id, "turn-1")
         self.assertEqual(sequenced_during_write, [True])
 
-    def test_native_review_output_fails_closed_without_thread_path(self) -> None:
-        client = MagicMock()
-        client.thread_read.return_value = SimpleNamespace(
-            thread=SimpleNamespace(path="")
-        )
-        codex = cast(Codex, SimpleNamespace(_client=client))
-
-        self.assertIsNone(
-            codex_worker_module._native_review_output(
-                codex, thread_id="parent-thread", turn_id="review-turn-1"
-            )
-        )
-
-        client.thread_read.side_effect = RuntimeError("thread unavailable")
-        with patch.object(codex_worker_module.logger, "exception") as log_exception:
-            self.assertIsNone(
-                codex_worker_module._native_review_output(
-                    codex, thread_id="parent-thread", turn_id="review-turn-1"
-                )
-            )
-        log_exception.assert_called_once()
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_visible_system_feedback_worker_registers_native_reviewer(
@@ -7919,10 +7768,9 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx.thread_resume.return_value = thread
 
         with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw), prompt="Apply the QA fix")
+            instance = self._make_instance(Path(raw), prompt="Apply the review fix")
             instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
-            instance.agent_kind = system_agents.PR_QA_AGENT_KIND
-            instance.save(update_fields=["purpose", "agent_kind"])
+            instance.save(update_fields=["purpose"])
             call_command("codex_worker", "--instance-id", str(instance.pk))
 
         thread.turn.assert_called_once()
@@ -10470,70 +10318,27 @@ class StreamForInstanceTests(TestCase):
 
     @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    def test_system_workflow_stream_reports_working(
-        self, _mock_worker_alive: MagicMock
-    ) -> None:
+    def test_system_workflow_stream_reports_working(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="thread-workflow",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            Path(events_path).write_text(
-                json.dumps(
-                    {
-                        "method": codex_events.GOAL_UPDATED_METHOD,
-                        "payload": {
-                            "threadId": "hidden-thread",
-                            "goal": {
-                                "objective": "Review the diff",
-                                "tokensUsed": 99,
-                            },
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
+        frames = list(
+            streaming.system_workflow_stream(
+                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
             )
-            instance = _make_streaming_instance(
-                events_path,
-                thread_id="hidden-thread",
-                pid=_LIVE_PID,
-            )
-            instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
-            instance.workflow_id = workflow.pk
-            instance.agent_kind = "pr_qa"
-            instance.display_author = "QA agent"
-            instance.save(
-                update_fields=[
-                    "purpose",
-                    "workflow_id",
-                    "agent_kind",
-                    "display_author",
-                ]
-            )
-            SystemAgentRun.objects.create(
-                workflow=workflow,
-                agent_kind="pr_qa",
-                thread_id="hidden-thread",
-                instance=instance,
-                status=SystemAgentRun.STATUS_RUNNING,
-            )
-
-            frames = list(
-                streaming.system_workflow_stream(
-                    "thread-workflow", baseline_id=None, workflow_id=workflow.pk
-                )
-            )
+        )
 
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
         self.assertGreaterEqual(len(heartbeats), 1)
         self.assertIn(b'"working": true', heartbeats[0])
-        self.assertIn(b'"statusText": "QA agent working...99 tokens"', heartbeats[0])
+        self.assertIn(
+            b'"statusText": "PR agent is opening and following up..."',
+            heartbeats[0],
+        )
 
     def test_system_workflow_stream_uses_scoped_dead_reconciliation(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -10541,7 +10346,7 @@ class StreamForInstanceTests(TestCase):
             main_thread_id="thread-workflow",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         with (
@@ -10571,7 +10376,7 @@ class StreamForInstanceTests(TestCase):
             main_thread_id="thread-workflow",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         frames = list(
@@ -10582,7 +10387,10 @@ class StreamForInstanceTests(TestCase):
 
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
         self.assertGreater(len(heartbeats), 1)
-        self.assertIn(b'"statusText": "QA agent working..."', heartbeats[-1])
+        self.assertIn(
+            b'"statusText": "PR agent is opening and following up..."',
+            heartbeats[-1],
+        )
 
     def test_system_workflow_stream_ends_when_workflow_stops(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -10602,67 +10410,7 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"workflow"', frames[-1])
 
-    def test_system_workflow_stream_ends_when_steering_is_queued(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        stream = streaming.system_workflow_stream(
-            "thread-workflow",
-            baseline_id=None,
-            workflow_id=workflow.pk,
-            steering_revision=0,
-        )
 
-        self.assertEqual(next(stream), b"retry: 2000\n\n")
-        self.assertTrue(next(stream).startswith(b"event: heartbeat"))
-        workflow.state = {
-            system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1
-        }
-        workflow.save(update_fields=["state", "updated_at"])
-
-        frame = next(stream)
-        self.assertTrue(frame.startswith(b"event: end"))
-        self.assertIn(b'"steering"', frame)
-
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.0)
-    def test_active_feedback_stream_ends_when_steering_is_queued(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            Path(events_path).touch()
-            instance = _make_streaming_instance(
-                events_path,
-                thread_id="thread-workflow",
-                status=CodexInstance.STATUS_RUNNING,
-            )
-            instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
-            instance.workflow_id = workflow.pk
-            instance.save(update_fields=["purpose", "workflow_id"])
-            stream = streaming.stream_for_instance(
-                instance, steering_revision=0
-            )
-
-            self.assertEqual(next(stream), b"retry: 2000\n\n")
-            self.assertTrue(next(stream).startswith(b"event: heartbeat"))
-            workflow.state = {
-                system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1
-            }
-            workflow.save(update_fields=["state", "updated_at"])
-
-            frame = next(stream)
-
-        self.assertTrue(frame.startswith(b"event: end"))
-        self.assertIn(b'"steering"', frame)
 
     def test_reload_stream_yields_immediate_end(self) -> None:
         # ``session_stream`` returns this when it detects the page is
@@ -11113,49 +10861,7 @@ class StreamForInstanceTests(TestCase):
         self.assertIn("café".encode(), data_frames[0])
         self.assertTrue(frames[-1].startswith(b"event: end"))
 
-    def test_qa_instance_heartbeat_reports_goal_tokens(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            events_path = str(Path(raw) / "events.jsonl")
-            Path(events_path).write_text(
-                json.dumps(
-                    {
-                        "method": codex_events.GOAL_UPDATED_METHOD,
-                        "payload": {
-                            "threadId": "thread-1",
-                            "goal": {
-                                "objective": "Review the diff",
-                                "tokensUsed": 1200,
-                            },
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            instance = _make_streaming_instance(
-                events_path,
-                status=CodexInstance.STATUS_COMPLETED,
-            )
-            instance.display_author = "QA agent"
-            instance.save(update_fields=["display_author"])
 
-            frames = list(streaming.stream_for_instance(instance))
-
-        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertIn(b'"statusText": "QA agent working...1.2K tokens"', heartbeats[0])
-
-    def test_qa_instance_status_text_falls_back_without_tokens(self) -> None:
-        instance = _make_streaming_instance(
-            "/tmp/hitch-test-missing-qa-progress.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-        instance.display_author = "QA agent"
-        instance.save(update_fields=["display_author"])
-
-        self.assertEqual(
-            streaming.qa_agent_status_text_for_instance(instance),
-            "QA agent working...",
-        )
 
     def test_compact_token_count_formatter(self) -> None:
         self.assertEqual(formatting.format_token_count(-1), "0")
@@ -11176,20 +10882,6 @@ class StreamForInstanceTests(TestCase):
             "Hitch system agent is working...",
         )
 
-    def test_system_workflow_status_text_handles_qa_feedback_step(self) -> None:
-        workflow = cast(
-            SystemWorkflow,
-            SimpleNamespace(
-                kind=SystemWorkflow.KIND_PR_QA,
-                step="feedback_running",
-                state={},
-            ),
-        )
-
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "QA feedback agent is fixing feedback...",
-        )
 
     def test_system_workflow_status_text_handles_optional_review_turn(self) -> None:
         workflow = cast(

@@ -1,12 +1,10 @@
 import json
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 from django.test import SimpleTestCase
 
-from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_events
 
 
@@ -211,19 +209,6 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
     def test_latest_goal_tokens_for_instance_handles_missing_instance(self) -> None:
         self.assertIsNone(codex_events.latest_goal_tokens_for_instance(None))
 
-    def test_legacy_demo_instance_event_projections_are_redacted(self) -> None:
-        instance = cast(
-            CodexInstance,
-            SimpleNamespace(
-                agent_kind="demo",
-                events_path="/events/must-not-be-read.jsonl",
-                thread_id="thread-1",
-            ),
-        )
-
-        self.assertIsNone(codex_events.latest_goal_tokens_for_instance(instance))
-        self.assertIsNone(codex_events.latest_task_plan_for_instance(instance))
-        self.assertIsNone(codex_events.latest_pr_snapshot_for_instance(instance))
 
     def test_accepts_recorded_at_alias_and_ignores_bad_order_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

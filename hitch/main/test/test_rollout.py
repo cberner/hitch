@@ -145,31 +145,6 @@ class SessionHistoryPageTests(TestCase):
         )
         self.assertEqual(page.flat_entries[1]["phase"], "commentary")
 
-    def test_marks_one_oversized_legacy_redacted_prompt(self) -> None:
-        hidden_prompt = "secret retired-feature prompt " * 5000
-        path = _write_rollout(
-            [
-                _line(
-                    "event_msg",
-                    {"type": "user_message", "message": hidden_prompt},
-                ),
-                _line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "hidden answer"},
-                ),
-            ]
-        )
-        self.addCleanup(path.unlink, missing_ok=True)
-
-        page = rollout.session_history_page(
-            path,
-            message_target=2,
-            hidden_user_prompts=frozenset({hidden_prompt}),
-        )
-
-        self.assertIsNotNone(page)
-        assert page is not None
-        self.assertTrue(page.flat_entries[0]["_hitch_hidden_user"])
 
     def test_bounds_scan_without_an_earlier_user_message(self) -> None:
         path = _write_rollout(
@@ -317,41 +292,6 @@ class SessionHistoryPageTests(TestCase):
             [f"Answer {index}" for index in range(6)],
         )
 
-    def test_scan_cap_keeps_unknown_leading_redacted_context_hidden(self) -> None:
-        hidden_prompt = "Hidden retired-feature prompt"
-        path = _write_rollout(
-            [
-                _line(
-                    "event_msg",
-                    {"type": "user_message", "message": hidden_prompt},
-                ),
-                _line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Hidden answer"},
-                ),
-                _line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Visible prompt"},
-                ),
-                _line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Visible answer"},
-                ),
-            ]
-        )
-        self.addCleanup(path.unlink, missing_ok=True)
-
-        with patch.object(rollout, "_HISTORY_SCAN_MAX_RECORDS", 3):
-            page = rollout.session_history_page(
-                path,
-                message_target=4,
-                hidden_user_prompts=frozenset({hidden_prompt}),
-            )
-
-        self.assertIsNotNone(page)
-        assert page is not None
-        self.assertEqual(page.flat_entries[0]["text"], "Hidden answer")
-        self.assertEqual(page.leading_user_text, hidden_prompt)
 
     def test_retains_active_user_boundary_beyond_message_target(self) -> None:
         lines = [
@@ -576,64 +516,6 @@ class LatestModelConfigTests(TestCase):
         self.assertEqual(detail.latest_model_config, expected)
 
 
-class ReviewOutputTests(TestCase):
-    def test_reads_structured_output_for_the_requested_review_turn(self) -> None:
-        expected = {
-            "findings": [],
-            "overall_correctness": "patch is correct",
-            "overall_explanation": "No actionable correctness issues were found.",
-            "overall_confidence_score": 0.98,
-        }
-        path = _write_rollout(
-            [
-                _line(
-                    "event_msg",
-                    {
-                        "type": "exited_review_mode",
-                        "turn_id": "review-turn-1",
-                        "review_output": expected,
-                    },
-                ),
-                _line(
-                    "event_msg",
-                    {
-                        "type": "exited_review_mode",
-                        "turn_id": "review-turn-2",
-                        "review_output": {"findings": [{"title": "Later review"}]},
-                    },
-                ),
-            ]
-        )
-        self.addCleanup(path.unlink, missing_ok=True)
-
-        self.assertEqual(
-            rollout.review_output_for_turn(path, turn_id="review-turn-1"),
-            expected,
-        )
-
-    def test_ignores_unreadable_and_unrelated_review_output(self) -> None:
-        missing_path = _write_rollout([])
-        missing_path.unlink()
-        self.assertIsNone(
-            rollout.review_output_for_turn(missing_path, turn_id="review-turn-1")
-        )
-
-        path = _write_rollout(
-            [
-                _line("response_item", {}),
-                _line("event_msg", {"type": "other"}),
-                _line(
-                    "event_msg",
-                    {"type": "exited_review_mode", "turn_id": "other-turn"},
-                ),
-            ]
-        )
-        self.addCleanup(path.unlink, missing_ok=True)
-        self.assertIsNone(
-            rollout.review_output_for_turn(path, turn_id="review-turn-1")
-        )
-
-
 class LatestPrUrlTests(TestCase):
     @override
     def tearDown(self) -> None:
@@ -839,54 +721,6 @@ class LatestPrUrlTests(TestCase):
         self.assertIsNone(rollout.latest_pr_url(path))
         self.assertIsNone(rollout.latest_pr_snapshot(path))
 
-    def test_pr_workflow_notice_without_observation_keeps_existing_pr(self) -> None:
-        url = "https://github.com/cberner/hitch/pull/94"
-        path = self._make(
-            [
-                _line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _line(
-                    "event_msg",
-                    {
-                        "type": "mcp_tool_call_end",
-                        "invocation": {
-                            "server": "github",
-                            "tool": "_create_pull_request",
-                        },
-                        "result": {"url": url, "state": "open"},
-                    },
-                ),
-                _line("event_msg", {"type": "agent_message", "message": "Opened."}),
-                _line(
-                    "event_msg",
-                    {
-                        "type": "user_message",
-                        "message": (
-                            "Hitch QA agent could not complete the PR workflow.\n\n"
-                            "Status: Hitch checked the PR gates and is waiting on "
-                            "external PR state.\n\n"
-                            "Tell the user the PR workflow needs attention before "
-                            "continuing."
-                        ),
-                    },
-                ),
-                _line(
-                    "event_msg",
-                    {
-                        "type": "agent_message",
-                        "message": "PR workflow needs attention.",
-                    },
-                ),
-            ]
-        )
-
-        self.assertEqual(rollout.latest_pr_url(path), url)
-        snapshot = rollout.latest_pr_snapshot(path)
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot["url"], url)
 
     def test_pr_snapshot_reads_ok_wrapped_mcp_result(self) -> None:
         url = "https://github.com/cberner/hitch/pull/94"

@@ -9,9 +9,7 @@ class SessionStageTests(SimpleTestCase):
     def test_pr_qa_workflow_steps_map_to_display_stage(self) -> None:
         cases = {
             system_agents.STEP_LOCAL_BRANCH_MERGED: session_stage.DONE_MERGED,
-            system_agents.STEP_QA_RUNNING: session_stage.QA,
-            system_agents.STEP_QA_APPROVED: session_stage.QA,
-            system_agents.STEP_FEEDBACK_RUNNING: session_stage.IMPLEMENTATION,
+            system_agents.STEP_REVIEW_COMPLETED: session_stage.QA,
             system_agents.STEP_USER_STEERING_RUNNING: session_stage.IMPLEMENTATION,
             system_agents.STEP_PR_PROMPT_SPAWNED: session_stage.PR,
             system_agents.STEP_PR_PROMPT_RUNNING: session_stage.PR,
@@ -92,7 +90,11 @@ class SessionStageTests(SimpleTestCase):
         workflow = SystemWorkflow(
             kind=SystemWorkflow.KIND_PR_QA,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+            },
         )
 
         stage = session_stage.derive_stage(
@@ -156,7 +158,7 @@ class SessionStageTests(SimpleTestCase):
         workflow = SystemWorkflow(
             kind=SystemWorkflow.KIND_PR_QA,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         stage = session_stage.derive_stage(
@@ -191,7 +193,11 @@ class SessionStageTests(SimpleTestCase):
         workflow = SystemWorkflow(
             kind=SystemWorkflow.KIND_PR_QA,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
+            },
         )
 
         stage = session_stage.derive_stage(

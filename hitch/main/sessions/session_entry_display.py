@@ -1,7 +1,7 @@
 """Session-detail entry/transcript display helpers.
 
 Pure code-movement extraction from ``views.py``: builds the rendered
-entry list for a session (rollout vs. SDK fallback, system/QA author
+entry list for a session (rollout vs. SDK fallback and system author
 tagging) and the small active-worker/workflow status
 helpers the detail page and SSE view consume.
 """
@@ -19,10 +19,8 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from hitch.main.formatting import render_markdown
-from hitch.main.legacy_agent_records import only_legacy_redacted_agent_records
 from hitch.main.models import (
     CodexInstance,
-    SystemAgentRun,
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout, streaming
@@ -338,7 +336,11 @@ def _workflow_status_text(workflow: Any | None) -> str:
 
 def _workflow_composer_label(workflow: SystemWorkflow | None) -> str:
     if workflow is not None and workflow.kind == SystemWorkflow.KIND_PR_QA:
-        return "QA workflow"
+        return (
+            "Review workflow"
+            if system_agents.is_review_guidance_only_workflow(workflow)
+            else "PR workflow"
+        )
     return "Hitch workflow"
 
 
@@ -347,7 +349,7 @@ def _workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
 
 
 def _active_worker_status_text(active: CodexInstance | None) -> str:
-    return streaming.qa_agent_status_text_for_instance(active)
+    return ""
 
 
 def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
@@ -403,57 +405,22 @@ def _apply_system_author(entry: dict[str, Any], system_authors: dict[int, str], 
     return user_message_index
 
 
-def _legacy_redacted_prompts(session_id: str) -> frozenset[str]:
-    """Prompts whose persisted rollout turns must remain hidden after removal."""
-    return frozenset(
-        prompt
-        for prompt in only_legacy_redacted_agent_records(
-            CodexInstance.objects.filter(thread_id=session_id)
-        ).values_list("prompt", flat=True)
-        if isinstance(prompt, str) and prompt
-    )
-
-
-def _filter_legacy_redacted_entries(
-    entries: list[dict[str, Any]],
-    *,
-    initial_user_text: str | None = None,
-    redacted_prompts: frozenset[str],
-) -> list[dict[str, Any]]:
-    if not redacted_prompts:
-        return entries
-    filtered: list[dict[str, Any]] = []
-    suppress_turn = initial_user_text in redacted_prompts
-    for entry in entries:
-        if entry.get("kind") == "user":
-            hidden_marker = entry.get("_hitch_hidden_user")
-            if isinstance(hidden_marker, bool):
-                suppress_turn = hidden_marker
-            else:
-                text = entry.get("text")
-                suppress_turn = isinstance(text, str) and text in redacted_prompts
-        preserve_authored_agent = suppress_turn and entry.get("kind") == "agent" and bool(entry.get("display_author"))
-        if not suppress_turn or preserve_authored_agent:
-            filtered.append(entry)
-    return filtered
-
-
-def _apply_qa_approval_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-    approvals = sorted(_qa_approval_entries(session_id), key=lambda item: item[0])
-    if not approvals:
+def _apply_workflow_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
+    workflow_entries = sorted(_review_merge_entries(session_id), key=lambda item: item[0])
+    if not workflow_entries:
         result = entries
     else:
         result = []
         user_message_index = 0
-        pending = approvals.copy()
+        pending = workflow_entries.copy()
         for entry in entries:
             if entry.get("kind") == "user":
                 while pending and pending[0][0] == user_message_index:
-                    _index, approval = pending.pop(0)
-                    result.append(approval)
+                    _index, workflow_entry = pending.pop(0)
+                    result.append(workflow_entry)
                 user_message_index += 1
             result.append(entry)
-        result.extend(approval for _index, approval in pending)
+        result.extend(workflow_entry for _index, workflow_entry in pending)
     return _apply_workflow_auto_pull_messages(result, session_id)
 
 
@@ -488,86 +455,30 @@ def _workflow_auto_pull_entries(session_id: str) -> Iterator[dict[str, Any]]:
         }
 
 
-def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]]:
+def _review_merge_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]]:
     workflows = (
         SystemWorkflow.objects.filter(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id=session_id,
             status=SystemWorkflow.STATUS_COMPLETED,
-            step__in=[
-                system_agents.STEP_PR_PROMPT_SPAWNED,
-                system_agents.STEP_QA_APPROVED,
-                system_agents.STEP_PR_READY,
-                system_agents.STEP_PR_CLOSED,
-                system_agents.STEP_LOCAL_BRANCH_MERGED,
-            ],
+            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
         )
         .order_by("created_at")
-        .prefetch_related("agent_runs")
     )
     for workflow in workflows:
+        if not system_agents.is_review_guidance_only_workflow(workflow):
+            continue
         next_user_message_index = workflow.state.get("next_user_message_index")
         if not isinstance(next_user_message_index, int):
             continue
-        run = _approved_qa_run(workflow)
-        review_merge = (
-            workflow.step == system_agents.STEP_LOCAL_BRANCH_MERGED
-            and run is None
-            and system_agents.is_review_guidance_only_workflow(workflow)
-        )
-        if run is None and not review_merge:
-            continue
-        feedback = _qa_feedback_text(workflow, run) if run is not None else ""
-        text = (
-            _review_merge_result_text(workflow)
-            if review_merge
-            else _qa_approval_text(workflow)
-        )
-        if feedback:
-            text = f"{text}\n\n{feedback}"
-        if workflow.step in {
-            system_agents.STEP_QA_APPROVED,
-            system_agents.STEP_LOCAL_BRANCH_MERGED,
-        }:
-            insert_index = next_user_message_index
-        else:
-            prompt_index = workflow.state.get(system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY)
-            insert_index = prompt_index if is_nonbool_int(prompt_index) else max(next_user_message_index - 1, 0)
-        # ``_finalize_agent_entry`` would skip single-finding feedback
-        # (``looks_like_markdown`` needs two bullets), so render the body
-        # directly: QA feedback per the agent prompt carries structured
-        # findings and must reach the user formatted even for one finding.
-        yield insert_index, {
+        text = _review_merge_result_text(workflow)
+        yield next_user_message_index, {
             "kind": "agent",
-            "display_author": (
-                system_agents.REVIEW_WORKFLOW_DISPLAY_AUTHOR
-                if review_merge
-                else system_agents.QA_DISPLAY_AUTHOR
-            ),
+            "display_author": system_agents.REVIEW_WORKFLOW_DISPLAY_AUTHOR,
             "text": text,
             "html": render_markdown(text),
             "timestamp": int(workflow.updated_at.timestamp()),
         }
-
-
-def _qa_approval_text(workflow: SystemWorkflow) -> str:
-    if workflow.step != system_agents.STEP_LOCAL_BRANCH_MERGED:
-        return "QA agent approved the diff."
-    result = workflow.state.get("auto_merge_result")
-    if not isinstance(result, dict):
-        return "QA agent approved the diff and merged it to the local branch."
-    branch = result.get("branch")
-    commit_sha = result.get("commit_sha")
-    changed = result.get("changed")
-    if not isinstance(branch, str) or not branch.strip():
-        return "QA agent approved the diff and merged it to the local branch."
-    action = "merged it into"
-    if changed is False:
-        action = "found it already applied to"
-    text = f"QA agent approved the diff and {action} {branch.strip()}."
-    if isinstance(commit_sha, str) and commit_sha.strip():
-        text = f"{text}\n\nCommit: {commit_sha.strip()}"
-    return text
 
 
 def _review_merge_result_text(workflow: SystemWorkflow) -> str:
@@ -610,29 +521,6 @@ def _auto_pull_text(result: object) -> str:
     if status == "running":
         return "Auto-pull started but did not finish."
     return ""
-
-
-def _approved_qa_run(workflow: SystemWorkflow) -> SystemAgentRun | None:
-    runs = sorted(
-        workflow.agent_runs.all(),
-        key=lambda item: item.created_at,
-        reverse=True,
-    )
-    for run in runs:
-        if run.status != SystemAgentRun.STATUS_COMPLETED:
-            continue
-        output = run.output if isinstance(run.output, dict) else {}
-        if output.get("lgtm") is True:
-            return run
-    return None
-
-
-def _qa_feedback_text(workflow: SystemWorkflow, run: SystemAgentRun) -> str:
-    feedback = workflow.state.get("last_feedback")
-    if not isinstance(feedback, str) or not feedback.strip():
-        output = run.output if isinstance(run.output, dict) else {}
-        feedback = output.get("feedback")
-    return feedback.strip() if isinstance(feedback, str) else ""
 
 
 def _display_title(thread: Any) -> str:

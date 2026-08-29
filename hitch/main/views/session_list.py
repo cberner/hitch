@@ -1,6 +1,6 @@
 """Session list pages: index, system sessions, inbox, and usage."""
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any, NamedTuple
@@ -29,7 +29,6 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
-    SystemWorkflow,
 )
 from hitch.main.runtime import app_server_pool, reconciliation
 from hitch.main.runtime.rollout_state import (
@@ -91,8 +90,6 @@ from hitch.main.sessions.settings_cookies import (
     _apply_cookie_updates,
 )
 from hitch.main.sessions.system_agent_summary import (
-    _qa_activity_updated_at_by_main_thread_id,
-    _session_updated_at,
     _system_agent_instance_for_thread,
     _system_agent_run_detail_title,
     _system_agent_run_for_thread,
@@ -112,12 +109,6 @@ class VisibleSessionPage(NamedTuple):
     sessions: list[dict[str, Any]]
     next_cursor: str
     next_offset: int
-    needs_materialized_order: bool = False
-    materialized_order: bool = False
-
-class QAActivityPageState(NamedTuple):
-    updated_at_by_main_thread: dict[str, Any]
-    requires_materialized_order: bool
 
 class SessionListPage(NamedTuple):
     sessions: list[dict[str, Any]]
@@ -128,7 +119,6 @@ class SessionListPage(NamedTuple):
     archived_next_cursor: str
     archived_next_offset: int
     archived_next_done: bool
-    materialized_order: bool = False
 
 @dataclass
 class SessionPageSource:
@@ -139,10 +129,8 @@ class SessionPageSource:
     next_page_cursor: str = ""
     seen_cursors: set[str] = dataclass_field(default_factory=set)
     metadata_by_thread: dict[str, SessionMetadata] | None = None
-    qa_updated_at_by_main_thread: dict[str, Any] | None = None
     candidate: dict[str, Any] | None = None
     candidate_offset: int = 0
-    qa_activity_requires_materialized_order: bool = False
     exhausted: bool = False
 
 @dataclass
@@ -289,7 +277,6 @@ def _request_uses_codex_cursor(request: HttpRequest) -> bool:
             "archived_cursor",
             "archived_offset",
             "archived_done",
-            "materialized_order",
         )
     )
 
@@ -308,13 +295,6 @@ def _session_list_page_from_codex(
     *,
     current_settings: SettingsValues,
 ) -> SessionListPage:
-    if not query.system_only and request.GET.get("materialized_order") == "1":
-        return _materialized_session_list_page_from_codex(
-            codex,
-            request,
-            query,
-            include_archived=current_settings.show_archived_sessions,
-        )
     if current_settings.show_archived_sessions:
         return _merged_session_list_page_from_codex(codex, request, query)
     active = _visible_session_page_from_codex(
@@ -324,26 +304,6 @@ def _session_list_page_from_codex(
         archived=False,
         cursor_param="cursor",
     )
-    if active.needs_materialized_order:
-        return _materialized_session_list_page_from_codex(
-            codex,
-            request,
-            query,
-            include_archived=False,
-        )
-    if active.materialized_order:
-        done = not bool(active.next_offset)
-        return SessionListPage(
-            sessions=active.sessions,
-            next_cursor="",
-            next_offset=active.next_offset,
-            next_done=done,
-            include_archived_source=False,
-            archived_next_cursor="",
-            archived_next_offset=0,
-            archived_next_done=True,
-            materialized_order=True,
-        )
     return SessionListPage(
         sessions=active.sessions,
         next_cursor=active.next_cursor,
@@ -476,7 +436,6 @@ def _system_session_list_page_from_index(
         if (
             session := _session_row_for_metadata(
                 metadata,
-                qa_updated_at_by_main_thread={},
                 runs_by_thread_id=runs_by_thread_id,
                 instances_by_thread_id=instances_by_thread_id,
                 system_only=True,
@@ -544,14 +503,12 @@ def _session_list_page_from_index(
             rows = rows.exclude(thread_id__in=query.hidden_thread_ids)
     if query.system_only:
         metadata_rows = list(rows)
-        qa_updated_at_by_main_thread: dict[str, Any] = {}
         sessions = [
             session
             for metadata in metadata_rows
             if (
                 session := _session_row_for_metadata(
                     metadata,
-                    qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
                     runs_by_thread_id=query.runs_by_thread_id,
                     instances_by_thread_id=query.instances_by_thread_id,
                     system_only=True,
@@ -561,12 +518,7 @@ def _session_list_page_from_index(
         ]
         sessions = _sort_session_rows(sessions)
     else:
-        sessions, qa_updated_at_by_main_thread = _sorted_visible_index_rows(
-            rows,
-            hidden_thread_ids=(
-                query.hidden_thread_ids if query.hidden_thread_ids else None
-            ),
-        )
+        sessions = _sorted_visible_index_rows(rows)
     index_cursor = _index_cursor_sort_key(request.GET.get("cursor", ""))
     if index_cursor is not None:
         sessions = [
@@ -593,7 +545,6 @@ def _session_list_page_from_index(
             if (
                 session := _session_row_for_metadata(
                     metadata,
-                    qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
                     runs_by_thread_id=query.runs_by_thread_id,
                     instances_by_thread_id=query.instances_by_thread_id,
                     system_only=False,
@@ -615,57 +566,6 @@ def _session_list_page_from_index(
         archived_next_done=True,
     )
 
-def _materialized_session_list_page_from_codex(
-    codex: common.Codex,
-    request: HttpRequest,
-    query: _SessionListQuery,
-    *,
-    include_archived: bool,
-) -> SessionListPage:
-    observed_at = timezone.now()
-    threads = common._all_threads(codex)
-    if include_archived:
-        threads.extend(common._all_threads(codex, archived=True))
-    _add_thread_derived_hidden_ids(query, threads)
-    for thread in threads:
-        session_index.upsert_thread(
-            thread,
-            projects=query.projects,
-            observed_at=observed_at,
-        )
-    metadata_by_thread = _metadata_by_thread_id(threads)
-    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
-        threads, query.hidden_thread_ids
-    )
-    sessions = [
-        session
-        for thread in threads
-        if (
-            session := _session_row_for_thread(
-                thread,
-                query,
-                metadata_by_thread=metadata_by_thread,
-                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-            )
-        )
-        is not None
-    ]
-    offset = _non_negative_int(request.GET.get("offset", ""))
-    page = _sort_session_rows(sessions)[offset : offset + _SESSION_PAGE_SIZE]
-    next_offset = offset + len(page)
-    done = next_offset >= len(sessions)
-    return SessionListPage(
-        sessions=page,
-        next_cursor="",
-        next_offset=next_offset if not done else 0,
-        next_done=done,
-        include_archived_source=False,
-        archived_next_cursor="",
-        archived_next_offset=0,
-        archived_next_done=True,
-        materialized_order=True,
-    )
-
 def _merged_session_list_page_from_codex(
     codex: common.Codex,
     request: HttpRequest,
@@ -674,12 +574,6 @@ def _merged_session_list_page_from_codex(
     active = _session_page_source(request, archived=False, cursor_param="cursor")
     archived = _session_page_source(
         request, archived=True, cursor_param="archived_cursor"
-    )
-    materialized_fallback_allowed = (
-        not active.cursor
-        and active.offset == 0
-        and not archived.cursor
-        and archived.offset == 0
     )
     sources = [active, archived]
     sessions: list[dict[str, Any]] = []
@@ -702,10 +596,6 @@ def _merged_session_list_page_from_codex(
         session = _pop_source_session(source)
         if session is not None:
             sessions.append(session)
-    if materialized_fallback_allowed and active.qa_activity_requires_materialized_order:
-        return _materialized_session_list_page_from_codex(
-            codex, request, query, include_archived=True
-        )
     active_cursor, active_offset, active_done = _source_next_cursor(active)
     archived_cursor, archived_offset, archived_done = _source_next_cursor(archived)
     return SessionListPage(
@@ -756,20 +646,6 @@ def _peek_source_session(
                 )
             source.next_page_cursor = source.page.next_cursor
             source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
-            detect_materialized_order = (
-                not query.system_only and not source.archived and source.offset == 0
-            )
-            qa_activity = _qa_activity_page_state(
-                source.page.threads,
-                query.hidden_thread_ids,
-                detect_materialized_order=detect_materialized_order,
-            )
-            source.qa_updated_at_by_main_thread = qa_activity.updated_at_by_main_thread
-            if detect_materialized_order:
-                source.qa_activity_requires_materialized_order = (
-                    source.qa_activity_requires_materialized_order
-                    or qa_activity.requires_materialized_order
-                )
         if source.offset >= len(source.page.threads):
             if not source.next_page_cursor:
                 source.exhausted = True
@@ -779,10 +655,8 @@ def _peek_source_session(
             source.page = None
             source.next_page_cursor = ""
             source.metadata_by_thread = None
-            source.qa_updated_at_by_main_thread = None
             continue
         metadata_by_thread = source.metadata_by_thread or {}
-        qa_updated_at_by_main_thread = source.qa_updated_at_by_main_thread or {}
         while source.offset < len(source.page.threads):
             index = source.offset
             thread = source.page.threads[index]
@@ -790,7 +664,6 @@ def _peek_source_session(
                 thread,
                 query,
                 metadata_by_thread=metadata_by_thread,
-                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
             )
             if session is not None:
                 source.candidate = session
@@ -827,15 +700,11 @@ def _visible_session_page_from_codex(
 ) -> VisibleSessionPage:
     cursor = request.GET.get(cursor_param, "")
     offset = _non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), ""))
-    materialized_fallback_allowed = not cursor and offset == 0
     sessions: list[dict[str, Any]] = []
     seen_cursors: set[str] = set()
-    materialized_qa_activity_seen = False
-    while len(sessions) < _SESSION_PAGE_SIZE or materialized_qa_activity_seen:
+    while len(sessions) < _SESSION_PAGE_SIZE:
         if cursor in seen_cursors:
             common.logger.warning("thread list returned duplicate cursor; stopping pagination")
-            if materialized_qa_activity_seen:
-                return _materialized_visible_session_page(sessions)
             return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
         seen_cursors.add(cursor)
         observed_at = timezone.now()
@@ -847,46 +716,23 @@ def _visible_session_page_from_codex(
                 projects=query.projects,
                 observed_at=observed_at,
             )
-        can_materialize_qa_activity = (
-            materialized_fallback_allowed
-            and not query.system_only
-            and not archived
-            and offset == 0
-        )
         if offset >= len(page.threads):
             offset = 0
             next_cursor = page.next_cursor
             if not next_cursor:
-                if materialized_qa_activity_seen:
-                    return _materialized_visible_session_page(sessions)
                 return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
             cursor = next_cursor
             continue
         metadata_by_thread = _metadata_by_thread_id(page.threads)
-        qa_activity = _qa_activity_page_state(
-            page.threads,
-            query.hidden_thread_ids,
-            detect_materialized_order=can_materialize_qa_activity,
-        )
-        qa_updated_at_by_main_thread = qa_activity.updated_at_by_main_thread
-        if can_materialize_qa_activity:
-            materialized_qa_activity_seen = (
-                materialized_qa_activity_seen
-                or qa_activity.requires_materialized_order
-            )
         for index, thread in enumerate(page.threads[offset:], start=offset):
             session = _session_row_for_thread(
                 thread,
                 query,
                 metadata_by_thread=metadata_by_thread,
-                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
             )
             if session is not None:
                 sessions.append(session)
-                if (
-                    len(sessions) >= _SESSION_PAGE_SIZE
-                    and not materialized_qa_activity_seen
-                ):
+                if len(sessions) >= _SESSION_PAGE_SIZE:
                     next_offset = index + 1
                     if next_offset < len(page.threads):
                         return VisibleSessionPage(
@@ -896,69 +742,9 @@ def _visible_session_page_from_codex(
         offset = 0
         next_cursor = page.next_cursor
         if not next_cursor:
-            if materialized_qa_activity_seen:
-                return _materialized_visible_session_page(sessions)
             return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
         cursor = next_cursor
     return VisibleSessionPage(_sort_session_rows(sessions), cursor, 0)
-
-def _materialized_visible_session_page(
-    sessions: list[dict[str, Any]],
-) -> VisibleSessionPage:
-    sorted_sessions = _sort_session_rows(sessions)
-    page = sorted_sessions[:_SESSION_PAGE_SIZE]
-    done = len(page) >= len(sorted_sessions)
-    return VisibleSessionPage(
-        page,
-        "",
-        0 if done else len(page),
-        materialized_order=True,
-    )
-
-def _qa_activity_page_state(
-    threads: list[Any],
-    hidden_thread_ids: set[str],
-    *,
-    detect_materialized_order: bool,
-) -> QAActivityPageState:
-    updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
-        threads, hidden_thread_ids
-    )
-    # Codex cursor pages are ordered by Codex-owned thread activity, but QA
-    # runs are Hitch-owned DB activity that can promote their main session
-    # ahead of sessions that appear earlier in the fetched Codex page. Once
-    # such activity is present, slicing by the Codex cursor before
-    # materializing effective order is unsafe.
-    requires_materialized_order = detect_materialized_order and (
-        bool(updated_at_by_main_thread)
-        or _page_has_cross_page_qa_activity(threads, hidden_thread_ids)
-    )
-    return QAActivityPageState(
-        updated_at_by_main_thread=updated_at_by_main_thread,
-        requires_materialized_order=requires_materialized_order,
-    )
-
-def _page_has_cross_page_qa_activity(
-    threads: list[Any], hidden_thread_ids: set[str]
-) -> bool:
-    thread_ids = {
-        thread_id
-        for thread in threads
-        if isinstance((thread_id := getattr(thread, "id", None)), str)
-    }
-    hidden_ids = thread_ids & hidden_thread_ids
-    if not hidden_ids:
-        return False
-    return (
-        SystemAgentRun.objects.filter(
-            workflow__kind=SystemWorkflow.KIND_PR_QA,
-            thread_id__in=hidden_ids,
-        )
-        .exclude(thread_id="")
-        .exclude(workflow__main_thread_id="")
-        .exclude(workflow__main_thread_id__in=thread_ids)
-        .exists()
-    )
 
 def _add_thread_derived_hidden_ids(
     query: _SessionListQuery, threads: Iterable[Any]
@@ -1001,7 +787,6 @@ def _session_row_for_thread(
     query: _SessionListQuery,
     *,
     metadata_by_thread: dict[str, SessionMetadata],
-    qa_updated_at_by_main_thread: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
@@ -1022,7 +807,7 @@ def _session_row_for_thread(
     row = {
         "id": thread_id,
         "cwd": common._thread_cwd(thread) or "",
-        "updated_at": _session_updated_at(thread, qa_updated_at_by_main_thread),
+        "updated_at": getattr(thread, "updated_at", None),
         "display_title": _display_title(thread),
         "name_value": getattr(thread, "name", None) or "",
         "is_archived": _thread_is_archived(thread),
@@ -1103,10 +888,6 @@ def _next_sessions_url(request: HttpRequest, page: SessionListPage) -> str:
     ):
         return ""
     params = request.GET.copy()
-    if page.materialized_order:
-        params["materialized_order"] = "1"
-    else:
-        params.pop("materialized_order", None)
     _set_cursor_params(
         params, "cursor", page.next_cursor, page.next_offset, page.next_done
     )

@@ -86,8 +86,7 @@ that replaces the framework-driven QA verdict-and-repair loop.
   spawning `hitch_reviewer` and leaves the decision to the coding agent.
 - `REVIEW-no-framework-loop`: New workflows do not launch a hidden QA reviewer,
   parse a QA verdict, automatically send findings to a repair agent, or repeat
-  those steps. Legacy in-flight workflows may finish through their existing
-  states after an upgrade.
+  those steps. Pre-upgrade framework-QA workflow states are not resumed.
 - `REVIEW-guidance-settings`: The guidance turn retains the coding session's
   model, reasoning effort, developer instructions, sandbox, approval, memory,
   and web-search settings.
@@ -100,15 +99,14 @@ that replaces the framework-driven QA verdict-and-repair loop.
   agent-driven `hitch.watch_pr` follow-up turn after its guidance turn succeeds.
 - `REVIEW-local-merge-handoff`: A configured local auto-merge captures the final
   change set after guidance, applies that exact change set to the target branch,
-  and reports the branch and commit independently of legacy QA runs. Messages
-  use neutral review-guidance terminology and do not claim QA approval.
+  and reports the branch and commit. Messages use neutral review-guidance
+  terminology and do not claim QA approval.
 - `REVIEW-guidance-steering`: User steering during QA-only or local-merge
   guidance resumes guidance without PR preparation, commit, push, or PR
   publication instructions. Guidance failures are attributed to the review
   workflow.
 - `REVIEW-qa-display`: `/qa` is displayed as a coding-agent inspection with an
-  optional reviewer subagent. Hitch may retain the old QA-agent text only as a
-  recognition alias.
+  optional reviewer subagent.
 - `REVIEW-pr-now`: `/pr-now` continues to skip review guidance and proceeds
   directly to PR preparation.
 

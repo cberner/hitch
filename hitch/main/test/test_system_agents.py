@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import threading
 from collections.abc import Callable
@@ -7,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NamedTuple, override
+from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
@@ -21,12 +20,8 @@ from django.db import (
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from openai_codex import CodexError
-from openai_codex.generated.v2_all import (
-    GetAccountRateLimitsResponse,
-    WorkspaceWriteSandboxPolicy,
-)
+from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
-from hitch.main import diffs
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     REVIEW_GUIDANCE_LOCAL_MERGE,
@@ -34,7 +29,6 @@ from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
 )
-from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.models import (
     AutonomousGoal,
     AutonomousGoalMemory,
@@ -48,8 +42,7 @@ from hitch.main.models import (
 )
 from hitch.main.repos import AutoPullError, AutoPullResult
 from hitch.main.runtime import codex_events, rate_limit
-from hitch.main.test.support import _git, _make_project, _rollout_line
-from hitch.main.test.support import _init_repo as _init_test_repo
+from hitch.main.test.support import _make_project, _rollout_line
 from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
@@ -59,7 +52,6 @@ from hitch.main.workflows import (
     pr_handoff,
     pr_qa,
     pr_stage_refresh_state,
-    qa_prompts,
     system_agents,
 )
 
@@ -125,14 +117,6 @@ def _synchronous_thread(*, target: Any, args: tuple[Any, ...] = (), **_kwargs: A
     thread = MagicMock()
     thread.start.side_effect = lambda: target(*args)
     return thread
-
-
-def _qa_handoff_contents(ref: str) -> tuple[str, dict[str, Any], list[Path]]:
-    handoff_dir = Path(ref)
-    manifest = json.loads((handoff_dir / "manifest.json").read_text(encoding="utf-8"))
-    parts = sorted(handoff_dir.glob("*.diffpart"))
-    data = b"".join(part.read_bytes() for part in parts)
-    return data.decode("utf-8"), manifest, parts
 
 
 def _events_file(
@@ -280,18 +264,6 @@ def _pr_tool_event(
     }
 
 
-class _DesignGateCase(NamedTuple):
-    name: str
-    current_feedback: str
-    expect_gate: bool
-    prior_feedback: str | None = None
-    prior_lgtm: bool = False
-    iteration: int = 1
-    expected_categories: tuple[str, ...] = ()
-    expected_files: tuple[str, ...] = ()
-    prompt_includes: tuple[str, ...] = ()
-
-
 class PrQaWorkflowTests(TestCase):
     def test_pr_qa_start_rejects_archived_session(self) -> None:
         thread_id = "blocked-archived"
@@ -379,9 +351,6 @@ class PrQaWorkflowTests(TestCase):
         )
 
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
-        self.assertEqual(
-            workflow.max_iterations, system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS
-        )
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["thread_id"], "main-thread")
@@ -402,10 +371,9 @@ class PrQaWorkflowTests(TestCase):
         self.assertIn("commit the final changes", kwargs["prompt"])
         self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_pr_qa_start_leaves_diff_review_to_optional_subagent(
-        self, mock_spawn: MagicMock, mock_diff: MagicMock
+        self, mock_spawn: MagicMock
     ) -> None:
         mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
@@ -420,12 +388,11 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
-        mock_diff.assert_not_called()
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_start_pr_now_workflow_skips_qa_and_starts_pr_prompt(
+    def test_start_pr_now_workflow_starts_pr_prompt(
         self, mock_spawn_turn: MagicMock, mock_spawn_new_session: MagicMock
     ) -> None:
         mock_spawn_turn.return_value = MagicMock(spec=CodexInstance)
@@ -446,9 +413,7 @@ class PrQaWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
-        self.assertEqual(workflow.max_iterations, system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS)
         self.assertEqual(workflow.state["next_user_message_index"], 5)
-        self.assertEqual(workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 4)
         self.assertEqual(workflow.state["auto_merge_branch"], "")
         self.assertFalse(SystemAgentRun.objects.filter(workflow=workflow).exists())
         mock_spawn_new_session.assert_not_called()
@@ -495,9 +460,8 @@ class PrQaWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents._spawn_workflow_failure_turn")
     def test_surface_workflow_failure_is_idempotent_across_stale_copies(self, mock_spawn: MagicMock) -> None:
-        # Panel mode routes several lane instances concurrently, so two stale
-        # in-memory copies of the same workflow can each reach
-        # _surface_workflow_failure. The check-then-set must re-read the row
+        # Two stale in-memory copies can each reach _surface_workflow_failure.
+        # The check-then-set must re-read the row
         # under a lock so only one failure turn is spawned -- otherwise the
         # user sees a duplicate failure message and the user message index is
         # double-incremented.
@@ -506,7 +470,7 @@ class PrQaWorkflowTests(TestCase):
             main_thread_id="main-thread",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={"next_user_message_index": 1},
         )
         stale_a = SystemWorkflow.objects.get(pk=workflow.pk)
@@ -520,7 +484,7 @@ class PrQaWorkflowTests(TestCase):
         self.assertTrue(workflow.state["failure_surfaced"])
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_pr_prompt_failure_is_not_surfaced_as_qa_failure(self, mock_spawn: MagicMock) -> None:
+    def test_pr_prompt_failure_is_surfaced_as_pr_failure(self, mock_spawn: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
@@ -538,7 +502,6 @@ class PrQaWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR)
         self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
-        self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_qa_only_guidance_failure_is_surfaced_as_review_failure(
@@ -569,7 +532,6 @@ class PrQaWorkflowTests(TestCase):
         )
         self.assertIn("Hitch review workflow could not complete.", kwargs["prompt"])
         self.assertIn("review workflow needs attention", kwargs["prompt"])
-        self.assertNotIn("Hitch QA agent", kwargs["prompt"])
         self.assertNotIn("Hitch PR workflow", kwargs["prompt"])
         self.assertEqual(
             system_agents._workflow_stopped_error(workflow),
@@ -580,271 +542,20 @@ class PrQaWorkflowTests(TestCase):
             system_agents._workflow_stopped_error(workflow),
             "PR workflow stopped by user",
         )
-        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
-        self.assertEqual(
-            system_agents._workflow_stopped_error(workflow),
-            "QA workflow stopped by user",
-        )
 
-    def _stale_qa_running_workflow(self, **state: Any) -> SystemWorkflow:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1, **state},
-        )
-        # Age the row past the spawn stale window (bypasses auto_now on save) to
-        # mimic a workflow whose QA spawn handler was killed mid-call hours ago.
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=datetime.now(UTC) - timedelta(minutes=20))
-        return workflow
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_respawns_qa_when_spawn_handler_died(self, mock_spawn: MagicMock, _mock_diff: MagicMock) -> None:
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        workflow = self._stale_qa_running_workflow()
 
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
 
-        self.assertEqual(reconciled, 1)
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
-        self.assertTrue(SystemAgentRun.objects.filter(workflow=workflow).exists())
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-        # The re-spawn created a live QA instance, so a follow-up reconcile is a
-        # no-op rather than spawning a second redundant review.
-        mock_spawn.reset_mock()
-        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-        mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_leaves_fresh_qa_running_alone(self, mock_spawn: MagicMock) -> None:
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1},
-        )
 
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
 
-        self.assertEqual(reconciled, 0)
-        mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_skips_qa_running_with_live_review(self, mock_spawn: MagicMock) -> None:
-        workflow = self._stale_qa_running_workflow()
-        _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
 
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
 
-        self.assertEqual(reconciled, 0)
-        mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa._qa_review_in_flight", side_effect=[False, True])
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_skips_qa_when_review_appears_during_claim(
-        self, mock_spawn: MagicMock, _mock_in_flight: MagicMock
-    ) -> None:
-        # The unlocked pre-check sees no live review, but a review appears by the
-        # time the step is claimed: the post-claim re-check must skip rather than
-        # spawn a duplicate QA agent.
-        workflow = self._stale_qa_running_workflow()
 
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
 
-        self.assertEqual(reconciled, 0)
-        mock_spawn.assert_not_called()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_respawns_qa_despite_prior_round_completed_instance(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
-    ) -> None:
-        # A QA workflow loops through feedback rounds without bumping the review
-        # revision, so a prior round's completed QA instance shares the current
-        # revision. It must not mask the dead spawn that left no live review.
-        workflow = self._stale_qa_running_workflow()
-        prior = _instance(
-            thread_id="qa-thread-prior",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=prior.thread_id,
-            instance=prior,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            input={},
-        )
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread-new",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 1)
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch(
-        "hitch.main.workflows.system_agents.codex_pool.spawn_new_session",
-        side_effect=RuntimeError("database is locked"),
-    )
-    def test_reconcile_blocks_when_qa_respawn_fails(
-        self, _mock_spawn: MagicMock, _mock_diff: MagicMock, _mock_surface: MagicMock
-    ) -> None:
-        workflow = self._stale_qa_running_workflow()
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 1)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn("spawn handler died", workflow.state["error"])
-
-    def _stale_turn_workflow(self, step: str) -> SystemWorkflow:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=step,
-            state={"next_user_message_index": 3},
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=datetime.now(UTC) - timedelta(minutes=20))
-        return workflow
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_blocks_zombie_turn_steps_with_surfaced_error(self, mock_surface: MagicMock) -> None:
-        # Every turn step whose spawn died before the worker launched must be
-        # surfaced as a clear failure instead of zombing in place.
-        for step, label in (
-            (system_agents.STEP_FEEDBACK_RUNNING, "QA feedback turn"),
-            (system_agents.STEP_USER_STEERING_RUNNING, "coding turn"),
-        ):
-            with self.subTest(step=step):
-                workflow = self._stale_turn_workflow(step)
-                mock_surface.reset_mock()
-
-                reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-                self.assertEqual(reconciled, 1)
-                workflow.refresh_from_db()
-                self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-                self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-                self.assertIn(label, workflow.state["error"])
-                self.assertIn("never started", workflow.state["error"])
-                mock_surface.assert_called_once()
-                workflow.delete()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_zombie_feedback_turn_claims_queued_steering(
-        self, mock_surface: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = self._stale_turn_workflow(system_agents.STEP_FEEDBACK_RUNNING)
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="continue with docs")
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id=workflow.main_thread_id)
-
-        self.assertEqual(reconciled, 1)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "continue with docs")
-        self.assertFalse(workflow.steering_messages.exists())
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "continue with docs")
-        mock_surface.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_assigns_owner_for_zombie_turn(self, _mock_surface: MagicMock) -> None:
-        # The surfaced failure must be attributed to the QA agent.
-        qa = self._stale_turn_workflow(system_agents.STEP_FEEDBACK_RUNNING)
-        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-        qa.refresh_from_db()
-        self.assertEqual(
-            qa.state[system_agents._WORKFLOW_FAILURE_OWNER_STATE_KEY],
-            system_agents._WORKFLOW_FAILURE_OWNER_QA,
-        )
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_leaves_fresh_turn_step_alone(self, mock_surface: MagicMock) -> None:
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 3},
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 0)
-        mock_surface.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_leaves_live_turn_worker_alone(self, mock_surface: MagicMock) -> None:
-        workflow = self._stale_turn_workflow(system_agents.STEP_FEEDBACK_RUNNING)
-        _instance(
-            thread_id="feedback-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=2,
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 0)
-        mock_surface.assert_not_called()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_reconcile_defers_turn_with_fresh_routing_claim(self, mock_surface: MagicMock) -> None:
-        # A finished turn still being routed (fresh claim) is mid-handoff and
-        # must not be blocked out from under its finish handler.
-        workflow = self._stale_turn_workflow(system_agents.STEP_FEEDBACK_RUNNING)
-        instance = _instance(
-            thread_id="feedback-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=2,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(workflow_routing_started_at=datetime.now(UTC))
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 0)
-        mock_surface.assert_not_called()
 
     def _stale_pr_prompt_workflow(self, insert_index: int = 3) -> SystemWorkflow:
         workflow = SystemWorkflow.objects.create(
@@ -855,7 +566,6 @@ class PrQaWorkflowTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "next_user_message_index": insert_index,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: insert_index,
                 "pr_prompt": system_agents.PR_SLASH_PROMPT,
             },
         )
@@ -864,8 +574,8 @@ class PrQaWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reconcile_redrives_pr_prompt_when_spawn_died(self, mock_spawn_turn: MagicMock) -> None:
-        # A QA-approved auto-PR workflow whose PR-prompt spawn died is recovered
-        # by re-driving _spawn_pr_prompt (reconstructable prompt), not blocked.
+        # A PR workflow whose prompt spawn died is recovered by re-driving the
+        # reconstructable prompt rather than blocking.
         mock_spawn_turn.return_value = _instance(
             thread_id="main-thread",
             purpose=CodexInstance.PURPOSE_USER,
@@ -961,7 +671,6 @@ class PrQaWorkflowTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "next_user_message_index": 5,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 2,
                 system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 5,
                 system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (system_agents.STEP_PR_PROMPT_RUNNING),
                 "pr_prompt": system_agents.PR_SLASH_PROMPT,
@@ -994,46 +703,6 @@ class PrQaWorkflowTests(TestCase):
             5,
         )
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_reconcile_routes_turn_spawned_before_index_save(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
-    ) -> None:
-        # _spawn_workflow_turn creates the turn before saving the incremented
-        # next_user_message_index; a death in that gap leaves the durable turn one
-        # index ahead. It must be routed (advancing the step), not stranded and
-        # then blocked.
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 3},
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=datetime.now(UTC) - timedelta(minutes=20))
-        # The turn carries index 3 (== next_user_message_index) because its
-        # increment was never saved, one ahead of the 2 the reconciler keys on.
-        _instance(
-            thread_id="feedback-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=3,
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 1)
-        workflow.refresh_from_db()
-        # Routing the completed feedback turn advanced QA rather than blocking.
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
 
 class SessionPrStageRefreshTests(TestCase):
@@ -1122,171 +791,6 @@ class SessionPrStageRefreshTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
-    def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
-        self, mock_gh_pr_view: MagicMock
-    ) -> None:
-        now = datetime.now(UTC)
-
-        def handoff(pr_number: int) -> dict[str, object]:
-            return {
-                "url": f"https://github.com/cberner/hitch/pull/{pr_number}",
-                "repository_full_name": "cberner/hitch",
-                "pr_number": pr_number,
-                "state": "open",
-            }
-
-        with tempfile.TemporaryDirectory() as cwd:
-            for thread_id in ("main-1", "main-2", "maxed-main", "superseded-main"):
-                SessionMetadata.objects.create(
-                    thread_id=thread_id,
-                    cwd=cwd,
-                    codex_created_at=now,
-                    codex_updated_at=now,
-                    codex_last_synced_at=now,
-                    codex_archived=False,
-                )
-            SessionMetadata.objects.create(
-                thread_id="stale-cached-done-main",
-                cwd=cwd,
-                codex_created_at=now,
-                codex_updated_at=now,
-                codex_last_synced_at=now,
-                codex_archived=False,
-                derived_stage="done_merged",
-            )
-            SessionMetadata.objects.create(
-                thread_id="terminal-handoff-main",
-                cwd=cwd,
-                codex_created_at=now,
-                codex_updated_at=now,
-                codex_last_synced_at=now,
-                codex_archived=False,
-            )
-            SessionMetadata.objects.create(
-                thread_id="archived-main",
-                cwd=cwd,
-                codex_created_at=now,
-                codex_updated_at=now,
-                codex_last_synced_at=now,
-                codex_archived=True,
-            )
-            merged_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="main-1",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(101)},
-            )
-            closed_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="main-2",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(102)},
-            )
-            archived_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="archived-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(103)},
-            )
-            stale_cached_done_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="stale-cached-done-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(105)},
-            )
-            maxed_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="maxed-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
-                step=system_agents.STEP_MAX_ITERATIONS_REACHED,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(107)},
-            )
-            terminal_handoff_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="terminal-handoff-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={
-                    system_agents._PR_HANDOFF_STATE_KEY: {
-                        **handoff(106),
-                        "state": "closed",
-                        "merged": True,
-                    }
-                },
-            )
-            superseded_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="superseded-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_PR_READY,
-                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(104)},
-            )
-            latest_workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="superseded-main",
-                cwd=cwd,
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_QA_APPROVED,
-            )
-
-            def refreshed_pr(
-                _workflow: SystemWorkflow,
-                *,
-                selector: str | None = None,
-                source_tool: str,
-                timeout_seconds: int,
-            ) -> dict[str, object]:
-                self.assertEqual(source_tool, "gh_pr_stage_refresh")
-                self.assertEqual(timeout_seconds, system_agents._PR_STAGE_REFRESH_TIMEOUT_SECONDS)
-                self.assertIsNotNone(selector)
-                pr_number = int(str(selector).rsplit("/", 1)[1])
-                if pr_number in {101, 107}:
-                    return {
-                        **handoff(pr_number),
-                        "state": "closed",
-                        "merged": True,
-                        "merged_at": "2026-06-02T08:26:51Z",
-                    }
-                return {**handoff(pr_number), "state": "closed", "merged": False}
-
-            mock_gh_pr_view.side_effect = refreshed_pr
-
-            refreshed = pr_qa.refresh_unarchived_session_pr_stages()
-
-        self.assertEqual(refreshed, 4)
-        self.assertEqual(mock_gh_pr_view.call_count, 4)
-        merged_workflow.refresh_from_db()
-        self.assertEqual(merged_workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertTrue(merged_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"])
-        maxed_workflow.refresh_from_db()
-        self.assertEqual(maxed_workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(maxed_workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertTrue(maxed_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"])
-        closed_workflow.refresh_from_db()
-        self.assertEqual(closed_workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertFalse(closed_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"])
-        archived_workflow.refresh_from_db()
-        self.assertEqual(archived_workflow.step, system_agents.STEP_PR_READY)
-        stale_cached_done_workflow.refresh_from_db()
-        self.assertEqual(stale_cached_done_workflow.step, system_agents.STEP_PR_CLOSED)
-        terminal_handoff_workflow.refresh_from_db()
-        self.assertEqual(terminal_handoff_workflow.step, system_agents.STEP_PR_READY)
-        superseded_workflow.refresh_from_db()
-        latest_workflow.refresh_from_db()
-        self.assertEqual(superseded_workflow.step, system_agents.STEP_PR_READY)
-        self.assertEqual(latest_workflow.step, system_agents.STEP_QA_APPROVED)
 
     def test_stage_refresh_due_respects_global_debounce(self) -> None:
         # The stage-refresh predicate the render/worker consult must close once
@@ -1342,7 +846,6 @@ class SystemAgentWorkflowTests(TestCase):
             open_pr_on_lgtm=False,
         )
 
-        self.assertEqual(workflow.max_iterations, 1)
         self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertTrue(
             workflow.state[system_agents.REVIEW_GUIDANCE_STATE_KEY]
@@ -1469,72 +972,6 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertIn("no merge base", workflow.state["error"])
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_legacy_qa_panel_run_cancels_in_flight_panel_workflow(
-        self, mock_interrupt: MagicMock, mock_spawn_turn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        finished_instance = _instance(
-            thread_id="legacy-panel-finished",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents._LEGACY_QA_PANEL_LANE_AGENT_KINDS[0],
-        )
-        sibling_instance = _instance(
-            thread_id="legacy-panel-running",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents._LEGACY_QA_PANEL_LANE_AGENT_KINDS[1],
-        )
-        finished_run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=finished_instance.agent_kind,
-            thread_id=finished_instance.thread_id,
-            instance=finished_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        sibling_run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=sibling_instance.agent_kind,
-            thread_id=sibling_instance.thread_id,
-            instance=sibling_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        mock_interrupt.return_value = None
-
-        system_agents.on_codex_instance_finished(finished_instance)
-
-        workflow.refresh_from_db()
-        finished_run.refresh_from_db()
-        sibling_run.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(
-            workflow.state["error"],
-            system_agents._LEGACY_QA_PANEL_CANCELLED_ERROR,
-        )
-        self.assertEqual(finished_run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(sibling_run.status, SystemAgentRun.STATUS_FAILED)
-        mock_interrupt.assert_called_once_with(
-            sibling_instance.pk,
-            expected_thread_id=sibling_instance.thread_id,
-        )
-        system_agents.on_codex_instance_finished(sibling_instance)
-        sibling_run.refresh_from_db()
-        self.assertEqual(sibling_run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(
-            mock_spawn_turn.call_args.kwargs["display_author"],
-            system_agents.QA_DISPLAY_AUTHOR,
-        )
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
@@ -1543,7 +980,7 @@ class SystemAgentWorkflowTests(TestCase):
             main_thread_id="main-thread",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         workflow = pr_qa.start_pr_qa_workflow(
@@ -1919,7 +1356,7 @@ class SystemAgentWorkflowTests(TestCase):
             step=system_agents.STEP_BLOCKED,
             state={
                 "auto_merge_branch": "main",
-                "error": "failed to start QA agent: no merge base",
+                "error": "review workflow failed: no merge base",
             },
         )
         mock_start.return_value = workflow
@@ -1937,7 +1374,7 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
         self.assertEqual(
             proposal.outcome_metadata["auto_merge_error"],
-            "failed to start QA agent: no merge base",
+            "review workflow failed: no merge base",
         )
 
     @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
@@ -2048,49 +1485,7 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertIn("no longer supported", workflow.state["error"])
         self.assertNotIn("failure_surfaced", workflow.state)
 
-    def test_system_agent_without_run_returns_false(self) -> None:
-        instance = _instance(
-            thread_id="orphan-system-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=12345,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
 
-        handled = system_agents.on_codex_instance_finished(instance)
-
-        self.assertFalse(handled)
-
-    def test_terminal_system_agent_run_returns_true_without_changes(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="terminal-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="terminal-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="terminal-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": "", "lgtm": True},
-        )
-
-        handled = system_agents.on_codex_instance_finished(instance)
-
-        self.assertTrue(handled)
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
     def test_retired_system_agent_run_does_not_reopen_terminal_workflow(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -2130,7 +1525,7 @@ class SystemAgentWorkflowTests(TestCase):
             main_thread_id="main-thread",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -2139,1007 +1534,24 @@ class SystemAgentWorkflowTests(TestCase):
                 main_thread_id="main-thread",
                 cwd="/repo",
                 status=SystemWorkflow.STATUS_RUNNING,
-                step=system_agents.STEP_QA_RUNNING,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
             )
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_feedback_spawns_tagged_visible_turn(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={
-                "approval_mode": "prompt_user",
-                "sandbox_policy": "workspaceWrite",
-                "model": "gpt-5.4",
-                "reasoning_effort": "high",
-                "developer_instructions": "Use repo conventions.",
-                "web_search_mode": "live",
-                "next_user_message_index": 2,
-            },
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "a1",
-                                "type": "agentMessage",
-                                "text": '{"feedback": "Fix it", "lgtm": false}',
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
 
-        mock_spawn.assert_called_once()
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["thread_id"], "main-thread")
-        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertEqual(kwargs["approval_mode"], "prompt_user")
-        self.assertEqual(kwargs["model"], "gpt-5.4")
-        self.assertEqual(kwargs["reasoning_effort"], "high")
-        self.assertEqual(kwargs["developer_instructions"], "Use repo conventions.")
-        self.assertEqual(kwargs["web_search_mode"], "live")
-        self.assertEqual(kwargs["user_message_index"], 2)
-        self.assertIn("Feedback from Hitch QA agent", kwargs["prompt"])
-        self.assertIn(
-            "findings in the current QA feedback as one remediation batch",
-            kwargs["prompt"],
-        )
-        self.assertIn("sibling instances of each issue class", kwargs["prompt"])
-        self.assertIn("self-review the complete diff", kwargs["prompt"])
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, "feedback_running")
-        self.assertEqual(workflow.iteration, 1)
-        self.assertEqual(workflow.state["next_user_message_index"], 3)
 
-    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    def test_legacy_large_worktree_qa_handoff_preserves_exact_untracked_diff(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            hitch_home = root / "hitch-home"
-            _init_test_repo(repo, initial_branch="main", configure_user=True)
-            marker = "untracked-large-review-marker"
-            for index in range(3):
-                (repo / f"new-feature-{index}.txt").write_text(f"{marker}-{index}\n" + ("x" * 180_000) + "\n")
-            expected_diff = diffs.build_worktree_diff_text(str(repo))
-            self.assertGreater(len(expected_diff), diffs._MAX_DIFF_PREVIEW_CHARS)
-            self.assertLess(len(expected_diff.encode()), diffs.REVIEWER_DIFF_MAX_BYTES)
-            object_state = _git(repo, "count-objects", "-v")
 
-            def spawn(**kwargs: Any) -> CodexInstance:
-                return _instance(
-                    thread_id="large-worktree-review",
-                    cwd=kwargs["cwd"],
-                    prompt=kwargs["prompt"],
-                    purpose=kwargs["purpose"],
-                    workflow_id=kwargs["workflow_id"],
-                    agent_kind=kwargs["agent_kind"],
-                    status=CodexInstance.STATUS_RUNNING,
-                    sandbox_policy=kwargs["sandbox_policy"],
-                )
 
-            mock_spawn.side_effect = spawn
-            with (
-                override_settings(HITCH_HOME_DIR=hitch_home),
-                patch(
-                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
-                    return_value=raw,
-                ),
-            ):
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="large-worktree-main",
-                    cwd=str(repo),
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                    max_iterations=1,
-                    state={
-                        "sandbox_policy": "workspaceWrite",
-                        "approval_mode": "auto_review",
-                        "next_user_message_index": 0,
-                        "open_pr_on_lgtm": False,
-                    },
-                )
-                pr_qa._spawn_pr_qa_run(workflow)
 
-                run = workflow.agent_runs.select_related("instance").get()
-                handoff_ref = run.input["qa_handoff_ref"]
-                handoff_text, manifest, parts = _qa_handoff_contents(handoff_ref)
 
-                self.assertTrue(Path(handoff_ref).is_relative_to(root))
-                self.assertFalse(Path(handoff_ref).is_relative_to(hitch_home))
-                self.assertFalse(Path(handoff_ref).is_relative_to(repo))
-                self.assertEqual(
-                    Path(handoff_ref).name,
-                    f"workflow-{workflow.pk}-review-0-iteration-0",
-                )
-                self.assertEqual(handoff_text, expected_diff)
-                self.assertIn(marker, handoff_text)
-                self.assertGreater(
-                    max(len(line.encode()) for line in expected_diff.splitlines()),
-                    12_000,
-                )
-                self.assertTrue(all(part.stat().st_size <= 12_000 for part in parts))
-                self.assertEqual(len(parts), len(manifest["parts"]))
-                self.assertEqual(manifest["total_bytes"], len(expected_diff.encode()))
-                self.assertEqual(manifest["workflow_id"], workflow.pk)
-                self.assertEqual(manifest["review_revision"], 0)
-                self.assertEqual(manifest["workflow_iteration"], 0)
-                self.assertGreater(len(parts), 1)
-                self.assertNotIn(marker, run.instance.prompt)
-                self.assertIn("tracked and untracked worktree patch", run.instance.prompt)
-                self.assertIn("one file per command", run.instance.prompt)
-                self.assertTrue(codex_worker_module._is_native_review_verdict_worker(run.instance))
-                policy = codex_worker_module._build_sandbox_policy(run.instance.sandbox_policy)
-                self.assertIsNotNone(policy)
-                assert policy is not None
-                self.assertIsInstance(policy.root, WorkspaceWriteSandboxPolicy)
-                assert isinstance(policy.root, WorkspaceWriteSandboxPolicy)
-                self.assertFalse(policy.root.exclude_slash_tmp)
-                self.assertFalse(policy.root.exclude_tmpdir_env_var)
-                self.assertEqual(run.input["qa_handoff_mode"], "chunked_files")
-                self.assertEqual(run.input["qa_workflow_iteration"], 0)
-                self.assertEqual(run.input["qa_handoff_chunks"], len(parts))
-                self.assertEqual(run.input["qa_handoff_bytes"], len(expected_diff.encode()))
-                self.assertEqual(run.input["diff_chars"], len(expected_diff))
-                self.assertEqual(run.input["qa_embedded_diff_chars"], 0)
-                self.assertEqual(run.input["qa_omitted_diff_chars"], len(expected_diff))
-                self.assertEqual(run.input["qa_prompt_chars"], len(run.instance.prompt))
-                self.assertEqual(_git(repo, "count-objects", "-v"), object_state)
 
-                run.status = SystemAgentRun.STATUS_FAILED
-                run.save(update_fields=["status", "updated_at"])
-                run.instance.status = CodexInstance.STATUS_FAILED
-                run.instance.error = "cancelled"
-                run.instance.save(update_fields=["status", "error"])
-                system_agents.on_codex_instance_finished(run.instance)
-                run.refresh_from_db()
 
-                self.assertFalse(Path(handoff_ref).exists())
-                self.assertIs(run.input["qa_handoff_cleaned"], True)
 
-    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    def test_legacy_large_auto_merge_qa_handoff_preserves_exact_committed_diff(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            session = root / "session"
-            hitch_home = root / "hitch-home"
-            _init_test_repo(repo, initial_branch="main", configure_user=True)
-            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
-            marker = "committed-large-review-marker"
-            (session / "committed-feature.txt").write_text(f"{marker}\n" + ("y" * 101_000) + "\n")
-            _git(session, "add", "committed-feature.txt")
-            _git(session, "commit", "-m", "large committed feature")
-            self.assertEqual(_git(session, "status", "--porcelain"), "")
 
-            def spawn(**kwargs: Any) -> CodexInstance:
-                return _instance(
-                    thread_id="large-auto-merge-review",
-                    cwd=kwargs["cwd"],
-                    prompt=kwargs["prompt"],
-                    purpose=kwargs["purpose"],
-                    workflow_id=kwargs["workflow_id"],
-                    agent_kind=kwargs["agent_kind"],
-                    status=CodexInstance.STATUS_RUNNING,
-                    sandbox_policy=kwargs["sandbox_policy"],
-                )
 
-            mock_spawn.side_effect = spawn
-            with (
-                override_settings(HITCH_HOME_DIR=hitch_home),
-                patch(
-                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
-                    return_value=raw,
-                ),
-            ):
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="large-auto-merge-main",
-                    cwd=str(session),
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                    max_iterations=1,
-                    state={
-                        "sandbox_policy": "workspaceWrite",
-                        "approval_mode": "auto_review",
-                        "next_user_message_index": 0,
-                        "open_pr_on_lgtm": False,
-                        "auto_merge_branch": "main",
-                    },
-                )
-                pr_qa._spawn_pr_qa_run(workflow)
-                workflow.refresh_from_db()
-                run = workflow.agent_runs.select_related("instance").get()
-                reviewed_diff = workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY]
-                handoff_text, manifest, parts = _qa_handoff_contents(run.input["qa_handoff_ref"])
 
-                self.assertEqual(handoff_text, reviewed_diff)
-                self.assertIn(marker, handoff_text)
-                self.assertTrue(all(part.stat().st_size <= 12_000 for part in parts))
-                self.assertEqual(len(parts), len(manifest["parts"]))
-                self.assertGreater(len(parts), 1)
-                self.assertNotIn(marker, run.instance.prompt)
-                self.assertIn("auto-merge patch for target branch 'main'", run.instance.prompt)
-                self.assertIn("one file per command", run.instance.prompt)
-                self.assertTrue(codex_worker_module._is_native_review_verdict_worker(run.instance))
-                self.assertEqual(run.input["qa_handoff_mode"], "chunked_files")
-                self.assertEqual(run.input["qa_handoff_chunks"], len(parts))
-                self.assertEqual(run.input["qa_handoff_bytes"], len(reviewed_diff.encode()))
-                self.assertEqual(run.input["diff_chars"], len(reviewed_diff))
-                self.assertEqual(run.input["qa_embedded_diff_chars"], 0)
-                self.assertEqual(run.input["qa_omitted_diff_chars"], len(reviewed_diff))
-                self.assertEqual(run.input["qa_prompt_chars"], len(run.instance.prompt))
 
-    def test_large_qa_handoff_falls_back_to_exact_inline_diff(self) -> None:
-        marker = "large-inline-fallback-marker"
-        diff = "diff --git a/app.py b/app.py\n" + (f"+{marker}\n" * 4_000)
 
-        with patch.object(
-            qa_prompts,
-            "_write_qa_handoff_chunks",
-            side_effect=RuntimeError("read-only Hitch storage"),
-        ):
-            handoff = qa_prompts._qa_review_handoff(
-                "/repo",
-                diff,
-                workflow_id=1,
-                review_revision=0,
-                workflow_iteration=0,
-            )
-
-        self.assertEqual(handoff.mode, "inline_diff_fallback")
-        self.assertEqual(handoff.ref, "")
-        self.assertEqual(handoff.embedded_diff_chars, len(diff))
-        self.assertIn(marker, handoff.prompt)
-
-    def test_qa_handoff_rejects_aggregate_over_limit_before_prompt_or_files(
-        self,
-    ) -> None:
-        with (
-            patch.object(diffs, "REVIEWER_DIFF_MAX_BYTES", 10),
-            patch.object(qa_prompts, "_inline_qa_prompt") as mock_inline,
-            patch.object(qa_prompts, "_write_qa_handoff_chunks") as mock_write,
-            self.assertRaisesRegex(diffs.IncompleteDiffError, "10-byte reviewer"),
-        ):
-            qa_prompts._qa_review_handoff(
-                "/repo",
-                "x" * 11,
-                workflow_id=1,
-                review_revision=0,
-                workflow_iteration=0,
-            )
-
-        mock_inline.assert_not_called()
-        mock_write.assert_not_called()
-
-    @patch(
-        "hitch.main.workflows.pr_qa.codex_pool.spawn_new_session",
-        side_effect=RuntimeError("worker launch failed"),
-    )
-    def test_large_qa_handoff_is_cleaned_when_worker_spawn_fails(self, _mock_spawn: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            hitch_home = root / "hitch-home"
-            _init_test_repo(repo, initial_branch="main", configure_user=True)
-            (repo / "large.txt").write_text("z" * 101_000)
-            workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="spawn-failure-main",
-                cwd=str(repo),
-                status=SystemWorkflow.STATUS_RUNNING,
-                step=system_agents.STEP_QA_RUNNING,
-            )
-
-            with (
-                override_settings(HITCH_HOME_DIR=hitch_home),
-                patch(
-                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
-                    return_value=raw,
-                ),
-                self.assertRaisesRegex(RuntimeError, "worker launch failed"),
-            ):
-                pr_qa._spawn_pr_qa_run(workflow)
-
-            handoff_roots = list(root.glob("qa_review_handoffs-*"))
-            self.assertEqual(len(handoff_roots), 1)
-            self.assertEqual(list(handoff_roots[0].iterdir()), [])
-
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_recovered_qa_run_reconstructs_and_cleans_crash_window_handoff(self, _mock_surface: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            repo = root / "repo"
-            hitch_home = root / "hitch-home"
-            _init_test_repo(repo, initial_branch="main", configure_user=True)
-            workflow = SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_PR_QA,
-                main_thread_id="crash-window-main",
-                cwd=str(repo),
-                status=SystemWorkflow.STATUS_RUNNING,
-                step=system_agents.STEP_QA_RUNNING,
-            )
-            diff = "diff --git a/a b/a\n" + ("+sensitive\n" * 10_000)
-
-            with (
-                override_settings(HITCH_HOME_DIR=hitch_home),
-                patch(
-                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
-                    return_value=raw,
-                ),
-            ):
-                handoff = qa_prompts._qa_review_handoff(
-                    str(repo),
-                    diff,
-                    workflow_id=workflow.pk,
-                    review_revision=0,
-                    workflow_iteration=0,
-                )
-                instance = _instance(
-                    thread_id="crash-window-review",
-                    cwd=str(repo),
-                    prompt=handoff.prompt,
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                    workflow_id=workflow.pk,
-                    agent_kind=system_agents.PR_QA_AGENT_KIND,
-                    status=CodexInstance.STATUS_FAILED,
-                    error="web process died before run ownership was saved",
-                    user_message_index=0,
-                )
-                self.assertFalse(SystemAgentRun.objects.filter(instance=instance).exists())
-
-                system_agents.on_codex_instance_finished(instance)
-
-                recovered = SystemAgentRun.objects.get(instance=instance)
-                self.assertFalse(Path(handoff.ref).exists())
-                self.assertEqual(recovered.input["qa_handoff_ref"], handoff.ref)
-                self.assertIs(recovered.input["qa_handoff_cleaned"], True)
-
-    def test_stale_qa_handoff_reaper_preserves_live_and_fresh_owners(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            hitch_home = root / "hitch-home"
-            old_time = datetime.now(UTC) - timedelta(minutes=30)
-            stale_before = datetime.now(UTC) - timedelta(minutes=15)
-
-            with (
-                override_settings(HITCH_HOME_DIR=hitch_home),
-                patch(
-                    "hitch.main.workflows.qa_prompts.tempfile.gettempdir",
-                    return_value=raw,
-                ),
-            ):
-                live = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="live-owner",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                )
-                fresh = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="fresh-owner",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                )
-                prior_generation = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="prior-generation-owner",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                    iteration=1,
-                )
-                abandoned = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="abandoned-owner",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=system_agents.STEP_QA_RUNNING,
-                )
-                terminal = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id="terminal-owner",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_BLOCKED,
-                    step=system_agents.STEP_BLOCKED,
-                )
-                _instance(
-                    thread_id="live-review",
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                    workflow_id=live.pk,
-                    agent_kind=system_agents.PR_QA_AGENT_KIND,
-                    status=CodexInstance.STATUS_RUNNING,
-                    user_message_index=0,
-                )
-                prior_instance = _instance(
-                    thread_id="prior-generation-review",
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                    workflow_id=prior_generation.pk,
-                    agent_kind=system_agents.PR_QA_AGENT_KIND,
-                    status=CodexInstance.STATUS_RUNNING,
-                    user_message_index=0,
-                )
-                SystemWorkflow.objects.filter(pk=abandoned.pk).update(updated_at=old_time)
-                handoff_paths = {
-                    name: qa_prompts._write_qa_handoff_chunks(
-                        "+sensitive\n" * 10_000,
-                        workflow_id=owner_id,
-                        review_revision=0,
-                        workflow_iteration=0,
-                    )[0]
-                    for name, owner_id in {
-                        "live": live.pk,
-                        "fresh": fresh.pk,
-                        "prior": prior_generation.pk,
-                        "abandoned": abandoned.pk,
-                        "terminal": terminal.pk,
-                        "missing": 999_999,
-                    }.items()
-                }
-                SystemAgentRun.objects.create(
-                    workflow=prior_generation,
-                    instance=prior_instance,
-                    agent_kind=system_agents.PR_QA_AGENT_KIND,
-                    thread_id=prior_instance.thread_id,
-                    status=SystemAgentRun.STATUS_RUNNING,
-                    input={"qa_handoff_ref": str(handoff_paths["prior"])},
-                )
-                staging = qa_prompts._qa_handoff_root() / ".staging-crashed-write"
-                staging.mkdir()
-                (staging / "secret").write_text("sensitive", encoding="utf-8")
-                for path in [*handoff_paths.values(), staging]:
-                    os.utime(path, (old_time.timestamp(), old_time.timestamp()))
-
-                removed = qa_prompts.reap_stale_qa_handoffs(stale_before=stale_before)
-
-                self.assertEqual(removed, 4)
-                self.assertTrue(handoff_paths["live"].exists())
-                self.assertTrue(handoff_paths["fresh"].exists())
-                self.assertTrue(handoff_paths["prior"].exists())
-                self.assertFalse(handoff_paths["abandoned"].exists())
-                self.assertFalse(handoff_paths["terminal"].exists())
-                self.assertFalse(handoff_paths["missing"].exists())
-                self.assertFalse(staging.exists())
-
-    @patch(
-        "hitch.main.workflows.system_agents._review_diff_text_for_workflow",
-        return_value="diff --git a/app.py b/app.py",
-    )
-    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_feedback_loop_uses_coding_worker_before_next_verdict(
-        self,
-        mock_spawn_turn: MagicMock,
-        mock_spawn_review: MagicMock,
-        _mock_diff: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        review = (
-            "The patch has one correctness issue.\n\n"
-            "Review comment:\n\n"
-            "- [P1] Preserve the value — /repo/app.py:1-1\n"
-            "  This branch drops the value."
-        )
-        review_events = _raw_events_file(
-            self,
-            [
-                {
-                    "method": "item/completed",
-                    "payload": {
-                        "item": {
-                            "id": "review-1",
-                            "type": "exitedReviewMode",
-                            "review": review,
-                        }
-                    },
-                },
-                {
-                    "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
-                    "payload": {
-                        "threadId": "qa-thread-1",
-                        "turnId": "review-turn-1",
-                        "reviewOutput": {
-                            "findings": [{"title": "[P1] Preserve the value"}],
-                            "overall_correctness": "patch is incorrect",
-                            "overall_explanation": ("The patch has one correctness issue."),
-                            "overall_confidence_score": 0.99,
-                        },
-                    },
-                },
-            ],
-        )
-        first_review = _instance(
-            thread_id="qa-thread-1",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=review_events,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=first_review.thread_id,
-            instance=first_review,
-        )
-
-        def _spawn_feedback(**kwargs: Any) -> CodexInstance:
-            return _instance(
-                thread_id=kwargs["thread_id"],
-                purpose=kwargs["purpose"],
-                workflow_id=kwargs["workflow_id"],
-                status=CodexInstance.STATUS_RUNNING,
-                agent_kind=kwargs["agent_kind"],
-                display_author=kwargs["display_author"],
-                user_message_index=kwargs["user_message_index"],
-            )
-
-        mock_spawn_turn.side_effect = _spawn_feedback
-        mock_spawn_review.side_effect = lambda **kwargs: _instance(
-            thread_id="qa-thread-2",
-            purpose=kwargs["purpose"],
-            workflow_id=kwargs["workflow_id"],
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=kwargs["agent_kind"],
-            display_author=kwargs["display_author"],
-            user_message_index=kwargs["user_message_index"],
-        )
-
-        self.assertTrue(system_agents.on_codex_instance_finished(first_review))
-
-        feedback_worker = CodexInstance.objects.get(
-            workflow_id=workflow.pk,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        )
-        self.assertEqual(feedback_worker.agent_kind, system_agents.PR_QA_AGENT_KIND)
-        self.assertFalse(codex_worker_module._is_native_review_verdict_worker(feedback_worker))
-
-        feedback_worker.status = CodexInstance.STATUS_COMPLETED
-        feedback_worker.save(update_fields=["status"])
-        self.assertTrue(system_agents.on_codex_instance_finished(feedback_worker))
-
-        next_review = CodexInstance.objects.get(thread_id="qa-thread-2")
-        self.assertTrue(codex_worker_module._is_native_review_verdict_worker(next_review))
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-        self.assertEqual(workflow.iteration, 1)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_design_synthesis_gate_cases(self, mock_spawn: MagicMock) -> None:
-        cases = (
-            _DesignGateCase(
-                name="recurring file and state lifecycle feedback",
-                prior_feedback=(
-                    "[P2] hitch/main/runtime.py:230 lets stale superseded attempts "
-                    "overwrite the active generation after cleanup."
-                ),
-                current_feedback=(
-                    "[P2] hitch/main/runtime.py:287 still has a stale generation "
-                    "race where a cancelled attempt overwrites active state."
-                ),
-                expect_gate=True,
-                expected_categories=("state_lifecycle",),
-                expected_files=("hitch/main/runtime.py",),
-                prompt_includes=(
-                    "QA Design Synthesis Gate",
-                    "pause and simplify",
-                    "Prior related QA feedback",
-                    "prior feedback only as evidence",
-                    "do not treat its findings as current remediation work",
-                    "sibling instances of each issue class",
-                ),
-            ),
-            _DesignGateCase(
-                name="first unrelated feedback",
-                current_feedback=("[P2] hitch/main/views.py:120 returns the wrong template for this single path."),
-                expect_gate=False,
-                iteration=0,
-            ),
-            _DesignGateCase(
-                name="substring keyword match",
-                prior_feedback="Manual QA for hitch/main/views.py: interactive test suite passed.",
-                current_feedback=("[P2] hitch/main/views.py:120 has an interactive test suite coverage gap."),
-                expect_gate=False,
-            ),
-            _DesignGateCase(
-                name="prior lgtm feedback",
-                prior_feedback="No findings. Browser UI status rendered for hitch/main/views.py.",
-                prior_lgtm=True,
-                current_feedback="[P2] hitch/main/views.py:120 leaves browser UI status stale.",
-                expect_gate=False,
-            ),
-            _DesignGateCase(
-                name="category words in file paths",
-                prior_feedback=("[P2] frontend/state_guard.tsx:14 and config/schema.json return the wrong value."),
-                current_feedback=("[P2] frontend/state_guard.tsx:20 and config/schema.json miss a test assertion."),
-                expect_gate=False,
-            ),
-            _DesignGateCase(
-                name="dotted prose as file overlap",
-                prior_feedback="State validation is unclear, e.g. around v1.2.3.",
-                current_feedback="State validation still fails, e.g. in v1.2.3.",
-                expect_gate=False,
-            ),
-            _DesignGateCase(
-                name="urls as file overlap",
-                prior_feedback="Browser status is unclear; see https://docs.example.com/spec.v1.",
-                current_feedback="Browser status still fails; see https://docs.example.com/spec.v1.",
-                expect_gate=False,
-            ),
-            _DesignGateCase(
-                name="extensionless paths before categorizing",
-                prior_feedback=("[P2] services/state/ and hitch/main/migrations/ return the wrong value."),
-                current_feedback=("[P2] services/state/ and hitch/main/migrations/ miss a test assertion."),
-                expect_gate=False,
-                iteration=0,
-            ),
-        )
-
-        for index, case in enumerate(cases):
-            with self.subTest(case=case.name):
-                mock_spawn.reset_mock()
-                workflow = self._finish_design_gate_case(case, index)
-
-                mock_spawn.assert_called_once()
-                prompt = mock_spawn.call_args.kwargs["prompt"]
-                gate = workflow.state.get(qa_prompts._QA_DESIGN_SYNTHESIS_STATE_KEY)
-                if case.expect_gate:
-                    self.assertIsNotNone(gate)
-                    self.assertEqual(gate["triggered_at_iteration"], case.iteration + 1)
-                    for category in case.expected_categories:
-                        self.assertIn(category, gate["recurring_categories"])
-                    for file_path in case.expected_files:
-                        self.assertIn(file_path, gate["recurring_files"])
-                    for expected_text in case.prompt_includes:
-                        self.assertIn(expected_text, prompt)
-                else:
-                    self.assertIsNone(gate)
-                    self.assertIn("Feedback from Hitch QA agent", prompt)
-                    self.assertNotIn("QA Design Synthesis Gate", prompt)
-
-    def _finish_design_gate_case(self, case: _DesignGateCase, index: int) -> SystemWorkflow:
-        slug = f"design-gate-{index}"
-        cwd = f"/repo/{slug}"
-        if case.prior_feedback is not None:
-            self._record_prior_design_feedback(
-                cwd=cwd,
-                feedback=case.prior_feedback,
-                lgtm=case.prior_lgtm,
-                slug=slug,
-            )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id=f"{slug}-main-thread",
-            cwd=cwd,
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=case.iteration,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {"feedback": case.current_feedback, "lgtm": False},
-        )
-        instance = _instance(
-            thread_id=f"{slug}-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=f"{slug}-qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        return workflow
-
-    def _record_prior_design_feedback(self, *, cwd: str, feedback: str, lgtm: bool, slug: str) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id=f"{slug}-prior-thread",
-            cwd=cwd,
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-            iteration=1,
-        )
-        prior_instance = _instance(
-            thread_id=f"{slug}-prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=f"{slug}-prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={"feedback": feedback, "lgtm": lgtm},
-        )
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_lgtm_spawns_pr_prompt(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={
-                "pr_prompt": system_agents.PR_SLASH_PROMPT,
-                "model": "gpt-5.4",
-                "reasoning_effort": "high",
-                "developer_instructions": "Use repo conventions.",
-                "next_user_message_index": 4,
-            },
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "a1",
-                                "type": "agentMessage",
-                                "text": '{"feedback": "Looks good", "lgtm": true}',
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        mock_spawn.assert_called_once()
-        prompt = mock_spawn.call_args.kwargs["prompt"]
-        self.assertEqual(prompt, system_agents.PR_SLASH_PROMPT)
-        self.assertIn("default branch", prompt)
-        self.assertIn("commit the final changes", prompt)
-        self.assertIn("Do not push the branch or open a PR", prompt)
-        self.assertIn("Hitch will push and open it", prompt)
-        self.assertEqual(mock_spawn.call_args.kwargs["model"], "gpt-5.4")
-        self.assertEqual(mock_spawn.call_args.kwargs["reasoning_effort"], "high")
-        self.assertEqual(
-            mock_spawn.call_args.kwargs["developer_instructions"],
-            "Use repo conventions.",
-        )
-        self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 4)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
-        self.assertEqual(workflow.state["next_user_message_index"], 5)
-        self.assertEqual(workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 4)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_lgtm_can_complete_without_pr_prompt(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={"open_pr_on_lgtm": False, "next_user_message_index": 4},
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "a1",
-                                "type": "agentMessage",
-                                "text": '{"feedback": "Looks good", "lgtm": true}',
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        mock_spawn.assert_not_called()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_APPROVED)
-        self.assertEqual(workflow.state["next_user_message_index"], 4)
-        self.assertEqual(workflow.state["last_feedback"], "Looks good")
-
-    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
-    def test_qa_lgtm_merges_configured_local_branch(self, mock_merge: MagicMock) -> None:
-        project = _make_project()
-        implementation = SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/repo",
-            project=project,
-            auto_pr_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            title="Add parser coverage",
-            accepted_session=implementation,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={},
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={
-                "open_pr_on_lgtm": False,
-                "auto_merge_branch": "main",
-                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
-                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
-            },
-        )
-        mock_merge.return_value = LocalBranchMergeResult(
-            branch="main",
-            commit_sha="abc123",
-            target_worktree="/repo",
-            changed=True,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Looks good", "lgtm": True},
-            ),
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        mock_merge.assert_called_once_with("/repo", "main", "diff --git", "base123", "")
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
-        self.assertEqual(workflow.state["auto_merge_result"]["commit_sha"], "abc123")
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "merged")
-        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
-        self.assertEqual(proposal.outcome_metadata["auto_merge_commit_sha"], "abc123")
-
-    @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
-    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
-    def test_qa_lgtm_does_not_auto_pull_after_local_branch_merge(
-        self, mock_merge: MagicMock, mock_pull: MagicMock
-    ) -> None:
-        project = _make_project(
-            auto_pull_enabled=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/worktrees/session",
-            project=project,
-            auto_pr_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/worktrees/session",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={
-                "open_pr_on_lgtm": False,
-                "auto_merge_branch": "main",
-                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
-                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
-            },
-        )
-        mock_merge.return_value = LocalBranchMergeResult(
-            branch="main",
-            commit_sha="abc123",
-            target_worktree="/repo",
-            changed=True,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Looks good", "lgtm": True},
-            ),
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        mock_pull.assert_not_called()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
-        self.assertNotIn(system_agents.AUTO_PULL_RESULT_STATE_KEY, workflow.state)
 
     @patch("hitch.main.workflows.system_agents.pull_default_branch_from_origin")
     def test_auto_pull_skips_when_project_setting_is_off(self, mock_pull: MagicMock) -> None:
@@ -3571,10 +1983,9 @@ class SystemAgentWorkflowTests(TestCase):
             },
         )
         instance = _instance(
-            thread_id="pr-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
         )
         mock_latest_snapshot.return_value = {
             "url": "https://github.com/cberner/hitch/pull/201",
@@ -3659,155 +2070,7 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
-    def test_qa_lgtm_blocks_when_local_branch_merge_fails(self, mock_merge: MagicMock, mock_surface: MagicMock) -> None:
-        project = _make_project()
-        implementation = SessionMetadata.objects.create(
-            thread_id="main-thread",
-            cwd="/repo",
-            project=project,
-            auto_pr_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            title="Add parser coverage",
-            accepted_session=implementation,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={},
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={
-                "open_pr_on_lgtm": False,
-                "auto_merge_branch": "main",
-                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
-                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
-            },
-        )
-        mock_merge.side_effect = LocalBranchMergeError("patch conflict")
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Looks good", "lgtm": True},
-            ),
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
-
-        mock_surface.assert_called_once()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn("patch conflict", workflow.state["error"])
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "failed")
-        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
-        self.assertEqual(proposal.outcome_metadata["auto_merge_error"], "patch conflict")
-
-    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
-    @patch(
-        "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
-        return_value=AutoMergeReviewPatch(
-            patch="diff --git final",
-            target_sha="final-base",
-            source_tree_sha="final-tree",
-        ),
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_auto_merge_feedback_loop_uses_refreshed_review_patch(
-        self,
-        mock_turn: MagicMock,
-        mock_spawn: MagicMock,
-        _mock_patch: MagicMock,
-        mock_merge: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={
-                "open_pr_on_lgtm": False,
-                "auto_merge_branch": "main",
-                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: ("diff --git stale"),
-                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: ("stale-base"),
-            },
-        )
-        rejected = _instance(
-            thread_id="qa-rejected",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Fix this", "lgtm": False},
-            ),
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-rejected",
-            instance=rejected,
-        )
-        feedback = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-        )
-        final_qa = _instance(
-            thread_id="qa-final",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Looks good", "lgtm": True},
-            ),
-        )
-        mock_turn.return_value = feedback
-        mock_spawn.return_value = final_qa
-        mock_merge.return_value = LocalBranchMergeResult(
-            branch="main",
-            commit_sha="merged123",
-            target_worktree="/repo",
-            changed=True,
-        )
-
-        system_agents.on_codex_instance_finished(rejected)
-        system_agents.on_codex_instance_finished(feedback)
-        workflow.refresh_from_db()
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
-            "diff --git final",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
-            "final-base",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_SOURCE_TREE_STATE_KEY],
-            "final-tree",
-        )
-
-        system_agents.on_codex_instance_finished(final_qa)
-
-        mock_merge.assert_called_once_with("/repo", "main", "diff --git final", "final-base", "final-tree")
 
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
@@ -4262,33 +2525,6 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(commands[-1], ["gh", "pr", "create", "--fill"])
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_failed_notice_turn_does_not_reblock_completed_workflow(self, mock_surface: MagicMock) -> None:
-        # The no-change completion notice is a SYSTEM_FEEDBACK turn tied to the
-        # workflow; if it later fails it must not revert the terminal workflow
-        # back to Blocked.
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_NO_CHANGES,
-            state={},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            error="codex call failed",
-        )
-
-        pr_qa._handle_system_feedback_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
-        mock_surface.assert_not_called()
 
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
@@ -5165,859 +3401,24 @@ class SystemAgentWorkflowTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_completion_recovers_when_run_row_does_not_exist_yet(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={"pr_prompt": system_agents.PR_SLASH_PROMPT},
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "a1",
-                                "type": "agentMessage",
-                                "text": '{"feedback": "Looks good", "lgtm": true}',
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
 
-        run = SystemAgentRun.objects.get(instance=instance)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
-        mock_spawn.assert_called_once()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_unstructured_native_review_blocks_workflow_and_surfaces_failure(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={"next_user_message_index": 1},
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "a1",
-                                "type": "exitedReviewMode",
-                                "review": "The patch has a release-blocking defect.",
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
 
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertTrue(workflow.state["failure_surfaced"])
-        mock_spawn.assert_called_once()
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["thread_id"], "main-thread")
-        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertEqual(kwargs["user_message_index"], 1)
-        self.assertIn("QA output was not a valid Codex review", kwargs["prompt"])
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_stop_active_workflow_interrupts_hidden_run_and_blocks(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
-            state={"next_user_message_index": 0},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        mock_interrupt.return_value = instance
 
-        stopped = system_agents.stop_active_workflow("main-thread")
 
-        self.assertTrue(stopped)
-        mock_interrupt.assert_called_once_with(instance.pk, expected_thread_id="qa-thread")
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertTrue(workflow.state[system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY])
-        mock_spawn.assert_not_called()
 
-        instance.status = CodexInstance.STATUS_FAILED
-        instance.error = "interrupted by user"
-        instance.save(update_fields=["status", "error"])
-        self.assertTrue(system_agents.on_codex_instance_finished(instance))
 
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY, workflow.state)
-        mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_stop_active_workflow_keeps_uninterrupted_run_retryable(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={},
-        )
-        interrupted_instance = _instance(
-            thread_id="qa-thread-0",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        still_running_instance = _instance(
-            thread_id="qa-thread-1",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        interrupted_run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=interrupted_instance.thread_id,
-            instance=interrupted_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        still_running_run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=still_running_instance.thread_id,
-            instance=still_running_instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
 
-        def interrupt_side_effect(_instance_id: int, *, expected_thread_id: str) -> CodexInstance | None:
-            if expected_thread_id == interrupted_instance.thread_id:
-                return interrupted_instance
-            return None
 
-        mock_interrupt.side_effect = interrupt_side_effect
 
-        stopped = system_agents.stop_active_workflow("main-thread")
 
-        self.assertFalse(stopped)
-        interrupted_run.refresh_from_db()
-        still_running_run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(interrupted_run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(still_running_run.status, SystemAgentRun.STATUS_RUNNING)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertNotIn(system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY, workflow.state)
-        mock_spawn.assert_not_called()
 
-        interrupted_instance.status = CodexInstance.STATUS_FAILED
-        interrupted_instance.save(update_fields=["status"])
-        self.assertTrue(system_agents.on_codex_instance_finished(interrupted_instance))
-        mock_spawn.assert_not_called()
 
-        mock_interrupt.side_effect = None
-        mock_interrupt.return_value = still_running_instance
-        self.assertTrue(system_agents.stop_active_workflow("main-thread"))
 
-        still_running_run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(still_running_run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertTrue(workflow.state[system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY])
-
-        still_running_instance.status = CodexInstance.STATUS_FAILED
-        still_running_instance.save(update_fields=["status"])
-        self.assertTrue(system_agents.on_codex_instance_finished(still_running_instance))
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_partial_stop_blocks_only_after_every_turn_settles(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        interrupted_turn = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        unresolved_turn = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        mock_interrupt.side_effect = lambda instance_id, **_kwargs: (
-            interrupted_turn if instance_id == interrupted_turn.pk else None
-        )
-
-        stopped = system_agents.stop_active_workflow("main-thread")
-
-        self.assertFalse(stopped)
-        self.assertEqual(mock_interrupt.call_count, 2)
-        mock_interrupt.assert_any_call(interrupted_turn.pk, expected_thread_id="main-thread")
-        mock_interrupt.assert_any_call(unresolved_turn.pk, expected_thread_id="main-thread")
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertTrue(workflow.state[system_agents._WORKFLOW_STOP_REQUESTED_STATE_KEY])
-        self.assertFalse(system_agents.workflow_accepts_steering(workflow))
-        self.assertNotIn(system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY, workflow.state)
-        mock_spawn.assert_not_called()
-
-        interrupted_turn.status = CodexInstance.STATUS_FAILED
-        interrupted_turn.error = "interrupted by user"
-        interrupted_turn.save(update_fields=["status", "error"])
-        self.assertTrue(system_agents.on_codex_instance_finished(interrupted_turn))
-
-        workflow.refresh_from_db()
-        unresolved_turn.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(unresolved_turn.status, CodexInstance.STATUS_RUNNING)
-        mock_spawn.assert_not_called()
-
-        unresolved_turn.status = CodexInstance.STATUS_COMPLETED
-        unresolved_turn.save(update_fields=["status"])
-        self.assertTrue(system_agents.on_codex_instance_finished(unresolved_turn))
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertNotIn(system_agents._WORKFLOW_STOP_REQUESTED_STATE_KEY, workflow.state)
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stop_active_workflow_cancels_agentless_feedback_handoff(self, _mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-
-        stopped = system_agents.stop_active_workflow("main-thread")
-
-        self.assertTrue(stopped)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_active_workflow_reconciles_terminal_hidden_run(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            status=CodexInstance.STATUS_FAILED,
-            error="worker process exited before reporting completion",
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        active = system_agents.active_workflow_for_thread("main-thread")
-
-        self.assertIsNone(active)
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("worker process exited", run.error)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn("worker process exited", workflow.state["error"])
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_reconcile_terminal_hidden_run_recovers_missing_run_row(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            status=CodexInstance.STATUS_FAILED,
-            error="worker process exited before run creation",
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 1)
-        run = SystemAgentRun.objects.get(instance=instance)
-        workflow.refresh_from_db()
-        self.assertEqual(run.workflow, workflow)
-        self.assertEqual(run.agent_kind, system_agents.PR_QA_AGENT_KIND)
-        self.assertEqual(run.thread_id, "qa-thread")
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("worker process exited", run.error)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn("worker process exited", workflow.state["error"])
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.pr_qa._handle_pr_qa_agent_finished")
-    def test_system_agent_finish_claims_instance_before_routing(self, mock_route: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            status=CodexInstance.STATUS_COMPLETED,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        handled = system_agents.on_codex_instance_finished(instance)
-        instance.refresh_from_db()
-
-        self.assertTrue(handled)
-        self.assertIsNotNone(instance.workflow_routing_started_at)
-        mock_route.assert_called_once()
-        mock_route.reset_mock()
-
-        handled = system_agents.on_codex_instance_finished(instance)
-
-        self.assertTrue(handled)
-        mock_route.assert_not_called()
-
-    def test_workflow_turn_finish_claims_instance_before_routing(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        cases = [
-            (
-                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                "hitch.main.workflows.pr_qa._handle_system_feedback_finished",
-            ),
-            (
-                CodexInstance.PURPOSE_USER,
-                "hitch.main.workflows.system_agents._handle_workflow_user_turn_finished",
-            ),
-        ]
-        for purpose, handler in cases:
-            with self.subTest(purpose=purpose), patch(handler) as mock_handler:
-                instance = _instance(
-                    thread_id="main-thread",
-                    purpose=purpose,
-                    workflow_id=workflow.pk,
-                    status=CodexInstance.STATUS_COMPLETED,
-                )
-
-                handled = system_agents.on_codex_instance_finished(instance)
-                instance.refresh_from_db()
-
-                self.assertTrue(handled)
-                self.assertIsNotNone(instance.workflow_routing_started_at)
-                mock_handler.assert_called_once()
-                mock_handler.reset_mock()
-
-                handled = system_agents.on_codex_instance_finished(instance)
-
-                self.assertTrue(handled)
-                mock_handler.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa._handle_system_feedback_finished")
-    def test_reconcile_terminal_workflow_turn_clears_claim_when_routing_raises(self, mock_handler: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=0,
-        )
-        mock_handler.side_effect = [RuntimeError("transient"), None]
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-        instance.refresh_from_db()
-
-        self.assertEqual(reconciled, 0)
-        self.assertIsNone(instance.workflow_routing_started_at)
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-        instance.refresh_from_db()
-
-        self.assertEqual(reconciled, 1)
-        self.assertIsNotNone(instance.workflow_routing_started_at)
-        self.assertEqual(mock_handler.call_count, 2)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
-    def test_reconcile_terminal_workflow_turns_ignores_prior_completed_turn(
-        self,
-        mock_spawn_qa: MagicMock,
-        mock_spawn_turn: MagicMock,
-    ) -> None:
-        cases = [
-            (
-                system_agents.STEP_FEEDBACK_RUNNING,
-                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                "QA feedback worker failed: current failed",
-                {},
-            ),
-            (
-                system_agents.STEP_USER_STEERING_RUNNING,
-                CodexInstance.PURPOSE_USER,
-                "coding worker failed: current failed",
-                {},
-            ),
-            (
-                system_agents.STEP_PR_PROMPT_RUNNING,
-                CodexInstance.PURPOSE_USER,
-                "PR prompt worker failed: current failed",
-                {
-                    system_agents._PR_HANDOFF_STATE_KEY: {
-                        "url": "https://github.com/cberner/hitch/pull/169",
-                        "repository_full_name": "cberner/hitch",
-                        "pr_number": 169,
-                    }
-                },
-            ),
-        ]
-        for case_index, (step, purpose, expected_error, extra_state) in enumerate(cases):
-            with self.subTest(step=step):
-                mock_spawn_qa.reset_mock()
-                mock_spawn_turn.reset_mock()
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id=f"main-thread-{case_index}",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=step,
-                    state={"next_user_message_index": 2, **extra_state},
-                )
-                _instance(
-                    thread_id=workflow.main_thread_id,
-                    purpose=purpose,
-                    workflow_id=workflow.pk,
-                    status=CodexInstance.STATUS_COMPLETED,
-                    user_message_index=0,
-                )
-                _instance(
-                    thread_id=workflow.main_thread_id,
-                    purpose=purpose,
-                    workflow_id=workflow.pk,
-                    status=CodexInstance.STATUS_FAILED,
-                    error="current failed",
-                    user_message_index=1,
-                )
-
-                reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id=workflow.main_thread_id)
-
-                self.assertEqual(reconciled, 1)
-                workflow.refresh_from_db()
-                self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-                self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-                self.assertEqual(workflow.state["error"], expected_error)
-                self.assertTrue(workflow.state["failure_surfaced"])
-                mock_spawn_turn.assert_called_once()
-                mock_spawn_qa.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
-    def test_reconcile_routes_index_zero_workflow_turn(
-        self,
-        mock_spawn_qa: MagicMock,
-        mock_spawn_turn: MagicMock,
-    ) -> None:
-        # ``next_user_message_index`` is still 0 exactly when the spawner died
-        # before saving the increment -- the dead-spawn shape the dual-index
-        # match exists for. Skipping such workflows stranded the turn and let
-        # the zombie recovery later block them with a misleading explanation.
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 0},
-        )
-        _instance(
-            thread_id=workflow.main_thread_id,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            error="current failed",
-            user_message_index=0,
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id=workflow.main_thread_id)
-
-        self.assertEqual(reconciled, 1)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.state["error"], "QA feedback worker failed: current failed")
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_qa_verdict_yields_to_concurrent_user_steering_claim(self, mock_spawn_turn: MagicMock) -> None:
-        # A user steering claim can land while the verdict handler is parsing
-        # the QA output; the verdict's transition must re-validate under the
-        # lock and stand down instead of overwriting the steering step and
-        # its qa_review_revision bump with the stale snapshot.
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "Tighten the tests", "lgtm": False},
-            ),
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        def _steer_mid_parse(*args: Any, **kwargs: Any) -> None:
-            WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="also update docs")
-            claimed = pr_qa._start_queued_user_steering(
-                SystemWorkflow.objects.get(pk=workflow.pk),
-                expected_step=system_agents.STEP_QA_RUNNING,
-            )
-            assert claimed
-            return
-
-        with patch.object(
-            pr_qa,
-            "_maybe_build_qa_design_synthesis_gate",
-            side_effect=_steer_mid_parse,
-        ):
-            system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        run.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["qa_review_revision"], 1)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("stale QA review", run.error)
-        mock_spawn_turn.assert_called_once()
-        self.assertEqual(mock_spawn_turn.call_args.kwargs["prompt"], "also update docs")
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stale_qa_callback_does_not_respawn_terminal_steering_turn(self, mock_spawn_turn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 2,
-                "user_steering_prompt": "update docs",
-                "user_steering_message_index": 1,
-            },
-        )
-        steering = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=1,
-        )
-        stale_qa = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=stale_qa,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        self.assertTrue(system_agents.on_codex_instance_finished(stale_qa))
-
-        run.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("stale QA review", run.error)
-        self.assertEqual(steering.status, CodexInstance.STATUS_COMPLETED)
-        mock_spawn_turn.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents._final_agent_text")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_invalid_qa_verdict_cannot_block_concurrent_steering(
-        self, mock_spawn_turn: MagicMock, mock_final_text: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        mock_spawn_turn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=1,
-        )
-
-        def _steer_before_parse(_events_path: str) -> str:
-            self.assertTrue(pr_qa.enqueue_user_steering(workflow, prompt="also update docs"))
-            return "not JSON"
-
-        mock_final_text.side_effect = _steer_before_parse
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        run.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "also update docs")
-        self.assertNotIn("error", workflow.state)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        mock_spawn_turn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_dead_qa_feedback_worker_is_retried_once(self, mock_spawn_turn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            error=(
-                "worker process exited before reporting completion; "
-                'last event: command failed: `/bin/bash -lc "which sqlite3"`'
-            ),
-            user_message_index=1,
-        )
-
-        handled = system_agents.on_codex_instance_finished(instance)
-
-        self.assertTrue(handled)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
-        self.assertEqual(workflow.state["next_user_message_index"], 3)
-        self.assertEqual(
-            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
-            {"qa_feedback": 1},
-        )
-        self.assertNotIn("failure_surfaced", workflow.state)
-        mock_spawn_turn.assert_called_once()
-        kwargs = mock_spawn_turn.call_args.kwargs
-        self.assertEqual(kwargs["thread_id"], "main-thread")
-        self.assertEqual(kwargs["prompt"], "prompt")
-        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
-        self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertEqual(kwargs["user_message_index"], 2)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_overloaded_qa_feedback_worker_is_retried_once(self, mock_spawn_turn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            display_author=system_agents.QA_DISPLAY_AUTHOR,
-            error="Provider wording may change.",
-            codex_error_info=CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
-            user_message_index=1,
-        )
-
-        handled = system_agents.on_codex_instance_finished(instance)
-
-        self.assertTrue(handled)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
-        self.assertEqual(
-            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
-            {"qa_feedback": 1},
-        )
-        mock_spawn_turn.assert_called_once()
-        self.assertEqual(mock_spawn_turn.call_args.kwargs["prompt"], "prompt")
-
-    @patch("hitch.main.workflows.pr_qa._start_user_steering_if_ready")
-    def test_feedback_retry_claim_yields_to_committed_steering(self, mock_start_steering: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        stale = SystemWorkflow.objects.get(pk=workflow.pk)
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            error="worker process exited before reporting completion",
-            user_message_index=1,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="also update docs")
-
-        self.assertTrue(pr_qa._start_queued_user_steering(workflow, expected_step=system_agents.STEP_FEEDBACK_RUNNING))
-        self.assertFalse(pr_qa._claim_feedback_turn_retry(stale, instance))
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "also update docs")
-        self.assertNotIn(system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state)
-        mock_start_steering.assert_called_once()
 
     def test_legacy_overload_message_fallback_without_error_info(self) -> None:
         instance = _instance(
@@ -6036,678 +3437,21 @@ class SystemAgentWorkflowTests(TestCase):
 
         self.assertFalse(system_agents._is_retryable_workflow_turn_error(instance))
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_dead_qa_feedback_worker_blocks_after_retry_budget(self, mock_spawn_turn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={
-                "next_user_message_index": 2,
-                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {"qa_feedback": 1},
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            error="worker process exited before reporting completion",
-            user_message_index=1,
-        )
 
-        handled = system_agents.on_codex_instance_finished(instance)
 
-        self.assertTrue(handled)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertEqual(
-            workflow.state["error"],
-            "QA feedback worker failed: worker process exited before reporting completion",
-        )
-        self.assertTrue(workflow.state["failure_surfaced"])
-        mock_spawn_turn.assert_called_once()
-        kwargs = mock_spawn_turn.call_args.kwargs
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertIn(
-            "Hitch QA agent could not complete the PR workflow.",
-            kwargs["prompt"],
-        )
 
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
-    def test_completed_qa_feedback_clears_dead_worker_retry_state(self, mock_spawn_qa: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={
-                "next_user_message_index": 2,
-                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {"qa_feedback": 1},
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=1,
-        )
 
-        handled = system_agents.on_codex_instance_finished(instance)
 
-        self.assertTrue(handled)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-        self.assertNotIn(system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state)
-        mock_spawn_qa.assert_called_once_with(workflow, lifecycle_lock_held=True)
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stale_qa_feedback_cannot_advance_over_current_turn(self, mock_spawn_qa: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={
-                "next_user_message_index": 3,
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 2,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (system_agents.STEP_FEEDBACK_RUNNING),
-            },
-        )
-        stale = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=1,
-        )
-        _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=2,
-        )
 
-        self.assertTrue(system_agents.on_codex_instance_finished(stale))
 
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
-        mock_spawn_qa.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance", return_value=None)
-    def test_stop_active_workflow_waits_for_launching_worker(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        instance.pid = 0
-        instance.save(update_fields=["pid"])
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
 
-        stopped = system_agents.stop_active_workflow("main-thread")
 
-        self.assertFalse(stopped)
-        mock_interrupt.assert_not_called()
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_stop_retires_terminal_hidden_run_during_steering_handoff(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={"user_steering_prompt": "update docs"},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(workflow_routing_started_at=datetime.now(UTC))
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=instance.thread_id,
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="then update tests")
 
-        stopped = system_agents.stop_active_workflow("main-thread")
 
-        self.assertTrue(stopped)
-        mock_interrupt.assert_not_called()
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertFalse(workflow.steering_messages.exists())
-        self.assertEqual(
-            mock_spawn.call_args.kwargs["purpose"],
-            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        )
 
-        CodexInstance.objects.filter(pk=instance.pk).update(workflow_routing_started_at=None)
-        self.assertTrue(system_agents.on_codex_instance_finished(instance))
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_user_steering_waits_for_running_qa_before_spawning_user_turn(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 3},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        mock_interrupt.return_value = instance
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        started = pr_qa.enqueue_user_steering(workflow, prompt="  also update docs  ")
-
-        self.assertTrue(started)
-        mock_interrupt.assert_called_once_with(instance.pk, expected_thread_id="qa-thread")
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state[qa_prompts._QA_REVIEW_REVISION_STATE_KEY], 1)
-        self.assertEqual(workflow.state["next_user_message_index"], 3)
-        mock_spawn.assert_not_called()
-
-        instance.status = CodexInstance.STATUS_COMPLETED
-        instance.save(update_fields=["status"])
-        self.assertEqual(
-            system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread"),
-            1,
-        )
-
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("stale QA review", run.error)
-        self.assertEqual(workflow.state["next_user_message_index"], 4)
-        mock_spawn.assert_called_once()
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["thread_id"], "main-thread")
-        self.assertEqual(kwargs["prompt"], "also update docs")
-        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_USER)
-        self.assertEqual(kwargs["workflow_id"], workflow.pk)
-        self.assertEqual(kwargs["user_message_index"], 3)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_reconcile_force_stops_stale_qa_interrupt_for_user_steering(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 1,
-                "user_steering_prompt": "answer the follow-up",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 1,
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 1,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (system_agents.STEP_USER_STEERING_RUNNING),
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(
-            interrupt_requested_at=(
-                datetime.now(UTC) - system_agents._USER_STEERING_INTERRUPT_GRACE - timedelta(seconds=1)
-            )
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id=instance.thread_id,
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        def force_interrupt(
-            instance_id: int,
-            *,
-            expected_thread_id: str,
-            force: bool = False,
-            error: str | None = None,
-        ) -> CodexInstance:
-            self.assertEqual(instance_id, instance.pk)
-            self.assertEqual(expected_thread_id, instance.thread_id)
-            self.assertTrue(force)
-            self.assertEqual(error, "hidden workflow run superseded by user steering")
-            CodexInstance.objects.filter(pk=instance_id).update(
-                status=CodexInstance.STATUS_FAILED,
-                ended_at=datetime.now(UTC),
-                error=error or "",
-            )
-            return CodexInstance.objects.get(pk=instance_id)
-
-        mock_interrupt.side_effect = force_interrupt
-        mock_spawn.side_effect = lambda **kwargs: _instance(
-            thread_id=kwargs["thread_id"],
-            purpose=kwargs["purpose"],
-            workflow_id=kwargs["workflow_id"],
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=kwargs["user_message_index"],
-        )
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 1)
-        mock_interrupt.assert_called_once_with(
-            instance.pk,
-            expected_thread_id=instance.thread_id,
-            force=True,
-            error="hidden workflow run superseded by user steering",
-        )
-        instance.refresh_from_db()
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(run.error, "stale QA review superseded by a user steering message")
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "answer the follow-up")
-        self.assertEqual(mock_spawn.call_args.kwargs["purpose"], CodexInstance.PURPOSE_USER)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_reconcile_leaves_fresh_user_steering_interrupt_graceful(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={"user_steering_prompt": "answer the follow-up"},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        CodexInstance.objects.filter(pk=instance.pk).update(interrupt_requested_at=datetime.now(UTC))
-
-        reconciled = system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
-
-        self.assertEqual(reconciled, 0)
-        mock_interrupt.assert_not_called()
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_escalation_retries_stale_interrupt_launch_race(self, mock_interrupt: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=(datetime.now(UTC) - system_agents._USER_STEERING_INTERRUPT_GRACE - timedelta(seconds=1))
-        )
-        workflow.refresh_from_db()
-
-        system_agents._escalate_stale_user_steering_interrupts([workflow])
-
-        mock_interrupt.assert_called_once_with(instance.pk, expected_thread_id=instance.thread_id)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_escalation_skips_workflow_stopped_after_snapshot(self, mock_interrupt: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-        )
-        _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            state={system_agents._WORKFLOW_STOP_REQUESTED_STATE_KEY: True}
-        )
-
-        system_agents._escalate_stale_user_steering_interrupts([workflow])
-
-        mock_interrupt.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_user_steering_turn_keeps_uninterrupted_qa_run_running(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        mock_interrupt.return_value = None
-        started = pr_qa.enqueue_user_steering(workflow, prompt="also update docs")
-
-        self.assertTrue(started)
-        mock_interrupt.assert_called_once_with(instance.pk, expected_thread_id="qa-thread")
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
-        self.assertEqual(run.error, "")
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_feedback_turn_hands_queued_steering_to_next_coding_turn(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={
-                "next_user_message_index": 2,
-                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {"qa_feedback": 1},
-            },
-        )
-        feedback = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=1,
-        )
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        self.assertTrue(pr_qa.enqueue_user_steering(workflow, prompt="  also update docs  "))
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
-        self.assertEqual(workflow.steering_messages.get().prompt, "also update docs")
-        self.assertEqual(
-            workflow.state[system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY],
-            1,
-        )
-        mock_spawn.assert_not_called()
-
-        feedback.status = CodexInstance.STATUS_COMPLETED
-        feedback.save(update_fields=["status"])
-        system_agents.on_codex_instance_finished(feedback)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertFalse(workflow.steering_messages.exists())
-        self.assertEqual(workflow.state["next_user_message_index"], 3)
-        self.assertNotIn(system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state)
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "also update docs")
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_user_steering_starts_when_visible_turn_spawn_is_missing(self, mock_spawn: MagicMock) -> None:
-        mock_spawn.side_effect = lambda **kwargs: _instance(
-            thread_id=kwargs["thread_id"],
-            purpose=kwargs["purpose"],
-            workflow_id=kwargs["workflow_id"],
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=kwargs["user_message_index"],
-        )
-        cases = (
-            (
-                system_agents.STEP_FEEDBACK_RUNNING,
-                system_agents.STEP_QA_RUNNING,
-            ),
-            (
-                system_agents.STEP_PR_WATCH_RUNNING,
-                system_agents.STEP_PR_WATCH_RUNNING,
-            ),
-            (
-                system_agents.STEP_PR_PROMPT_RUNNING,
-                system_agents.STEP_PR_PROMPT_RUNNING,
-            ),
-        )
-        for step, resume_step in cases:
-            with self.subTest(step=step):
-                mock_spawn.reset_mock()
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id=f"main-thread-{step}",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=step,
-                    state={"next_user_message_index": 2},
-                )
-
-                self.assertTrue(pr_qa.enqueue_user_steering(workflow, prompt="also update docs"))
-
-                workflow.refresh_from_db()
-                self.assertEqual(
-                    workflow.step,
-                    system_agents.STEP_USER_STEERING_RUNNING,
-                )
-                self.assertEqual(workflow.state["user_steering_resume_step"], resume_step)
-                self.assertFalse(workflow.steering_messages.exists())
-                mock_spawn.assert_called_once()
-                self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "also update docs")
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_superseded_feedback_completion_starts_reserved_steering(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 3,
-                "user_steering_prompt": "also update docs",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 2,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (system_agents.STEP_USER_STEERING_RUNNING),
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 2,
-            },
-        )
-        feedback = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=1,
-        )
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        system_agents.on_codex_instance_finished(feedback)
-
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "also update docs")
-        self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 2)
-
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_completed_feedback_yields_to_message_queued_during_finalization(
-        self, mock_spawn: MagicMock, mock_spawn_qa: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        feedback = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=1,
-        )
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        original_start = pr_qa._start_queued_user_steering
-        checks = 0
-
-        def _queue_after_initial_check(current: SystemWorkflow, **kwargs: Any) -> bool:
-            nonlocal checks
-            checks += 1
-            if checks == 1:
-                WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="also update docs")
-                return False
-            return original_start(current, **kwargs)
-
-        with patch.object(
-            pr_qa,
-            "_start_queued_user_steering",
-            side_effect=_queue_after_initial_check,
-        ):
-            system_agents.on_codex_instance_finished(feedback)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "also update docs")
-        self.assertFalse(workflow.steering_messages.exists())
-        mock_spawn.assert_called_once()
-        mock_spawn_qa.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_new_input_recovers_stranded_steering_turn(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 3,
-                "user_steering_prompt": "first request",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 3,
-            },
-        )
-        mock_spawn.side_effect = lambda **kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=kwargs["user_message_index"],
-        )
-
-        self.assertTrue(pr_qa.enqueue_user_steering(workflow, prompt="second request"))
-
-        workflow.refresh_from_db()
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "first request")
-        self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 3)
-        self.assertEqual(workflow.steering_messages.get().prompt, "second request")
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reserved_steering_ignores_previous_terminal_claim(self, mock_spawn: MagicMock) -> None:
@@ -6759,137 +3503,8 @@ class SystemAgentWorkflowTests(TestCase):
 
         self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 2)
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_second_steering_message_runs_after_current_steering_turn(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 1,
-                "user_steering_prompt": "first request",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-            },
-        )
-        current = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=0,
-        )
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
 
-        self.assertTrue(pr_qa.enqueue_user_steering(workflow, prompt="second request"))
-        mock_spawn.assert_not_called()
 
-        current.status = CodexInstance.STATUS_COMPLETED
-        current.save(update_fields=["status"])
-        system_agents.on_codex_instance_finished(current)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "second request")
-        self.assertEqual(
-            workflow.state["user_steering_resume_step"],
-            system_agents.STEP_QA_RUNNING,
-        )
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "second request")
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_failed_steering_turn_yields_to_next_queued_message(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                # The worker was created before its cursor increment was saved.
-                "next_user_message_index": 3,
-                "user_steering_prompt": "first request",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 3,
-            },
-        )
-        current = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            error="worker exited",
-            user_message_index=3,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="second request")
-        mock_spawn.side_effect = lambda **kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=kwargs["user_message_index"],
-        )
-
-        system_agents.on_codex_instance_finished(current)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_prompt"], "second request")
-        self.assertEqual(workflow.state["user_steering_message_index"], 4)
-        self.assertEqual(workflow.state["next_user_message_index"], 5)
-        self.assertNotIn("error", workflow.state)
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 4)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stale_steering_failure_cannot_block_current_turn(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 2,
-                "user_steering_prompt": "current request",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 1,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (system_agents.STEP_USER_STEERING_RUNNING),
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 1,
-            },
-        )
-        stale = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            error="old worker failed late",
-            user_message_index=0,
-        )
-        current = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=1,
-        )
-
-        pr_qa._handle_user_steering_finished(stale, workflow)
-
-        workflow.refresh_from_db()
-        current.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_message_index"], 1)
-        self.assertEqual(current.status, CodexInstance.STATUS_RUNNING)
-        mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_recovered_pr_prompt_repairs_cursor_before_queued_steering(self, mock_spawn: MagicMock) -> None:
@@ -6930,38 +3545,6 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 5)
         self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 4)
 
-    @patch("hitch.main.workflows.system_agents.build_worktree_diff_text", return_value="diff")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    def test_user_steering_turn_completion_restarts_qa(self, mock_spawn: MagicMock, _mock_diff: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_spawn.return_value = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-        run = SystemAgentRun.objects.get(workflow=workflow)
-        self.assertEqual(run.thread_id, "qa-thread")
-        self.assertEqual(
-            run.input["qa_review_revision"],
-            workflow.state[qa_prompts._QA_REVIEW_REVISION_STATE_KEY],
-        )
 
     @patch("hitch.main.workflows.pr_qa._run_pr_step_action_if_owned")
     def test_pr_steering_settlement_reserves_prompt_before_spawn(self, mock_run_action: MagicMock) -> None:
@@ -7000,84 +3583,7 @@ class SystemAgentWorkflowTests(TestCase):
         )
         mock_run_action.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
-    def test_pr_user_steering_completion_preserves_pr_preparation_reservation(
-        self, mock_spawn_qa: MagicMock, mock_spawn_pr: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 5,
-                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 2,
-                "user_steering_prompt": "update docs",
-                "user_steering_resume_step": system_agents.STEP_PR_PROMPT_RUNNING,
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            user_message_index=4,
-        )
-        mock_spawn_pr.side_effect = lambda **kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            user_message_index=kwargs["user_message_index"],
-        )
 
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
-        self.assertNotIn("user_steering_prompt", workflow.state)
-        self.assertEqual(workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 2)
-        self.assertEqual(
-            workflow.state[system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY],
-            system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        self.assertEqual(
-            workflow.state[system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY],
-            5,
-        )
-        self.assertEqual(mock_spawn_pr.call_args.kwargs["prompt"], system_agents.PR_SLASH_PROMPT)
-        self.assertEqual(mock_spawn_pr.call_args.kwargs["user_message_index"], 5)
-        mock_spawn_qa.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_recovered_steering_turn_advances_cursor_before_next_message(self, mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "next_user_message_index": 3,
-                "user_steering_prompt": "update docs",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-                "user_steering_message_index": 3,
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            user_message_index=3,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="then update docs")
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
-        self.assertEqual(workflow.state["user_steering_message_index"], 4)
     def test_pr_steering_instructions_distinguish_unpublished_pr(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -7136,22 +3642,6 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertNotIn("commit all resulting changes", instructions)
         self.assertNotIn("PR preparation phase", instructions)
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stop_cancels_agentless_queued_steering(self, _mock_spawn: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="then lint")
-
-        self.assertTrue(system_agents.stop_active_workflow("main-thread"))
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertFalse(workflow.steering_messages.exists())
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_stop_cancels_agentless_pr_spawn_handoff(self, _mock_spawn: MagicMock) -> None:
@@ -7173,69 +3663,7 @@ class SystemAgentWorkflowTests(TestCase):
                 workflow.refresh_from_db()
                 self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
-    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stop_cancels_agentless_qa_resume_handoff(self, _mock_surface: MagicMock, mock_spawn_qa: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
 
-        self.assertTrue(system_agents.stop_active_workflow("main-thread"))
-        self.assertIsNone(pr_qa._spawn_pr_qa_run(workflow))
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        mock_spawn_qa.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stale_hidden_failure_cannot_block_new_generation(self, mock_spawn: MagicMock) -> None:
-        cases = (
-            (
-                system_agents.STEP_QA_RUNNING,
-                system_agents.PR_QA_AGENT_KIND,
-                {qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 2},
-                {"qa_review_revision": 1},
-                pr_qa._fail_qa_run_if_owned,
-            ),
-        )
-        for step, agent_kind, state, run_input, fail in cases:
-            with self.subTest(step=step):
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id=f"main-thread-{step}",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=step,
-                    state=state,
-                )
-                instance = _instance(
-                    thread_id=f"worker-{step}",
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                    workflow_id=workflow.pk,
-                    status=CodexInstance.STATUS_FAILED,
-                    agent_kind=agent_kind,
-                )
-                run = SystemAgentRun.objects.create(
-                    workflow=workflow,
-                    agent_kind=agent_kind,
-                    thread_id=instance.thread_id,
-                    instance=instance,
-                    status=SystemAgentRun.STATUS_RUNNING,
-                    input=run_input,
-                )
-
-                fail(workflow, run, "old generation failed")
-
-                workflow.refresh_from_db()
-                run.refresh_from_db()
-                self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-                self.assertEqual(workflow.step, step)
-                self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-                mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_failed_steering_spawn_cancels_later_queued_messages(self, mock_spawn: MagicMock) -> None:
@@ -7360,153 +3788,10 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertNotIn(system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY, workflow.state)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    def test_deferred_stop_failure_does_not_overtake_new_session_turn(
-        self, mock_interrupt: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_FEEDBACK_RUNNING,
-        )
-        stopped_turn = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        mock_interrupt.return_value = stopped_turn
 
-        self.assertTrue(system_agents.stop_active_workflow("main-thread"))
-        mock_spawn.assert_not_called()
-        workflow.refresh_from_db()
-        blocked_at = workflow.updated_at
 
-        stopped_turn.status = CodexInstance.STATUS_FAILED
-        stopped_turn.error = "interrupted by user"
-        stopped_turn.save(update_fields=["status", "error"])
-        newer_turn = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            status=CodexInstance.STATUS_RUNNING,
-        )
 
-        self.assertTrue(system_agents.on_codex_instance_finished(stopped_turn))
 
-        workflow.refresh_from_db()
-        newer_turn.refresh_from_db()
-        self.assertNotIn(system_agents._DEFERRED_FAILURE_SURFACE_STATE_KEY, workflow.state)
-        self.assertNotIn("failure_surfaced", workflow.state)
-        self.assertEqual(workflow.updated_at, blocked_at)
-        self.assertEqual(newer_turn.status, CodexInstance.STATUS_RUNNING)
-        mock_spawn.assert_not_called()
-
-    def test_all_active_pr_work_phases_accept_steering(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-        )
-
-        for step in system_agents.PR_QA_STEERABLE_STEPS:
-            with self.subTest(step=step):
-                workflow.step = step
-                self.assertTrue(system_agents.workflow_accepts_steering(workflow))
-
-        workflow.step = system_agents.STEP_PR_READY
-        self.assertFalse(system_agents.workflow_accepts_steering(workflow))
-
-    @patch("hitch.main.workflows.pr_qa.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_stale_qa_spawner_yields_to_claimed_steering(
-        self, mock_spawn_turn: MagicMock, mock_spawn_qa: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={
-                "user_steering_prompt": "update docs",
-                "user_steering_resume_step": system_agents.STEP_QA_RUNNING,
-            },
-        )
-        mock_spawn_turn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        spawned = pr_qa._spawn_pr_qa_run(workflow)
-
-        self.assertIsNone(spawned)
-        mock_spawn_qa.assert_not_called()
-        self.assertEqual(mock_spawn_turn.call_args.kwargs["prompt"], "update docs")
-
-    def test_recovered_qa_run_preserves_instance_review_revision(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={
-                "open_pr_on_lgtm": False,
-                qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            events_path=_events_file(self, {"feedback": "", "lgtm": True}),
-            user_message_index=1,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        run = SystemAgentRun.objects.get(instance=instance)
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
-        self.assertEqual(run.input["qa_review_revision"], 1)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_APPROVED)
-
-    def test_recovered_stale_qa_run_keeps_prior_revision(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1},
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            events_path=_events_file(self, {"feedback": "", "lgtm": True}),
-            user_message_index=0,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        run = SystemAgentRun.objects.get(instance=instance)
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(run.input["qa_review_revision"], 0)
-        self.assertEqual(run.error, "stale QA review superseded by a user steering message")
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
     def test_final_agent_text_ignores_commentary_messages(self) -> None:
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
@@ -7549,138 +3834,8 @@ class SystemAgentWorkflowTests(TestCase):
             '{"feedback": "Done", "lgtm": true}',
         )
 
-    def test_native_codex_review_output_maps_findings_to_qa_verdict(self) -> None:
-        review = (
-            "The patch has one correctness issue.\n\n"
-            "Review comment:\n\n"
-            "- [P1] Preserve the value — /repo/app.py:4-4\n"
-            "  This branch drops the value."
-        )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": "item/completed",
-                        "payload": {
-                            "item": {
-                                "id": "review-1",
-                                "type": "exitedReviewMode",
-                                "review": review,
-                            }
-                        },
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
 
-        structured_finding = {
-            "findings": [{"title": "[P1] Preserve the value"}],
-            "overall_correctness": "patch is incorrect",
-            "overall_explanation": "The patch has one correctness issue.",
-            "overall_confidence_score": 0.99,
-        }
-        with Path(events_path).open("a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
-                        "payload": {"reviewOutput": structured_finding},
-                    }
-                )
-                + "\n"
-            )
-        self.assertEqual(
-            system_agents._codex_review_result(events_path),
-            {"feedback": review, "review_output": structured_finding},
-        )
-        self.assertEqual(
-            agent_io._parse_codex_review_output(review, structured_finding),
-            {"feedback": review, "lgtm": False},
-        )
-        clean_explanation = "No actionable correctness issues were found in the diff."
-        self.assertEqual(
-            agent_io._parse_codex_review_output(
-                clean_explanation,
-                {
-                    "findings": [],
-                    "overall_correctness": "patch is correct",
-                    "overall_explanation": clean_explanation,
-                    "overall_confidence_score": 0.96,
-                },
-            ),
-            {"feedback": clean_explanation, "lgtm": True},
-        )
-        self.assertIsNone(
-            agent_io._parse_codex_review_output(
-                "The patch has a release-blocking defect.",
-                {
-                    "findings": [],
-                    "overall_correctness": "",
-                    "overall_explanation": ("The patch has a release-blocking defect."),
-                    "overall_confidence_score": 0.0,
-                },
-            )
-        )
-        self.assertIsNone(agent_io._parse_codex_review_output("Reviewer failed to output a response.", None))
-        self.assertIsNone(
-            agent_io._parse_codex_review_output("Malformed finding payload.", {"findings": ["not an object"]})
-        )
 
-    def test_native_codex_review_output_tolerates_missing_and_malformed_events(
-        self,
-    ) -> None:
-        with tempfile.NamedTemporaryFile() as missing:
-            missing_path = missing.name
-        self.assertIsNone(system_agents._codex_review_result(missing_path))
-
-        expected = {
-            "findings": [],
-            "overall_correctness": "patch is correct",
-            "overall_explanation": "No correctness issues were found.",
-        }
-        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
-            fh.write("not json\n")
-            fh.write(
-                json.dumps(
-                    {
-                        "method": codex_events.NATIVE_REVIEW_COMPLETED_METHOD,
-                        "payload": {"reviewOutput": expected},
-                    }
-                )
-                + "\n"
-            )
-            events_path = fh.name
-        self.addCleanup(Path(events_path).unlink, missing_ok=True)
-
-        self.assertEqual(
-            system_agents._codex_review_result(events_path),
-            {
-                "feedback": "No correctness issues were found.",
-                "review_output": expected,
-            },
-        )
-
-    def test_fenced_json_with_unicode_separators_still_parses(self) -> None:
-        # A fenced JSON verdict whose string content legitimately contains a
-        # Unicode line/paragraph/NEL separator must not be torn apart by the
-        # fence stripper: those characters are valid inside a JSON string, and
-        # rewriting them as literal newlines would block the workflow with a
-        # bogus "output was not valid JSON" failure.
-        for separator in ("\u2028", "\u2029", "\x85", "\x0c", "\x0b"):
-            with self.subTest(separator=repr(separator)):
-                verdict = {"feedback": f"left{separator}right", "lgtm": False}
-                fenced = "```json\n" + json.dumps(verdict, ensure_ascii=False) + "\n```"
-                parsed = agent_io._parse_qa_output(fenced)
-                self.assertIsNotNone(parsed)
-                assert parsed is not None
-                self.assertIs(parsed["lgtm"], False)
-                self.assertEqual(parsed["feedback"], f"left{separator}right")
-        # A CRLF-delimited fence parses identically to an LF one, and a plain
-        # fence is unaffected.
-        crlf = '```json\r\n{"feedback": "x", "lgtm": true}\r\n```'
-        self.assertEqual(agent_io._parse_qa_output(crlf), {"feedback": "x", "lgtm": True})
 
     def test_pr_gate_evaluator_requires_all_auto_pr_gates(self) -> None:
         gates = gh_observations._evaluate_pr_gates(
@@ -12549,7 +8704,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             main_thread_id="implementation-thread",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
@@ -16476,26 +12631,6 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertNotIn("candidate-thread", system_agents.hidden_thread_ids())
 
-    def test_legacy_demo_rows_do_not_own_visible_user_thread(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="visible-user-thread",
-            cwd="/repo",
-        )
-        instance = _instance(
-            thread_id="visible-user-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind="demo",
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="demo",
-            thread_id="visible-user-thread",
-            instance=instance,
-        )
-
-        self.assertNotIn("visible-user-thread", system_agents.hidden_thread_ids())
 
     def test_hidden_session_metadata_marks_system_thread(self) -> None:
         metadata = SessionMetadata.objects.create(
@@ -16613,8 +12748,8 @@ class ClaimWorkflowTransitionTests(TestCase):
             "main_thread_id": "main-thread",
             "cwd": "/repo",
             "status": SystemWorkflow.STATUS_RUNNING,
-            "step": system_agents.STEP_QA_RUNNING,
-            "state": {"qa_review_revision": 1},
+            "step": system_agents.STEP_PR_PROMPT_RUNNING,
+            "state": {"revision": 1},
         }
         defaults.update(overrides)
         return SystemWorkflow.objects.create(**defaults)
@@ -16623,15 +12758,21 @@ class ClaimWorkflowTransitionTests(TestCase):
         workflow = self._workflow()
         # Stale snapshot: another writer changed state after this copy loaded.
         snapshot = SystemWorkflow.objects.get(pk=workflow.pk)
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(state={"qa_review_revision": 1, "written_elsewhere": True})
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            state={"revision": 1, "written_elsewhere": True}
+        )
 
         def _advance(locked: SystemWorkflow) -> str:
             locked.state = {**locked.state, "advanced": True}
-            locked.step = system_agents.STEP_FEEDBACK_RUNNING
+            locked.step = system_agents.STEP_USER_STEERING_RUNNING
             locked.save(update_fields=["step", "state", "updated_at"])
             return "feedback"
 
-        result = engine.claim_workflow_transition(snapshot, _advance, expect_step=system_agents.STEP_QA_RUNNING)
+        result = engine.claim_workflow_transition(
+            snapshot,
+            _advance,
+            expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        )
 
         self.assertEqual(result, "feedback")
         # The concurrent write survived: apply ran on the locked row, not the
@@ -16639,14 +12780,20 @@ class ClaimWorkflowTransitionTests(TestCase):
         workflow.refresh_from_db()
         self.assertTrue(workflow.state["written_elsewhere"])
         self.assertTrue(workflow.state["advanced"])
-        self.assertEqual(snapshot.step, system_agents.STEP_FEEDBACK_RUNNING)
+        self.assertEqual(snapshot.step, system_agents.STEP_USER_STEERING_RUNNING)
         self.assertTrue(snapshot.state["written_elsewhere"])
 
     def test_returns_none_without_applying_on_step_mismatch(self) -> None:
-        workflow = self._workflow(step=system_agents.STEP_FEEDBACK_RUNNING)
+        workflow = self._workflow(step=system_agents.STEP_USER_STEERING_RUNNING)
         apply = MagicMock()
 
-        self.assertIsNone(engine.claim_workflow_transition(workflow, apply, expect_step=system_agents.STEP_QA_RUNNING))
+        self.assertIsNone(
+            engine.claim_workflow_transition(
+                workflow,
+                apply,
+                expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            )
+        )
         apply.assert_not_called()
 
     def test_returns_none_for_inactive_unless_opted_out(self) -> None:
@@ -16661,14 +12808,14 @@ class ClaimWorkflowTransitionTests(TestCase):
         workflow = self._workflow()
         snapshot = SystemWorkflow.objects.get(pk=workflow.pk)
         # A concurrent steering claim bumped the revision after the snapshot.
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(state={"qa_review_revision": 2})
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(state={"revision": 2})
         apply = MagicMock()
 
         result = engine.claim_workflow_transition(
             snapshot,
             apply,
-            expect_step=system_agents.STEP_QA_RUNNING,
-            guard=lambda locked: locked.state.get("qa_review_revision") == 1,
+            expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            guard=lambda locked: locked.state.get("revision") == 1,
         )
 
         self.assertIsNone(result)

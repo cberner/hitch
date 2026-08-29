@@ -10,7 +10,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
-from hitch.main.workflows import pr_qa, qa_prompts, system_agents
+from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -89,19 +89,7 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
 
 
 def _workflow_maintenance_tick() -> None:
-    try:
-        reconciliation.reconcile_dead()
-    finally:
-        try:
-            reaped = qa_prompts.reap_stale_qa_handoffs(
-                stale_before=(
-                    timezone.now() - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
-                )
-            )
-            if reaped:
-                logger.info("reaped %s stale QA review handoff(s)", reaped)
-        except Exception:
-            logger.exception("failed to reap stale QA review handoffs")
+    reconciliation.reconcile_dead()
     # Converge GitHub-backed PR stages in the background. This scheduler
     # runs under production server commands (gunicorn et al.), whereas the
     # auto-proposal scheduler does not, so without this the per-session

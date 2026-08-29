@@ -228,7 +228,6 @@ def _metadata_resume_for_inactive_session(
     require_system_agent_thread: bool,
     history_message_target: int | None = None,
     allow_active_rollout: bool = False,
-    hidden_user_prompts: frozenset[str] | None = None,
     active_user_identity: rollout.SessionHistoryUserIdentity | None = None,
 ) -> _MetadataResume | None:
     if metadata is None or (
@@ -257,7 +256,6 @@ def _metadata_resume_for_inactive_session(
         history_page = rollout.session_history_page(
             rollout_path,
             message_target=history_message_target,
-            hidden_user_prompts=hidden_user_prompts,
             active_user_identity=active_user_identity,
         )
         if history_page is None:
