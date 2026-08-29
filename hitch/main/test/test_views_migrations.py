@@ -509,7 +509,7 @@ class RemovedFeatureMigrationTests(TransactionTestCase):
         missing_result = subprocess.CalledProcessError(
             125,
             ["podman", "inspect", "demo-container"],
-            stderr="no such container",
+            stderr='Error: no such object: "demo-container"',
         )
         podman_results = [
             subprocess.CompletedProcess([], 0, "demo-container\n", ""),

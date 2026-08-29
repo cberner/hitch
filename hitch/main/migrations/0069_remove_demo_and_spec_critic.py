@@ -636,6 +636,7 @@ def _container_missing_error(exc: subprocess.CalledProcessError) -> bool:
         for marker in (
             "does not exist",
             "no such container",
+            "no such object",
             "not found",
             "no container with name or id",
         )
