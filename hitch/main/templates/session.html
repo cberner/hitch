@@ -23,7 +23,7 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
-                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes or active_worker or active_system_workflow %}disabled{% endif %}>View diff</button>
+                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes or active_worker %}disabled{% endif %}>View diff</button>
                     {% endif %}
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
                     {% if not read_only %}
@@ -35,11 +35,8 @@
                     <form method="post" action="{{ set_archived_url }}" role="none">
                         {% csrf_token %}
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
-                        <button type="submit" role="menuitem"{% if active_system_workflow and not is_archived %} disabled aria-describedby="archive-active-workflow-note" data-archive-blocked{% endif %}>{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                        <button type="submit" role="menuitem">{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
                     </form>
-                    {% if active_system_workflow and not is_archived %}
-                    <p class="session-menu-note" id="archive-active-workflow-note">Stop the workflow before archiving.</p>
-                    {% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -113,7 +110,7 @@
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
             </p>
             {% endif %}
-            {% if not read_only and not active_worker and not active_system_workflow %}
+            {% if not read_only and not active_worker %}
             <p class="next-message" aria-label="Settings for the next message" data-next-message-config>
                 {% for item in next_message_config %}
                 <span class="next-message-item"
@@ -129,7 +126,7 @@
         </div>
 
         <div class="session-body">
-        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or queued_workflow_user_messages or active_worker or active_system_workflow %}
+        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
         <section class="thread" data-thread id="history-start">
             {% if system_prompt %}
             <details class="system-prompt">
@@ -177,28 +174,6 @@
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
             {% endif %}
-            {% if active_system_workflow and not active_worker %}
-            <div class="entry"
-                 data-live-root
-                 data-active-author=""
-                 data-hide-transcript="true"
-                 data-hide-user-message="true"
-                 data-sanitize-live-details="true"
-                 data-read-only="{{ read_only|yesno:'true,false' }}"
-                 data-approval-url-template="{{ approval_url_template }}"
-                 data-input-url-template="{{ input_url_template }}"></div>
-            {% endif %}
-            {% for queued_message in queued_workflow_user_messages %}
-            <div class="entry" data-queued-workflow-user>
-                <div class="entry-header">
-                    <span class="role">User · Queued</span>
-                    <time data-ts="{{ queued_message.timestamp }}">{{ queued_message.timestamp }}</time>
-                </div>
-                <div class="message user pending" data-copyable-message>
-                    <div class="body">{{ queued_message.prompt }}</div>
-                </div>
-            </div>
-            {% endfor %}
         </section>
         {% else %}
         <div class="empty-thread">
@@ -206,10 +181,10 @@
         </div>
         {% endif %}
         </div>
-        <div class="live-work" data-live-work data-state="{% if active_worker or active_system_workflow %}working{% else %}idle{% endif %}">
+        <div class="live-work" data-live-work data-state="{% if active_worker %}working{% else %}idle{% endif %}">
             <span class="live-status"
                   data-live-status
-                  data-state="{% if active_worker or active_system_workflow %}working{% else %}idle{% endif %}"
+                  data-state="{% if active_worker %}working{% else %}idle{% endif %}"
                   {% if live_status_text %}data-working-text="{{ live_status_text }}"{% endif %}
                   role="status"
                   aria-live="polite">{% if live_status_text %}{{ live_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
@@ -217,8 +192,8 @@
                 <span class="live-goal-label">Goal</span>
                 <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
             </span>
-            <span class="pr-progress" data-pr-progress {% if not pr_workflow_progress %}hidden{% endif %}>
-                {% for gate in pr_workflow_progress %}
+            <span class="pr-progress" data-pr-progress {% if not pr_watch_progress %}hidden{% endif %}>
+                {% for gate in pr_watch_progress %}
                 <span class="pr-gate"
                       data-pr-gate="{{ gate.key }}"
                       data-status="{{ gate.status }}"
@@ -229,7 +204,7 @@
         </div>
     </main>
 
-    {% if diff_view.has_changes and not active_worker and not active_system_workflow %}
+    {% if diff_view.has_changes and not active_worker %}
     <button type="button" class="diff-fab" data-diff-open aria-label="View diff">
         <span>Diff</span>
         <span class="diff-fab-count">{{ diff_view.file_count }}</span>
@@ -285,7 +260,7 @@
     {% endif %}
 
     {# A running turn can change the diff continuously; render it after the stream reloads the completed session. #}
-    {% if diff_view.has_changes and not active_worker and not active_system_workflow %}
+    {% if diff_view.has_changes and not active_worker %}
     <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
         <div class="diff-shell">
             <header class="diff-modal-header">
@@ -338,7 +313,7 @@
     {% endif %}
 
     {% if not read_only %}
-    {% if active_worker or active_system_workflow %}
+    {% if active_worker %}
     <form id="stop-session-form" method="post" action="{{ stop_url }}" data-stop-form>
         {% csrf_token %}
         {% if active_worker %}
@@ -352,7 +327,6 @@
           action="{{ send_message_url }}"
           data-composer
           data-stream-url="{{ stream_url }}"
-          data-workflow-locked="{% if workflow_composer_locked %}true{% else %}false{% endif %}"
           data-plan-mode="{{ default_plan_mode|yesno:'true,false' }}"
           data-initial-plan-mode="{{ default_plan_mode|yesno:'true,false' }}">
         {% csrf_token %}
@@ -361,7 +335,7 @@
         <input type="hidden" name="plan_mode_explicit" value="" data-plan-mode-explicit-input>
         <div class="composer-inner">
             <div class="composer-command" data-slash-command>
-                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="{{ default_plan_mode|yesno:'true,false' }}" data-slash-trigger {% if active_system_workflow %}disabled{% endif %}>/</button>
+                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="{{ default_plan_mode|yesno:'true,false' }}" data-slash-trigger>/</button>
                 <div class="slash-menu" role="menu" data-slash-menu hidden>
                     <button type="button" role="menuitemcheckbox" aria-checked="{{ default_plan_mode|yesno:'true,false' }}" data-slash-plan>
                         <span class="slash-menu-title">Plan mode</span>
@@ -388,15 +362,13 @@
                        name="input_images"
                        accept="{{ input_image_accept }}"
                        multiple
-                       data-image-input
-                       {% if active_system_workflow %}disabled{% endif %}>
+                       data-image-input>
             </label>
             <span class="composer-attachment-summary" data-image-summary hidden></span>
             <button type="button"
                     class="composer-attachment-clear"
                     data-image-clear
-                    hidden
-                    {% if active_system_workflow %}disabled{% endif %}>
+                    hidden>
                 Clear
             </button>
             {% if active_worker %}
@@ -404,14 +376,13 @@
             {% endif %}
             <textarea name="prompt"
                       rows="1"
-                      {% if workflow_composer_locked %}disabled{% endif %}
                       autocomplete="off"
-                      placeholder="{% if workflow_composer_locked %}{{ workflow_composer_label }} is running…{% elif active_worker or workflow_accepts_steering %}Add instructions…{% else %}Send a message…{% endif %}"
-                      aria-label="{% if workflow_composer_locked %}{{ workflow_composer_label }} is running{% elif active_worker or workflow_accepts_steering %}Add instructions{% else %}Send a message{% endif %}"
+                      placeholder="{% if active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
+                      aria-label="{% if active_worker %}Add instructions{% else %}Send a message{% endif %}"
                       data-composer-input></textarea>
-            <button type="submit" data-composer-submit {% if workflow_composer_locked %}disabled{% endif %}>{% if workflow_composer_locked %}Waiting{% elif active_worker or workflow_accepts_steering %}Steer{% else %}Send{% endif %}</button>
-            {% if active_worker or active_system_workflow %}
-            <button type="submit" class="stop" form="stop-session-form" formnovalidate data-composer-stop aria-label="{% if active_system_workflow %}Stop the {{ workflow_composer_label }}{% else %}Stop the running turn{% endif %}">Stop</button>
+            <button type="submit" data-composer-submit>{% if active_worker %}Steer{% else %}Send{% endif %}</button>
+            {% if active_worker %}
+            <button type="submit" class="stop" form="stop-session-form" formnovalidate data-composer-stop aria-label="Stop the running turn">Stop</button>
             {% endif %}
         </div>
     </form>

@@ -33,8 +33,8 @@ from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
 )
+from hitch.main.sessions import agent_tasks, session_index
 from hitch.main.sessions import lifecycle as session_lifecycle
-from hitch.main.sessions import session_index
 from hitch.main.sessions.message_intent import (
     _message_intent,
 )
@@ -87,7 +87,6 @@ from hitch.main.sessions.settings_cookies import (
     _settings_cookie_updates,
 )
 from hitch.main.views import common
-from hitch.main.workflows import pr_qa
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -638,7 +637,7 @@ def _start_candidate_proposal_session(
     plan_mode: bool,
     pr_now_activation: bool,
     qa_activation: bool,
-    qa_workflow_activation: bool,
+    agent_task_activation: bool,
     cwd: str,
     target: _NewSessionTarget,
     settings: SettingsValues,
@@ -671,7 +670,7 @@ def _start_candidate_proposal_session(
         candidate_session.thread_id,
         candidate_session,
     )
-    if qa_workflow_activation:
+    if agent_task_activation:
         claim_response = _claim_candidate_proposal_start(
             proposed_session=proposed_session,
             candidate_session=candidate_session,
@@ -684,42 +683,51 @@ def _start_candidate_proposal_session(
                 proposed_session,
                 candidate_session,
                 settings,
-            ) as lifecycle_lock_held:
-                workflow_kwargs: dict[str, Any] = {
-                    "main_thread_id": candidate_session.thread_id,
+            ):
+                task = (
+                    agent_tasks.publish_pr_task()
+                    if pr_now_activation
+                    else agent_tasks.review_task(
+                        prepare_pull_request=not qa_activation,
+                        pr_title=(
+                            proposed_session.title if not qa_activation else ""
+                        ),
+                    )
+                )
+                if task.requires_pr_watch and not thread_has_dynamic_tool(
+                    candidate_session.thread_id,
+                    namespace="hitch",
+                    name="watch_pr",
+                ):
+                    raise agent_tasks.PrWatchUnavailableError(
+                        "hitch.watch_pr is unavailable for this session; "
+                        "start a new session before publishing a PR"
+                    )
+                task_kwargs: dict[str, Any] = {
+                    "thread_id": candidate_session.thread_id,
                     "cwd": candidate_cwd,
+                    "prompt": task.prompt,
                     "sandbox_policy": sandbox_policy or None,
                     "approval_mode": approval_mode,
                     "model": settings.model or None,
                     "reasoning_effort": settings.reasoning_effort or None,
                     "developer_instructions": developer_instructions or None,
                     "enable_memories": settings.enable_memories,
-                    "initial_user_message_index": (
+                    "user_message_index": (
                         _next_user_message_index_for_candidate_thread(
                             candidate_session.thread_id,
                             settings,
                         )
                     ),
-                    "pr_watch_tool_available": thread_has_dynamic_tool(
-                        candidate_session.thread_id,
-                        namespace="hitch",
-                        name="watch_pr",
-                    ),
+                    "agent_kind": task.agent_kind,
                 }
                 if web_search_mode:
-                    workflow_kwargs["web_search_mode"] = web_search_mode
-                if qa_activation:
-                    workflow_kwargs["open_pr_on_lgtm"] = False
-                if lifecycle_lock_held:
-                    workflow_kwargs["lifecycle_lock_held"] = True
-                if pr_now_activation:
-                    pr_qa.start_pr_now_workflow(**workflow_kwargs)
-                else:
-                    pr_qa.start_pr_qa_workflow(**workflow_kwargs)
+                    task_kwargs["web_search_mode"] = web_search_mode
+                codex_pool.spawn_turn(**task_kwargs)
         except _RecoverySourceBusyError:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             return HttpResponseBadRequest(_RECOVERY_SOURCE_BUSY_MESSAGE)
-        except pr_qa.PrWatchUnavailableError as exc:
+        except agent_tasks.PrWatchUnavailableError as exc:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             return HttpResponseBadRequest(str(exc))
         except Exception:
@@ -1011,9 +1019,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     pr_now_activation = intent.pr_now_activation
     fix_pr_activation = intent.fix_pr_activation
     qa_activation = intent.qa_activation
-    qa_workflow_activation = pr_activation or pr_now_activation or qa_activation or fix_pr_activation
+    agent_task_activation = (
+        pr_activation or pr_now_activation or qa_activation or fix_pr_activation
+    )
     prompt = intent.prompt
-    plan_mode = False if qa_workflow_activation else intent.plan_mode
+    plan_mode = False if agent_task_activation else intent.plan_mode
     has_input_images = common._has_input_image_uploads(request)
     if fix_pr_activation:
         return HttpResponseBadRequest("fix-pr requires an existing session with a PR")
@@ -1108,10 +1118,12 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(web_search_error)
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
-    if qa_workflow_activation and has_input_images:
-        return HttpResponseBadRequest("image attachments are not supported for PR workflow requests")
+    if agent_task_activation and has_input_images:
+        return HttpResponseBadRequest(
+            "image attachments are not supported for review or PR tasks"
+        )
     if (
-        not qa_workflow_activation
+        not agent_task_activation
         and source_project is not None
         and source_project.auto_pull_enabled
         and not (proposed_session is not None and _proposal_resumes_source_session(proposed_session))
@@ -1132,7 +1144,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             plan_mode=plan_mode,
             pr_now_activation=pr_now_activation,
             qa_activation=qa_activation,
-            qa_workflow_activation=qa_workflow_activation,
+            agent_task_activation=agent_task_activation,
             cwd=cwd,
             target=target,
             settings=settings,
@@ -1144,9 +1156,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
 
     session_cwd = cwd
     sandbox_policy = _effective_sandbox_policy_for_cwd(settings, session_cwd)
-    # QA workflows review the selected repo's current diff; a fresh managed
+    # Review tasks inspect the selected repo's current diff; a fresh managed
     # worktree would be clean and miss uncommitted changes.
-    if qa_workflow_activation:
+    if agent_task_activation:
         if proposed_session is not None:
             thread_name = proposed_session.title
         else:
@@ -1190,26 +1202,35 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         else:
             session_auto_pr_enabled = False
             session_auto_qa_enabled = False
-        workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": thread_id,
+        task = (
+            agent_tasks.publish_pr_task()
+            if pr_now_activation
+            else agent_tasks.review_task(
+                prepare_pull_request=not qa_activation,
+                pr_title=(
+                    proposed_session.title
+                    if proposed_session is not None and not qa_activation
+                    else ""
+                ),
+            )
+        )
+        task_kwargs: dict[str, Any] = {
+            "thread_id": thread_id,
             "cwd": session_cwd,
+            "prompt": task.prompt,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": source_developer_instructions or None,
             "enable_memories": settings.enable_memories,
-            "initial_user_message_index": 0,
+            "user_message_index": 0,
+            "agent_kind": task.agent_kind,
         }
         if web_search_mode:
-            workflow_kwargs["web_search_mode"] = web_search_mode
-        if qa_activation:
-            workflow_kwargs["open_pr_on_lgtm"] = False
+            task_kwargs["web_search_mode"] = web_search_mode
         try:
-            if pr_now_activation:
-                pr_qa.start_pr_now_workflow(**workflow_kwargs)
-            else:
-                pr_qa.start_pr_qa_workflow(**workflow_kwargs)
+            codex_pool.spawn_turn(**task_kwargs)
         except Exception:
             if proposal_claimed:
                 assert proposed_session is not None

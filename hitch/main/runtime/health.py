@@ -34,7 +34,6 @@ from hitch.main.runtime import (
     reconciliation,
     server_lifecycle,
 )
-from hitch.main.workflows import system_agents
 from hitch.main.worktrees import discover_managed_worktrees
 
 logger = logging.getLogger(__name__)
@@ -314,11 +313,6 @@ def _stuck_turn_count() -> int:
     ).count()
 
 
-def _stale_blocked_count() -> int:
-    cutoff = timezone.now() - system_agents.STALE_BLOCKED_AGE
-    return len(system_agents.archive_stale_blocked_workflows(older_than=cutoff, apply=False))
-
-
 def _leak_section(*, hitch_disk_metric: HealthMetric | None = None) -> HealthSection:
     disk_metric = hitch_disk_metric if hitch_disk_metric is not None else _hitch_disk_metric()
     return HealthSection(
@@ -359,15 +353,6 @@ def _backlog_section() -> HealthSection:
                 lambda: SystemWorkflow.objects.filter(status=SystemWorkflow.STATUS_BLOCKED).count(),
                 warn_at=1,
                 detail="Workflows halted on an error, awaiting attention.",
-            ),
-            _count_metric(
-                "stale_blocked_workflows",
-                "Stale blocked PR-QA (>7d)",
-                _stale_blocked_count,
-                warn_at=1,
-                detail="Blocked PR-QA workflows older than 7 days. Auto-cleared "
-                "hourly by the workflow maintenance scheduler; run the "
-                "archive_stale_blocked_workflows command to clear them now.",
             ),
             _count_metric(
                 "pending_approvals",

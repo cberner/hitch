@@ -453,6 +453,32 @@ class SessionIndexSyncState(models.Model):
         return f"SessionIndexSyncState(source={self.source})"
 
 
+class SessionPullRequest(models.Model):
+    """Durable PR state registered by a visible session's watch tool."""
+
+    WATCH_OWNER_INSTANCE_STATE_KEY: ClassVar[str] = "watch_owner_instance_id"
+    SUPERSEDED_BY_INSTANCE_STATE_KEY: ClassVar[str] = "superseded_by_instance_id"
+
+    thread_id = models.CharField(max_length=128, unique=True)
+    cwd = models.CharField(max_length=4096)
+    state = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return f"SessionPullRequest(thread_id={self.thread_id})"
+
+    @property
+    def is_current(self) -> bool:
+        superseded_by = self.state.get(self.SUPERSEDED_BY_INSTANCE_STATE_KEY)
+        return not (
+            isinstance(superseded_by, int)
+            and not isinstance(superseded_by, bool)
+            and superseded_by > 0
+        )
+
+
 class RefreshThrottle(models.Model):
     """Central debounce ledger: the last time any path pinged an external resource.
 
@@ -590,7 +616,6 @@ class CodexInstance(models.Model):
 class SystemWorkflow(models.Model):
     """Durable state for Hitch-managed system-agent workflows."""
 
-    KIND_PR_QA = "pr_qa"
     KIND_AUTONOMOUS_GOAL_RUN = "autonomous_goal_run"
 
     STATUS_RUNNING = "running"
@@ -648,22 +673,6 @@ class SystemWorkflow(models.Model):
     def is_active(self) -> bool:
         """Whether this workflow is still running (and thus pins its worktree)."""
         return self.status in SystemWorkflow.ACTIVE_STATUSES
-
-
-class WorkflowSteeringMessage(models.Model):
-    """A user message waiting for its workflow's next safe coding handoff."""
-
-    workflow = models.ForeignKey(
-        SystemWorkflow,
-        on_delete=models.CASCADE,
-        related_name="steering_messages",
-    )
-    prompt = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    @override
-    def __str__(self) -> str:
-        return f"WorkflowSteeringMessage(workflow={self.workflow_id})"
 
 
 class SystemAgentRun(models.Model):

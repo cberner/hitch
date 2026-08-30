@@ -2,6 +2,7 @@
 
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,6 @@ from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
     SessionMetadata,
-    SystemWorkflow,
 )
 from hitch.main.test.support import (
     _seed_cookies,
@@ -499,12 +499,12 @@ class SetSessionArchivedViewTests(TestCase):
         "hitch.main.views.session_actions._stored_rollout_path_for_thread",
         return_value=None,
     )
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_unarchive_retries_auto_review_deferred_by_archive(
         self,
         mock_codex: MagicMock,
-        mock_start: MagicMock,
+        mock_spawn: MagicMock,
         _mock_rollout_path: MagicMock,
     ) -> None:
         SessionMetadata.objects.create(
@@ -522,10 +522,7 @@ class SetSessionArchivedViewTests(TestCase):
             auto_qa_enabled=True,
             approval_mode="auto_review",
         )
-        mock_start.side_effect = [
-            system_agents.WorkflowStartBlockedByArchiveError(),
-            MagicMock(),
-        ]
+        mock_spawn.return_value = MagicMock(spec=CodexInstance, pk=99)
         system_agents.on_codex_instance_finished(instance)
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_qa_triggered_at)
@@ -538,8 +535,8 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         instance.refresh_from_db()
         self.assertIsNotNone(instance.auto_qa_triggered_at)
-        self.assertEqual(mock_start.call_count, 2)
-        self.assertTrue(mock_start.call_args.kwargs["lifecycle_lock_held"])
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["thread_id"], "abc")
         mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
             "abc"
         )
@@ -654,16 +651,19 @@ class SetSessionArchivedViewTests(TestCase):
                         ).exists()
                     )
 
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.common.Codex")
-    def test_archive_conflict_preserves_active_workflow(
-        self, mock_codex: MagicMock
+    def test_archive_conflict_preserves_active_review_turn(
+        self, mock_codex: MagicMock, _mock_worker_alive: MagicMock
     ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
+        instance = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="abc",
             cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            prompt="Review the changes",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind="review_guidance",
         )
         url = reverse("set_session_archived", kwargs={"session_id": "abc"})
 
@@ -677,7 +677,7 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(ajax_response.status_code, 409)
         self.assertContains(
             ajax_response,
-            "Stop the active workflow",
+            "Stop the active turn",
             status_code=409,
         )
         self.assertRedirects(
@@ -685,8 +685,8 @@ class SetSessionArchivedViewTests(TestCase):
             reverse("session", kwargs={"session_id": "abc"}),
             fetch_redirect_response=False,
         )
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
         mock_codex.assert_not_called()
 
     @patch(

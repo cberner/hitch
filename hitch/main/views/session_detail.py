@@ -26,7 +26,6 @@ from hitch.main.sessions.session_entry_display import (
     _active_instance_for,
     _active_stream_owns_turn,
     _apply_system_authors,
-    _apply_workflow_messages,
     _trim_in_progress_turn,
 )
 from hitch.main.sessions.session_resume import (
@@ -35,7 +34,6 @@ from hitch.main.sessions.session_resume import (
     _session_detail_metadata,
 )
 from hitch.main.views import common
-from hitch.main.workflows import system_agents
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -193,7 +191,6 @@ def _rollout_intermediate_entry_for_detail(
     if not _entries_include_transcript(entries):
         raise Http404("session not found")
     entries = _apply_system_authors(entries, session_id)
-    entries = _apply_workflow_messages(entries, session_id)
     if entry_index >= len(entries):
         raise Http404("intermediate entry not found")
     entry = entries[entry_index]
@@ -225,35 +222,21 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     """
     baseline_param = request.GET.get("baseline", "")
     active_param = request.GET.get("active", "")
-    workflow_param = request.GET.get("workflow", "")
-    steering_param = request.GET.get("steering", "")
     active = _active_instance_for(session_id)
-    active_workflow = system_agents.active_workflow_for_thread(
-        session_id,
-        reconcile=False,
-    )
     # Idle clients reconnect frequently to detect state changes. Keep unchanged
     # idle probes read-only; active streams still reconcile before routing so a
-    # dead worker or workflow cannot leave the page stuck in working state.
-    if active is not None or active_workflow is not None:
+    # a dead worker cannot leave the page stuck in working state.
+    if active is not None:
         reconciliation.reconcile_dead_for_thread(session_id)
         reconciliation.reconcile_dead_if_due()
         active = _active_instance_for(session_id)
-        active_workflow = system_agents.active_workflow_for_thread(session_id)
 
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
     current_active_str = str(active.pk) if active is not None else ""
-    current_workflow_str = str(active_workflow.pk) if active_workflow is not None else ""
-    current_steering_revision = streaming.workflow_steering_revision(active_workflow)
-    current_steering_str = (
-        str(current_steering_revision) if active_workflow is not None else ""
-    )
     if (
         baseline_param != current_latest_str
         or active_param != current_active_str
-        or workflow_param != current_workflow_str
-        or steering_param != current_steering_str
     ):
         response = StreamingHttpResponse(
             streaming.reload_stream(), content_type="text/event-stream"
@@ -263,24 +246,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
             streaming.capacity_limited_stream(
                 streaming.stream_for_instance(
                     active,
-                    steering_revision=(
-                        current_steering_revision
-                        if active_workflow is not None
-                        else None
-                    ),
                 ),
-            ),
-            content_type="text/event-stream",
-        )
-    elif active_workflow is not None:
-        response = StreamingHttpResponse(
-            streaming.capacity_limited_stream(
-                streaming.system_workflow_stream(
-                    session_id,
-                    current_latest,
-                    active_workflow.pk,
-                    current_steering_revision,
-                )
             ),
             content_type="text/event-stream",
         )

@@ -16,10 +16,9 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.models import ApprovalRequest, UserInputRequest
 from hitch.main.runtime import codex_pool
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
-from hitch.main.workflows import system_agents
 
 
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
@@ -163,9 +162,8 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
     """Interrupt the in-progress turn for ``session_id``.
 
     The Stop button posts the active worker's id (as ``instance``) so a
-    stale tab can't abort an unrelated worker or workflow. A workflow-owned
-    instance stops its matching workflow as a unit. When the form value is
-    missing (older cached page, direct POST) we fall back to the current work.
+    stale tab can't abort an unrelated worker. When the form value is missing
+    (older cached page, direct POST) we fall back to the current work.
 
     No-ops cleanly when no worker is active so a double-click after the
     turn already finished still lands on the session page rather than 404.
@@ -175,18 +173,7 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
         instance_id, error = _parse_instance_id(raw)
         if error is not None or instance_id is None:
             return HttpResponseBadRequest(error or "invalid instance id")
-        workflow_id = (
-            CodexInstance.objects.filter(pk=instance_id, thread_id=session_id)
-            .values_list("workflow_id", flat=True)
-            .first()
-        )
-        if workflow_id is None or not system_agents.stop_active_workflow(
-            session_id, expected_workflow_id=workflow_id
-        ):
-            codex_pool.interrupt_instance(
-                instance_id, expected_thread_id=session_id
-            )
+        codex_pool.interrupt_instance(instance_id, expected_thread_id=session_id)
     else:
-        if not system_agents.stop_active_workflow(session_id):
-            codex_pool.interrupt_active(session_id)
+        codex_pool.interrupt_active(session_id)
     return redirect("session", session_id=session_id)

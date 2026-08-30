@@ -4,7 +4,6 @@
 import json
 import os
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,12 +25,13 @@ from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
     SessionMetadata,
+    SessionPullRequest,
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, codex_pool
+from hitch.main.runtime import codex_pool
 from hitch.main.runtime import rollout as rollout_module
-from hitch.main.sessions import session_pr_plan
+from hitch.main.sessions import agent_tasks
 from hitch.main.sessions.settings_cookies import SettingsValues
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
@@ -53,7 +53,6 @@ from hitch.main.test.views_helpers import (
     _WEBP_BYTES,
 )
 from hitch.main.views import messages as message_views
-from hitch.main.workflows import system_agents
 
 
 class SendMessageViewTests(TestCase):
@@ -294,45 +293,6 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.common.Codex")
-    def test_queues_message_behind_active_workflow_user_turn(
-        self,
-        mock_codex: MagicMock,
-        _mock_worker_alive: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_USER_STEERING_RUNNING,
-        )
-        CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="user steering",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "also lint"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(workflow.steering_messages.get().prompt, "also lint")
-        mock_steer.assert_not_called()
-        mock_spawn.assert_not_called()
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -439,6 +399,196 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
+    @patch(
+        "hitch.main.views.messages.thread_has_dynamic_tool",
+        return_value=True,
+    )
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_review_and_pr_shortcuts_spawn_ordinary_visible_turns(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_has_watch_tool: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        cases = (
+            ("/qa", agent_tasks.review_task(prepare_pull_request=False)),
+            (_QA_PROMPT, agent_tasks.review_task(prepare_pull_request=False)),
+            ("/pr", agent_tasks.review_task(prepare_pull_request=True)),
+            (_PR_PROMPT, agent_tasks.review_task(prepare_pull_request=True)),
+            ("/PR-NOW", agent_tasks.publish_pr_task()),
+        )
+
+        for prompt, task in cases:
+            with self.subTest(prompt=prompt):
+                self._patch_codex(
+                    mock_codex,
+                    model="gpt-5.4",
+                    reasoning_effort="high",
+                )
+                mock_spawn.reset_mock()
+
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": prompt, "plan_mode": "true"},
+                )
+
+                self.assertEqual(response.status_code, 302)
+                kwargs = mock_spawn.call_args.kwargs
+                self.assertEqual(kwargs["thread_id"], "abc")
+                self.assertEqual(kwargs["cwd"], "/repo")
+                self.assertEqual(kwargs["prompt"], task.prompt)
+                self.assertEqual(kwargs["agent_kind"], task.agent_kind)
+                self.assertEqual(kwargs["model"], "gpt-5.4")
+                self.assertEqual(kwargs["reasoning_effort"], "high")
+                self.assertNotIn("plan_mode", kwargs)
+                self.assertNotIn("workflow_id", kwargs)
+                self.assertFalse(
+                    SystemWorkflow.objects.filter(main_thread_id="abc").exists()
+                )
+
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_review_and_pr_shortcuts_reject_image_uploads_before_side_effects(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        for prompt in ("/pr", "/pr-now", "/qa", "/fix-pr"):
+            with self.subTest(prompt=prompt):
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={
+                        "prompt": prompt,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+                self.assertContains(
+                    response,
+                    "image attachments are not supported for review or PR tasks",
+                    status_code=400,
+                )
+                mock_spawn.assert_not_called()
+                mock_codex.assert_not_called()
+
+    @patch(
+        "hitch.main.views.messages.thread_has_dynamic_tool",
+        return_value=True,
+    )
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_fix_pr_uses_registered_session_pr(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_has_watch_tool: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/594"
+        SessionPullRequest.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 594,
+                    "state": "open",
+                }
+            },
+        )
+        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["agent_kind"], agent_tasks.PR_WATCH_AGENT_KIND)
+        self.assertIn(pr_url, kwargs["prompt"])
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_fix_pr_requires_registered_pr(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertContains(
+            response,
+            "fix-pr requires an opened PR for this session",
+            status_code=400,
+        )
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_qa_shortcut_forwards_web_search_setting(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "cached"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["web_search_mode"], "cached")
+        self.assertEqual(kwargs["agent_kind"], agent_tasks.REVIEW_AGENT_KIND)
+
+    @patch(
+        "hitch.main.views.messages.thread_has_dynamic_tool",
+        return_value=False,
+    )
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_pr_shortcut_requires_watch_tool(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_has_watch_tool: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/pr"},
+        )
+
+        self.assertContains(response, "hitch.watch_pr is unavailable", status_code=400)
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
@@ -476,62 +626,6 @@ class SendMessageViewTests(TestCase):
             ),
         )
 
-    @patch("hitch.main.workflows.pr_qa._spawn_pr_prompt")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_qa_follow_up_owns_unarchive_through_workflow_start(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_spawn_review_prompt: MagicMock,
-    ) -> None:
-        rollout_path = self._make_rollout(
-            [
-                _rollout_line(
-                    "event_msg", {"type": "user_message", "message": "Implement it"}
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Done."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ]
-        )
-        metadata = SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_archived=True,
-            codex_archived_at=timezone.now(),
-        )
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/qa"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        workflow = SystemWorkflow.objects.get(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-        )
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
-        mock_spawn_review_prompt.assert_called_once_with(
-            workflow, lifecycle_lock_held=True
-        )
-        mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
-            "abc"
-        )
-        metadata.refresh_from_db()
-        self.assertFalse(metadata.codex_archived)
-        self.assertIsNone(metadata.codex_archived_at)
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
@@ -916,35 +1010,6 @@ class SendMessageViewTests(TestCase):
             mock_codex.assert_not_called()
             self.assertFalse((Path(raw) / "attachments").exists())
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_send_message_rejects_workflow_image_uploads_before_side_effects(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        for prompt in ("/pr", "/pr-now", "/qa", "/fix-pr"):
-            with self.subTest(prompt=prompt):
-                response = self.client.post(
-                    reverse("send_message", kwargs={"session_id": "abc"}),
-                    data={
-                        "prompt": prompt,
-                        "input_images": SimpleUploadedFile(
-                            "screen.png", _PNG_BYTES, content_type="image/png"
-                        ),
-                    },
-                )
-
-                self.assertContains(
-                    response,
-                    "image attachments are not supported for PR workflow requests",
-                    status_code=400,
-                )
-                mock_start_workflow.assert_not_called()
-                mock_spawn.assert_not_called()
-                mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -1339,505 +1404,15 @@ class SendMessageViewTests(TestCase):
             plan_mode=True,
         )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_pr_qa_activation_routes_to_workflow_matrix(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        cases: list[
-            tuple[str, dict[str, str], str | None, str | None, dict[str, Any]]
-        ] = [
-            ("pr slash", {"prompt": "/pr"}, None, None, {}),
-            (
-                "qa slash ignores posted plan mode",
-                {"prompt": "/qa", "plan_mode": "true"},
-                None,
-                "high",
-                {"open_pr_on_lgtm": False},
-            ),
-            (
-                "qa menu",
-                {"prompt": _QA_PROMPT},
-                None,
-                None,
-                {"open_pr_on_lgtm": False},
-            ),
-            (
-                "pr slash after pending plan",
-                {"prompt": "/pr", "plan_mode": "true"},
-                "pending",
-                None,
-                {"initial_user_message_index": 1},
-            ),
-            (
-                "pr menu after pending plan",
-                {"prompt": _PR_PROMPT},
-                "pending",
-                None,
-                {"initial_user_message_index": 1},
-            ),
-        ]
 
-        for label, data, rollout, reasoning_effort, expected in cases:
-            with self.subTest(label=label):
-                rollout_path = None
-                if rollout == "pending":
-                    rollout_path = str(self._make_pending_plan_rollout())
-                else:
-                    self.assertIsNone(rollout)
-                self._patch_codex(
-                    mock_codex,
-                    model="gpt-5.4",
-                    reasoning_effort=reasoning_effort,
-                    path=rollout_path,
-                )
-                mock_start_workflow.reset_mock()
 
-                response = self.client.post(
-                    reverse("send_message", kwargs={"session_id": "abc"}),
-                    data=data,
-                )
 
-                self.assertEqual(response.status_code, 302)
-                workflow_kwargs: dict[str, Any] = {
-                    "main_thread_id": "abc",
-                    "cwd": "/repo",
-                    "sandbox_policy": None,
-                    "approval_mode": "auto_review",
-                    "model": "gpt-5.4",
-                    "reasoning_effort": reasoning_effort,
-                    "developer_instructions": None,
-                    "enable_memories": False,
-                    "initial_user_message_index": 0,
-                    "pr_watch_tool_available": False,
-                    "lifecycle_lock_held": True,
-                }
-                workflow_kwargs.update(expected)
-                mock_start_workflow.assert_called_once_with(**workflow_kwargs)
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.workflows.pr_qa.start_pr_now_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_pr_now_slash_skips_qa_workflow_entry_point(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_pr_now: MagicMock,
-        mock_start_pr_qa: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/PR-NOW", "plan_mode": "true"},
-        )
 
-        self.assertEqual(response.status_code, 302)
-        mock_start_pr_qa.assert_not_called()
-        mock_start_pr_now.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-            pr_watch_tool_available=False,
-            lifecycle_lock_held=True,
-        )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_fix_pr_slash_keeps_handoff_after_workflow_owned_failure_activity(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_monitor: MagicMock,
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/594"
-        rollout_path = self._make_rollout(
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Ready."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ]
-        )
-        workflow_updated_at = datetime.now(UTC) - timedelta(minutes=1)
-        failure_ended_at = workflow_updated_at + timedelta(milliseconds=25)
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_created_at=workflow_updated_at - timedelta(minutes=10),
-            codex_updated_at=failure_ended_at,
-        )
-        handoff = {
-            "url": pr_url,
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 594,
-            "state": "open",
-        }
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=workflow_updated_at
-        )
-        failure = CodexInstance.objects.create(
-            pid=0,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="Hitch PR workflow could not complete.",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_FAILED,
-            ended_at=failure_ended_at,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-            model="gpt-5.4",
-            reasoning_effort="high",
-        )
-        CodexInstance.objects.filter(pk=failure.pk).update(
-            started_at=workflow_updated_at + timedelta(milliseconds=1)
-        )
-        mock_discover.return_value = [Path("/repo")]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/fix-pr"},
-        )
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(mock_start_monitor.call_args.kwargs["pr_url"], pr_url)
-        mock_codex.assert_not_called()
-
-    def test_workflow_activity_ownership_uses_bounded_batch_query(
-        self,
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/594"
-        workflow_updated_at = datetime.now(UTC) - timedelta(minutes=1)
-        main_updated_at = workflow_updated_at + timedelta(seconds=1)
-        handoff = {
-            "url": pr_url,
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 594,
-        }
-        owned_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="owned",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
-        )
-        unrelated_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="unrelated",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
-        )
-        extra_workflows = SystemWorkflow.objects.bulk_create(
-            [
-                SystemWorkflow(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id=f"extra-{index}",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_BLOCKED,
-                    step=system_agents.STEP_BLOCKED,
-                    state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
-                )
-                for index in range(1_000)
-            ]
-        )
-        assert owned_workflow.pk is not None
-        assert unrelated_workflow.pk is not None
-        assert extra_workflows[-1].pk is not None
-        workflows = [owned_workflow, unrelated_workflow, *extra_workflows]
-        SystemWorkflow.objects.all().update(
-            updated_at=workflow_updated_at,
-        )
-        for workflow in workflows:
-            workflow.updated_at = workflow_updated_at
-        owned_instance = CodexInstance.objects.create(
-            pid=0,
-            thread_id="owned",
-            cwd="/repo",
-            prompt="Hitch PR workflow could not complete.",
-            events_path="/tmp/owned-events.jsonl",
-            status=CodexInstance.STATUS_FAILED,
-            ended_at=main_updated_at,
-            workflow_id=owned_workflow.pk,
-        )
-        unrelated_instance = CodexInstance.objects.create(
-            pid=0,
-            thread_id="unrelated",
-            cwd="/repo",
-            prompt="Do unrelated work",
-            events_path="/tmp/unrelated-events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            ended_at=main_updated_at,
-        )
-        CodexInstance.objects.filter(
-            pk__in=[owned_instance.pk, unrelated_instance.pk]
-        ).update(
-            started_at=workflow_updated_at + timedelta(milliseconds=1)
-        )
-
-        with self.assertNumQueries(1):
-            activity_ownership = session_pr_plan._workflow_activity_ownership_by_id(
-                [(workflow, main_updated_at) for workflow in workflows]
-            )
-
-        self.assertTrue(activity_ownership[owned_workflow.pk])
-        self.assertFalse(activity_ownership[unrelated_workflow.pk])
-        self.assertFalse(activity_ownership[extra_workflows[-1].pk])
-        owned_current = session_pr_plan._workflow_after_main_lifecycle(
-            owned_workflow,
-            codex_events.PrObservationResult(snapshot=handoff),
-            main_updated_at=main_updated_at,
-            newer_main_activity_owned=activity_ownership[owned_workflow.pk],
-        )
-        current = session_pr_plan._workflow_after_main_lifecycle(
-            unrelated_workflow,
-            codex_events.PrObservationResult(
-                snapshot=None,
-                superseded_by_lifecycle=True,
-            ),
-            main_updated_at=main_updated_at,
-            newer_main_activity_owned=activity_ownership[unrelated_workflow.pk],
-        )
-
-        self.assertEqual(owned_current, owned_workflow)
-        self.assertIsNone(current)
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_watch_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_fix_pr_slash_requires_opened_pr(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_monitor: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/fix-pr"},
-        )
-
-        self.assertContains(
-            response,
-            "fix-pr requires an opened PR for this session",
-            status_code=400,
-        )
-        mock_start_monitor.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_qa_slash_command_forwards_web_search_setting(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
-        mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "cached"})
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/qa"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        kwargs = mock_start_workflow.call_args.kwargs
-        self.assertEqual(kwargs["web_search_mode"], "cached")
-        self.assertFalse(kwargs["open_pr_on_lgtm"])
-
-    @patch("hitch.main.workflows.pr_qa._handle_pr_prompt_finished")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_terminal_pr_prompt_queues_steering_before_reconciliation(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_pr_prompt_finished: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "next_user_message_index": 1,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
-                    system_agents.STEP_PR_PROMPT_RUNNING
-                ),
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 0,
-            },
-        )
-        CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="prepare the pull request",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            user_message_index=0,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "also update docs"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            list(workflow.steering_messages.values_list("prompt", flat=True)),
-            ["also update docs"],
-        )
-        mock_pr_prompt_finished.assert_not_called()
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
-    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_workflow_finishing_during_enqueue_preserves_follow_up(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        _mock_discover: MagicMock,
-        mock_enqueue_steering: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        def finish_before_claim(*_args: object, **_kwargs: object) -> bool:
-            SystemWorkflow.objects.filter(pk=workflow.pk).update(
-                status=SystemWorkflow.STATUS_COMPLETED,
-                step=system_agents.STEP_REVIEW_COMPLETED,
-            )
-            return False
-
-        mock_enqueue_steering.side_effect = finish_before_claim
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "please also do this"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self._assert_follow_up_spawn(mock_spawn, prompt="please also do this")
-
-    @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_workflow_steering_rejects_unrelated_posted_worker(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_enqueue_steering: MagicMock,
-    ) -> None:
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_WATCH_RUNNING,
-        )
-        unrelated = CodexInstance.objects.create(
-            pid=1,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="old ordinary turn",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_USER,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={
-                "prompt": "stale tab message",
-                "active_instance": str(unrelated.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertContains(
-            response,
-            "submitted worker does not belong to the active PR workflow",
-            status_code=400,
-        )
-        mock_enqueue_steering.assert_not_called()
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.views.common.Codex")
-    def test_duplicate_pr_command_during_running_workflow_redirects(
-        self, mock_codex: MagicMock, mock_start_workflow: MagicMock
-    ) -> None:
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/pr"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        mock_codex.assert_not_called()
-        mock_start_workflow.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -1939,8 +1514,8 @@ class SendMessageViewTests(TestCase):
             (
                 {"prompt": "/pr", "collaboration_mode": "default"},
                 "/repo",
-                "PR workflow conflicts with collaboration",
-                "PR workflow conflicts with collaboration mode",
+                "PR task conflicts with collaboration",
+                "review and PR tasks conflict with collaboration mode",
                 False,
             ),
             ({"prompt": "hi"}, None, "thread without cwd", "thread has no cwd", True),
@@ -1994,76 +1569,20 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa._handle_pr_prompt_finished")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.runtime.codex_pool.interrupt_instance")
-    def test_targeted_stop_blocks_terminal_pr_turn_before_reconciliation(
-        self,
-        mock_interrupt_instance: MagicMock,
-        _mock_spawn: MagicMock,
-        mock_pr_prompt_finished: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "next_user_message_index": 1,
-                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
-                    system_agents.STEP_PR_PROMPT_RUNNING
-                ),
-                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 0,
-            },
-        )
-        instance = CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="prepare the pull request",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            user_message_index=0,
-        )
-
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"}),
-            data={"instance": str(instance.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        mock_pr_prompt_finished.assert_not_called()
-        mock_interrupt_instance.assert_not_called()
-
-    @patch(
-        "hitch.main.workflows.system_agents.stop_active_workflow",
-        wraps=system_agents.stop_active_workflow,
-    )
     @patch("hitch.main.runtime.codex_pool.interrupt_instance")
     @patch("hitch.main.runtime.codex_pool.interrupt_active")
     def test_falls_back_to_latest_active_without_instance(
         self,
         mock_interrupt_active: MagicMock,
         mock_interrupt_instance: MagicMock,
-        mock_stop_workflow: MagicMock,
     ) -> None:
-        # Older cached page (or a direct curl POST) won't carry the
-        # instance field; fall back to "latest active worker for this
-        # thread" so the stop click still has a chance to do something.
-        # ``None`` models a double-click after the worker already finished;
-        # the view should still redirect instead of surfacing an error.
         mock_interrupt_active.return_value = None
+
         response = self.client.post(
             reverse("stop_session", kwargs={"session_id": "abc"})
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_stop_workflow.assert_called_once_with("abc")
         mock_interrupt_active.assert_called_once_with("abc")
         mock_interrupt_instance.assert_not_called()
 

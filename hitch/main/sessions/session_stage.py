@@ -6,9 +6,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.models import CodexInstance
 from hitch.main.runtime import rollout
-from hitch.main.workflows import system_agents
+from hitch.main.sessions import agent_tasks
 
 
 @dataclass(frozen=True)
@@ -48,64 +48,39 @@ _LEGACY_STAGES_BY_KEY = {
     "waiting_for_user": AWAITING_INPUT,
 }
 
-_STAGE_BY_WORKFLOW_STEP = {
-    system_agents.STEP_REVIEW_COMPLETED: QA,
-    system_agents.STEP_USER_STEERING_RUNNING: IMPLEMENTATION,
-    system_agents.STEP_PR_PROMPT_SPAWNED: PR,
-    system_agents.STEP_PR_PROMPT_RUNNING: PR,
-    system_agents.STEP_PR_WATCH_RUNNING: PR,
-    system_agents.STEP_PR_WATCH_COMPLETED: PR,
-    system_agents.STEP_PR_READY: PR,
-    system_agents.STEP_PR_CLOSED: PR,
-    system_agents.STEP_BLOCKED: BLOCKED,
-}
-_BLOCKED_WORKFLOW_STATUSES = (
-    SystemWorkflow.STATUS_BLOCKED,
-    SystemWorkflow.STATUS_FAILED,
-    SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
-)
-
-
 def derive_stage(
     *,
     entries: Iterable[Mapping[str, Any]] = (),
     active_instance: CodexInstance | None = None,
-    workflow: SystemWorkflow | None = None,
     awaiting_user_input: bool = False,
     pr_snapshot: Mapping[str, Any] | None = None,
-    workflow_pr_snapshot: Mapping[str, Any] | None = None,
+    registered_pr_snapshot: Mapping[str, Any] | None = None,
 ) -> SessionStage:
-    """Return the current stage after callers select the current lifecycle owner."""
+    """Return the current stage from ordinary turns and durable PR state."""
     selected_pr = _select_pr_snapshot(
         log_pr_snapshot=pr_snapshot,
-        workflow_pr_snapshot=workflow_pr_snapshot,
+        registered_pr_snapshot=registered_pr_snapshot,
     )
 
     if awaiting_user_input:
         return AWAITING_INPUT
 
-    if workflow is not None and workflow.is_active:
-        running_pr_snapshot = (
-            selected_pr
-            if _has_pr_identity(workflow_pr_snapshot)
-            else workflow_pr_snapshot
-        )
-        if running_stage := _running_workflow_stage(workflow, running_pr_snapshot):
-            return running_stage
-        return IMPLEMENTATION
-
     if active_instance is not None:
+        task_stage = agent_tasks.stage_for_agent_kind(active_instance.agent_kind)
+        if task_stage == "qa":
+            return QA
+        if task_stage == "pr":
+            return PR
         return PLAN if active_instance.plan_mode else IMPLEMENTATION
 
     if terminal_stage := _terminal_pr_stage(selected_pr):
         return terminal_stage
 
-    if workflow_stage := _workflow_stage(workflow, workflow_pr_snapshot):
-        return workflow_stage
-
     entries_list = list(entries)
     if _has_pr_identity(selected_pr):
         return PR
+    if _latest_agent_task_stage(entries_list) == "qa":
+        return QA
     if _entries_are_waiting_on_plan(entries_list):
         return PLAN
     if _has_session_activity(entries_list):
@@ -116,12 +91,12 @@ def derive_stage(
 def merge_pr_snapshots(
     *,
     log_pr_snapshot: Mapping[str, Any] | None,
-    workflow_pr_snapshot: Mapping[str, Any] | None,
+    registered_pr_snapshot: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     return dict(
         _select_pr_snapshot(
             log_pr_snapshot=log_pr_snapshot,
-            workflow_pr_snapshot=workflow_pr_snapshot,
+            registered_pr_snapshot=registered_pr_snapshot,
         )
         or {}
     )
@@ -131,61 +106,31 @@ def stage_for_key(key: str) -> SessionStage | None:
     return _STAGES_BY_KEY.get(key) or _LEGACY_STAGES_BY_KEY.get(key)
 
 
-def _running_workflow_stage(
-    workflow: SystemWorkflow, pr_snapshot: Mapping[str, Any] | None
-) -> SessionStage | None:
-    if workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return None
-    if terminal_stage := _terminal_pr_stage(pr_snapshot):
-        return terminal_stage
-    return _stage_for_workflow(workflow)
-
-
-def _workflow_stage(
-    workflow: SystemWorkflow | None, pr_snapshot: Mapping[str, Any] | None
-) -> SessionStage | None:
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return None
-    if workflow.status in _BLOCKED_WORKFLOW_STATUSES:
-        return BLOCKED
-    if terminal_stage := _terminal_pr_stage(pr_snapshot):
-        return terminal_stage
-    if step_stage := _stage_for_workflow(workflow):
-        return step_stage
-    if _has_pr_identity(pr_snapshot):
-        return PR
-    return None
-
-
-def _stage_for_workflow_step(step: str) -> SessionStage | None:
-    return _STAGE_BY_WORKFLOW_STEP.get(step)
-
-
-def _stage_for_workflow(workflow: SystemWorkflow) -> SessionStage | None:
-    if (
-        workflow.step == system_agents.STEP_PR_PROMPT_RUNNING
-        and system_agents.is_review_guidance_only_workflow(workflow)
-    ):
-        return QA
-    return _stage_for_workflow_step(workflow.step)
-
-
 def _select_pr_snapshot(
     *,
     log_pr_snapshot: Mapping[str, Any] | None,
-    workflow_pr_snapshot: Mapping[str, Any] | None,
+    registered_pr_snapshot: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
     if not log_pr_snapshot:
-        return workflow_pr_snapshot
-    if not workflow_pr_snapshot:
+        return registered_pr_snapshot
+    if not registered_pr_snapshot:
         return log_pr_snapshot
-    if _same_pr_identity(log_pr_snapshot, workflow_pr_snapshot):
-        if _terminal_pr_stage(workflow_pr_snapshot):
-            return {**log_pr_snapshot, **workflow_pr_snapshot}
-        return {**workflow_pr_snapshot, **log_pr_snapshot}
-    if _has_pr_identity(workflow_pr_snapshot):
-        return workflow_pr_snapshot
+    if _same_pr_identity(log_pr_snapshot, registered_pr_snapshot):
+        if _terminal_pr_stage(registered_pr_snapshot):
+            return {**log_pr_snapshot, **registered_pr_snapshot}
+        return {**registered_pr_snapshot, **log_pr_snapshot}
+    if _has_pr_identity(registered_pr_snapshot):
+        return registered_pr_snapshot
     return log_pr_snapshot
+
+
+def _latest_agent_task_stage(entries: list[Mapping[str, Any]]) -> str:
+    for entry in reversed(entries):
+        if entry.get("kind") != "user":
+            continue
+        text = entry.get("text")
+        return agent_tasks.stage_for_agent_prompt(text if isinstance(text, str) else "")
+    return ""
 
 
 def _terminal_pr_stage(snapshot: Mapping[str, Any] | None) -> SessionStage | None:

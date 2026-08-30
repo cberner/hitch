@@ -548,7 +548,7 @@ def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
 def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
 
-    The worker fires the auto-review workflow from ``_notify_system_agents``
+    The worker fires the auto-review follow-up from ``_notify_system_agents``
     *after* committing the terminal status, claiming ``auto_pr_triggered_at`` /
     ``auto_qa_triggered_at`` as it does. A reaped COMPLETED user turn with the
     automation enabled but neither field set was killed before it could fire --
@@ -591,7 +591,7 @@ def _finalize_reaped_instance(instance_id: int) -> None:
 
     Things the killed worker never got to handle itself:
 
-    * finish routing: a terminal system-agent (or workflow-owned user) turn
+    * finish routing: a terminal system-agent turn
       relies on ``_notify_system_agents_if_needed`` to route its post-terminal
       hooks, the same idempotent callback ``_mark_dead_instances_failed`` runs for
       rows that died after saving terminal status; without it the
@@ -628,7 +628,7 @@ def _finalize_reaped_instance(instance_id: int) -> None:
         ).update(
             status=CodexInstance.STATUS_FAILED,
             error=(
-                f"This turn finished, but its {automation} workflow could not "
+                f"This turn finished, but its {automation} follow-up could not "
                 "start because the worker had to be terminated while holding the "
                 "Codex database lock. Send the message again to retry."
             ),

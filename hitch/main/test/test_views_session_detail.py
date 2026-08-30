@@ -20,7 +20,7 @@ from openai_codex.errors import InternalRpcError, InvalidRequestError
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
-    SystemWorkflow,
+    SessionPullRequest,
 )
 from hitch.main.runtime import rollout as rollout_module
 from hitch.main.runtime import streaming
@@ -30,6 +30,7 @@ from hitch.main.sessions import (
     session_pr_plan,
     session_resume,
 )
+from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.test.support import (
     _rollout_line,
     _seed_cookies,
@@ -44,7 +45,6 @@ from hitch.main.test.views_helpers import (
     _write_codex_home_rollout,
 )
 from hitch.main.views import common as common_views
-from hitch.main.workflows import system_agents
 
 
 class SessionDetailFastPathTests(TestCase):
@@ -426,38 +426,6 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(older, "Canonical final")
         mock_codex.assert_not_called()
 
-    def test_pr_workflow_auto_pull_result_surfaces_without_review_result(
-        self,
-    ) -> None:
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="pr-monitor-auto-pull",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_CLOSED,
-            state={
-                system_agents.AUTO_PULL_RESULT_STATE_KEY: {
-                    "status": "pulled",
-                    "branch": "main",
-                    "before_sha": "a" * 40,
-                    "after_sha": "b" * 40,
-                    "changed": True,
-                },
-            },
-        )
-
-        entries = session_entry_display._apply_workflow_messages(
-            [{"kind": "user", "text": "Fix PR"}],
-            "pr-monitor-auto-pull",
-        )
-
-        self.assertEqual(
-            entries[-1]["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
-        )
-        self.assertIn(
-            "Auto-pull: pulled origin/main into the default repo.",
-            entries[-1]["text"],
-        )
 
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.caches._start_models_refresh_thread")
@@ -615,42 +583,6 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "Archived rollout answer")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_session_detail_uses_rollout_while_workflow_is_active(
-        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
-    ) -> None:
-        rollout_path = _make_rollout(
-            self,
-            _basic_session_rollout_lines(
-                "Archived during QA", "Keep the archived transcript visible"
-            ),
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        SessionMetadata.objects.create(
-            thread_id="archived-during-workflow",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_preview="Archived during QA",
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_archived=True,
-        )
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="archived-during-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-        )
-
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "archived-during-workflow"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Archived during QA")
-        self.assertContains(response, "Keep the archived transcript visible")
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -1010,7 +942,7 @@ class SessionDetailFastPathTests(TestCase):
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -1127,7 +1059,7 @@ class SessionDetailFastPathTests(TestCase):
             ),
         )
 
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
+    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
@@ -1165,18 +1097,20 @@ class SessionDetailFastPathTests(TestCase):
             codex_created_at=now,
             codex_updated_at=now,
         )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="ready-pr-merged-detail",
+        registered_pr = SessionPullRequest.objects.create(
+            thread_id="ready-pr-merged-detail",
             cwd=str(rollout_path.parent),
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
             state={
                 "pr_handoff": {
                     "url": pr_url,
                     "repository_full_name": "cberner/hitch",
                     "pr_number": 344,
                     "state": "open",
+                },
+                "hitch_pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 344,
                 },
             },
         )
@@ -1191,7 +1125,7 @@ class SessionDetailFastPathTests(TestCase):
 
         # First load serves the last-known (open) PR stage with the refreshing
         # highlight and runs the gh refresh off-request (synchronous under
-        # TESTING), which persists the terminal stage onto the workflow.
+        # TESTING), which persists the terminal state onto the registered PR.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
         )
@@ -1201,9 +1135,8 @@ class SessionDetailFastPathTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
         )
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
-        self.assertTrue(workflow.state["pr_handoff"]["merged"])
+        registered_pr.refresh_from_db()
+        self.assertTrue(registered_pr.state["pr_handoff"]["merged"])
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
 
@@ -1217,7 +1150,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
+    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
     def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
@@ -1232,7 +1165,7 @@ class SessionDetailFastPathTests(TestCase):
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -1354,155 +1287,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_ignores_stale_completed_pr_workflow(
-        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
-    ) -> None:
-        pr_url = "https://github.com/cberner/hitch/pull/98"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_fetch_pr",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps(
-                            {"url": pr_url, "state": "closed", "merged": False}
-                        ),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Closed."}],
-                        "phase": "final_answer",
-                    },
-                ),
-                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Implemented."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        metadata = SessionMetadata.objects.create(
-            thread_id="stale-workflow-detail",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_name="Stale workflow detail",
-            codex_preview="Next",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="stale-workflow-detail",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-            state={
-                "pr_handoff": {"url": pr_url, "state": "closed", "merged": False}
-            },
-        )
 
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "stale-workflow-detail"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
-        )
-        self.assertNotContains(response, "Done: Closed")
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "implementation")
-        mock_codex.assert_not_called()
-
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_ignores_workflow_only_stale_pr_handoff(
-        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
-    ) -> None:
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Implemented."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        metadata = SessionMetadata.objects.create(
-            thread_id="workflow-only-stale-detail",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_name="Workflow-only stale detail",
-            codex_preview="Next",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="workflow-only-stale-detail",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-            state={
-                "pr_handoff": {
-                    "url": "https://github.com/cberner/hitch/pull/99",
-                    "state": "closed",
-                    "merged": False,
-                }
-            },
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
-            updated_at=now - timedelta(minutes=5)
-        )
-
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "workflow-only-stale-detail"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
-        )
-        self.assertNotContains(response, "Done: Closed")
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "implementation")
-        mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -1515,7 +1300,7 @@ class SessionDetailFastPathTests(TestCase):
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -1537,13 +1322,12 @@ class SessionDetailFastPathTests(TestCase):
             codex_preview="Open a PR",
             codex_created_at=now,
             codex_updated_at=now,
+            derived_stage="done_closed",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
         )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="server-created-pr-detail",
+        registered_pr = SessionPullRequest.objects.create(
+            thread_id="server-created-pr-detail",
             cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
             state={
                 "pr_handoff": {
                     "url": pr_url,
@@ -1559,7 +1343,7 @@ class SessionDetailFastPathTests(TestCase):
                 },
             },
         )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+        SessionPullRequest.objects.filter(pk=registered_pr.pk).update(
             updated_at=now + timedelta(minutes=1)
         )
 
@@ -1574,7 +1358,121 @@ class SessionDetailFastPathTests(TestCase):
             '<span class="stage-badge" data-tone="active">PR</span>',
         )
         metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "")
+        self.assertEqual(metadata.derived_stage, "pr")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_new_publication_hides_previous_pr_progress_until_registration(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        _worker_is_alive: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/100"
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Continue implementation", "Done."),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="replacement-pr-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Replacement PR detail",
+            codex_preview="Publish the replacement",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        SessionPullRequest.objects.create(
+            thread_id="replacement-pr-detail",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                    "state": "open",
+                },
+                "pr_gates": [
+                    {
+                        "key": "ci",
+                        "label": "Old CI",
+                        "status": "blocked",
+                        "summary": "Old failure",
+                    }
+                ],
+            },
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="replacement-pr-detail",
+            cwd="/repo",
+            prompt="Publish a new PR",
+            events_path="/tmp/replacement-pr-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind="pr_publish",
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "replacement-pr-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["pr_watch_progress"], [])
+        self.assertNotContains(response, f'href="{pr_url}"')
+        self.assertNotContains(response, "Old CI")
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_session_detail_does_not_resurrect_superseded_pr(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/100"
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Continue implementation", "Done."),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="superseded-pr-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Superseded PR detail",
+            codex_preview="Continue implementation",
+            codex_created_at=now,
+            codex_updated_at=now,
+            derived_stage="done_closed",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        SessionPullRequest.objects.create(
+            thread_id="superseded-pr-detail",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                    "state": "closed",
+                },
+                SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY: 9,
+            },
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "superseded-pr-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, f'href="{pr_url}"')
+        self.assertNotContains(response, "Done: Closed")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
@@ -1765,7 +1663,7 @@ class SessionDetailFastPathTests(TestCase):
                 *_basic_session_rollout_lines("Previous prompt", "Previous answer"),
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -1876,7 +1774,6 @@ class PendingSessionResumeTests(SimpleTestCase):
                 "pending-rollout",
                 metadata,
                 active_instance=None,
-                active_system_workflow=None,
             )
         )
 
@@ -1892,31 +1789,8 @@ class PendingSessionResumeTests(SimpleTestCase):
                 "pending-rollout",
                 metadata,
                 active_instance=active_instance,
-                active_system_workflow=None,
             )
         )
-
-    def test_uses_active_workflow_without_instance(self) -> None:
-        workflow = SystemWorkflow(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="pending-rollout",
-            cwd="/workflow",
-        )
-
-        resumed = session_resume._pending_resume_for_active_session(
-            "pending-rollout",
-            None,
-            active_instance=None,
-            active_system_workflow=workflow,
-        )
-
-        self.assertIsNotNone(resumed)
-        assert resumed is not None
-        self.assertEqual(resumed.thread.cwd, "/workflow")
-        self.assertEqual(resumed.thread.preview, "")
-        self.assertIsNone(resumed.thread.updated_at)
-        self.assertEqual(resumed.model, "")
-        self.assertEqual(resumed.reasoning_effort, "")
 
     def test_uses_active_instance_fallback_metadata(self) -> None:
         started_at = datetime(2025, 1, 5, tzinfo=UTC)
@@ -1940,7 +1814,6 @@ class PendingSessionResumeTests(SimpleTestCase):
             "pending-rollout",
             metadata,
             active_instance=active_instance,
-            active_system_workflow=None,
         )
 
         self.assertIsNotNone(resumed)
@@ -2248,80 +2121,9 @@ class SessionStreamViewTests(TestCase):
         reconcile_global.assert_not_called()
         reconcile_workflow.assert_not_called()
 
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_returns_working_heartbeat_stream_for_active_system_workflow(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "pr_gates": [
-                    {
-                        "key": "ci",
-                        "label": "CI",
-                        "status": "pending",
-                        "summary": "CI is still running.",
-                    }
-                ]
-            },
-        )
-
-        response = self.client.get(
-            self._stream_url("thread-workflow", workflow=str(workflow.pk))
-        )
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"event: heartbeat", body)
-        self.assertIn(b'"working": true', body)
-        self.assertIn(b'"prWorkflowProgress"', body)
-        self.assertIn(b'"label": "CI"', body)
-        self.assertIn(b'"statusLabel": "Pending"', body)
-
-    def test_reloads_when_steering_revision_changed_after_render(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY: 1},
-        )
-
-        response = self.client.get(
-            self._stream_url(
-                "thread-workflow",
-                workflow=str(workflow.pk),
-                steering="0",
-            )
-        )
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertIn(b'"status": "stale"', body)
 
 
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_system_workflow_heartbeat_clears_empty_pr_progress(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow-empty-progress",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
 
-        response = self.client.get(
-            self._stream_url(
-                "thread-workflow-empty-progress", workflow=str(workflow.pk)
-            )
-        )
-        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-        self.assertIn(b'"prWorkflowProgress": []', body)
 
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_forwards_worker_events_through_view(self) -> None:

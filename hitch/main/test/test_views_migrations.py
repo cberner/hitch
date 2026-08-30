@@ -17,6 +17,7 @@ from django.test import (
     SimpleTestCase,
     TransactionTestCase,
 )
+from django.utils import timezone
 
 
 class ResetStaleStageCacheMigrationTests(TransactionTestCase):
@@ -1097,3 +1098,220 @@ class LocalBranchMergeRemovalMigrationTests(TransactionTestCase):
         migrated_workflow = SystemWorkflow.objects.get(pk=workflow.pk)
         self.assertEqual(migrated_workflow.state, {"keep": "value"})
         self.assertEqual(migrated_workflow.step, "review_completed")
+
+
+class PrQaWrapperRemovalMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0071_remove_hitch_pr_publication_claim")]
+    migrate_to = [("main", "0072_session_pull_request")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_preserves_pr_state_and_retires_in_flight_wrapper_work(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        ApprovalRequest = old_apps.get_model("main", "ApprovalRequest")
+        CodexInstance = old_apps.get_model("main", "CodexInstance")
+        SystemAgentRun = old_apps.get_model("main", "SystemAgentRun")
+        SystemWorkflow = old_apps.get_model("main", "SystemWorkflow")
+        UserInputRequest = old_apps.get_model("main", "UserInputRequest")
+        WorkflowSteeringMessage = old_apps.get_model(
+            "main", "WorkflowSteeringMessage"
+        )
+
+        SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="pr-thread",
+            cwd="/old-repo",
+            status="completed",
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/acme/widgets/pull/11",
+                    "pr_number": 11,
+                }
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="pr-thread",
+            cwd="/repo",
+            status="running",
+            step="pr_watch_running",
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/acme/widgets/pull/12",
+                    "repository_full_name": "acme/widgets",
+                    "pr_number": 12,
+                },
+                "pr_gates": {"checks": "pending"},
+                "unrelated_wrapper_state": "drop me",
+            },
+        )
+        visible = CodexInstance.objects.create(
+            pid=1,
+            thread_id="pr-thread",
+            cwd="/repo",
+            prompt="Publish and watch",
+            events_path="/dev/null",
+            status="running",
+            purpose="user",
+            workflow_id=workflow.pk,
+            workflow_routing_started_at=timezone.now(),
+        )
+        hidden = CodexInstance.objects.create(
+            pid=2,
+            thread_id="hidden-reviewer",
+            cwd="/repo",
+            prompt="Review",
+            events_path="/dev/null",
+            status="running",
+            purpose="system_agent",
+            workflow_id=workflow.pk,
+        )
+        feedback = CodexInstance.objects.create(
+            pid=3,
+            thread_id="pr-thread",
+            cwd="/repo",
+            prompt="Report wrapper failure",
+            events_path="/dev/null",
+            status="starting",
+            purpose="system_feedback",
+            workflow_id=workflow.pk,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            instance=hidden,
+            agent_kind="legacy_pr_monitor",
+            thread_id="hidden-reviewer",
+            status="running",
+        )
+        approval = ApprovalRequest.objects.create(
+            instance=feedback,
+            method="item/commandExecution/requestApproval",
+        )
+        input_request = UserInputRequest.objects.create(
+            instance=feedback,
+            method="item/tool/requestUserInput",
+        )
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow,
+            prompt="First queued instruction",
+        )
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow,
+            prompt="Second queued instruction",
+        )
+
+        review_workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="review-thread",
+            cwd="/repo",
+            status="running",
+            state={"open_pr_on_lgtm": False, "review_guidance": True},
+        )
+        review_turn = CodexInstance.objects.create(
+            pid=4,
+            thread_id="review-thread",
+            cwd="/repo",
+            events_path="/dev/null",
+            status="starting",
+            purpose="user",
+            workflow_id=review_workflow.pk,
+        )
+        publish_workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="publish-thread",
+            cwd="/repo",
+            status="running",
+        )
+        publish_turn = CodexInstance.objects.create(
+            pid=5,
+            thread_id="publish-thread",
+            cwd="/repo",
+            events_path="/dev/null",
+            status="starting",
+            purpose="user",
+            workflow_id=publish_workflow.pk,
+        )
+        blocked_workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="blocked-thread",
+            cwd="/repo",
+            status="blocked",
+            step="blocked",
+            state={"error": "Legacy failure"},
+        )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        ApprovalRequest = new_apps.get_model("main", "ApprovalRequest")
+        CodexInstance = new_apps.get_model("main", "CodexInstance")
+        SessionPullRequest = new_apps.get_model("main", "SessionPullRequest")
+        SystemAgentRun = new_apps.get_model("main", "SystemAgentRun")
+        SystemWorkflow = new_apps.get_model("main", "SystemWorkflow")
+        UserInputRequest = new_apps.get_model("main", "UserInputRequest")
+
+        record = SessionPullRequest.objects.get(thread_id="pr-thread")
+        self.assertEqual(record.cwd, "/repo")
+        self.assertEqual(record.state["pr_handoff"]["pr_number"], 12)
+        self.assertEqual(record.state["pr_gates"], {"checks": "pending"})
+        self.assertNotIn("unrelated_wrapper_state", record.state)
+
+        migrated_visible = CodexInstance.objects.get(pk=visible.pk)
+        self.assertEqual(migrated_visible.status, "running")
+        self.assertIsNone(migrated_visible.workflow_id)
+        self.assertIsNone(migrated_visible.workflow_routing_started_at)
+        self.assertEqual(migrated_visible.agent_kind, "pr_watch")
+        self.assertEqual(
+            CodexInstance.objects.get(pk=review_turn.pk).agent_kind,
+            "review_guidance",
+        )
+        self.assertEqual(
+            CodexInstance.objects.get(pk=publish_turn.pk).agent_kind,
+            "pr_publish",
+        )
+
+        for instance_pk in (hidden.pk, feedback.pk):
+            retired = CodexInstance.objects.get(pk=instance_pk)
+            self.assertEqual(retired.status, "failed")
+            self.assertIsNone(retired.workflow_id)
+            self.assertIsNotNone(retired.ended_at)
+            self.assertIsNotNone(retired.interrupt_requested_at)
+            self.assertEqual(retired.error, "PR/QA wrapper retired during upgrade")
+        migrated_run = SystemAgentRun.objects.get(pk=run.pk)
+        self.assertEqual(migrated_run.status, "failed")
+        self.assertEqual(
+            migrated_run.error,
+            "PR/QA wrapper retired during upgrade",
+        )
+        self.assertEqual(
+            ApprovalRequest.objects.get(pk=approval.pk).decision,
+            "cancel",
+        )
+        self.assertEqual(
+            UserInputRequest.objects.get(pk=input_request.pk).response,
+            {"answers": {}},
+        )
+
+        migrated_workflow = SystemWorkflow.objects.get(pk=workflow.pk)
+        self.assertEqual(migrated_workflow.status, "completed")
+        self.assertEqual(migrated_workflow.step, "pr_wrapper_retired")
+        self.assertTrue(migrated_workflow.state["pr_qa_wrapper_retired"])
+        self.assertEqual(
+            migrated_workflow.state["retired_steering_messages"],
+            ["First queued instruction", "Second queued instruction"],
+        )
+        migrated_blocked = SystemWorkflow.objects.get(pk=blocked_workflow.pk)
+        self.assertEqual(migrated_blocked.status, "completed")
+        self.assertEqual(migrated_blocked.step, "pr_wrapper_retired")
+        self.assertTrue(migrated_blocked.state["pr_qa_wrapper_retired"])
+        with self.assertRaises(LookupError):
+            new_apps.get_model("main", "WorkflowSteeringMessage")

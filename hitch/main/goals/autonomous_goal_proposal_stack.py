@@ -21,6 +21,7 @@ from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
     ProposedSession,
+    SessionPullRequest,
     SystemWorkflow,
 )
 from hitch.main.runtime import rollout
@@ -354,7 +355,7 @@ def _autonomous_goal_accepted_session_blocking_ids(
         if isinstance(thread_id, str) and thread_id
     ]
     live_thread_ids = _accepted_session_live_thread_ids(accepted_thread_ids)
-    done_workflows_by_thread_id = _accepted_session_done_workflows_by_thread_id(
+    done_prs_by_thread_id = _accepted_session_done_prs_by_thread_id(
         accepted_thread_ids
     )
     for (
@@ -376,13 +377,13 @@ def _autonomous_goal_accepted_session_blocking_ids(
         if rollout_evidence is not None and rollout_evidence.superseded_by_lifecycle:
             blocking_ids.add(goal_id)
             continue
-        workflow = (
-            done_workflows_by_thread_id.get(thread_id)
+        registered_pr = (
+            done_prs_by_thread_id.get(thread_id)
             if isinstance(thread_id, str)
             else None
         )
-        if workflow is not None and _accepted_session_workflow_is_current(
-            workflow, codex_updated_at
+        if registered_pr is not None and _accepted_session_pr_is_current(
+            registered_pr, codex_updated_at
         ):
             continue
         if _accepted_session_cached_stage_is_done(
@@ -412,41 +413,32 @@ def _accepted_session_live_thread_ids(thread_ids: Iterable[str]) -> set[str]:
     return {thread_id for thread_id in live_thread_ids if isinstance(thread_id, str)}
 
 
-def _accepted_session_done_workflows_by_thread_id(
+def _accepted_session_done_prs_by_thread_id(
     thread_ids: Iterable[str],
-) -> dict[str, SystemWorkflow]:
+) -> dict[str, SessionPullRequest]:
     ids = unique_nonempty(thread_ids)
     if not ids:
         return {}
-    done_workflows: dict[str, SystemWorkflow] = {}
-    seen_thread_ids: set[str] = set()
-    workflows = (
-        SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id__in=ids,
-        )
-        .order_by("main_thread_id", "-updated_at", "-pk")
-    )
-    for workflow in workflows:
-        if workflow.main_thread_id in seen_thread_ids:
+    done_prs: dict[str, SessionPullRequest] = {}
+    for registered_pr in SessionPullRequest.objects.filter(thread_id__in=ids):
+        if not registered_pr.is_current:
             continue
-        seen_thread_ids.add(workflow.main_thread_id)
-        if _accepted_session_workflow_is_done(workflow):
-            done_workflows[workflow.main_thread_id] = workflow
-    return done_workflows
+        state = registered_pr.state if isinstance(registered_pr.state, Mapping) else {}
+        if _pr_snapshot_done_stage_key(state.get(_PR_HANDOFF_STATE_KEY)) is not None:
+            done_prs[registered_pr.thread_id] = registered_pr
+    return done_prs
 
 
-def _accepted_session_workflow_is_done(workflow: SystemWorkflow) -> bool:
-    state = workflow.state if isinstance(workflow.state, Mapping) else {}
-    return _pr_snapshot_done_stage_key(state.get(_PR_HANDOFF_STATE_KEY)) is not None
-
-
-def _accepted_session_workflow_is_current(
-    workflow: SystemWorkflow, codex_updated_at: object
+def _accepted_session_pr_is_current(
+    registered_pr: SessionPullRequest, codex_updated_at: object
 ) -> bool:
-    if workflow.updated_at is None or not isinstance(codex_updated_at, datetime):
+    state = registered_pr.state if isinstance(registered_pr.state, Mapping) else {}
+    watch_owner_id = state.get(SessionPullRequest.WATCH_OWNER_INSTANCE_STATE_KEY)
+    if is_nonbool_int(watch_owner_id) and watch_owner_id > 0:
+        return registered_pr.is_current
+    if registered_pr.updated_at is None or not isinstance(codex_updated_at, datetime):
         return True
-    return workflow.updated_at >= codex_updated_at
+    return registered_pr.updated_at >= codex_updated_at
 
 
 def _accepted_session_cached_stage_is_done(

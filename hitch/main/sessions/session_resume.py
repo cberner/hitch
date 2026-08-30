@@ -23,7 +23,6 @@ from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
     SessionMetadata,
-    SystemWorkflow,
 )
 from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import (
@@ -224,7 +223,6 @@ def _metadata_resume_for_inactive_session(
     metadata: SessionMetadata | None,
     *,
     active_instance: CodexInstance | None,
-    active_system_workflow: SystemWorkflow | None,
     require_system_agent_thread: bool,
     history_message_target: int | None = None,
     allow_active_rollout: bool = False,
@@ -239,12 +237,12 @@ def _metadata_resume_for_inactive_session(
         or _metadata_rollout_path_indicates_archived(metadata)
     )
     # Archived Codex threads cannot be resumed. Their rollout remains the
-    # authoritative detail source even if stale workflow state is still active.
+    # authoritative detail source even if a stale worker row is still active.
     if (
         history_message_target is None
         and not archived
         and not allow_active_rollout
-        and (active_instance is not None or active_system_workflow is not None)
+        and active_instance is not None
     ):
         return None
     rollout_path = _rollout_path_from_value(metadata.codex_path)
@@ -317,15 +315,12 @@ def _pending_resume_for_active_session(
     metadata: SessionMetadata | None,
     *,
     active_instance: CodexInstance | None,
-    active_system_workflow: SystemWorkflow | None,
 ) -> _MetadataResume | None:
-    if active_instance is None and active_system_workflow is None:
+    if active_instance is None:
         return None
     cwd = ""
-    if active_instance is not None and active_instance.cwd:
+    if active_instance.cwd:
         cwd = active_instance.cwd
-    elif active_system_workflow is not None and active_system_workflow.cwd:
-        cwd = active_system_workflow.cwd
     elif metadata is not None:
         cwd = metadata.cwd
     if not cwd:
@@ -335,12 +330,12 @@ def _pending_resume_for_active_session(
         if metadata is not None and metadata.codex_updated_at is not None
         else None
     )
-    if updated_at is None and active_instance is not None:
+    if updated_at is None:
         updated_at = active_instance.started_at.timestamp()
     preview = ""
     if metadata is not None and metadata.codex_preview:
         preview = metadata.codex_preview
-    elif active_instance is not None:
+    else:
         preview = active_instance.prompt
     thread = _MetadataThread(
         id=session_id,
@@ -357,21 +352,15 @@ def _pending_resume_for_active_session(
         archived=False,
         thread_source=metadata.codex_thread_source if metadata is not None else "",
     )
-    model_config = (
-        rollout.SessionModelConfig(
-            model=active_instance.model,
-            reasoning_effort=active_instance.reasoning_effort,
-        )
-        if active_instance is not None
-        else None
+    model_config = rollout.SessionModelConfig(
+        model=active_instance.model,
+        reasoning_effort=active_instance.reasoning_effort,
     )
     return _MetadataResume(
         thread=thread,
         entries=(),
-        model=model_config.model if model_config is not None else "",
-        reasoning_effort=(
-            model_config.reasoning_effort if model_config is not None else ""
-        ),
+        model=model_config.model,
+        reasoning_effort=model_config.reasoning_effort,
         model_config=model_config,
     )
 

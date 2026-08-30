@@ -1,10 +1,9 @@
 """Subprocess execution layer for the ``gh`` and ``git`` CLIs.
 
-Isolates the raw subprocess runners and the low-level gh/git helpers used by
-the PR workflow from the handoff-parsing and state-key coupled orchestration in
-``system_agents``. These helpers depend only on stdlib, Django, and the leaf
-siblings ``pr_handoff``, ``gh_observations``, and ``sdk_values`` -- never on
-``system_agents`` -- so importing them here introduces no cycle.
+Isolates the raw subprocess runners and low-level gh/git helpers used by PR
+watching from handoff parsing and durable session-state tracking. These helpers
+depend only on stdlib, Django, and the leaf siblings ``pr_handoff``,
+``gh_observations``, and ``sdk_values``.
 """
 
 from __future__ import annotations

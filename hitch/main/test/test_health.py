@@ -68,7 +68,7 @@ class CollectHealthReportTests(TestCase):
 
     def test_blocked_workflow_raises_overall_to_warn(self) -> None:
         SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="m",
             cwd="/r",
             status=SystemWorkflow.STATUS_BLOCKED,
@@ -181,7 +181,7 @@ class CollectHealthReportTests(TestCase):
     def _blocked(self, error: str) -> None:
         type(self)._blocked_seq += 1
         SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id=f"thread-{type(self)._blocked_seq}",
             cwd="/r",
             status=SystemWorkflow.STATUS_BLOCKED,

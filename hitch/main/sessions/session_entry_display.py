@@ -2,8 +2,7 @@
 
 Pure code-movement extraction from ``views.py``: builds the rendered
 entry list for a session (rollout vs. SDK fallback and system author
-tagging) and the small active-worker/workflow status
-helpers the detail page and SSE view consume.
+tagging) and active-worker helpers the detail page and SSE view consume.
 """
 
 from __future__ import annotations
@@ -18,19 +17,15 @@ from typing import Any
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from hitch.main.formatting import render_markdown
 from hitch.main.models import (
     CodexInstance,
-    SystemWorkflow,
 )
-from hitch.main.runtime import codex_events, codex_pool, rollout, streaming
-from hitch.main.runtime.sdk_values import is_nonbool_int
+from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.sessions import session_index
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
     render_entries,
 )
-from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -229,42 +224,6 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     return _active_user_message_text(active)
 
 
-def _queued_workflow_user_messages(
-    workflow: SystemWorkflow | None,
-) -> list[dict[str, Any]]:
-    """Return accepted steering that has not reached a visible coding turn."""
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA or not workflow.is_active:
-        return []
-    messages: list[dict[str, Any]] = []
-    prompt = workflow.state.get("user_steering_prompt")
-    message_index = workflow.state.get("user_steering_message_index")
-    if (
-        workflow.step == system_agents.STEP_USER_STEERING_RUNNING
-        and isinstance(prompt, str)
-        and prompt
-        and is_nonbool_int(message_index)
-        and not CodexInstance.objects.filter(
-            workflow_id=workflow.pk,
-            purpose=CodexInstance.PURPOSE_USER,
-            user_message_index=message_index,
-        ).exists()
-    ):
-        messages.append(
-            {
-                "prompt": prompt,
-                "timestamp": int(workflow.updated_at.timestamp()),
-            }
-        )
-    messages.extend(
-        {
-            "prompt": message.prompt,
-            "timestamp": int(message.created_at.timestamp()),
-        }
-        for message in workflow.steering_messages.order_by("created_at", "pk")
-    )
-    return messages
-
-
 def _active_user_message_text(active: CodexInstance | None) -> str:
     if active is None:
         return ""
@@ -330,24 +289,6 @@ def _pending_user_timestamp(active: CodexInstance | None) -> int:
     return int(active.started_at.timestamp())
 
 
-def _workflow_status_text(workflow: Any | None) -> str:
-    return streaming.system_workflow_status_text(workflow)
-
-
-def _workflow_composer_label(workflow: SystemWorkflow | None) -> str:
-    if workflow is not None and workflow.kind == SystemWorkflow.KIND_PR_QA:
-        return (
-            "Review workflow"
-            if system_agents.is_review_guidance_only_workflow(workflow)
-            else "PR workflow"
-        )
-    return "Hitch workflow"
-
-
-def _workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
-    return system_agents.workflow_accepts_steering(workflow)
-
-
 def _active_worker_status_text(active: CodexInstance | None) -> str:
     return ""
 
@@ -403,65 +344,6 @@ def _apply_system_author(entry: dict[str, Any], system_authors: dict[int, str], 
         for item in entry.get("items", []):
             user_message_index = _apply_system_author(item, system_authors, user_message_index)
     return user_message_index
-
-
-def _apply_workflow_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-    return _apply_workflow_auto_pull_messages(entries, session_id)
-
-
-def _apply_workflow_auto_pull_messages(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-    additions = list(_workflow_auto_pull_entries(session_id))
-    if not additions:
-        return entries
-    return [*entries, *additions]
-
-
-def _workflow_auto_pull_entries(session_id: str) -> Iterator[dict[str, Any]]:
-    workflows = (
-        SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id=session_id,
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_CLOSED,
-        )
-        .order_by("created_at")
-        .prefetch_related("agent_runs")
-    )
-    for workflow in workflows:
-        text = _auto_pull_text(workflow.state.get(system_agents.AUTO_PULL_RESULT_STATE_KEY))
-        if not text:
-            continue
-        yield {
-            "kind": "agent",
-            "display_author": system_agents.PR_WORKFLOW_DISPLAY_AUTHOR,
-            "text": text,
-            "html": render_markdown(text),
-            "timestamp": int(workflow.updated_at.timestamp()),
-        }
-
-
-def _auto_pull_text(result: object) -> str:
-    if not isinstance(result, dict):
-        return ""
-    status = result.get("status")
-    branch = result.get("branch")
-    if status == "pulled" and isinstance(branch, str) and branch.strip():
-        return f"Auto-pull: pulled origin/{branch.strip()} into the default repo."
-    if status == "up_to_date" and isinstance(branch, str) and branch.strip():
-        return f"Auto-pull: the default repo was already up to date with origin/{branch.strip()}."
-    if status == "failed":
-        error = result.get("error")
-        if isinstance(error, str) and error.strip():
-            return f"Auto-pull failed: {error.strip()}"
-        return "Auto-pull failed."
-    if status == "skipped":
-        reason = result.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            return f"Auto-pull skipped: {reason.strip()}"
-        return "Auto-pull skipped."
-    if status == "running":
-        return "Auto-pull started but did not finish."
-    return ""
 
 
 def _display_title(thread: Any) -> str:

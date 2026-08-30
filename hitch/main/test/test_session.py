@@ -18,13 +18,13 @@ from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
-    SystemWorkflow,
-    WorkflowSteeringMessage,
+    SessionPullRequest,
 )
 from hitch.main.runtime import codex_events
-from hitch.main.sessions import session_entry_display
 from hitch.main.sessions.entry_render import tool_call_detail, tool_call_status
+from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.sessions.session_pr_plan import (
+    _fix_pr_url_for_thread,
     _pr_snapshot_for_thread,
     _pr_url_for_thread,
 )
@@ -33,7 +33,6 @@ from hitch.main.test.support import (
     _rollout_line,
     _seed_cookies,
 )
-from hitch.main.workflows import system_agents
 
 # Used for active-worker rendering tests so the session view's
 # ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
@@ -43,41 +42,6 @@ _LIVE_PID = os.getpid()
 
 def _worker_is_live_for_test(instance: CodexInstance) -> bool:
     return instance.pid == _LIVE_PID
-
-
-class AutoPullTextTests(TestCase):
-    def test_formats_up_to_date_and_failure_results(self) -> None:
-        self.assertEqual(
-            session_entry_display._auto_pull_text({"status": "up_to_date", "branch": "main"}),
-            "Auto-pull: the default repo was already up to date with origin/main.",
-        )
-        self.assertEqual(
-            session_entry_display._auto_pull_text({"status": "failed", "error": "project repository is dirty"}),
-            "Auto-pull failed: project repository is dirty",
-        )
-        self.assertEqual(
-            session_entry_display._auto_pull_text({"status": "failed"}),
-            "Auto-pull failed.",
-        )
-        self.assertEqual(
-            session_entry_display._auto_pull_text(
-                {
-                    "status": "skipped",
-                    "reason": "default checkout is the active session checkout",
-                }
-            ),
-            "Auto-pull skipped: default checkout is the active session checkout",
-        )
-        self.assertEqual(
-            session_entry_display._auto_pull_text({"status": "skipped"}),
-            "Auto-pull skipped.",
-        )
-        self.assertEqual(
-            session_entry_display._auto_pull_text({"status": "running"}),
-            "Auto-pull started but did not finish.",
-        )
-        self.assertEqual(session_entry_display._auto_pull_text("missing"), "")
-        self.assertEqual(session_entry_display._auto_pull_text({"status": "pulled"}), "")
 
 
 def _root(item: Any) -> SimpleNamespace:
@@ -257,7 +221,7 @@ class PrUrlDetectionTests(TestCase):
                 ),
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _mcp_tool_call(
                             "github",
                             "_create_pull_request",
@@ -279,7 +243,7 @@ class PrUrlDetectionTests(TestCase):
             [
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _mcp_tool_call("github", "_create_pull_request", {"url": url}),
                     ]
                 )
@@ -287,6 +251,42 @@ class PrUrlDetectionTests(TestCase):
         )
 
         self.assertIsNone(_pr_url_for_thread(thread))
+
+    def test_fix_pr_does_not_infer_an_unregistered_observed_pr(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(PR_SLASH_PROMPT),
+                        _mcp_tool_call(
+                            "github", "_create_pull_request", {"url": url}
+                        ),
+                        _agent_message("Opened the PR."),
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(_pr_url_for_thread(thread), url)
+        self.assertIsNone(_fix_pr_url_for_thread("thread-1"))
+
+    def test_fix_pr_uses_registered_repo_and_number_identity(self) -> None:
+        SessionPullRequest.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 94,
+                }
+            },
+        )
+
+        self.assertEqual(
+            _fix_pr_url_for_thread("thread-1"),
+            "https://github.com/cberner/hitch/pull/94",
+        )
 
     def test_pr_snapshot_when_mcp_tool_call_follows_final_message(self) -> None:
         # ``_pr_observation_result_for_thread`` reads the PR identity that
@@ -301,7 +301,7 @@ class PrUrlDetectionTests(TestCase):
             [
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _agent_message("Closed it.", phase="final_answer"),
                         _mcp_tool_call(
                             "github",
@@ -442,7 +442,7 @@ class SessionViewTests(TestCase):
             [
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _mcp_tool_call("github", "_create_pull_request", sdk_result),
                         _agent_message("Closed."),
                     ]
@@ -481,7 +481,7 @@ class SessionViewTests(TestCase):
             [
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _mcp_tool_call(
                             "github",
                             "_create_pull_request",
@@ -496,7 +496,7 @@ class SessionViewTests(TestCase):
                 ),
                 _turn(
                     [
-                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _user_message(PR_SLASH_PROMPT),
                         _mcp_tool_call(
                             "github",
                             "_create_pull_request",
@@ -1334,65 +1334,6 @@ class SessionViewActiveWorkerTests(TestCase):
             '<span class="task-plan-current" data-task-plan-current></span>',
             html=False,
         )
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
-    @patch("hitch.main.views.common.Codex")
-    def test_rendered_stop_cancels_workflow_and_queued_steering(
-        self,
-        mock_codex: MagicMock,
-        mock_interrupt: MagicMock,
-        mock_spawn: MagicMock,
-    ) -> None:
-        _patch_thread(self, mock_codex, _thread([]))
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-1",
-            cwd="/tmp/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 1},
-        )
-        instance = _make_codex_instance(
-            thread_id="thread-1",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            prompt="first request",
-            developer_instructions="PR workflow continuation requirements",
-            user_message_index=0,
-            pid=_LIVE_PID,
-        )
-        WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="second request")
-        mock_interrupt.return_value = instance
-
-        rendered = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
-        self.assertContains(rendered, f'name="instance" value="{instance.pk}"')
-        self.assertContains(rendered, "first request")
-        self.assertContains(rendered, 'aria-label="Stop the PR workflow"')
-        self.assertNotContains(rendered, 'aria-label="Stop the running turn"')
-        self.assertNotContains(rendered, "PR workflow continuation requirements")
-
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "thread-1"}),
-            data={"instance": str(instance.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertFalse(workflow.steering_messages.exists())
-        mock_interrupt.assert_called_once_with(instance.pk, expected_thread_id="thread-1")
-
-        instance.status = CodexInstance.STATUS_FAILED
-        instance.error = "interrupted by user"
-        instance.save(update_fields=["status", "error"])
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(mock_spawn.call_count, 1)
-        self.assertNotIn("second request", mock_spawn.call_args.kwargs["prompt"])
 
     @patch("hitch.main.views.common.Codex")
     def test_inactive_thread_omits_stop_button(self, mock_codex: MagicMock) -> None:
