@@ -19,7 +19,7 @@ from hitch.main.goals.proposed_sessions import (
     create_proposed_session,
     update_proposed_session,
 )
-from hitch.main.models import AutonomousGoal
+from hitch.main.models import AutonomousGoal, CodexInstance, SystemWorkflow
 from hitch.main.sessions import session_index
 from hitch.main.sessions.agent_tasks import PR_PUBLISH_AGENT_KIND
 from hitch.main.workflows import pr_tracking, pr_watch
@@ -33,6 +33,13 @@ _HITCH_NAMESPACE = "hitch"
 _PROPOSE_SESSION_TOOL = "propose_session"
 _RENAME_SESSION_TOOL = "rename_session"
 _WATCH_PR_TOOL = "watch_pr"
+_GET_GOAL_TOOL = "get_goal"
+_LIST_GOAL_SESSIONS_TOOL = "list_goal_sessions"
+_JUDGE_TOOL = "judge"
+_NO_PROPOSAL_TOOL = "no_proposal"
+_APPROVE_TOOL = "approve"
+_DENY_TOOL = "deny"
+_AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 
 
 def _not_cancelled() -> bool:
@@ -45,6 +52,8 @@ class ToolContext:
     thread_id: str
     instance_id: int = 0
     agent_kind: str = ""
+    purpose: str = CodexInstance.PURPOSE_USER
+    workflow_id: int | None = None
     user_message_index: int | None = None
     cancel_requested: Callable[[], bool] = _not_cancelled
     enable_memories: bool = False
@@ -58,6 +67,7 @@ class HitchTool:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[[dict[str, Any], ToolContext], str]
+    roles: frozenset[str]
 
 
 class HitchToolError(RuntimeError):
@@ -68,7 +78,12 @@ def is_dynamic_tool_call(method: str) -> bool:
     return method == _TOOL_CALL_METHOD
 
 
-def registered_dynamic_tool_specs() -> list[dict[str, Any]]:
+def registered_dynamic_tool_specs(
+    *,
+    purpose: str = CodexInstance.PURPOSE_USER,
+    agent_kind: str = "",
+) -> list[dict[str, Any]]:
+    role = _tool_role(purpose=purpose, agent_kind=agent_kind)
     return [
         {
             "namespace": tool.namespace,
@@ -78,6 +93,7 @@ def registered_dynamic_tool_specs() -> list[dict[str, Any]]:
             "deferLoading": False,
         }
         for tool in _TOOLS.values()
+        if role in tool.roles
     ]
 
 
@@ -95,6 +111,11 @@ def handle_dynamic_tool_call(
     tool = _TOOLS.get((namespace, tool_name))
     if tool is None:
         return _tool_response(f"unknown Hitch tool: {namespace}.{tool_name}", success=False)
+    if _tool_role(purpose=context.purpose, agent_kind=context.agent_kind) not in tool.roles:
+        return _tool_response(
+            f"Hitch tool {namespace}.{tool_name} is unavailable in this session",
+            success=False,
+        )
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         return _tool_response("tool arguments must be an object", success=False)
@@ -103,7 +124,11 @@ def handle_dynamic_tool_call(
             message = tool.handler(arguments, context)
         finally:
             connection.close()
-    except (HitchToolError, ProposedSessionError, pr_watch.PrWatchError) as exc:
+    except (
+        HitchToolError,
+        ProposedSessionError,
+        pr_watch.PrWatchError,
+    ) as exc:
         return _tool_response(str(exc), success=False)
     except Exception:
         # The handler runs on the SDK's reader thread: an exception escaping
@@ -208,6 +233,82 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
     )
     pr_tracking.record_pr_watch_result(registration, result)
     return json.dumps(result, sort_keys=True)
+
+
+def _handle_get_goal(arguments: dict[str, Any], context: ToolContext) -> str:
+    _require_no_arguments(arguments)
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().candidate_goal_data(context)
+    )
+
+
+def _handle_list_goal_sessions(
+    arguments: dict[str, Any], context: ToolContext
+) -> str:
+    _require_no_arguments(arguments)
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().candidate_goal_sessions(context)
+    )
+
+
+def _handle_judge(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().candidate_request_judgment(arguments, context)
+    )
+
+
+def _handle_no_proposal(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().candidate_decline_proposal(arguments, context)
+    )
+
+
+def _handle_approve(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().judge_record_verdict(
+            arguments, context, approved=True
+        )
+    )
+
+
+def _handle_deny(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(
+        lambda: _autonomous_goals().judge_record_verdict(
+            arguments, context, approved=False
+        )
+    )
+
+
+def _handle_autonomous_goal_tool(operation: Callable[[], object]) -> str:
+    try:
+        result = operation()
+    except ValueError as exc:
+        raise HitchToolError(str(exc)) from exc
+    return json.dumps(result, sort_keys=True)
+
+
+def _autonomous_goals() -> Any:
+    # Imported lazily because workflow registration imports this runtime module.
+    from hitch.main.workflows import autonomous_goals
+
+    return autonomous_goals
+
+
+def _require_no_arguments(arguments: dict[str, Any]) -> None:
+    if arguments:
+        raise HitchToolError("this tool does not accept arguments")
+
+
+def _tool_role(*, purpose: str, agent_kind: str) -> str:
+    if purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
+        return "visible"
+    if purpose != CodexInstance.PURPOSE_SYSTEM_AGENT:
+        return "none"
+    if agent_kind == SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN:
+        return "ag_candidate"
+    if agent_kind == _AUTONOMOUS_GOAL_JUDGE_AGENT_KIND:
+        return "ag_judge"
+    return "none"
 
 
 def _proposal_id_arg(arguments: dict[str, Any]) -> int | None:
@@ -320,6 +421,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_propose_session,
+        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _RENAME_SESSION_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -342,6 +444,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_rename_session,
+        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _WATCH_PR_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -366,5 +469,138 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_watch_pr,
+        roles=frozenset({"visible"}),
+    ),
+    (_HITCH_NAMESPACE, _GET_GOAL_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_GET_GOAL_TOOL,
+        description=(
+            "Return the autonomous goal, limits, current stack state, and prior "
+            "judge feedback for this candidate session."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        handler=_handle_get_goal,
+        roles=frozenset({"ag_candidate"}),
+    ),
+    (_HITCH_NAMESPACE, _LIST_GOAL_SESSIONS_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_LIST_GOAL_SESSIONS_TOOL,
+        description=(
+            "List prior candidate and accepted sessions for this autonomous "
+            "goal, including each readable Codex rollout file path."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        handler=_handle_list_goal_sessions,
+        roles=frozenset({"ag_candidate"}),
+    ),
+    (_HITCH_NAMESPACE, _JUDGE_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_JUDGE_TOOL,
+        description=(
+            "Submit the current candidate and checkout to the autonomous-goal "
+            "judge. You may call this at most twice. A denial returns feedback "
+            "that you should address before the final call."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "impact": {"type": "string"},
+                "implemented_changes": {"type": "string"},
+                "implementation_direction": {"type": "string"},
+                "verification": {"type": "string"},
+                "rough_edges": {"type": "string"},
+                "suggested_continuation": {"type": "string"},
+                "relevant_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "title",
+                "summary",
+                "impact",
+                "implemented_changes",
+                "implementation_direction",
+                "verification",
+                "rough_edges",
+                "suggested_continuation",
+                "relevant_files",
+            ],
+            "additionalProperties": False,
+        },
+        handler=_handle_judge,
+        roles=frozenset({"ag_candidate"}),
+    ),
+    (_HITCH_NAMESPACE, _NO_PROPOSAL_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_NO_PROPOSAL_TOOL,
+        description=(
+            "Finish this autonomous-goal candidate without a proposal. Use this "
+            "when no worthwhile candidate remains or after the second denial."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"},
+            },
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        handler=_handle_no_proposal,
+        roles=frozenset({"ag_candidate"}),
+    ),
+    (_HITCH_NAMESPACE, _APPROVE_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_APPROVE_TOOL,
+        description=(
+            "Approve the candidate if it meets the autonomous goal's confidence "
+            "threshold. Feedback is optional."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "string",
+                    "enum": ["medium", "high", "very_high"],
+                },
+                "feedback": {"type": "string"},
+            },
+            "required": ["confidence"],
+            "additionalProperties": False,
+        },
+        handler=_handle_approve,
+        roles=frozenset({"ag_judge"}),
+    ),
+    (_HITCH_NAMESPACE, _DENY_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_DENY_TOOL,
+        description=(
+            "Deny the candidate and optionally give concrete feedback for the "
+            "candidate's next and final attempt."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "string",
+                    "enum": ["medium", "high", "very_high"],
+                },
+                "feedback": {"type": "string"},
+            },
+            "required": ["confidence"],
+            "additionalProperties": False,
+        },
+        handler=_handle_deny,
+        roles=frozenset({"ag_judge"}),
     ),
 }

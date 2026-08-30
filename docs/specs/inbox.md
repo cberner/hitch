@@ -79,9 +79,10 @@ acknowledge notices from Hitch background systems.
   judge logs when available.
 - `INBOX-proposal-accept`: Accepting a Proposal starts or continues a normal
   user-visible session using the Proposal prompt and source context.
-- `INBOX-proposal-candidate`: If a Proposal has a candidate session with a
-  distinct worktree, accepting it continues from that candidate work instead of
-  starting from the base project worktree.
+- `INBOX-proposal-candidate`: A non-AG Proposal may continue an eligible source
+  candidate thread. An AG Proposal instead starts a fresh visible thread and
+  worktree from its approved candidate snapshot; hidden AG candidate and judge
+  threads remain hidden.
 - `INBOX-proposal-reject`: Rejecting a Proposal requires a user-provided reason.
 - `INBOX-proposal-dismiss`: Dismissing a Proposal resolves it without requiring a
   reason.

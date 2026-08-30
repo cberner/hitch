@@ -74,6 +74,45 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-system-sessions`: AGs spawn Hitch-owned system sessions to produce Proposals.
 - `AG-noninteractive`: AG system sessions run without user intervention or interactive
   approval prompts.
+- `AG-tool-driven-protocol`: New AG workflows are driven by role-scoped Hitch
+  tools. Candidate and judge final prose is transcript content only and never
+  changes workflow state.
+- `AG-candidate-tools`: Candidate sessions receive only the AG candidate tools:
+  read the current goal, list prior goal sessions, submit a candidate for
+  judgment, and finish with no proposal. The tools infer the current workflow;
+  they do not accept a goal, workflow, session, or thread identifier.
+- `AG-history-sessions`: Listing goal history returns lightweight metadata and
+  the Codex rollout path for prior candidate and accepted sessions in the
+  current AG lineage. It excludes judge and unrelated system sessions. Hitch
+  does not summarize those transcripts; the candidate may inspect any returned
+  rollout directly with ordinary read-only filesystem operations.
+- `AG-judge-tools`: Every judge session receives only `approve` and `deny`.
+  Both record a confidence and may include feedback. Judge final prose is
+  ignored.
+- `AG-judge-limit`: A candidate may request judgment at most twice. The first
+  denial is returned to the candidate so it can address the feedback before
+  its final request. After a second denial, only no-proposal completion is
+  available.
+- `AG-judge-snapshot`: Requesting judgment snapshots the exact candidate
+  checkout and retains it with a Hitch-owned Git ref before starting a
+  read-only judge in a worktree pinned to that commit. Approval publishes the
+  judged candidate data and snapshot, not later candidate mutations. Hitch
+  releases the ref only after the snapshot is transferred to an accepted
+  session or the proposal is denied, replaced, rejected, or dismissed.
+- `AG-protocol-recovery`: If a candidate turn finishes without requesting
+  judgment or declaring no proposal, Hitch resumes the same hidden thread with
+  a state-aware protocol reminder. Hitch permits at most three such recovery
+  turns per candidate. A judge that finishes without approving or denying gets
+  one protocol reminder; a second omission becomes a failed judgment and is
+  returned to the waiting candidate.
+- `AG-role-isolation`: Candidate and judge tools are immutable thread-scoped
+  capabilities. Candidate and judge threads always remain hidden and are never
+  promoted to user sessions.
+- `AG-in-flight-upgrade`: Workflows created before the tool-driven protocol are
+  retired when their worker next finishes, or when Hitch detects a stranded
+  spawn. Hitch records a failure notice and cleans up the obsolete candidate
+  checkout; it does not retain the structured-output candidate, judge, memory,
+  or transcript-summarization implementation.
 - `AG-background-queue`: AG-owned background sessions are globally queued so only one executes
   at a time.
 - `AG-manual-start-admission`: Manual Run and Run all do not create durable queued work.
@@ -82,21 +121,18 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-independent-lifecycles`: Queueing does not make AG lifecycles dependent. Each AG remains
   independent except for the shared one-at-a-time execution queue.
 - `AG-stack-continuation`: A token budget allows repeated background attempts,
-  even when effective stack depth is `1`. If an attempt fails to produce a
-  Proposal, Hitch may retry until it produces a Proposal, exhausts token budget,
-  or hits a terminal failure. If a Proposal is produced and stack depth is
+  even when effective stack depth is `1`. Hitch may retry a failed candidate
+  turn while budget remains. If a Proposal is produced and stack depth is
   greater than `1`, Hitch may continue from prior background work until it
   reaches stack depth, exhausts token budget, produces a user-actionable
   Proposal, or hits a terminal failure.
 - `AG-stack-limit`: AGs must not continue past configured stack depth.
 - `AG-budget-limit`: AGs must not start another automatic background session when doing so
   would exceed the configured token budget.
-- `AG-no-proposal-stall-limit`: A token budget does not authorize an unbounded
-  sequence of candidates that repeatedly conclude no proposal is possible.
-  Hitch stops after three consecutive budgeted no-proposal retries. Producing a
-  candidate resets this stall counter; candidate execution failures preserve
-  it. The resulting Inbox notice or published stacked proposal identifies the
-  stall limit as the stop reason.
+- `AG-no-proposal-terminal`: Calling `hitch.no_proposal` is an explicit terminal
+  decision for the current AG workflow. Hitch records the notice or publishes
+  the preceding completed stack proposal and does not spend remaining budget on
+  another candidate.
 
 ### 4.3 Quota
 
@@ -117,8 +153,11 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-proposal-inbox`: AG-created Proposals appear in the Inbox.
 - `AG-proposal-content`: A Proposal includes title, summary, prompt, confidence, relevant files,
   and metadata for AG, stack, and budget lineage.
-- `AG-proposal-acceptance`: Accepting a Proposal starts a normal user-visible session with the
-  proposed work and prompt.
+- `AG-proposal-acceptance`: Accepting a Proposal starts a fresh normal
+  user-visible thread with the proposed work and prompt. Implementation
+  proposals start in a fresh worktree at the approved snapshot; propose-only
+  results start in the selected repository. Acceptance never resumes or
+  reveals the hidden candidate thread.
 - `AG-proposal-resolution`: Rejecting or dismissing a Proposal records the outcome and stops any
   background continuation tied to that Proposal.
 
@@ -161,12 +200,11 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-accept-no-budget-single-run`: An AG with no token budget runs exactly one background session for a
   no-proposal attempt, then shows a stopped/no-proposal state.
 - `AG-accept-stack-depth-limit`: An AG with stack depth `3` creates or continues
-  no more than three stack levels. No-proposal retries consume token budget but
+  no more than three stack levels. Failed-turn retries consume token budget but
   do not count as new stack levels.
 - `AG-accept-budget-retries`: An AG with stack depth `1` and a token budget can
-  retry no-proposal attempts until it produces a Proposal, exhausts token
-  budget, reaches the consecutive no-proposal stall limit, or hits a terminal
-  failure.
+  retry failed candidate turns until it produces a Proposal, exhausts token
+  budget, receives `no_proposal`, or hits a terminal failure.
 - `AG-accept-low-quota-auto`: Low quota prevents automatic AG starts and shows a low-quota reason.
 - `AG-accept-manual-quota-override`: Manual Run can start an AG below the automatic quota threshold.
 - `AG-accept-background-queue`: Multiple eligible AGs execute only one AG-owned background session at a

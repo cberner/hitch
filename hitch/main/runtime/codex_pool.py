@@ -169,8 +169,11 @@ def spawn_new_session(
             start_kwargs["approvalsReviewer"] = approval[1]
     if thread_source is not None:
         start_kwargs["threadSource"] = thread_source.value
-    if purpose == CodexInstance.PURPOSE_USER:
-        start_kwargs["dynamicTools"] = registered_dynamic_tool_specs()
+    dynamic_tools = registered_dynamic_tool_specs(
+        purpose=purpose, agent_kind=agent_kind
+    )
+    if dynamic_tools:
+        start_kwargs["dynamicTools"] = dynamic_tools
     name_source = (
         thread_name if thread_name is not None and thread_name.strip() else prompt
     )
@@ -242,31 +245,61 @@ def create_session_thread(
     web_search_mode: str | None = None,
 ) -> str:
     """Create and persist a visible Codex thread without starting a turn."""
+    thread_id, _thread_path = create_session_thread_with_path(
+        cwd=cwd,
+        name=name,
+        developer_instructions=developer_instructions,
+        model=model,
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
+    )
+    return thread_id
+
+
+def create_session_thread_with_path(
+    *,
+    cwd: str,
+    name: str,
+    developer_instructions: str | None = None,
+    model: str | None = None,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+    purpose: str = CodexInstance.PURPOSE_USER,
+    agent_kind: str = "",
+    thread_source: ThreadSource | None = None,
+) -> tuple[str, str]:
+    """Create a persisted role-scoped thread without starting its first turn."""
     config = app_server_config(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
-    # Use the low-level client (like spawn_new_session) so this visible session
-    # can register Hitch dynamic tools. These threads are real user sessions the
-    # user drives directly, so they need the same tools (e.g.
-    # hitch.propose_session) an ordinary spawn_new_session session gets.
     start_kwargs: dict[str, Any] = {
         "cwd": cwd,
         "developerInstructions": developer_instructions,
         "model": model,
-        "dynamicTools": registered_dynamic_tool_specs(),
     }
-    def _create_and_persist(codex: Codex) -> str:
+    dynamic_tools = registered_dynamic_tool_specs(
+        purpose=purpose,
+        agent_kind=agent_kind,
+    )
+    if dynamic_tools:
+        start_kwargs["dynamicTools"] = dynamic_tools
+    if thread_source is not None:
+        start_kwargs["threadSource"] = thread_source.value
+
+    def _create_and_persist(codex: Codex) -> tuple[str, str]:
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
         codex._client.thread_set_name(thread.id, _initial_thread_name(name))
-        return thread.id
+        return thread.id, _thread_path_value(thread)
 
     # See ``spawn_new_session``: retry the open+create when the ``thread_set_name``
     # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
     # non-idempotent ``thread_start`` because a locked persist exits the
     # app-server before anything reaches disk.
-    return app_server_pool.run_codex_op_with_retry(lambda: Codex(config=config), _create_and_persist)
+    return app_server_pool.run_codex_op_with_retry(
+        lambda: Codex(config=config), _create_and_persist
+    )
 
 
 # Upper bound for the auto-derived thread name. Matches the

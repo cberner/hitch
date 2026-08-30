@@ -23,6 +23,9 @@ _GIT_TIMEOUT_SECONDS = 10
 # SIGKILL git mid-checkout on any large repo and leak the partial worktree.
 _GIT_CHECKOUT_TIMEOUT_SECONDS = 300
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SNAPSHOT_REF_RE = re.compile(
+    r"refs/hitch/autonomous-goals/[1-9][0-9]*/[0-9a-f]{32}"
+)
 _MAX_REPO_SLUG_LEN = 48
 _SNAPSHOT_COMMIT_ENV = {
     "GIT_AUTHOR_NAME": "Hitch",
@@ -51,8 +54,11 @@ def snapshot_worktree_to_commit(
     source_cwd: str | Path,
     *,
     message: str = "Snapshot Hitch stacked diff proposal",
+    retain_ref: str = "",
 ) -> str:
     """Create an internal commit for a worktree tree without mutating it."""
+    if retain_ref and _SNAPSHOT_REF_RE.fullmatch(retain_ref) is None:
+        raise WorktreeCreationError("snapshot ref is invalid")
     repo = _repo_root(Path(source_cwd))
     if repo is None:
         raise WorktreeCreationError("source cwd is not a git repository")
@@ -77,7 +83,21 @@ def snapshot_worktree_to_commit(
     commit_output = _git(repo, args, extra_env=_SNAPSHOT_COMMIT_ENV)
     if commit_output is None:
         raise WorktreeCreationError("failed to create worktree snapshot commit")
-    return commit_output.strip()
+    commit_sha = commit_output.strip()
+    if retain_ref:
+        _git(repo, ["update-ref", retain_ref, commit_sha])
+    return commit_sha
+
+
+def release_snapshot_commit_ref(source_cwd: str | Path, ref: str) -> bool:
+    """Delete a Hitch-owned snapshot ref, returning whether it was eligible."""
+    if _SNAPSHOT_REF_RE.fullmatch(ref) is None:
+        return False
+    repo = _repo_root(Path(source_cwd))
+    if repo is None:
+        raise WorktreeCleanupError("source cwd is not a git repository")
+    _git(repo, ["update-ref", "-d", ref], error_cls=WorktreeCleanupError)
+    return True
 
 
 def create_worktree_for_session(

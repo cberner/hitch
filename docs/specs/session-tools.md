@@ -4,8 +4,9 @@ Status: Draft
 
 ## 1. Overview
 
-Hitch exposes dynamic tools that let Codex act on the visible coding session
-that owns the current turn.
+Hitch exposes immutable, thread-scoped dynamic tools. Visible coding sessions
+receive user-session tools; selected hidden workflow roles receive only the
+tools for that role.
 
 ## 2. Requirements
 
@@ -22,6 +23,18 @@ that owns the current turn.
 - `SESSIONTOOLS-rename-failure`: If Codex rejects the rename because the thread
   is archived or unknown, the tool returns an error and does not update Hitch's
   cached title.
+- `SESSIONTOOLS-role-registration`: A new thread's dynamic tools are selected
+  from its purpose and agent kind when the thread is created. Ordinary hidden
+  system sessions receive no tools, AG candidates receive only candidate AG
+  tools, and AG judges receive only judge AG tools.
+- `SESSIONTOOLS-role-authorization`: Tool handlers repeat the purpose, agent
+  kind, workflow, invoking thread, current workflow step, and terminal-state
+  checks. A registered tool is not authorization by itself.
+- `SESSIONTOOLS-ag-candidate`: AG candidate tools are `hitch.get_goal`,
+  `hitch.list_goal_sessions`, `hitch.judge`, and `hitch.no_proposal`.
+- `SESSIONTOOLS-ag-judge`: AG judge tools are `hitch.approve` and `hitch.deny`.
+- `SESSIONTOOLS-ag-scope`: AG tool inputs never select another workflow, goal,
+  or session. Scope comes exclusively from the invoking worker context.
 
 ## 3. Success Criteria
 
@@ -29,3 +42,6 @@ that owns the current turn.
   name changes the invoking session's persisted and cached names.
 - `SESSIONTOOLS-rename-validation`: Invalid names fail without attempting a
   rename.
+- `SESSIONTOOLS-role-isolation-success`: A candidate cannot invoke judge or
+  visible-session tools, a judge cannot invoke candidate or visible-session
+  tools, and a visible session cannot invoke AG workflow tools.

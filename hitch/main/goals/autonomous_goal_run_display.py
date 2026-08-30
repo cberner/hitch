@@ -435,9 +435,9 @@ def _autonomous_goal_skipped_detail(workflow: SystemWorkflow) -> str:
             return message.strip()
     judgment = workflow.state.get("judgment")
     if isinstance(judgment, dict):
-        rationale = judgment.get("rationale")
-        if isinstance(rationale, str) and rationale.strip():
-            return rationale.strip()
+        feedback = judgment.get("feedback")
+        if isinstance(feedback, str) and feedback.strip():
+            return feedback.strip()
     return "The last autonomous goal run completed without a proposal."
 
 
@@ -447,11 +447,6 @@ def _autonomous_goal_proposed_detail(workflow: SystemWorkflow) -> str:
         return (
             "The last autonomous goal run published the current stacked proposal "
             "because the next candidate produced no proposal."
-        )
-    if stopped_reason == "judge_confidence_below_threshold":
-        return (
-            "The last autonomous goal run published the current stacked proposal "
-            "because the next candidate fell below the confidence threshold."
         )
     if stopped_reason == "stacked_diff_continuation_failed":
         error = _workflow_state_string(workflow, "stacked_diff_continuation_error")
@@ -528,9 +523,7 @@ def _attach_proposed_session_display_state(
         proposed_session.stack_stopped_display = (  # type: ignore[attr-defined]
             _proposed_session_stack_stopped_display(proposed_session)
         )
-        proposed_session.notice_stopped_display = (  # type: ignore[attr-defined]
-            _proposed_session_notice_stopped_display(proposed_session)
-        )
+        proposed_session.notice_stopped_display = ""  # type: ignore[attr-defined]
 
 
 def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
@@ -572,8 +565,6 @@ def _proposed_session_tokens_used_display(proposed_session: ProposedSession) -> 
 # state, so a stack that quietly ended looks like a continuation bug.
 _STACK_STOP_REASON_DISPLAY = {
     "candidate_no_proposal": "no further proposal found",
-    "candidate_no_proposal_stall_limit": "no proposal retry limit reached",
-    "judge_confidence_below_threshold": "judge confidence below threshold",
     "stacked_diff_continuation_failed": "continuation failed",
 }
 
@@ -585,34 +576,7 @@ def _proposed_session_stack_stopped_display(proposed_session: ProposedSession) -
     )
     if not isinstance(reason, str) or not reason:
         return ""
-    if reason == "candidate_no_proposal_stall_limit":
-        return _no_proposal_stall_display(metadata) or _STACK_STOP_REASON_DISPLAY[reason]
     return _STACK_STOP_REASON_DISPLAY.get(reason, reason.replace("_", " "))
-
-
-def _proposed_session_notice_stopped_display(
-    proposed_session: ProposedSession,
-) -> str:
-    if proposed_session.inbox_kind != ProposedSession.INBOX_KIND_NOTICE:
-        return ""
-    metadata = _proposal_metadata(proposed_session)
-    if metadata.get("skip_reason") != "candidate_no_proposal_stall_limit":
-        return ""
-    return _no_proposal_stall_display(metadata)
-
-
-def _no_proposal_stall_display(metadata: dict[str, object]) -> str:
-    retries = autonomous_goal_proposal_stack._proposal_metadata_non_negative_int(
-        metadata,
-        autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_RETRIES_METADATA_KEY,
-    )
-    retry_limit = autonomous_goal_proposal_stack._proposal_metadata_non_negative_int(
-        metadata,
-        autonomous_goals._AUTONOMOUS_GOAL_NO_PROPOSAL_RETRY_LIMIT_METADATA_KEY,
-    )
-    if retries is None or retry_limit is None or retries < retry_limit:
-        return ""
-    return f"no proposal after {retries} retries"
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:

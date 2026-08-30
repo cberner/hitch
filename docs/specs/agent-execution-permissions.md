@@ -15,6 +15,9 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
 - System session: A Hitch-owned background session for workflows such as Autonomous Goals. The visible coding turn that publishes a PR and invokes `hitch.watch_pr` is a user session, not a system session.
+- Role-scoped tool: An immutable dynamic tool registered only on the hidden
+  workflow role that requires it. Registration is paired with handler-side
+  workflow and thread authorization.
 - Separate worktree: A git worktree distinct from the associated user session's active checkout.
 
 ## 2. Goals and Non-Goals
