@@ -26,6 +26,7 @@ from hitch.main.models import (
 from hitch.main.runtime import disk_cleanup
 from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
 from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
+from hitch.main.sessions.review_prompts import QA_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.settings_cookies import (
     _DEFAULT_APPROVAL_MODE,
     _EFFORT_COOKIE,
@@ -44,10 +45,9 @@ from hitch.main.sessions.settings_cookies import (
     _settings_cookie_updates,
     _web_search_mode_label,
 )
-from hitch.main.workflows import system_agents
 
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
-_QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT
+_QA_SLASH_PROMPT = QA_SLASH_DISPLAY_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 
 

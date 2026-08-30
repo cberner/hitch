@@ -13,13 +13,7 @@ from pathlib import Path
 
 from django.conf import settings
 
-from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
-
-_WORKFLOW_KINDS = (SystemWorkflow.KIND_PR_QA,)
-
-
-class WorkflowStartBlockedError(RuntimeError):
-    pass
+from hitch.main.models import CodexInstance
 
 
 @dataclass
@@ -81,52 +75,9 @@ def hold(thread_id: str, *, blocking: bool = True) -> Iterator[bool]:
         lease.release()
 
 
-@contextlib.contextmanager
-def hold_for_workflow_start(
-    thread_id: str, *, lifecycle_lock_held: bool = False
-) -> Iterator[None]:
-    """Hold the lifecycle lock unless the caller already owns this transition."""
-    if lifecycle_lock_held:
-        yield
-        return
-    with hold(thread_id):
-        yield
-
-
 def archive_has_active_work(thread_id: str) -> bool:
-    """Return whether archiving would strand a visible turn or workflow."""
-    if CodexInstance.objects.filter(
-        thread_id=thread_id,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    ).exists():
-        return True
-    return SystemWorkflow.objects.filter(
-        kind__in=_WORKFLOW_KINDS,
-        main_thread_id=thread_id,
-        status=SystemWorkflow.STATUS_RUNNING,
-    ).exists()
-
-
-def ensure_workflow_start_allowed(thread_id: str, *, kind: str) -> None:
-    """Reject a workflow start that conflicts with durable session state."""
-    archived = SessionMetadata.objects.filter(
-        thread_id=thread_id,
-        codex_archived=True,
-    ).exists()
-    active_turn = CodexInstance.objects.filter(
+    """Return whether archiving would strand a visible turn."""
+    return CodexInstance.objects.filter(
         thread_id=thread_id,
         status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists()
-    other_workflow = (
-        SystemWorkflow.objects.filter(
-            kind__in=_WORKFLOW_KINDS,
-            main_thread_id=thread_id,
-            status=SystemWorkflow.STATUS_RUNNING,
-        )
-        .exclude(kind=kind)
-        .exists()
-    )
-    if archived or active_turn or other_workflow:
-        raise WorkflowStartBlockedError(
-            f"session {thread_id} is archived or already running work"
-        )

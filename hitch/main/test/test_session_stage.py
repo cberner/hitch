@@ -1,43 +1,52 @@
 from django.test import SimpleTestCase
 
-from hitch.main.models import SystemWorkflow
-from hitch.main.sessions import session_stage
-from hitch.main.workflows import system_agents
+from hitch.main.models import CodexInstance
+from hitch.main.sessions import agent_tasks, session_stage
+
+
+def _active_instance(agent_kind: str) -> CodexInstance:
+    return CodexInstance(
+        pid=1,
+        thread_id="thread-1",
+        cwd="/repo",
+        events_path="/dev/null",
+        agent_kind=agent_kind,
+    )
 
 
 class SessionStageTests(SimpleTestCase):
-    def test_archived_workflow_does_not_derive_blocked_stage(self) -> None:
-        # Archived stale-blocked rows must drop out of the Blocked inbox stage.
-        workflow = SystemWorkflow(
-            kind=SystemWorkflow.KIND_PR_QA,
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_ARCHIVED,
+    def test_review_guidance_turn_uses_qa_stage(self) -> None:
+        stage = session_stage.derive_stage(
+            active_instance=_active_instance(agent_tasks.REVIEW_AGENT_KIND)
         )
 
-        self.assertNotEqual(
-            session_stage.derive_stage(workflow=workflow), session_stage.BLOCKED
+        self.assertEqual(stage, session_stage.QA)
+
+    def test_publish_and_watch_turns_use_pr_stage(self) -> None:
+        for agent_kind in (
+            agent_tasks.PR_PUBLISH_AGENT_KIND,
+            agent_tasks.PR_WATCH_AGENT_KIND,
+        ):
+            with self.subTest(agent_kind=agent_kind):
+                stage = session_stage.derive_stage(
+                    active_instance=_active_instance(agent_kind)
+                )
+
+                self.assertEqual(stage, session_stage.PR)
+
+    def test_completed_review_task_stays_visible_as_qa(self) -> None:
+        stage = session_stage.derive_stage(
+            entries=[
+                {
+                    "kind": "user",
+                    "text": agent_tasks.review_task(
+                        prepare_pull_request=False
+                    ).prompt,
+                }
+            ]
         )
 
-    def test_qa_guidance_turn_uses_qa_stage_instead_of_pr_stage(self) -> None:
-        workflow = SystemWorkflow(
-            kind=SystemWorkflow.KIND_PR_QA,
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "open_pr_on_lgtm": False,
-                system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
-            },
-        )
-
-        self.assertEqual(
-            session_stage.derive_stage(workflow=workflow),
-            session_stage.QA,
-        )
-        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
-        self.assertEqual(
-            session_stage.derive_stage(workflow=workflow),
-            session_stage.PR,
-        )
+        self.assertEqual(stage, session_stage.QA)
 
     def test_approval_declined_after_plan_stays_plan_stage(self) -> None:
         stage = session_stage.derive_stage(
@@ -52,11 +61,6 @@ class SessionStageTests(SimpleTestCase):
         self.assertEqual(stage, session_stage.PLAN)
 
     def test_trailing_commentary_after_plan_stays_plan_stage(self) -> None:
-        # The session-list stage runs against raw, un-collapsed rollout
-        # entries, where Codex's post-plan narration keeps ``kind="agent"``
-        # with a ``commentary`` phase. That intermediate narration must not be
-        # mistaken for a final reply that resolves the plan, or the list badge
-        # would disagree with the detail view's Approve/Revise card.
         stage = session_stage.derive_stage(
             entries=[
                 {"kind": "user", "text": "Plan it"},
@@ -71,21 +75,14 @@ class SessionStageTests(SimpleTestCase):
 
         self.assertEqual(stage, session_stage.PLAN)
 
-    def test_workflow_pr_identity_wins_over_terminal_log_snapshot(self) -> None:
-        workflow = SystemWorkflow(
-            kind=SystemWorkflow.KIND_PR_QA,
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-        )
-
+    def test_registered_pr_identity_wins_over_unrelated_log_snapshot(self) -> None:
         stage = session_stage.derive_stage(
             entries=[{"kind": "user"}],
-            workflow=workflow,
             pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/93",
                 "state": "closed",
             },
-            workflow_pr_snapshot={
+            registered_pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/94",
                 "state": "open",
             },
@@ -93,24 +90,15 @@ class SessionStageTests(SimpleTestCase):
 
         self.assertEqual(stage, session_stage.PR)
 
-    def test_running_workflow_uses_terminal_main_pr_state_for_same_handoff_pr(
-        self,
-    ) -> None:
-        workflow = SystemWorkflow(
-            kind=SystemWorkflow.KIND_PR_QA,
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
+    def test_terminal_log_observation_wins_for_registered_pr(self) -> None:
         stage = session_stage.derive_stage(
             entries=[{"kind": "user"}],
-            workflow=workflow,
             pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/93",
                 "state": "closed",
                 "merged": True,
             },
-            workflow_pr_snapshot={
+            registered_pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/93",
                 "state": "open",
             },

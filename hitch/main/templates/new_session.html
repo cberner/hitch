@@ -584,14 +584,14 @@
                     const qaCommandPrompt = (
                         prCommandPrompt === null && prNowCommandPrompt === null
                     ) ? parseNewSessionQaCommand() : null;
-                    const workflowCommandPrompt = prCommandPrompt
+                    const taskCommandPrompt = prCommandPrompt
                         || prNowCommandPrompt
                         || qaCommandPrompt;
-                    const commandPrompt = workflowCommandPrompt === null ? parseNewSessionPlanCommand() : null;
-                    if (workflowCommandPrompt !== null && newSessionInput) {
+                    const commandPrompt = taskCommandPrompt === null ? parseNewSessionPlanCommand() : null;
+                    if (taskCommandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(false);
                         clearNewSessionImages();
-                        newSessionInput.value = workflowCommandPrompt;
+                        newSessionInput.value = taskCommandPrompt;
                     } else if (commandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(true);
                         newSessionInput.value = commandPrompt;

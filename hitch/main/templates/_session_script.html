@@ -351,7 +351,6 @@
                 const prNowCommand = "/pr-now";
                 const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
                 const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
-                const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
                 let composerKeyboardSettleTimers = [];
                 const hasImages = () => imageInput && (imageInput.files || []).length > 0;
@@ -365,9 +364,7 @@
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
                     syncComposerHeight();
-                    submit.disabled = workflowLocked || (
-                        input.value.trim().length === 0 && !hasImages()
-                    );
+                    submit.disabled = input.value.trim().length === 0 && !hasImages();
                 };
                 const syncImageSummary = () => {
                     if (!imageInput) return;
@@ -483,11 +480,11 @@
                     return qaPrompt;
                 };
                 const syncNextMessageConfig = () => {
-                    const workflowCommand = parsePrCommand() !== null
+                    const taskCommand = parsePrCommand() !== null
                         || parsePrNowCommand() !== null
                         || parseFixPrCommand() !== null
                         || parseQaCommand() !== null;
-                    const planMode = !workflowCommand && (
+                    const planMode = !taskCommand && (
                         composer.dataset.planMode === "true"
                         || parsePlanCommand() !== null
                     );
@@ -646,10 +643,6 @@
                 });
                 composer.addEventListener("submit", (event) => {
                     const submitter = event.submitter || document.activeElement;
-                    if (workflowLocked && submitter !== stop) {
-                        event.preventDefault();
-                        return;
-                    }
                     const isStopSubmit = submitter === stop;
                     if (isStopSubmit) {
                         clearImages();
@@ -664,15 +657,15 @@
                             && prNowCommandPrompt === null
                             && fixPrCommandPrompt === null
                         ) ? parseQaCommand() : null;
-                        const workflowCommandPrompt = prCommandPrompt
+                        const taskCommandPrompt = prCommandPrompt
                             || prNowCommandPrompt
                             || fixPrCommandPrompt
                             || qaCommandPrompt;
-                        const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
-                        if (workflowCommandPrompt !== null) {
+                        const commandPrompt = taskCommandPrompt === null ? parsePlanCommand() : null;
+                        if (taskCommandPrompt !== null) {
                             setPlanMode(false, true);
                             clearImages();
-                            input.value = workflowCommandPrompt;
+                            input.value = taskCommandPrompt;
                             sync();
                         } else if (commandPrompt !== null) {
                             setPlanMode(true, true);
@@ -727,7 +720,6 @@
             const liveWork = document.querySelector("[data-live-work]");
             const liveGoal = document.querySelector("[data-live-goal]");
             const liveGoalText = document.querySelector("[data-live-goal-text]");
-            const prProgress = document.querySelector("[data-pr-progress]");
             const streamUrl = streamSource && streamSource.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
 
@@ -2176,35 +2168,7 @@
                 if (payload && typeof payload.statusText === "string" && payload.statusText.trim()) {
                     workingText = payload.statusText.trim();
                 }
-                if (payload && Array.isArray(payload.prWorkflowProgress)) {
-                    renderPrProgress(payload.prWorkflowProgress);
-                }
                 setState(payload && payload.working ? "working" : "idle");
-            }
-
-            function renderPrProgress(gates) {
-                if (!prProgress) return;
-                prProgress.replaceChildren();
-                const validGates = gates.filter((gate) => {
-                    return gate
-                        && typeof gate.key === "string"
-                        && typeof gate.label === "string"
-                        && typeof gate.status === "string";
-                });
-                prProgress.hidden = validGates.length === 0;
-                for (const gate of validGates) {
-                    const item = document.createElement("span");
-                    item.className = "pr-gate";
-                    item.dataset.prGate = gate.key;
-                    item.dataset.status = gate.status;
-                    if (typeof gate.summary === "string") item.title = gate.summary;
-                    const statusLabel = typeof gate.statusLabel === "string"
-                        ? gate.statusLabel
-                        : gate.status;
-                    item.setAttribute("aria-label", `${gate.label}: ${statusLabel}`);
-                    item.textContent = `${gate.label}: ${statusLabel}`;
-                    prProgress.appendChild(item);
-                }
             }
 
             // Stream message router: maps each SSE method to its handler,

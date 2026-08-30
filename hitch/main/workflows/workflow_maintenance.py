@@ -7,16 +7,14 @@ import threading
 import time
 
 from django.db import close_old_connections
-from django.utils import timezone
 
 from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
-from hitch.main.workflows import pr_qa, system_agents
+from hitch.main.workflows import pr_tracking
 
 logger = logging.getLogger(__name__)
 
 _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
 _DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
-_STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS = 60 * 60
 # Row/file retention runs daily, but the first sweep happens shortly after
 # startup: this server restarts often enough that "a day after boot" could
 # mean never, and a backlogged first sweep is already bounded per pass.
@@ -64,17 +62,10 @@ def _workflow_maintenance_scheduler_loop() -> None:
         close_old_connections()
     stop = threading.Event()
     start = time.monotonic()
-    next_stale_blocked_archive_at = start + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS
     next_disk_cleanup_at = start + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
     next_row_retention_at = start + _ROW_RETENTION_STARTUP_DELAY_SECONDS
     while True:
         _run_workflow_maintenance_scheduler_tick()
-        # Archive stale blocked PR-QA workflows so they stop surfacing a stale
-        # "Blocked" badge in the inbox. Disk cleanup no longer depends on this:
-        # blocked workflows are a failure state and no longer pin their worktrees.
-        next_stale_blocked_archive_at = _run_due_stale_blocked_archive(
-            next_due_at=next_stale_blocked_archive_at
-        )
         next_disk_cleanup_at = _run_due_disk_usage_cleanup(
             next_due_at=next_disk_cleanup_at
         )
@@ -96,7 +87,7 @@ def _workflow_maintenance_tick() -> None:
     # `gh pr view` stage refresh only ever fires from the session-list
     # request path (capped at one row per render) -- dominating dashboard
     # latency once a session's 5-minute refresh window elapses.
-    pr_stages = pr_qa.refresh_unarchived_session_pr_stages(
+    pr_stages = pr_tracking.refresh_unarchived_session_pr_stages(
         limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
     )
     if pr_stages:
@@ -144,37 +135,3 @@ def _run_due_row_retention(
     finally:
         close_old_connections()
     return current + _ROW_RETENTION_INTERVAL_SECONDS
-
-
-def _run_due_stale_blocked_archive(
-    *,
-    next_due_at: float,
-    now: float | None = None,
-) -> float:
-    """Archive stale blocked PR-QA workflows when this hourly tick comes due.
-
-    This clears the stale "Blocked" badge from the inbox. It no longer affects
-    disk reclamation: ``disk_cleanup`` only treats RUNNING workflows as pinning a
-    worktree, so a blocked workflow's worktree is already eligible for cleanup.
-    """
-    current = time.monotonic() if now is None else now
-    if current < next_due_at:
-        return next_due_at
-
-    close_old_connections()
-    try:
-        cutoff = timezone.now() - system_agents.STALE_BLOCKED_AGE
-        archived_ids = system_agents.archive_stale_blocked_workflows(
-            older_than=cutoff, apply=True
-        )
-        if archived_ids:
-            logger.info(
-                "archived %s stale blocked PR-QA workflow(s): %s",
-                len(archived_ids),
-                ", ".join(str(workflow_id) for workflow_id in archived_ids),
-            )
-    except Exception:
-        logger.exception("failed to run scheduled stale blocked workflow archive")
-    finally:
-        close_old_connections()
-    return current + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS

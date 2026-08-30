@@ -1,7 +1,7 @@
 """Pure data transforms for the PR-handoff snapshot dict.
 
-The PR-QA workflow persists a compact snapshot of a pull request's state. This
-module owns the dependency-free transforms over that snapshot: compacting raw
+Hitch persists a compact snapshot of a pull request's state. This module owns
+the dependency-free transforms over that snapshot: compacting raw
 GitHub observations down to the safe field set, merging an update onto the
 persisted snapshot (resetting gate observations when the head moves), and the
 identity/head-change and terminal-state predicates those rely on.

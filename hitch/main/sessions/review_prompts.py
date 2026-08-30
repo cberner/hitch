@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 
+QA_SLASH_DISPLAY_PROMPT = (
+    "Ask the coding agent to inspect the changes and optionally use a reviewer subagent"
+)
+
 
 def optional_review_prompt(
     *,

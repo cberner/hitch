@@ -70,7 +70,6 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
 from hitch.main.runtime.codex_review import REVIEWER_AGENT_NAME
-from hitch.main.workflows import system_agents
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -2049,12 +2048,12 @@ class ReconcileAndLookupTests(TestCase):
         mock_reconcile: MagicMock,
     ) -> None:
         target_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="main-thread",
             cwd="/repo",
         )
         other_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="other-thread",
             cwd="/repo",
         )
@@ -6536,49 +6535,6 @@ class StreamForInstanceTests(TestCase):
         self.assertEqual(frames, [b"frame"])
         slots.release.assert_called_once_with()
 
-    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.05)
-    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_system_workflow_stream_resends_status_heartbeat(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        frames = list(
-            streaming.system_workflow_stream(
-                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
-            )
-        )
-
-        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertGreater(len(heartbeats), 1)
-        self.assertIn(
-            b'"statusText": "PR agent is opening and following up..."',
-            heartbeats[-1],
-        )
-
-    def test_system_workflow_stream_ends_when_workflow_stops(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="thread-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step="blocked",
-        )
-
-        frames = list(
-            streaming.system_workflow_stream(
-                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
-            )
-        )
-
-        self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"workflow"', frames[-1])
-
     def test_initial_backlog_keeps_only_latest_diff_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
@@ -6782,38 +6738,6 @@ class StreamForInstanceTests(TestCase):
         self.assertEqual(formatting.format_token_count(1_500_000), "1.5M")
         self.assertEqual(formatting.format_token_count(13_000_000), "13M")
         self.assertEqual(formatting.format_token_count(1_000_000_000), "1B")
-
-    def test_system_workflow_status_text_handles_non_qa_workflow(self) -> None:
-        workflow = cast(SystemWorkflow, SimpleNamespace(kind="other"))
-
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "Hitch system agent is working...",
-        )
-
-
-    def test_system_workflow_status_text_handles_optional_review_turn(self) -> None:
-        workflow = cast(
-            SystemWorkflow,
-            SimpleNamespace(
-                kind=SystemWorkflow.KIND_PR_QA,
-                step=system_agents.STEP_PR_PROMPT_RUNNING,
-                state={
-                    "open_pr_on_lgtm": False,
-                    system_agents.REVIEW_GUIDANCE_STATE_KEY: True,
-                },
-            ),
-        )
-
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "Coding agent is reviewing the changes...",
-        )
-        workflow.state.pop(system_agents.REVIEW_GUIDANCE_STATE_KEY)
-        self.assertEqual(
-            streaming.system_workflow_status_text(workflow),
-            "PR agent is opening and following up...",
-        )
 
     @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_missing_events_file_with_dead_worker_ends_promptly(self) -> None:

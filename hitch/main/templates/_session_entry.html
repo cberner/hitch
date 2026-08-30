@@ -89,7 +89,7 @@ per-item layout stays identical in both contexts.
             {% endif %}
         </div>
         <div class="plan-text">{{ entry.text }}</div>
-        {% if entry.show_plan_actions and send_message_url and not active_worker and not active_system_workflow %}
+        {% if entry.show_plan_actions and send_message_url and not active_worker %}
         <div class="plan-actions">
             <form method="post" action="{{ send_message_url }}">
                 {% csrf_token %}

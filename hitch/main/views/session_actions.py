@@ -35,7 +35,7 @@ from hitch.main.views import common
 from hitch.main.workflows import system_agents
 
 _ARCHIVE_ACTIVE_WORK_MESSAGE = (
-    "Stop the active workflow before archiving this session."
+    "Stop the active turn before archiving this session."
 )
 _ARCHIVE_BUSY_MESSAGE = "This session is changing. Try archiving again."
 

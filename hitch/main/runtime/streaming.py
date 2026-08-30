@@ -28,25 +28,14 @@ from typing import Any
 
 from django.db import close_old_connections
 
-from hitch.main.models import (
-    CodexInstance,
-    SystemAgentRun,
-    SystemWorkflow,
-    UserInputRequest,
-)
+from hitch.main.models import CodexInstance
 from hitch.main.runtime import codex_pool, reconciliation
 from hitch.main.runtime.db import run_ignoring_database_locks
-from hitch.main.workflows import system_agents
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short
 # enough that streamed deltas surface in near-real-time; long enough not to
 # pin a CPU when a turn is mostly waiting on the model.
 _POLL_INTERVAL = 0.2
-
-# Cadence at which idle_stream re-checks the database for a newly-spawned
-# worker. Only used when no worker is active for the session, so it doesn't
-# need to be as snappy as ``_POLL_INTERVAL``.
-_IDLE_POLL_INTERVAL = 1.0
 
 # Cadence for the named ``heartbeat`` event the client uses to drive its
 # connection-status indicator. The indicator enters a recoverable reconnecting
@@ -65,9 +54,9 @@ _MAX_STREAM_SECONDS = 60 * 30
 # reconnect event without treating the intentional recycle as transport loss.
 _IDLE_RECONNECT_MILLISECONDS = 5000
 
-# The installed service has 64 request threads. Bound long-lived worker and
-# workflow streams below that so ordinary pages retain capacity even when many
-# active sessions are open. Idle streams do not consume these slots.
+# The installed service has 64 request threads. Bound long-lived worker streams
+# below that so ordinary pages retain capacity even when many active sessions
+# are open. Idle streams do not consume these slots.
 _ACTIVE_STREAM_SLOTS = threading.BoundedSemaphore(48)
 
 _COMPACTABLE_TEXT_DELTA_METHODS = frozenset(
@@ -79,10 +68,6 @@ _COMPACTABLE_TEXT_DELTA_METHODS = frozenset(
     }
 )
 
-# System-workflow streams are active status channels and remain open between
-# heartbeats. Recycle them sooner than a direct worker stream.
-_IDLE_MAX_STREAM_SECONDS = 5 * 60
-
 # Upper bound on how long we wait for the events file to appear before giving
 # up. ``_spawn_worker`` creates the row before launching the subprocess, so on
 # a healthy host the file shows up within a fraction of a second; this caps
@@ -93,46 +78,22 @@ _FILE_APPEAR_TIMEOUT = 30.0
 
 def stream_for_instance(
     instance: CodexInstance,
-    *,
-    steering_revision: int | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames (as bytes) for a single CodexInstance.
 
     Always ends with a named ``end`` event so the client can stop its
     EventSource explicitly rather than relying on the connection close.
     """
-    last_steering_poll = 0.0
-
-    def steering_changed() -> bool:
-        nonlocal last_steering_poll
-        if steering_revision is None or instance.workflow_id is None:
-            return False
-        now = time.monotonic()
-        if now - last_steering_poll < _IDLE_POLL_INTERVAL:
-            return False
-        last_steering_poll = now
-        return (
-            _current_workflow_steering_revision(instance.workflow_id)
-            != steering_revision
-        )
-
     yield b"retry: 2000\n\n"
-    if steering_changed():
-        yield _end_frame("steering")
-        return
     yield _heartbeat_frame(
         working=True,
         status_text="",
-        workflow=_workflow_for_instance(instance),
     )
 
     path = Path(instance.events_path)
     started = time.monotonic()
     last_heartbeat = time.monotonic()
     while not path.exists():
-        if steering_changed():
-            yield _end_frame("steering")
-            return
         if _is_done(instance.pk):
             yield _end_frame(_current_status(instance.pk))
             return
@@ -143,7 +104,6 @@ def stream_for_instance(
             yield _heartbeat_frame(
                 working=True,
                 status_text="",
-                workflow=_workflow_for_instance(instance),
             )
             last_heartbeat = time.monotonic()
         time.sleep(_POLL_INTERVAL)
@@ -161,9 +121,6 @@ def stream_for_instance(
         initial_backlog = True
         deadline = time.monotonic() + _MAX_STREAM_SECONDS
         while True:
-            if steering_changed():
-                yield _end_frame("steering")
-                return
             chunk = fh.read()
             if chunk:
                 buffer += chunk
@@ -201,7 +158,6 @@ def stream_for_instance(
                 yield _heartbeat_frame(
                     working=True,
                     status_text="",
-                    workflow=_workflow_for_instance(instance),
                 )
                 last_heartbeat = time.monotonic()
             time.sleep(_POLL_INTERVAL)
@@ -222,72 +178,13 @@ def capacity_limited_stream(stream: Iterator[bytes]) -> Iterator[bytes]:
 def idle_stream() -> Iterator[bytes]:
     """Send one idle heartbeat and direct the client to reconnect shortly.
 
-    ``session_stream`` validates the page's worker and workflow baselines on every
+    ``session_stream`` validates the page's worker baseline on every
     connection. Reconnecting therefore retains out-of-band change detection
     without holding one blocking WSGI thread per idle browser tab.
     """
     yield f"retry: {_IDLE_RECONNECT_MILLISECONDS}\n\n".encode()
     yield _heartbeat_frame(working=False)
     yield _reconnect_frame()
-
-
-def system_workflow_stream(
-    session_id: str,
-    baseline_id: int | None,
-    workflow_id: int,
-    steering_revision: int = 0,
-) -> Iterator[bytes]:
-    """Heartbeat stream while a hidden system workflow owns the main thread."""
-    yield b"retry: 2000\n\n"
-    _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
-    workflow = _running_system_workflow(session_id, workflow_id)
-    if workflow_steering_revision(workflow) != steering_revision:
-        yield _end_frame("steering")
-        return
-    yield _heartbeat_frame(
-        working=True,
-        status_text=system_workflow_status_text(workflow),
-        workflow=workflow,
-    )
-    deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
-    last_heartbeat = time.monotonic()
-    seen_inputs: dict[int, str] = {}
-    if workflow is not None:
-        yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
-    while True:
-        if _latest_id_for_thread(session_id) != baseline_id:
-            yield _end_frame("active")
-            return
-        # The dead-worker and terminal-workflow reconciles are write-capable and
-        # ran on every 1s poll tick of every open workflow stream -- a steady
-        # write-lock storm proportional to open streams. Cheap WAL reads
-        # (``_latest_id_for_thread`` above, the status read below) stay per-tick
-        # for snappy "active worker spawned"/"workflow ended" detection, but the
-        # reconciles only need the slower heartbeat cadence (the 60s scheduler is
-        # the authoritative reconcile path regardless).
-        reconcile_due = time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL
-        if reconcile_due:
-            _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
-        workflow = _running_system_workflow(
-            session_id, workflow_id, reconcile=reconcile_due
-        )
-        if workflow is None:
-            yield _end_frame("workflow")
-            return
-        if workflow_steering_revision(workflow) != steering_revision:
-            yield _end_frame("steering")
-            return
-        yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
-        if time.monotonic() > deadline:
-            return
-        if reconcile_due:
-            yield _heartbeat_frame(
-                working=True,
-                status_text=system_workflow_status_text(workflow),
-                workflow=workflow,
-            )
-            last_heartbeat = time.monotonic()
-        time.sleep(_IDLE_POLL_INTERVAL)
 
 
 def reload_stream() -> Iterator[bytes]:
@@ -309,26 +206,6 @@ def _reconnect_frame() -> bytes:
         "event: reconnect\n"
         f"data: {{\"afterMs\": {_IDLE_RECONNECT_MILLISECONDS}}}\n\n"
     ).encode()
-
-
-def workflow_steering_revision(workflow: SystemWorkflow | None) -> int:
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return 0
-    value = workflow.state.get(
-        system_agents._WORKFLOW_STEERING_REVISION_STATE_KEY
-    )
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _current_workflow_steering_revision(workflow_id: int) -> int:
-    try:
-        workflow = SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            status=SystemWorkflow.STATUS_RUNNING,
-        ).first()
-        return workflow_steering_revision(workflow)
-    finally:
-        close_old_connections()
 
 
 def _emit_complete_lines(buffer: bytes) -> Generator[bytes, None, bytes]:
@@ -519,175 +396,16 @@ def _message_frame(method: str, payload: dict[str, object]) -> bytes:
     return b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
 
 
-def _workflow_input_request_frames(
-    workflow_id: int, seen: dict[int, str]
-) -> Iterator[bytes]:
-    try:
-        requests = list(
-            UserInputRequest.objects.filter(
-                instance__system_agent_runs__workflow_id=workflow_id
-            )
-            .order_by("created_at", "id")
-            .values("id", "method", "params", "response")
-        )
-    finally:
-        close_old_connections()
-    for row in requests:
-        request_id = row["id"]
-        if not isinstance(request_id, int):
-            continue
-        method = row.get("method") if isinstance(row.get("method"), str) else ""
-        params = row.get("params") if isinstance(row.get("params"), dict) else {}
-        response = row.get("response")
-        prior = seen.get(request_id)
-        if prior is None:
-            yield _message_frame(
-                "input/requested",
-                {"id": request_id, "method": method, "params": params},
-            )
-        marker = json.dumps(response, sort_keys=True) if response is not None else ""
-        if marker and prior != marker:
-            yield _message_frame(
-                "input/resolved",
-                {
-                    "id": request_id,
-                    "method": method,
-                    "response": response if isinstance(response, dict) else {},
-                },
-            )
-        seen[request_id] = marker
-
-
 def _heartbeat_frame(
     *,
     working: bool,
     status_text: str = "",
-    workflow: SystemWorkflow | None = None,
 ) -> bytes:
     payload_data: dict[str, Any] = {"working": working}
     if status_text:
         payload_data["statusText"] = status_text
-    if workflow is not None and workflow.kind == SystemWorkflow.KIND_PR_QA:
-        progress = pr_workflow_progress(workflow)
-        payload_data["prWorkflowProgress"] = progress
     payload = json.dumps(payload_data).encode("utf-8")
     return b"event: heartbeat\ndata: " + payload + b"\n\n"
-
-
-def pr_workflow_progress(workflow: SystemWorkflow | None) -> list[dict[str, str]]:
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return []
-    raw_gates = workflow.state.get("pr_gates") if isinstance(workflow.state, dict) else []
-    if not isinstance(raw_gates, list) or not raw_gates:
-        return []
-    progress: list[dict[str, str]] = []
-    for raw in raw_gates:
-        if not isinstance(raw, dict):
-            continue
-        key = raw.get("key")
-        label = raw.get("label")
-        status = raw.get("status")
-        summary = raw.get("summary")
-        if not isinstance(key, str) or not isinstance(label, str):
-            continue
-        if status not in {"passed", "blocked", "pending", "checking", "stopped"}:
-            status = "pending"
-        progress.append(
-            {
-                "key": key,
-                "label": label,
-                "status": status,
-                "statusLabel": _pr_gate_status_label(status),
-                "summary": summary if isinstance(summary, str) else "",
-            }
-        )
-    return progress
-
-
-def _pr_gate_status_label(status: str) -> str:
-    return {
-        "blocked": "Blocked",
-        "checking": "Checking",
-        "passed": "Passed",
-        "pending": "Pending",
-        "stopped": "Stopped",
-    }.get(status, "Pending")
-
-
-def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
-    if workflow is None:
-        return ""
-    if workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return "Hitch system agent is working..."
-    if workflow.step == system_agents.STEP_PR_PROMPT_RUNNING:
-        if system_agents.is_review_guidance_only_workflow(workflow):
-            return "Coding agent is reviewing the changes..."
-        return "PR agent is opening and following up..."
-    if workflow.step == system_agents.STEP_PR_WATCH_RUNNING:
-        return "Coding agent is watching and following up on the PR..."
-    if workflow.step == system_agents.STEP_USER_STEERING_RUNNING:
-        if CodexInstance.objects.filter(
-            workflow_id=workflow.pk,
-            purpose=CodexInstance.PURPOSE_USER,
-            status__in=CodexInstance.ACTIVE_STATUSES,
-        ).exists():
-            return "Coding agent is working..."
-        return "Coding agent is waiting for the current workflow turn..."
-    return "Hitch workflow is working..."
-
-
-def _running_system_workflow(
-    session_id: str,
-    workflow_id: int,
-    *,
-    reconcile: bool = True,
-) -> SystemWorkflow | None:
-    try:
-        # The reconcile write runs on the heartbeat tick of every open workflow
-        # SSE stream; a transient lock must skip this tick (the next one retries)
-        # rather than abort the generator and drop the stream. ``reconcile`` is
-        # False on the faster intermediate poll ticks so the write-capable sweep
-        # stays on the heartbeat cadence. The status read below is a WAL reader
-        # and never contends for the lock, so it runs every tick.
-        if reconcile:
-            run_ignoring_database_locks(
-                lambda: system_agents.reconcile_terminal_workflow_instances(
-                    workflow_id=workflow_id
-                ),
-                description="system workflow instance reconcile",
-            )
-        return SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            main_thread_id=session_id,
-            status=SystemWorkflow.STATUS_RUNNING,
-        ).first()
-    finally:
-        close_old_connections()
-
-
-def _running_system_agent_instance(workflow_id: int) -> CodexInstance | None:
-    try:
-        run = (
-            SystemAgentRun.objects.filter(
-                workflow_id=workflow_id,
-                status=SystemAgentRun.STATUS_RUNNING,
-            )
-            .select_related("instance")
-            .order_by("-created_at")
-            .first()
-        )
-    finally:
-        close_old_connections()
-    return run.instance if run is not None else None
-
-
-def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:
-    if instance.workflow_id is None:
-        return None
-    try:
-        return SystemWorkflow.objects.filter(pk=instance.workflow_id).first()
-    finally:
-        close_old_connections()
 
 
 def _is_done(instance_id: int) -> bool:
@@ -734,22 +452,6 @@ def _reconcile_dead_for_thread(session_id: str) -> None:
         run_ignoring_database_locks(
             lambda: reconciliation.reconcile_dead_for_thread(session_id),
             description="stream dead-worker reconcile",
-        )
-    finally:
-        close_old_connections()
-
-
-def _reconcile_dead_for_workflow(
-    workflow_id: int, *, main_thread_id: str | None
-) -> None:
-    try:
-        # Runs each heartbeat tick of an open workflow stream; skip a contended
-        # tick rather than tear down the SSE generator. The next tick retries.
-        run_ignoring_database_locks(
-            lambda: reconciliation.reconcile_dead_for_workflow(
-                workflow_id, main_thread_id=main_thread_id
-            ),
-            description="workflow dead-worker reconcile",
         )
     finally:
         close_old_connections()

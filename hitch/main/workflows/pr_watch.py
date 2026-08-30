@@ -51,8 +51,6 @@ from hitch.main.workflows.pr_handoff import (
 
 PR_WATCH_RESULT_STATE_KEY = "last_pr_watch"
 PR_WATCH_RESULT_TURN_INDEX_STATE_KEY = "last_pr_watch_turn_index"
-STEP_PR_WATCH_RUNNING = "pr_watch_running"
-STEP_PR_WATCH_COMPLETED = "pr_watch_completed"
 
 _PR_WATCH_POLL_SECONDS = 2 * 60
 _PR_WATCH_TIMEOUT_SECONDS = 30 * 60

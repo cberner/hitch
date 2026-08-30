@@ -1,9 +1,9 @@
 """Derive a thread/session's PR, plan-mode, and auto-flag state.
 
-This module owns the helpers that read a thread's rollout, workflow, and
-metadata to derive its PR state (URLs, snapshots, observation epochs), its
-Plan Mode state, and its auto-PR/auto-QA session settings. It is a
-leaf module: it depends only on the sibling helpers and never imports views.
+This module owns the helpers that read a thread's rollout, registered PR, and
+metadata to derive its PR state (URLs, snapshots, observation epochs), Plan
+Mode state, and auto-PR/auto-QA settings. It is a leaf module: it depends only
+on sibling helpers and never imports views.
 """
 
 from __future__ import annotations
@@ -14,9 +14,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from django.db.models import Q
-
-from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
+from hitch.main.models import CodexInstance, SessionMetadata, SessionPullRequest
 from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_for
 from hitch.main.runtime.sdk_values import (
@@ -24,12 +22,11 @@ from hitch.main.runtime.sdk_values import (
     plain_sdk_value,
     sdk_model_dump_value,
     string_value,
-    updated_at_seconds,
     value_for,
 )
 from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
 from hitch.main.sessions.pr_prompts import is_pr_creation_prompt, is_pr_workflow_notice
-from hitch.main.workflows import pr_qa, pr_stage, pr_stage_refresh_state
+from hitch.main.workflows import pr_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -61,142 +58,6 @@ def _pr_observation_result_for_rollout_path(
     except Exception:
         logger.exception("failed to parse rollout %s for PR stage snapshot", rollout_path)
         return codex_events.PrObservationResult(snapshot=None)
-
-
-def _workflow_after_main_lifecycle(
-    workflow: SystemWorkflow | None,
-    pr_observation: codex_events.PrObservationResult,
-    *,
-    main_updated_at: Any = None,
-    newer_main_activity_owned: bool,
-) -> SystemWorkflow | None:
-    """Keep completed PR workflows only when main work has not superseded them."""
-    if workflow is None or workflow.is_active:
-        return workflow
-    if pr_observation.superseded_by_lifecycle:
-        if _workflow_pr_handoff_survives_lifecycle(
-            workflow,
-            main_updated_at=main_updated_at,
-            newer_main_activity_owned=newer_main_activity_owned,
-        ):
-            return workflow
-        return None
-    main_updated_seconds = updated_at_seconds(main_updated_at)
-    workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
-    main_is_newer = (
-        main_updated_seconds is not None
-        and workflow_updated_seconds is not None
-        and main_updated_seconds > workflow_updated_seconds
-    )
-    if main_is_newer and newer_main_activity_owned:
-        return workflow
-    if main_is_newer and _pr_snapshot_identity(pr_observation.snapshot) is not None:
-        return None
-    if pr_observation.snapshot is None and main_is_newer:
-        return None
-    return workflow
-
-
-def _workflow_pr_handoff_survives_lifecycle(
-    workflow: SystemWorkflow,
-    *,
-    main_updated_at: Any,
-    newer_main_activity_owned: bool,
-) -> bool:
-    if not _workflow_has_durable_pr_handoff(workflow):
-        return False
-    main_updated_seconds = updated_at_seconds(main_updated_at)
-    workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
-    return (
-        main_updated_seconds is None
-        or workflow_updated_seconds is None
-        or workflow_updated_seconds >= main_updated_seconds
-        or newer_main_activity_owned
-    )
-
-
-def _workflow_has_durable_pr_handoff(workflow: SystemWorkflow) -> bool:
-    handoff = pr_qa.pr_handoff_for_workflow(workflow)
-    handoff_identity = _pr_snapshot_identity(handoff)
-    if handoff_identity is None:
-        return False
-    hitch_handoff = pr_stage_refresh_state.hitch_pr_handoff_for_workflow(workflow)
-    return _pr_snapshot_identity(hitch_handoff) == handoff_identity
-
-
-def _workflow_activity_ownership_by_id(
-    workflow_main_updates: Iterable[tuple[SystemWorkflow | None, Any]],
-) -> dict[int, bool]:
-    """Batch ownership checks for workflow-newer session recency.
-
-    Session recency tracks every worker lifecycle. A failure-surfacing worker
-    can therefore end just after its workflow becomes terminal, even though no
-    later user turn superseded the workflow's durable PR handoff. Collect every
-    ambiguous workflow into one query so session-list and detail rendering do
-    not perform this lookup once per workflow.
-    """
-    candidates: dict[int, tuple[SystemWorkflow, float, float]] = {}
-    for workflow, main_updated_at in workflow_main_updates:
-        if workflow is None or workflow.pk is None or workflow.is_active:
-            continue
-        main_updated_seconds = updated_at_seconds(main_updated_at)
-        workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
-        if (
-            main_updated_seconds is None
-            or workflow_updated_seconds is None
-            or main_updated_seconds <= workflow_updated_seconds
-            or not _workflow_has_durable_pr_handoff(workflow)
-        ):
-            continue
-        previous = candidates.get(workflow.pk)
-        if previous is None or main_updated_seconds > previous[1]:
-            candidates[workflow.pk] = (
-                workflow,
-                main_updated_seconds,
-                workflow_updated_seconds,
-            )
-    if not candidates:
-        return {}
-
-    candidates_by_thread: dict[str, list[tuple[SystemWorkflow, float, float]]] = {}
-    for candidate in candidates.values():
-        workflow = candidate[0]
-        candidates_by_thread.setdefault(workflow.main_thread_id, []).append(candidate)
-
-    earliest_workflow_updated_at = min(
-        workflow.updated_at for workflow, _, _ in candidates.values()
-    )
-    instances = CodexInstance.objects.filter(
-        Q(started_at__gt=earliest_workflow_updated_at)
-        | Q(ended_at__gt=earliest_workflow_updated_at),
-        thread_id__in=candidates_by_thread.keys(),
-    ).only(
-        "thread_id", "workflow_id", "started_at", "ended_at"
-    )
-    owned_activity_reaches_main_update: set[int] = set()
-    unrelated_activity_after_workflow: set[int] = set()
-    for instance in instances:
-        activity_seconds = max(
-            updated_at_seconds(instance.started_at) or 0,
-            updated_at_seconds(instance.ended_at) or 0,
-        )
-        for workflow, main_updated_seconds, workflow_updated_seconds in (
-            candidates_by_thread.get(instance.thread_id, [])
-        ):
-            assert workflow.pk is not None
-            if activity_seconds <= workflow_updated_seconds:
-                continue
-            if instance.workflow_id != workflow.pk:
-                unrelated_activity_after_workflow.add(workflow.pk)
-            elif activity_seconds >= main_updated_seconds:
-                owned_activity_reaches_main_update.add(workflow.pk)
-    return {
-        workflow_id: (
-            workflow_id in owned_activity_reaches_main_update
-            and workflow_id not in unrelated_activity_after_workflow
-        )
-        for workflow_id in candidates
-    }
 
 
 def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
@@ -299,47 +160,47 @@ def _current_pr_url_for_thread(
     thread: Any,
     *,
     pr_observation: codex_events.PrObservationResult,
-    stage_pr_workflow: SystemWorkflow | None,
+    registered_pr: SessionPullRequest | None,
     latest_pr_url: str | None = None,
     latest_pr_url_loaded: bool = False,
 ) -> str | None:
+    if registered_pr is not None:
+        return _registered_pr_url(registered_pr)
     # A raw latest PR URL is only valid while the PR observation epoch is
     # current. Lifecycle-cleared sessions must not expose old PR actions.
     if not pr_observation.superseded_by_lifecycle:
         thread_url = latest_pr_url if latest_pr_url_loaded else _pr_url_for_thread(thread)
         if thread_url:
             return thread_url
-    workflow_handoff = pr_qa.pr_handoff_for_workflow(stage_pr_workflow)
-    workflow_url = string_value(workflow_handoff.get("url"))
-    if workflow_url:
-        return workflow_url
     snapshot = pr_observation.snapshot
     return string_value(snapshot.get("url") if snapshot else None) or None
 
 
-def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
-    pr_observation = _pr_observation_result_for_thread(thread)
-    main_updated_at = getattr(thread, "updated_at", None)
-    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
-    activity_ownership = _workflow_activity_ownership_by_id(
-        [(latest_pr_workflow, main_updated_at)]
-    )
-    stage_pr_workflow = _workflow_after_main_lifecycle(
-        latest_pr_workflow,
-        pr_observation,
-        main_updated_at=main_updated_at,
-        newer_main_activity_owned=bool(
-            latest_pr_workflow is not None
-            and latest_pr_workflow.pk is not None
-            and activity_ownership.get(latest_pr_workflow.pk)
-        ),
-    )
-    return _current_pr_url_for_thread(
-        thread,
-        pr_observation=pr_observation,
-        stage_pr_workflow=stage_pr_workflow,
-        latest_pr_url=None,
-    )
+def _fix_pr_url_for_thread(session_id: str) -> str | None:
+    registered_pr = pr_tracking.record_for_thread(session_id)
+    return _registered_pr_url(registered_pr)
+
+
+def _registered_pr_url(record: SessionPullRequest | None) -> str | None:
+    handoff = pr_tracking.pr_handoff_for_record(record)
+    url = string_value(handoff.get("url"))
+    if url:
+        return url
+    repository = string_value(handoff.get("repository_full_name"))
+    number = handoff.get("pr_number")
+    repository_parts = repository.split("/")
+    if (
+        len(repository_parts) == 2
+        and all(
+            part and not any(char.isspace() for char in part)
+            for part in repository_parts
+        )
+        and isinstance(number, int)
+        and not isinstance(number, bool)
+        and number > 0
+    ):
+        return f"https://github.com/{repository}/pull/{number}"
+    return None
 
 
 def _pr_snapshot_for_thread(thread: Any) -> dict[str, Any] | None:

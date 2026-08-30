@@ -28,11 +28,11 @@ from hitch.main.models import (
     Project,
     ProposedSession,
     SessionMetadata,
-    SystemWorkflow,
     UserSettings,
 )
 from hitch.main.runtime import input_images
 from hitch.main.sessions import (
+    agent_tasks,
     session_settings,
 )
 from hitch.main.sessions.settings_cookies import SettingsValues
@@ -468,18 +468,18 @@ class NewSessionViewTests(TestCase):
         assert error is not None
         self.assertNotIn("/tmp/private", error)
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+
+
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.repos.discover_repos")
-    def test_new_session_rejects_workflow_image_uploads_before_side_effects(
+    def test_new_session_rejects_review_task_images_before_side_effects(
         self,
         mock_discover: MagicMock,
         mock_codex: MagicMock,
         mock_create_thread: MagicMock,
         mock_spawn: MagicMock,
-        mock_start_workflow: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
@@ -491,31 +491,30 @@ class NewSessionViewTests(TestCase):
                     data={
                         "prompt": prompt,
                         "cwd": self.REPO,
-                        "input_images": SimpleUploadedFile("screen.png", _PNG_BYTES, content_type="image/png"),
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
                     },
                 )
 
                 self.assertContains(
                     response,
-                    "image attachments are not supported for PR workflow requests",
+                    "image attachments are not supported for review or PR tasks",
                     status_code=400,
                 )
                 mock_create_thread.assert_not_called()
                 mock_spawn.assert_not_called()
-                mock_start_workflow.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
-    @patch("hitch.main.workflows.pr_qa.start_pr_now_workflow")
-    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
+    @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.repos.discover_repos")
-    def test_new_session_pr_now_skips_qa_workflow_entry_point(
+    def test_new_session_pr_now_spawns_ordinary_publish_turn(
         self,
         mock_discover: MagicMock,
-        mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_pr_now: MagicMock,
-        mock_start_pr_qa: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_spawn: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_create_thread.return_value = "pr-now-thread"
@@ -534,18 +533,11 @@ class NewSessionViewTests(TestCase):
             model="gpt-5.4",
             enable_memories=False,
         )
-        mock_start_pr_qa.assert_not_called()
-        mock_start_pr_now.assert_called_once_with(
-            main_thread_id="pr-now-thread",
-            cwd=self.REPO,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-        )
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "pr-now-thread")
+        self.assertEqual(kwargs["prompt"], agent_tasks.publish_pr_task().prompt)
+        self.assertEqual(kwargs["agent_kind"], agent_tasks.PR_PUBLISH_AGENT_KIND)
+        self.assertNotIn("workflow_id", kwargs)
 
     @patch("hitch.main.views.common._save_posted_input_images")
     @patch("hitch.main.views.common.Codex")
@@ -996,7 +988,7 @@ class NewSessionViewTests(TestCase):
 
         cases = (
             ("turn", "Continue the preserved request."),
-            ("workflow", "/qa"),
+            ("review task", "/qa"),
         )
         for index, (active_kind, prompt) in enumerate(cases):
             with self.subTest(active_kind=active_kind, prompt=prompt):
@@ -1019,22 +1011,19 @@ class NewSessionViewTests(TestCase):
                     prompt=prompt,
                     outcome_metadata={"resume_source_session": True},
                 )
-                if active_kind == "turn":
-                    CodexInstance.objects.create(
-                        pid=12345,
-                        thread_id=thread_id,
-                        cwd=recovery_repo,
-                        prompt="Other active work",
-                        events_path="/tmp/active-events.jsonl",
-                        status=CodexInstance.STATUS_RUNNING,
-                    )
-                else:
-                    SystemWorkflow.objects.create(
-                        kind=SystemWorkflow.KIND_PR_QA,
-                        main_thread_id=thread_id,
-                        cwd=recovery_repo,
-                        status=SystemWorkflow.STATUS_RUNNING,
-                    )
+                CodexInstance.objects.create(
+                    pid=12345,
+                    thread_id=thread_id,
+                    cwd=recovery_repo,
+                    prompt="Other active work",
+                    events_path="/tmp/active-events.jsonl",
+                    status=CodexInstance.STATUS_RUNNING,
+                    agent_kind=(
+                        agent_tasks.REVIEW_AGENT_KIND
+                        if active_kind == "review task"
+                        else ""
+                    ),
+                )
 
                 with patch.object(
                     new_session_views,
@@ -1385,7 +1374,6 @@ class NewSessionViewTests(TestCase):
         mock_turn.assert_not_called()
 
     @patch("hitch.main.views.common.goal_workflows.stop_running_autonomous_goal_stack_after_proposal_resolution")
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1396,14 +1384,13 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
-        mock_start_workflow: MagicMock,
         mock_stop_stack: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
         codex._client.thread_resume.return_value = SimpleNamespace(thread=SimpleNamespace(turns=[]))
-        mock_start_workflow.side_effect = RuntimeError("workflow failed")
+        mock_turn.side_effect = RuntimeError("turn failed")
         project = _make_project(repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -1432,8 +1419,7 @@ class NewSessionViewTests(TestCase):
                 },
             )
 
-        mock_start_workflow.assert_called_once()
-        mock_turn.assert_not_called()
+        mock_turn.assert_called_once()
         proposal.refresh_from_db()
         candidate.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
@@ -1441,7 +1427,6 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.is_hidden_system_session)
         mock_stop_stack.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1452,7 +1437,6 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
-        mock_start_workflow: MagicMock,
     ) -> None:
         # Accepting an autonomous-goal proposal with a /qa (or /pr) prompt must
         # persist the goal-derived auto-review configuration onto the session,
@@ -1500,20 +1484,19 @@ class NewSessionViewTests(TestCase):
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "candidate-thread"}),
         )
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="candidate-thread",
+        mock_turn.assert_called_once_with(
+            thread_id="candidate-thread",
             cwd="/repo-worktree",
+            prompt=agent_tasks.review_task(prepare_pull_request=False).prompt,
             sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
             model=None,
             reasoning_effort=None,
             developer_instructions=None,
             enable_memories=False,
-            initial_user_message_index=0,
-            pr_watch_tool_available=False,
-            open_pr_on_lgtm=False,
+            user_message_index=0,
+            agent_kind=agent_tasks.REVIEW_AGENT_KIND,
         )
-        mock_turn.assert_not_called()
         proposal.refresh_from_db()
         candidate.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
@@ -1876,18 +1859,18 @@ class NewSessionViewTests(TestCase):
             input_image_paths=image_paths,
         )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.views.common.create_worktree_for_session")
     @patch("hitch.main.repos.discover_repos")
-    def test_new_session_qa_workflow_slash_commands(
+    def test_new_session_review_and_pr_shortcuts_spawn_ordinary_turns(
         self,
         mock_discover: MagicMock,
         mock_create_worktree: MagicMock,
         mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
+        mock_turn: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         codex = _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
@@ -1942,7 +1925,6 @@ class NewSessionViewTests(TestCase):
                     "reasoning_effort": "high",
                     "developer_instructions": None,
                     "web_search_mode": "disabled",
-                    "open_pr_on_lgtm": False,
                 },
             ),
             (
@@ -1963,7 +1945,7 @@ class NewSessionViewTests(TestCase):
             data,
             cookies,
             thread_kwargs,
-            workflow_kwargs,
+            task_settings,
         ) in enumerate(cases):
             with self.subTest(label=label):
                 self._clear_models_cache()
@@ -1974,7 +1956,7 @@ class NewSessionViewTests(TestCase):
                 mock_create_thread.return_value = f"thread-{index}"
                 mock_create_thread.reset_mock()
                 mock_create_worktree.reset_mock()
-                mock_start_workflow.reset_mock()
+                mock_turn.reset_mock()
                 if cookies:
                     _seed_cookies(client, **cookies)
 
@@ -1987,17 +1969,22 @@ class NewSessionViewTests(TestCase):
                     enable_memories=False,
                     **thread_kwargs,
                 )
-                mock_start_workflow.assert_called_once_with(
-                    main_thread_id=f"thread-{index}",
+                task = agent_tasks.review_task(
+                    prepare_pull_request=label != "qa"
+                )
+                mock_turn.assert_called_once_with(
+                    thread_id=f"thread-{index}",
                     cwd=self.REPO,
+                    prompt=task.prompt,
                     sandbox_policy=None,
                     approval_mode="auto_review",
                     enable_memories=False,
-                    initial_user_message_index=0,
-                    **workflow_kwargs,
+                    user_message_index=0,
+                    agent_kind=task.agent_kind,
+                    **task_settings,
                 )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.pull_default_branch_from_origin")
@@ -2006,7 +1993,7 @@ class NewSessionViewTests(TestCase):
         mock_pull: MagicMock,
         mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
+        mock_turn: MagicMock,
     ) -> None:
         project = _make_project(repo_path=self.REPO, auto_pull_enabled=True)
         mock_pull.side_effect = repos_module.AutoPullError("project repository has uncommitted changes")
@@ -2021,9 +2008,9 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         mock_pull.assert_not_called()
         mock_create_thread.assert_called_once()
-        mock_start_workflow.assert_called_once()
+        mock_turn.assert_called_once()
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -2032,7 +2019,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
+        mock_turn: MagicMock,
     ) -> None:
         # A coding-agent proposal (no autonomous goal) leaves the inbox's
         # auto-review inputs empty, so the proposal did not request auto-review.
@@ -2060,14 +2047,14 @@ class NewSessionViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_start_workflow.assert_called_once()
+        mock_turn.assert_called_once()
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         metadata = SessionMetadata.objects.get(thread_id="coding-proposal-thread")
         self.assertFalse(metadata.auto_qa_enabled)
         self.assertFalse(metadata.auto_pr_enabled)
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -2076,7 +2063,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
+        mock_turn: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
@@ -2097,7 +2084,7 @@ class NewSessionViewTests(TestCase):
                 },
             )
 
-        mock_start_workflow.assert_not_called()
+        mock_turn.assert_not_called()
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
@@ -2106,16 +2093,16 @@ class NewSessionViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
-    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
-    def test_proposal_qa_workflow_start_failure_resets_start_claim(
+    def test_proposal_qa_turn_start_failure_resets_start_claim(
         self,
         mock_discover: MagicMock,
         mock_create_thread: MagicMock,
         mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
+        mock_turn: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
@@ -2125,7 +2112,7 @@ class NewSessionViewTests(TestCase):
             title="Tidy up logging",
         )
         mock_create_thread.return_value = "proposal-qa-thread"
-        mock_start_workflow.side_effect = RuntimeError("workflow failed")
+        mock_turn.side_effect = RuntimeError("turn failed")
 
         with self.assertRaises(RuntimeError):
             self.client.post(

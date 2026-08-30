@@ -6,7 +6,7 @@ from typing import Any, override
 from django.test import TestCase
 
 from hitch.main.runtime import rollout
-from hitch.main.workflows import system_agents
+from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 
 
 def _line(line_type: str, payload: dict[str, Any], *, timestamp: str = "2025-01-05T12:00:00Z") -> str:
@@ -273,7 +273,7 @@ class LatestPrUrlTests(TestCase):
             [
                 _line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _line(
                     "event_msg",
@@ -289,7 +289,7 @@ class LatestPrUrlTests(TestCase):
                 _line("event_msg", {"type": "agent_message", "message": "Opened."}),
                 _line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _line(
                     "response_item",
@@ -321,7 +321,7 @@ class LatestPrUrlTests(TestCase):
             [
                 _line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _line(
                     "response_item",
@@ -374,7 +374,7 @@ class LatestPrUrlTests(TestCase):
             [
                 _line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _func_call("call-pr", None, name="github_fetch_pr"),
                 _line(
@@ -437,7 +437,7 @@ class LatestPrUrlTests(TestCase):
             [
                 _line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _line(
                     "event_msg",

@@ -1,4 +1,4 @@
-"""send_message: steering, workflow activation, and turn spawning."""
+"""Send-message intent parsing, steering, and ordinary turn spawning."""
 import logging
 import os
 import uuid
@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from django.contrib import messages as django_messages
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -20,7 +19,6 @@ from openai_codex.errors import InvalidRequestError
 
 from hitch.main import caches
 from hitch.main.models import (
-    CodexInstance,
     Project,
     SessionMetadata,
 )
@@ -32,6 +30,7 @@ from hitch.main.runtime.input_images import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
+from hitch.main.sessions import agent_tasks
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions.message_intent import (
     _message_intent,
@@ -43,7 +42,6 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.session_approval import _parse_instance_id
 from hitch.main.sessions.session_entry_display import (
     _entries_for,
-    _workflow_accepts_steering,
 )
 from hitch.main.sessions.session_pr_plan import (
     _auto_pr_enabled_for_session,
@@ -73,7 +71,6 @@ from hitch.main.sessions.settings_cookies import (
     _valid_web_search_mode_or_default,
 )
 from hitch.main.views import common
-from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +90,7 @@ class _MessageSubmission:
     pr_now_activation: bool
     fix_pr_activation: bool
     qa_activation: bool
-    qa_workflow_activation: bool
+    agent_task_activation: bool
     has_input_images: bool
 
 
@@ -105,7 +102,7 @@ def _message_submission(
     pr_now_activation = intent.pr_now_activation
     fix_pr_activation = intent.fix_pr_activation
     qa_activation = intent.qa_activation
-    qa_workflow_activation = (
+    agent_task_activation = (
         pr_activation or pr_now_activation or qa_activation or fix_pr_activation
     )
     has_input_images = common._has_input_image_uploads(request)
@@ -126,9 +123,9 @@ def _message_submission(
         return None, "invalid collaboration mode"
     if collaboration_mode and intent.plan_mode and intent.explicit_plan_mode:
         return None, "collaboration mode conflicts with plan mode"
-    if qa_workflow_activation and collaboration_mode:
-        return None, "PR workflow conflicts with collaboration mode"
-    if collaboration_mode or qa_workflow_activation:
+    if agent_task_activation and collaboration_mode:
+        return None, "review and PR tasks conflict with collaboration mode"
+    if collaboration_mode or agent_task_activation:
         intent = intent._replace(plan_mode=False)
     return (
         _MessageSubmission(
@@ -137,7 +134,7 @@ def _message_submission(
             pr_now_activation=pr_now_activation,
             fix_pr_activation=fix_pr_activation,
             qa_activation=qa_activation,
-            qa_workflow_activation=qa_workflow_activation,
+            agent_task_activation=agent_task_activation,
             has_input_images=has_input_images,
         ),
         None,
@@ -219,64 +216,33 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     pr_now_activation = submission.pr_now_activation
     fix_pr_activation = submission.fix_pr_activation
     qa_activation = submission.qa_activation
-    qa_workflow_activation = submission.qa_workflow_activation
+    agent_task_activation = submission.agent_task_activation
     prompt = intent.prompt
     plan_mode = intent.plan_mode
     collaboration_mode = submission.collaboration_mode
     has_input_images = submission.has_input_images
-    active_system_workflow = system_agents.active_workflow_snapshot_for_thread(
-        session_id
+    run_ignoring_database_locks(
+        lambda: reconciliation.reconcile_dead_for_thread(session_id),
+        description="send-message dead-worker reconcile",
     )
-    steering_can_be_claimed_before_reconciliation = (
-        active_system_workflow is not None
-        and not qa_workflow_activation
-        and not has_input_images
-        and _workflow_accepts_steering(active_system_workflow)
-    )
-    if not steering_can_be_claimed_before_reconciliation:
-        run_ignoring_database_locks(
-            lambda: reconciliation.reconcile_dead_for_thread(session_id),
-            description="send-message dead-worker reconcile",
-        )
-        active_system_workflow = (
-            system_agents.active_workflow_snapshot_for_thread(session_id)
-        )
-    if qa_workflow_activation and has_input_images:
+    if agent_task_activation and has_input_images:
         return HttpResponseBadRequest(
-            "image attachments are not supported for PR workflow requests"
+            "image attachments are not supported for review or PR tasks"
         )
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     active_instance = None
     instance_id: int | None = None
     if raw_active:
-        if qa_workflow_activation:
-            return HttpResponseBadRequest("PR workflow requires an idle session")
+        if agent_task_activation:
+            return HttpResponseBadRequest("review and PR tasks require an idle session")
         instance_id, error = _parse_instance_id(raw_active)
         if error is not None or instance_id is None:
             return HttpResponseBadRequest(error or "invalid instance id")
     else:
         active_instance = codex_pool.latest_active_for_thread(session_id)
-        if active_instance is not None and qa_workflow_activation:
-            return HttpResponseBadRequest("PR workflow requires an idle session")
-    if active_system_workflow is not None and qa_workflow_activation:
-        return redirect("session", session_id=session_id)
-    if active_system_workflow is not None:
-        if has_input_images:
-            return HttpResponseBadRequest(
-                "image attachments are not supported while QA workflow is running"
-            )
-        if not _workflow_accepts_steering(active_system_workflow):
-            return HttpResponseBadRequest("PR workflow is running for this session")
-        if instance_id is not None and not CodexInstance.objects.filter(
-            pk=instance_id,
-            thread_id=session_id,
-            workflow_id=active_system_workflow.pk,
-        ).exists():
-            return HttpResponseBadRequest(
-                "submitted worker does not belong to the active PR workflow"
-            )
-
+        if active_instance is not None and agent_task_activation:
+            return HttpResponseBadRequest("review and PR tasks require an idle session")
     input_image_paths, input_image_error = common._save_posted_input_images(request)
     if input_image_error is not None:
         return HttpResponseBadRequest(input_image_error)
@@ -299,26 +265,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         lifecycle_lock_held = True
 
     try:
-        if active_system_workflow is not None:
-            if pr_qa.enqueue_user_steering(active_system_workflow, prompt=prompt):
-                return redirect("session", session_id=session_id)
-            # The workflow may have finished after the steerable-page snapshot.
-            # Preserve the prompt through the ordinary follow-up path only if
-            # no active workflow still owns the session.
-            run_ignoring_database_locks(
-                lambda: reconciliation.reconcile_dead_for_thread(session_id),
-                description="send-message dead-worker reconcile",
-            )
-            active_system_workflow = (
-                system_agents.active_workflow_snapshot_for_thread(session_id)
-            )
-            if active_system_workflow is not None:
-                return HttpResponseBadRequest(
-                    "PR workflow is running for this session"
-                )
-            active_system_workflow = None
-            if not raw_active:
-                active_instance = codex_pool.latest_active_for_thread(session_id)
         steer_instance_id: int | None = None
         if raw_active:
             assert instance_id is not None
@@ -344,7 +290,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # rollout file from disk: the detached worker resumes the thread itself
         # moments later, so a live ``thread_resume`` here only duplicates that
         # rollout read (and its lazy state-DB migration) on the request path.
-        # Fall back to a live resume for active/workflow/uncached-cwd threads.
+        # Fall back to a live resume for active or uncached-cwd threads.
         hold_lifecycle_lock()
         metadata = _session_detail_metadata(session_id)
 
@@ -355,8 +301,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if not session_unarchived_for_turn or session_unarchive_recorded:
                 return
             # Post-spawn bookkeeping is best effort: a transient failure must
-            # not re-archive underneath a live worker. Workflow starts record
-            # first because their durable-state guard reads this metadata.
+            # not re-archive underneath a live worker. Task starts record first
+            # because their durable-state guard reads this metadata.
             try:
                 _record_session_unarchived(session_id, thread=thread)
             except Exception:
@@ -395,7 +341,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 session_id,
                 metadata,
                 active_instance=active_instance,
-                active_system_workflow=active_system_workflow,
                 require_system_agent_thread=False,
             )
         )
@@ -483,7 +428,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and (
                 plan_mode
                 or collaboration_mode == _DEFAULT_COLLABORATION_MODE
-                or qa_workflow_activation
+                or agent_task_activation
             )
             and not string_value(getattr(resumed, "model", None))
         ):
@@ -513,7 +458,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # Sandbox policy and approval mode are applied per-turn rather than
         # persisted on the thread, so follow-up messages have to re-forward
         # the cookies or every turn after the first silently reverts to Codex
-        # defaults — which breaks multi-turn workflows that depend on
+        # defaults — which breaks multi-turn sessions that depend on
         # elevated permissions or stricter escalation handling.
         sandbox_policy = _effective_sandbox_policy_for_cwd(settings, cwd)
         approval_mode = _effective_approval_mode_for_session(
@@ -544,7 +489,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         )
         web_search_mode = (
             previous_web_search_mode
-            if qa_workflow_activation and not configured_web_search_mode
+            if agent_task_activation and not configured_web_search_mode
             else configured_web_search_mode
         )
         should_forward_web_search_mode = bool(web_search_mode) or bool(
@@ -554,53 +499,52 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         auto_qa_enabled = (
             False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
         )
-        if qa_workflow_activation:
-            workflow_model, workflow_reasoning_effort = _stored_model_and_effort(
+        if agent_task_activation:
+            task_model, task_reasoning_effort = _stored_model_and_effort(
                 resumed, settings
             )
-            workflow_kwargs: dict[str, Any] = {
-                "main_thread_id": session_id,
-                "cwd": cwd,
-                "sandbox_policy": sandbox_policy or None,
-                "approval_mode": approval_mode,
-                "model": workflow_model or None,
-                "reasoning_effort": workflow_reasoning_effort or None,
-                "developer_instructions": developer_instructions or None,
-                "enable_memories": settings.enable_memories,
-                "initial_user_message_index": _count_user_entries(thread_entries),
-                "pr_watch_tool_available": thread_has_dynamic_tool(
-                    session_id,
-                    namespace="hitch",
-                    name="watch_pr",
-                ),
-            }
-            if should_forward_web_search_mode:
-                workflow_kwargs["web_search_mode"] = web_search_mode
-            if lifecycle_lock_held:
-                workflow_kwargs["lifecycle_lock_held"] = True
-            if session_unarchived_for_turn:
-                record_session_unarchived_for_accepted_turn(best_effort=False)
             if fix_pr_activation:
-                pr_url = _fix_pr_url_for_thread(session_id, thread)
+                pr_url = _fix_pr_url_for_thread(session_id)
                 if not pr_url:
                     raise _TurnRejectedError(
                         HttpResponseBadRequest(
                             "fix-pr requires an opened PR for this session"
                         )
                     )
-                pr_qa.start_pr_watch_workflow(
-                    pr_url=pr_url,
-                    **workflow_kwargs,
+                task = agent_tasks.watch_pr_task(pr_url)
+            elif pr_now_activation:
+                task = agent_tasks.publish_pr_task()
+            else:
+                task = agent_tasks.review_task(
+                    prepare_pull_request=not qa_activation
                 )
-                record_session_unarchived_for_accepted_turn()
-                return redirect("session", session_id=session_id)
-            if pr_now_activation:
-                pr_qa.start_pr_now_workflow(**workflow_kwargs)
-                record_session_unarchived_for_accepted_turn()
-                return redirect("session", session_id=session_id)
-            if qa_activation:
-                workflow_kwargs["open_pr_on_lgtm"] = False
-            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
+            if task.requires_pr_watch and not thread_has_dynamic_tool(
+                session_id,
+                namespace="hitch",
+                name="watch_pr",
+            ):
+                raise _TurnRejectedError(
+                    HttpResponseBadRequest(
+                        "hitch.watch_pr is unavailable for this session; "
+                        "start a new session before publishing or watching a PR"
+                    )
+                )
+            task_kwargs: dict[str, Any] = {
+                "thread_id": session_id,
+                "cwd": cwd,
+                "prompt": task.prompt,
+                "sandbox_policy": sandbox_policy or None,
+                "approval_mode": approval_mode,
+                "model": task_model or None,
+                "reasoning_effort": task_reasoning_effort or None,
+                "developer_instructions": developer_instructions or None,
+                "enable_memories": settings.enable_memories,
+                "user_message_index": _count_user_entries(thread_entries),
+                "agent_kind": task.agent_kind,
+            }
+            if should_forward_web_search_mode:
+                task_kwargs["web_search_mode"] = web_search_mode
+            codex_pool.spawn_turn(**task_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         spawn_kwargs: dict[str, Any] = {
@@ -656,18 +600,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         restore_archived_session_for_rejected_turn()
         common._cleanup_saved_input_images(input_image_paths)
         return rejected.response
-    except pr_qa.PrWatchUnavailableError as exc:
-        restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(input_image_paths)
-        return HttpResponseBadRequest(str(exc))
-    except system_agents.WorkflowStartBlockedByArchiveError:
-        restore_archived_session_for_rejected_turn()
-        common._cleanup_saved_input_images(input_image_paths)
-        django_messages.error(
-            request,
-            "This session is archived or already running work.",
-        )
-        return redirect("session", session_id=session_id)
     except codex_pool.InputAttachmentLimitExceededError as exc:
         restore_archived_session_for_rejected_turn()
         common._cleanup_saved_input_images(input_image_paths)

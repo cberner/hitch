@@ -35,14 +35,12 @@ from hitch.main.runtime.sdk_values import (
     string_value,
 )
 from hitch.main.sequences import unique_nonempty
-from hitch.main.sessions import session_stage
+from hitch.main.sessions import agent_tasks, session_stage
 from hitch.main.sessions.session_pr_plan import (
     _pr_observation_result_for_rollout_path,
     _pr_snapshot_identity,
-    _workflow_activity_ownership_by_id,
-    _workflow_after_main_lifecycle,
 )
-from hitch.main.workflows import pr_qa, pr_stage
+from hitch.main.workflows import pr_stage, pr_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +98,7 @@ def _pr_stage_refresh_worker(session_id: str) -> None:
 def _refresh_session_pr_stage(session_id: str) -> None:
     """Perform the gh-backed PR stage refresh for one session and persist it.
 
-    Mirrors the refresh the list/detail render used to do inline: the workflow
-    handoff path persists onto the ``SystemWorkflow``, the log-snapshot path
+    A registered PR refresh persists onto ``SessionPullRequest``; the log-snapshot path
     re-derives and updates the cached ``derived_stage``. The gh call is gated by
     the per-PR global ``rate_limit`` claim inside the refreshers, so this is a
     cheap no-op when the same PR was refreshed elsewhere recently.
@@ -112,35 +109,22 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     )
     rollout_path = rollout_state.path if rollout_state is not None else None
     pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
-    main_updated_at = metadata.codex_updated_at if metadata is not None else None
-    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
-    activity_ownership = _workflow_activity_ownership_by_id(
-        [(latest_pr_workflow, main_updated_at)]
-    )
-    stage_pr_workflow = _workflow_after_main_lifecycle(
-        latest_pr_workflow,
-        pr_observation,
-        main_updated_at=main_updated_at,
-        newer_main_activity_owned=bool(
-            latest_pr_workflow is not None
-            and latest_pr_workflow.pk is not None
-            and activity_ownership.get(latest_pr_workflow.pk)
-        ),
-    )
-    if stage_pr_workflow is not None:
-        pr_qa.refreshed_pr_handoff_for_stage(stage_pr_workflow)
+    stored_pr = pr_tracking.stored_record_for_thread(session_id)
+    if stored_pr is not None:
+        if pr_tracking.record_is_current(stored_pr):
+            pr_tracking.refreshed_pr_handoff_for_stage(stored_pr)
         return
     snapshot = pr_observation.snapshot
     if metadata is None or snapshot is None or rollout_state is None:
         return
-    if not pr_qa.pr_snapshot_stage_refresh_due(
+    if not pr_tracking.pr_snapshot_stage_refresh_due(
         cwd=metadata.cwd,
         snapshot=snapshot,
         attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
     ):
         return
     pr_stage._mark_cached_pr_stage_refresh_attempt(session_id)
-    refreshed = pr_qa.refreshed_pr_snapshot_for_stage(
+    refreshed = pr_tracking.refreshed_pr_snapshot_for_stage(
         cwd=metadata.cwd, snapshot=snapshot
     )
     stage = session_stage.derive_stage(pr_snapshot=refreshed)
@@ -151,15 +135,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     thread_ids = [
         session["id"] for session in sessions if isinstance(session.get("id"), str)
     ]
-    workflows_by_thread_id = pr_stage._latest_stage_workflows_by_thread_id(thread_ids)
-    activity_ownership = _workflow_activity_ownership_by_id(
-        (
-            workflows_by_thread_id.get(session["id"]),
-            session.get("stage_main_updated_at"),
-        )
-        for session in sessions
-        if isinstance(session.get("id"), str)
-    )
+    registered_prs_by_thread_id = pr_tracking.records_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
     waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
@@ -168,13 +144,24 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         if not isinstance(session_id, str):
             continue
         rollout_state = _rollout_file_state_from_value(session.get("codex_path"))
-        workflow = workflows_by_thread_id.get(session_id)
+        stored_pr = registered_prs_by_thread_id.get(session_id)
+        registered_pr = (
+            stored_pr if pr_tracking.record_is_current(stored_pr) else None
+        )
+        historical_pr = stored_pr is not None and registered_pr is None
         active_instance = active_instances_by_thread_id.get(session_id)
+        publishing_before_registration = bool(
+            active_instance is not None
+            and active_instance.agent_kind == agent_tasks.PR_PUBLISH_AGENT_KIND
+            and not pr_tracking.watch_registered_by_instance(
+                registered_pr, active_instance.pk
+            )
+        )
         awaiting_user_input = session_id in waiting_thread_ids
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
         if (
             active_instance is None
-            and workflow is None
+            and stored_pr is None
             and not awaiting_user_input
             and cached_stage is not None
         ):
@@ -196,54 +183,32 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
         if not entries and session.get("has_activity"):
             entries = [{"kind": "user"}]
-        stage_workflow = _workflow_after_main_lifecycle(
-            workflow,
-            pr_observation,
-            main_updated_at=session.get("stage_main_updated_at"),
-            newer_main_activity_owned=bool(
-                workflow is not None
-                and workflow.pk is not None
-                and activity_ownership.get(workflow.pk)
-            ),
+        log_pr_snapshot = (
+            None
+            if publishing_before_registration or historical_pr
+            else pr_observation.snapshot
         )
-        if (
-            active_instance is None
-            and stage_workflow is None
-            and not awaiting_user_input
-            and cached_stage is not None
-        ):
-            assert rollout_state is not None
-            stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing = (
-                _stage_from_cached_session_row(
-                    session_id,
-                    session,
-                    rollout_state=rollout_state,
-                    cached_stage=cached_stage,
-                    pr_stage_refreshes_remaining=pr_stage_refreshes_remaining,
-                )
-            )
-            session["stage"] = _session_list_stage_context(
-                stage, pr_snapshot=pr_snapshot, refreshing=refreshing
-            )
-            continue
-        log_pr_snapshot = pr_observation.snapshot
         # Serve the last-known PR stage now; when a gh refresh is due, flag the
         # badge as refreshing and do the actual refresh off-request so the page
         # is not blocked on a ``gh`` call (the result lands on a later render).
-        workflow_pr_snapshot = pr_qa.pr_handoff_for_workflow(stage_workflow)
+        registered_pr_snapshot = (
+            {}
+            if publishing_before_registration
+            else pr_tracking.pr_handoff_for_record(registered_pr)
+        )
         # Only the PR stage gets the refreshing badge: an active worker or a
         # waiting-for-input row shows its own stage, and flagging that refreshing
         # would schedule a needless worker and reload.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
         refresh_due = (
             pr_stage_displayed
-            and pr_qa.pr_handoff_stage_refresh_due(stage_workflow)
+            and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
         )
         if (
             pr_stage_displayed
-            and stage_workflow is None
+            and registered_pr is None
             and log_pr_snapshot is not None
-            and pr_qa.pr_snapshot_stage_refresh_due(
+            and pr_tracking.pr_snapshot_stage_refresh_due(
                 cwd=string_value(session.get("cwd")),
                 snapshot=log_pr_snapshot,
                 attempted_at=datetime_value(
@@ -267,31 +232,25 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
-            workflow=stage_workflow,
             awaiting_user_input=awaiting_user_input,
             pr_snapshot=log_pr_snapshot,
-            workflow_pr_snapshot=workflow_pr_snapshot,
+            registered_pr_snapshot=registered_pr_snapshot,
         )
         stage_executing = stage.key == session_stage.IMPLEMENTATION.key and (
             active_instance is not None
-            or (
-                stage_workflow is not None
-                and stage_workflow.is_active
-            )
         )
         session["stage"] = _session_list_stage_context(
             stage,
             pr_snapshot=_session_list_pr_snapshot_for_stage(
-                stage_workflow=stage_workflow,
                 log_pr_snapshot=log_pr_snapshot,
-                workflow_pr_snapshot=workflow_pr_snapshot,
+                registered_pr_snapshot=registered_pr_snapshot,
             ),
             refreshing=badge_refreshing,
             executing=stage_executing,
         )
         # The stage cache is keyed only on the rollout file's mtime, so it may
         # only hold stages that are a pure function of the rollout. A stage that
-        # an active worker or a PR/QA workflow forced (e.g. Implementation while
+        # an active worker forced (e.g. Implementation while
         # a turn runs) is transient state the mtime key cannot track: once the
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
@@ -302,7 +261,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # would let the cached fast path serve it without ever rechecking.
         if (
             active_instance is None
-            and stage_workflow is None
             and not awaiting_user_input
             and not refresh_due
         ):
@@ -326,7 +284,7 @@ def _stage_from_cached_session_row(
     refreshing = False
     if cached_stage.key == session_stage.PR.key:
         pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
-        if pr_snapshot is not None and pr_qa.pr_snapshot_stage_refresh_due(
+        if pr_snapshot is not None and pr_tracking.pr_snapshot_stage_refresh_due(
             cwd=string_value(session.get("cwd")),
             snapshot=pr_snapshot,
             attempted_at=datetime_value(session.get("stage_pr_refresh_attempted_at")),
@@ -348,18 +306,12 @@ def _stage_from_cached_session_row(
 
 def _session_list_pr_snapshot_for_stage(
     *,
-    stage_workflow: SystemWorkflow | None,
     log_pr_snapshot: Mapping[str, Any] | None,
-    workflow_pr_snapshot: Mapping[str, Any] | None,
+    registered_pr_snapshot: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
-    if (
-        stage_workflow is not None
-        and _pr_snapshot_identity(workflow_pr_snapshot) is None
-    ):
-        return workflow_pr_snapshot
     return session_stage.merge_pr_snapshots(
         log_pr_snapshot=log_pr_snapshot,
-        workflow_pr_snapshot=workflow_pr_snapshot,
+        registered_pr_snapshot=registered_pr_snapshot,
     )
 
 

@@ -44,7 +44,6 @@ from hitch.main.models import (
     Project,
     ProposedSession,
     SessionMetadata,
-    SystemWorkflow,
 )
 from hitch.main.repos import git_common_dir as git_common_dir
 from hitch.main.repos import same_repo_or_worktree
@@ -54,7 +53,6 @@ from hitch.main.runtime import (
     codex_pool,
     reconciliation,
     rollout,
-    streaming,
 )
 from hitch.main.runtime.input_images import (
     _INPUT_IMAGE_ACCEPT,
@@ -72,7 +70,7 @@ from hitch.main.runtime.rollout_state import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
-from hitch.main.sessions import session_index, session_stage, token_usage
+from hitch.main.sessions import agent_tasks, session_index, session_stage, token_usage
 from hitch.main.sessions.message_intent import (
     _FIX_PR_SLASH_COMMAND,
 )
@@ -89,7 +87,6 @@ from hitch.main.sessions.session_entry_display import (
     _active_stream_owns_turn,
     _active_worker_status_text,
     _apply_system_authors,
-    _apply_workflow_messages,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
@@ -98,13 +95,9 @@ from hitch.main.sessions.session_entry_display import (
     _pending_user_author,
     _pending_user_prompt,
     _pending_user_timestamp,
-    _queued_workflow_user_messages,
     _show_active_worker_transcript,
     _task_plan_context,
     _trim_in_progress_turn,
-    _workflow_accepts_steering,
-    _workflow_composer_label,
-    _workflow_status_text,
 )
 from hitch.main.sessions.session_pr_plan import (
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
@@ -112,8 +105,6 @@ from hitch.main.sessions.session_pr_plan import (
     _mark_pending_plan_actions,
     _pr_observation_result_for_thread,
     _thread_plan_mode_state,
-    _workflow_activity_ownership_by_id,
-    _workflow_after_main_lifecycle,
 )
 from hitch.main.sessions.session_resume import (
     _metadata_resume_for_inactive_session,
@@ -157,7 +148,7 @@ from hitch.main.sessions.settings_cookies import (
     _web_search_mode_label,
 )
 from hitch.main.workflows import autonomous_goals as goal_workflows
-from hitch.main.workflows import pr_qa, pr_stage, system_agents
+from hitch.main.workflows import pr_stage, pr_tracking, system_agents
 from hitch.main.worktrees import cleanup_managed_worktree_path as cleanup_managed_worktree_path
 from hitch.main.worktrees import cleanup_worktree as cleanup_worktree
 from hitch.main.worktrees import create_worktree_for_session as create_worktree_for_session
@@ -455,7 +446,6 @@ def _render_session_detail(
     reconciliation.reconcile_dead_if_due()
     initial_settings = _stored_settings(request)
     active_instance = _active_instance_for(session_id)
-    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     metadata = _session_detail_metadata(session_id)
     # Capture the rollout mtime *before* any entries are read (the resume helper
     # below reads them off disk), so a concurrent append surfaces as a cache
@@ -494,7 +484,6 @@ def _render_session_detail(
         session_id,
         metadata,
         active_instance=active_instance,
-        active_system_workflow=active_system_workflow,
         require_system_agent_thread=require_system_agent_thread,
         history_message_target=(
             _SESSION_HISTORY_MESSAGE_TARGET if paginate_history else None
@@ -540,7 +529,6 @@ def _render_session_detail(
                         session_id,
                         metadata,
                         active_instance=active_instance,
-                        active_system_workflow=active_system_workflow,
                     )
                     if pending_resume is not None:
                         logger.warning(
@@ -620,7 +608,6 @@ def _render_session_detail(
         entries = raw_entries
     else:
         entries = _apply_system_authors(raw_entries, session_id)
-        entries = _apply_workflow_messages(entries, session_id)
         if full_history_requested:
             _mark_active_history_user_entries(entries, active_instance)
     name_value = getattr(thread, "name", None) or ""
@@ -635,47 +622,26 @@ def _render_session_detail(
         if rollout_data is not None
         else _pr_observation_result_for_thread(thread)
     )
-    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
-    stage_workflow = active_system_workflow or latest_pr_workflow
-    stage_pr_workflow = (
-        active_system_workflow
-        if active_system_workflow is not None
-        and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
-        else latest_pr_workflow
+    stored_pr = pr_tracking.stored_record_for_thread(session_id)
+    registered_pr = stored_pr if pr_tracking.record_is_current(stored_pr) else None
+    historical_pr = stored_pr is not None and registered_pr is None
+    publishing_before_registration = bool(
+        active_instance is not None
+        and active_instance.agent_kind == agent_tasks.PR_PUBLISH_AGENT_KIND
+        and not pr_tracking.watch_registered_by_instance(
+            registered_pr, active_instance.pk
+        )
     )
-    main_updated_at = getattr(thread, "updated_at", None)
-    activity_ownership = _workflow_activity_ownership_by_id(
-        [
-            (stage_workflow, main_updated_at),
-            (stage_pr_workflow, main_updated_at),
-        ]
-    )
-    stage_workflow = _workflow_after_main_lifecycle(
-        stage_workflow,
-        pr_observation,
-        main_updated_at=main_updated_at,
-        newer_main_activity_owned=bool(
-            stage_workflow is not None
-            and stage_workflow.pk is not None
-            and activity_ownership.get(stage_workflow.pk)
-        ),
-    )
-    stage_pr_workflow = _workflow_after_main_lifecycle(
-        stage_pr_workflow,
-        pr_observation,
-        main_updated_at=main_updated_at,
-        newer_main_activity_owned=bool(
-            stage_pr_workflow is not None
-            and stage_pr_workflow.pk is not None
-            and activity_ownership.get(stage_pr_workflow.pk)
-        ),
-    )
-    pr_url = _current_pr_url_for_thread(
-        thread,
-        pr_observation=pr_observation,
-        stage_pr_workflow=stage_pr_workflow,
-        latest_pr_url=latest_pr_url,
-        latest_pr_url_loaded=rollout_data is not None,
+    pr_url = (
+        None
+        if publishing_before_registration or historical_pr
+        else _current_pr_url_for_thread(
+            thread,
+            pr_observation=pr_observation,
+            registered_pr=registered_pr,
+            latest_pr_url=latest_pr_url,
+            latest_pr_url_loaded=rollout_data is not None,
+        )
     )
     stage_context: dict[str, Any] | None = None
     if not read_only:
@@ -685,7 +651,11 @@ def _render_session_detail(
         # (up to a 5s timeout) and dominated page latency; instead the badge is
         # flagged as refreshing and the actual gh call runs in the background,
         # persisting the result for a later render to read back.
-        workflow_pr_snapshot = pr_qa.pr_handoff_for_workflow(stage_pr_workflow)
+        registered_pr_snapshot = (
+            {}
+            if publishing_before_registration
+            else pr_tracking.pr_handoff_for_record(registered_pr)
+        )
         # Only flag refreshing when the PR stage is the one actually displayed.
         # An active worker or a waiting-for-input session shows its own stage, so
         # marking that live badge refreshing would let the reload script tear
@@ -693,12 +663,16 @@ def _render_session_detail(
         pr_stage_displayed = active_instance is None and not awaiting_user_input
         stage_refreshing = (
             pr_stage_displayed
-            and pr_qa.pr_handoff_stage_refresh_due(stage_pr_workflow)
+            and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
         )
-        log_pr_snapshot = pr_observation.snapshot
+        log_pr_snapshot = (
+            None
+            if publishing_before_registration or historical_pr
+            else pr_observation.snapshot
+        )
         if (
             pr_stage_displayed
-            and stage_pr_workflow is None
+            and registered_pr is None
             and log_pr_snapshot is not None
         ):
             detail_cwd = (
@@ -706,7 +680,7 @@ def _render_session_detail(
                 if metadata is not None and metadata.cwd
                 else _thread_cwd(thread) or ""
             )
-            if pr_qa.pr_snapshot_stage_refresh_due(
+            if pr_tracking.pr_snapshot_stage_refresh_due(
                 cwd=detail_cwd,
                 snapshot=log_pr_snapshot,
                 attempted_at=(
@@ -721,10 +695,9 @@ def _render_session_detail(
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
-            workflow=stage_workflow,
             awaiting_user_input=awaiting_user_input,
             pr_snapshot=log_pr_snapshot,
-            workflow_pr_snapshot=workflow_pr_snapshot,
+            registered_pr_snapshot=registered_pr_snapshot,
         )
         # A background PR refresh persists a terminal stage to the mtime-keyed
         # cache, but the detail render otherwise re-derives from the (still-open)
@@ -733,6 +706,7 @@ def _render_session_detail(
         # the open-PR badge while the gh refresh stays throttled.
         if (
             stage.key == session_stage.PR.key
+            and stored_pr is None
             and metadata is not None
             and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
         ):
@@ -745,10 +719,11 @@ def _render_session_detail(
                 stage_refreshing = False
         if (
             history_paginated
+            and stored_pr is None
             and metadata is not None
             and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
             and active_instance is None
-            and active_system_workflow is None
+            and not historical_pr
             and not awaiting_user_input
         ):
             cached_stage = session_stage.stage_for_key(metadata.derived_stage)
@@ -756,15 +731,11 @@ def _render_session_detail(
                 stage = cached_stage
                 stage_refreshing = False
         # Only persist a rollout-derived stage; see _attach_session_stage_context
-        # for why active-instance/workflow-forced stages must not enter the
-        # mtime-keyed cache. The post-lifecycle ``stage_workflow``/
-        # ``stage_pr_workflow`` being ``None`` means no live owner influenced the
-        # result (a stale workflow stripped by ``_workflow_after_main_lifecycle``
-        # leaves the stage purely rollout-derived and therefore cacheable).
+        # for why active-instance-forced stages must not enter the
+        # mtime-keyed cache. Active turns and pending input remain transient and
+        # therefore cannot be cached under a rollout-only key.
         if (
             active_instance is None
-            and stage_workflow is None
-            and stage_pr_workflow is None
             and not awaiting_user_input
             and not stage_refreshing
             and not history_paginated
@@ -866,28 +837,23 @@ def _render_session_detail(
         )
     )
     thread_cwd = _thread_cwd(thread)
-    # A running worker/workflow can change the diff continuously. The stream
+    # A running worker can change the diff continuously. The stream
     # reload after completion supplies a stable preview; until then, avoid
     # parsing and highlighting a large snapshot that the page does not expose.
     diff_view = (
         DiffView(files=[])
-        if active_instance is not None or active_system_workflow is not None
+        if active_instance is not None
         else build_worktree_diff(thread_cwd)
     )
     settings_context = _settings_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     latest_user_turn_failure = _latest_user_turn_failure(session_id)
-    workflow_status_text = _workflow_status_text(active_system_workflow)
-    pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
-    workflow_accepts_steering = _workflow_accepts_steering(active_system_workflow)
-    workflow_composer_locked = active_system_workflow is not None and not (
-        workflow_accepts_steering
+    pr_watch_progress = pr_tracking.pr_watch_progress(
+        registered_pr.state
+        if registered_pr is not None and not publishing_before_registration
+        else None
     )
-    live_status_text = active_worker_status_text or (
-        workflow_status_text
-        if active_system_workflow is not None and active_instance is None
-        else ""
-    )
+    live_status_text = active_worker_status_text
     debug_chat_url = _debug_chat_new_session_url(
         session_id, session_project, projects, cwd=thread_cwd
     )
@@ -980,7 +946,6 @@ def _render_session_detail(
             "stream_url": _stream_url_for(
                 session_id,
                 active_instance,
-                active_system_workflow,
             ),
             # The JS swaps the trailing ``0`` for the real ApprovalRequest
             # pk on each POST. Templating the URL server-side (rather than
@@ -995,12 +960,7 @@ def _render_session_detail(
             "active_worker": active_instance is not None,
             "show_active_worker_transcript": show_active_worker_transcript,
             "rollout_owns_active_turn": rollout_owns_active_turn,
-            "active_system_workflow": active_system_workflow,
-            "workflow_composer_label": _workflow_composer_label(active_system_workflow),
-            "workflow_accepts_steering": workflow_accepts_steering,
-            "workflow_composer_locked": workflow_composer_locked,
-            "workflow_status_text": workflow_status_text,
-            "pr_workflow_progress": pr_workflow_progress,
+            "pr_watch_progress": pr_watch_progress,
             "active_worker_status_text": active_worker_status_text,
             "latest_user_turn_failure": latest_user_turn_failure,
             "live_status_text": live_status_text,
@@ -1019,9 +979,6 @@ def _render_session_detail(
             ),
             "pending_user_author": _pending_user_author(active_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance),
-            "queued_workflow_user_messages": _queued_workflow_user_messages(
-                active_system_workflow
-            ),
             "token_usage": session_token_usage,
             "session_model": session_model,
             "session_reasoning": session_reasoning,
@@ -1596,7 +1553,6 @@ def _developer_instructions_for_project(
 def _stream_url_for(
     session_id: str,
     active_instance: CodexInstance | None,
-    active_workflow: Any | None = None,
 ) -> str:
     """Build the SSE URL for the session view, tagging it with the page's
     render-time view of the session state.
@@ -1610,13 +1566,9 @@ def _stream_url_for(
     """
     baseline_id = codex_pool.latest_id_for_thread(session_id)
     active_id = active_instance.pk if active_instance is not None else None
-    workflow_id = active_workflow.pk if active_workflow is not None else None
-    steering_revision = streaming.workflow_steering_revision(active_workflow)
     query = {
         "baseline": str(baseline_id) if baseline_id is not None else "",
         "active": str(active_id) if active_id is not None else "",
-        "workflow": str(workflow_id) if workflow_id is not None else "",
-        "steering": str(steering_revision) if workflow_id is not None else "",
     }
     qs = urlencode(query)
     return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"

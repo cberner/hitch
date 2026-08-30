@@ -34,6 +34,7 @@ from hitch.main.models import (
     ProposedSession,
     SessionIndexSyncState,
     SessionMetadata,
+    SessionPullRequest,
     SystemAgentRun,
     SystemWorkflow,
 )
@@ -45,6 +46,7 @@ from hitch.main.sessions import (
     settings_cookies,
     token_usage,
 )
+from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.test.support import (
     _cookie_value,
     _make_project,
@@ -67,7 +69,7 @@ from hitch.main.test.views_helpers import (
 )
 from hitch.main.views import common as common_views
 from hitch.main.views import session_list
-from hitch.main.workflows import gh_cli, pr_stage_refresh_state, system_agents
+from hitch.main.workflows import gh_cli, system_agents
 
 
 class IndexViewTests(TestCase):
@@ -100,7 +102,7 @@ class IndexViewTests(TestCase):
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -160,7 +162,10 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
-    @patch("hitch.main.workflows.pr_qa.pr_snapshot_stage_refresh_due", return_value=True)
+    @patch(
+        "hitch.main.workflows.pr_tracking.pr_snapshot_stage_refresh_due",
+        return_value=True,
+    )
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
@@ -194,7 +199,7 @@ class IndexViewTests(TestCase):
                         "event_msg",
                         {
                             "type": "user_message",
-                            "message": system_agents.PR_SLASH_PROMPT,
+                            "message": PR_SLASH_PROMPT,
                         },
                     ),
                     _rollout_line(
@@ -251,10 +256,14 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
 
 
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_omits_stale_pr_number_for_new_workflow(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_cached_session_list_omits_stale_pr_number_for_new_publish_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_worker_alive: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
         client.thread_list.side_effect = CodexError("thread list unavailable")
@@ -265,7 +274,7 @@ class IndexViewTests(TestCase):
             [
                 _rollout_line(
                     "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                    {"type": "user_message", "message": PR_SLASH_PROMPT},
                 ),
                 _rollout_line(
                     "response_item",
@@ -315,13 +324,14 @@ class IndexViewTests(TestCase):
             codex_updated_at=now,
             codex_last_synced_at=now,
         )
-        SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="new-pr-workflow",
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="new-pr-workflow",
             cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={},
+            prompt="Publish the PR",
+            events_path="/tmp/new-pr-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind="pr_publish",
         )
 
         response = self.client.get(reverse("index"))
@@ -333,6 +343,76 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">PR</span>',
         )
         self.assertNotContains(response, "PR #94")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.views.common.Codex")
+    def test_cached_session_list_does_not_resurrect_superseded_pr(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = CodexError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Continue implementation"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="superseded-pr",
+            cwd="/repo",
+            codex_display_title="Superseded PR",
+            codex_preview="Continue implementation",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="done_closed",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        SessionPullRequest.objects.create(
+            thread_id="superseded-pr",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/100",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                    "state": "closed",
+                },
+                SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY: 9,
+            },
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="idle">Implementation</span>',
+        )
+        self.assertNotContains(response, "PR #100")
+        self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
@@ -451,89 +531,9 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_uses_terminal_cache_after_stale_pr_workflow(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        pr_url = "https://github.com/cberner/hitch/pull/98"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_fetch_pr",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps({"url": pr_url, "state": "open"}),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Open."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="terminal-cache-stale-workflow",
-            cwd="/repo",
-            codex_display_title="Terminal cache stale workflow",
-            codex_preview="Open a PR",
-            codex_path=str(rollout_path),
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-            derived_stage="done_merged",
-            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="terminal-cache-stale-workflow",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
-            state={"pr_handoff": {"url": pr_url, "state": "open"}},
-        )
-        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=now - timedelta(minutes=5))
 
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Terminal cache stale workflow")
-        self.assertContains(response, '<span class="stage-badge" data-tone="done">Done: Merged</span>')
-        self.assertNotContains(response, "PR #98")
-        mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
-
-    @patch("hitch.main.workflows.system_agents.logger")
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
+    @patch("hitch.main.workflows.pr_tracking.logger")
+    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     def test_cached_session_list_backs_off_failed_ready_pr_refresh(
@@ -571,18 +571,20 @@ class IndexViewTests(TestCase):
             last_synced_at=now,
             is_complete=True,
         )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="ready-pr-refresh-backoff",
+        registered_pr = SessionPullRequest.objects.create(
+            thread_id="ready-pr-refresh-backoff",
             cwd=str(rollout_path.parent),
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_READY,
             state={
                 "pr_handoff": {
                     "url": pr_url,
                     "repository_full_name": "cberner/hitch",
                     "pr_number": 344,
                     "state": "open",
+                },
+                "hitch_pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 344,
                 },
             },
         )
@@ -603,9 +605,8 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
-        workflow.refresh_from_db()
-        self.assertIn(pr_stage_refresh_state._PR_STAGE_REFRESH_STATE_KEY, workflow.state)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        registered_pr.refresh_from_db()
+        self.assertIn("pr_stage_refresh", registered_pr.state)
         mock_gh_pr_view.assert_called_once()
         mock_logger.exception.assert_called_once()
         mock_codex.assert_not_called()
@@ -882,7 +883,7 @@ class IndexViewTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
         )
@@ -2573,7 +2574,7 @@ class PrStageRefreshSchedulingTests(TestCase):
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch(
-        "hitch.main.sessions.session_stage_refresh.pr_qa.pr_snapshot_stage_refresh_due",
+        "hitch.main.sessions.session_stage_refresh.pr_tracking.pr_snapshot_stage_refresh_due",
         return_value=True,
     )
     @patch("hitch.main.sessions.session_stage_refresh._pr_snapshot_for_rollout_path")
