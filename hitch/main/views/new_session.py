@@ -1,5 +1,6 @@
 """The new-session page and start flow, including proposal acceptance."""
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, NamedTuple
@@ -17,13 +18,19 @@ from django.views.decorators.http import require_http_methods
 
 from hitch.main import caches
 from hitch.main import repos as repos_module
-from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
+from hitch.main.goals.autonomous_goal_proposal_stack import (
+    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY,
+    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY,
+    AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
+    _proposal_outcome_metadata,
+)
 from hitch.main.goals.autonomous_goal_run_display import (
     _attach_proposed_session_display_state,
     _auto_review_settings_for_proposed_session,
     _proposed_session_prompt,
 )
 from hitch.main.models import (
+    AutonomousGoal,
     CodexInstance,
     Project,
     ProposedSession,
@@ -91,6 +98,7 @@ from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
     WorktreeCreationError,
+    release_snapshot_commit_ref,
 )
 
 
@@ -104,6 +112,7 @@ class _NewSessionTarget(NamedTuple):
 _RESUME_SOURCE_SESSION_METADATA_KEY = "resume_source_session"
 _RECOVERY_SOURCE_BUSY_MESSAGE = "source session is already running work"
 _RECOVERY_TARGET_UNAVAILABLE_MESSAGE = "recovery repository is unavailable"
+_GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
 
 
 class _RecoverySourceBusyError(RuntimeError):
@@ -286,6 +295,8 @@ def _candidate_session_to_continue_from_proposal(
         ):
             return None
         return source_session
+    if _is_tool_protocol_ag_proposal(proposed_session):
+        return None
     if proposed_session.candidate_session is None:
         return None
     candidate_session = proposed_session.candidate_session
@@ -295,6 +306,77 @@ def _candidate_session_to_continue_from_proposal(
     if project is not None and candidate_session.cwd == project.repo_path:
         return None
     return candidate_session
+
+
+def _approved_snapshot_for_proposal(
+    proposed_session: ProposedSession | None,
+) -> str:
+    if proposed_session is None or proposed_session.autonomous_goal_id is None:
+        return ""
+    metadata = proposed_session.outcome_metadata
+    if not isinstance(metadata, dict):
+        return ""
+    value = metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY)
+    if not isinstance(value, str) or _GIT_OBJECT_ID_RE.fullmatch(value) is None:
+        return ""
+    return value
+
+
+def _is_tool_protocol_ag_proposal(proposed_session: ProposedSession) -> bool:
+    return (
+        proposed_session.autonomous_goal_id is not None
+        and isinstance(proposed_session.outcome_metadata, dict)
+        and proposed_session.outcome_metadata.get(
+            AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY
+        )
+        is True
+    )
+
+
+def _release_approved_snapshot_ref(proposed_session: ProposedSession) -> None:
+    metadata = proposed_session.outcome_metadata
+    if not isinstance(metadata, dict):
+        return
+    ref = metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY)
+    project = _project_for_proposed_session(proposed_session)
+    if not isinstance(ref, str) or not ref or project is None:
+        return
+    try:
+        release_snapshot_commit_ref(project.repo_path, ref)
+    except WorktreeCleanupError:
+        common.logger.exception(
+            "failed to release snapshot ref for proposed session %s",
+            proposed_session.pk,
+        )
+
+
+def _cleanup_hidden_ag_candidate_worktree(
+    proposed_session: ProposedSession,
+) -> None:
+    if not _is_tool_protocol_ag_proposal(proposed_session):
+        return
+    candidate = proposed_session.candidate_session
+    if candidate is None or not candidate.cwd:
+        return
+    try:
+        common.cleanup_managed_worktree_path(candidate.cwd)
+    except WorktreeCleanupError:
+        common.logger.exception(
+            "failed to clean up hidden candidate worktree for proposed session %s",
+            proposed_session.pk,
+        )
+
+
+def _tool_protocol_ag_proposal_requires_snapshot(
+    proposed_session: ProposedSession,
+) -> bool:
+    metadata = proposed_session.outcome_metadata
+    if not isinstance(metadata, dict):
+        return True
+    return (
+        metadata.get("autonomous_goal_autonomy")
+        != AutonomousGoal.AUTONOMY_PROPOSE_ONLY
+    )
 
 
 def _accept_proposed_session_for_session(
@@ -338,6 +420,7 @@ def _accept_proposed_session_for_session(
     proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
     proposed_session.accepted_session = session_metadata
     proposed_session.outcome_metadata = outcome_metadata
+    _release_approved_snapshot_ref(proposed_session)
     return True
 
 
@@ -483,6 +566,8 @@ def _finish_new_session_proposal_start_claim(
     proposed_session.accepted_session = session_metadata
     proposed_session.outcome_metadata = outcome_metadata
     common._stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
+    _release_approved_snapshot_ref(proposed_session)
+    _cleanup_hidden_ag_candidate_worktree(proposed_session)
 
 
 def _posted_bool_override(raw: str | None, *, default: bool, error: str) -> tuple[bool, str | None]:
@@ -1155,7 +1240,36 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         )
 
     session_cwd = cwd
-    sandbox_policy = _effective_sandbox_policy_for_cwd(settings, session_cwd)
+    managed_worktree: ManagedWorktree | None = None
+    approved_snapshot = _approved_snapshot_for_proposal(proposed_session)
+    if (
+        proposed_session is not None
+        and _is_tool_protocol_ag_proposal(proposed_session)
+        and not _tool_protocol_ag_proposal_requires_snapshot(proposed_session)
+    ):
+        approved_snapshot = ""
+    if (
+        proposed_session is not None
+        and _is_tool_protocol_ag_proposal(proposed_session)
+        and not approved_snapshot
+        and _tool_protocol_ag_proposal_requires_snapshot(proposed_session)
+    ):
+        return HttpResponseBadRequest(
+            "approved autonomous-goal snapshot is missing or invalid"
+        )
+    if approved_snapshot:
+        try:
+            managed_worktree = common.create_worktree_for_session(
+                cwd, base_ref=approved_snapshot
+            )
+        except WorktreeCreationError as exc:
+            return HttpResponseBadRequest(str(exc))
+        session_cwd = str(managed_worktree.path)
+    sandbox_policy = _effective_sandbox_policy_for_cwd(
+        settings,
+        session_cwd,
+        managed_worktree=managed_worktree is not None,
+    )
     # Review tasks inspect the selected repo's current diff; a fresh managed
     # worktree would be clean and miss uncommitted changes.
     if agent_task_activation:
@@ -1179,6 +1293,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 cookie_updates=cookie_updates,
             )
             if claim_response is not None:
+                _cleanup_worktree_quietly(managed_worktree)
                 return claim_response
             proposal_claimed = True
         try:
@@ -1187,6 +1302,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             if proposal_claimed:
                 assert proposed_session is not None
                 _reset_new_session_proposal_start_claim(proposed_session)
+            _cleanup_worktree_quietly(managed_worktree)
             raise
         # Only proposal acceptances carry forward auto-review, and only the
         # settings the proposal itself requested. A bare ``/qa`` or
@@ -1235,6 +1351,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             if proposal_claimed:
                 assert proposed_session is not None
                 _reset_new_session_proposal_start_claim(proposed_session)
+            _cleanup_worktree_quietly(managed_worktree)
             raise
         # Persist the proposal-derived auto-review configuration so subsequent
         # turns keep honoring it instead of reverting to manual review.
@@ -1250,8 +1367,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
         return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
 
-    managed_worktree = None
-    if use_worktrees:
+    if use_worktrees and managed_worktree is None:
         try:
             managed_worktree = common.create_worktree_for_session(cwd)
         except WorktreeCreationError as exc:

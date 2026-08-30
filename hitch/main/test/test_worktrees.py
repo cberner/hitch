@@ -17,6 +17,7 @@ from hitch.main.worktrees import (
     create_worktree_for_session,
     discover_managed_worktrees,
     is_managed_worktree_path,
+    release_snapshot_commit_ref,
     snapshot_worktree_to_commit,
 )
 
@@ -60,7 +61,13 @@ class ManagedWorktreeTests(SimpleTestCase):
                 },
                 clear=True,
             ):
-                snapshot = snapshot_worktree_to_commit(repo)
+                snapshot_ref = (
+                    "refs/hitch/autonomous-goals/1/"
+                    "0123456789abcdef0123456789abcdef"
+                )
+                snapshot = snapshot_worktree_to_commit(
+                    repo, retain_ref=snapshot_ref
+                )
 
             self.assertEqual(_git(repo, "rev-parse", "HEAD"), head)
             self.assertEqual(_git(repo, "rev-parse", f"{snapshot}^"), head)
@@ -70,6 +77,26 @@ class ManagedWorktreeTests(SimpleTestCase):
                 _git(repo, "show", f"{snapshot}:untracked.txt"), "untracked"
             )
             self.assertEqual(_git(repo, "status", "--short"), status_before)
+            self.assertEqual(_git(repo, "rev-parse", snapshot_ref), snapshot)
+            self.assertTrue(release_snapshot_commit_ref(repo, snapshot_ref))
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "show-ref", "--verify", snapshot_ref],
+                    cwd=repo,
+                    check=False,
+                    capture_output=True,
+                ).returncode,
+                0,
+            )
+
+    def test_snapshot_ref_helpers_reject_unowned_refs(self) -> None:
+        with self.assertRaisesRegex(WorktreeCreationError, "snapshot ref is invalid"):
+            snapshot_worktree_to_commit(
+                "/unused", retain_ref="refs/heads/do-not-touch"
+            )
+        self.assertFalse(
+            release_snapshot_commit_ref("/unused", "refs/heads/do-not-touch")
+        )
 
     def test_snapshot_worktree_to_commit_rejects_non_repo_source(self) -> None:
         with (

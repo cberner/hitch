@@ -13,10 +13,10 @@ from typing import NamedTuple
 from django.http import HttpRequest
 
 from hitch.main.formatting import render_markdown
+from hitch.main.goals.autonomous_goal_prompts import _AUTONOMOUS_GOAL_TITLE_MAX_LEN
 from hitch.main.models import AutonomousGoal
 from hitch.main.runtime.codex_pool import _VALID_WEB_SEARCH_MODES
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
-from hitch.main.workflows.agent_io import _AUTONOMOUS_GOAL_TITLE_MAX_LEN
 
 _MAX_BIGAUTOFIELD_DECIMAL = Decimal(_MAX_BIGAUTOFIELD)
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_UNIT = 1_000_000

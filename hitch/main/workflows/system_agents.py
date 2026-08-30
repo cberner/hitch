@@ -37,10 +37,9 @@ from hitch.main.workflows.workflow_state import (
 logger = logging.getLogger(__name__)
 
 AUTONOMOUS_GOAL_AGENT_KIND: str = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
-AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND = "autonomous_goal_history_summary"
+LEGACY_AUTONOMOUS_GOAL_HISTORY_AGENT_KIND = "autonomous_goal_history_summary"
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
-AUTONOMOUS_GOAL_HISTORY_SUMMARY_DISPLAY_AUTHOR = "Autonomous goal history"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
 AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
 AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR = "Autonomous goal proposal accepted by user"
@@ -58,7 +57,7 @@ SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 STEP_BLOCKED = "blocked"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
-STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING = "autonomous_goal_history_summarizing"
+LEGACY_STEP_AUTONOMOUS_GOAL_HISTORY = "autonomous_goal_history_summarizing"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
 STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
@@ -257,8 +256,8 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
 
 def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str, ...]:
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
-        if workflow.step == STEP_AUTONOMOUS_GOAL_HISTORY_SUMMARIZING:
-            return (AUTONOMOUS_GOAL_HISTORY_SUMMARY_AGENT_KIND,)
+        if workflow.step == LEGACY_STEP_AUTONOMOUS_GOAL_HISTORY:
+            return (LEGACY_AUTONOMOUS_GOAL_HISTORY_AGENT_KIND,)
         if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
             return (AUTONOMOUS_GOAL_AGENT_KIND,)
         if workflow.step == STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
@@ -690,7 +689,7 @@ def _resolved_stack_proposal_candidate_cleanup_cwd(
 
 def _state_without_current_candidate_result(state: Mapping[str, Any]) -> dict[str, Any]:
     next_state = dict(state)
-    for key in ("candidate", "judgment", "judge_session_id", "history_files"):
+    for key in ("candidate", "judgment", "judge_session_id"):
         next_state.pop(key, None)
     return next_state
 

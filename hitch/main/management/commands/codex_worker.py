@@ -1824,6 +1824,8 @@ def _make_approval_handler(
                     thread_id=instance.thread_id,
                     instance_id=instance.pk,
                     agent_kind=instance.agent_kind,
+                    purpose=instance.purpose,
+                    workflow_id=instance.workflow_id,
                     user_message_index=instance.user_message_index,
                     cancel_requested=lambda: _cancel_requested,
                     enable_memories=instance.enable_memories,

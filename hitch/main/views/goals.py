@@ -21,6 +21,8 @@ from hitch.main.goals.autonomous_goal_form import (
     _validated_autonomous_goal_values,
 )
 from hitch.main.goals.autonomous_goal_proposal_stack import (
+    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY,
+    AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
     _autonomous_goal_accepted_session_blocks_start,
     _autonomous_goal_pending_proposal_blocks_start,
     _proposal_outcome_metadata,
@@ -57,6 +59,7 @@ from hitch.main.workflows import autonomous_goals as goal_workflows
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
+    release_snapshot_commit_ref,
 )
 
 _AUTONOMOUS_GOAL_TITLE_MAX_LEN = 200
@@ -229,6 +232,7 @@ def delete_autonomous_goal(
             update_fields=["deleted_at", "auto_proposal_enabled", "updated_at"]
         )
     for proposal in cleanup_proposals:
+        _release_proposed_session_snapshot_ref(proposal)
         _cleanup_proposed_session_candidate_worktree(proposal)
     return redirect("autonomous_goals")
 
@@ -391,6 +395,15 @@ def update_proposed_session_outcome(
         return HttpResponseBadRequest("outcome status is invalid")
     if (
         outcome_status == ProposedSession.OUTCOME_ACCEPTED
+        and isinstance(proposed_session.outcome_metadata, dict)
+        and proposed_session.outcome_metadata.get(
+            AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY
+        )
+        is True
+    ):
+        return HttpResponseBadRequest("proposal must be started before acceptance")
+    if (
+        outcome_status == ProposedSession.OUTCOME_ACCEPTED
         and proposed_session.candidate_session is None
     ):
         # This endpoint can adopt an existing candidate, but proposals that
@@ -462,9 +475,33 @@ def update_proposed_session_outcome(
     if outcome_status in {
         ProposedSession.OUTCOME_DISMISSED,
         ProposedSession.OUTCOME_REJECTED,
-    } and stack_continuation_stopped:
-        _cleanup_proposed_session_candidate_worktree(proposed_session)
+    }:
+        _release_proposed_session_snapshot_ref(proposed_session)
+        if stack_continuation_stopped:
+            _cleanup_proposed_session_candidate_worktree(proposed_session)
     return redirect("inbox")
+
+
+def _release_proposed_session_snapshot_ref(
+    proposed_session: ProposedSession,
+) -> None:
+    metadata = proposed_session.outcome_metadata
+    ref = (
+        metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    project = proposed_session.project
+    if not isinstance(ref, str) or not ref or project is None:
+        return
+    try:
+        release_snapshot_commit_ref(project.repo_path, ref)
+    except WorktreeCleanupError:
+        common.logger.exception(
+            "failed to release snapshot ref for proposed session %s",
+            proposed_session.pk,
+        )
+
 
 def _cleanup_proposed_session_candidate_worktree(
     proposed_session: ProposedSession,

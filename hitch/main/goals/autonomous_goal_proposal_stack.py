@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
+AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY = "autonomous_goal_tool_protocol"
+AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY = "approved_snapshot_sha"
+AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY = "approved_snapshot_ref"
 _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
     "stacked_diff_continuation_stopped_reason"
 )

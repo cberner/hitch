@@ -801,10 +801,8 @@ class AutonomousGoalViewTests(TestCase):
                 "stacked_diff_iteration": 2,
                 "proposal_budget_tokens_used": 1250,
                 "stacked_diff_continuation_stopped_reason": (
-                    "candidate_no_proposal_stall_limit"
+                    "candidate_no_proposal"
                 ),
-                "no_proposal_retries": 3,
-                "no_proposal_retry_limit": 3,
             },
         )
 
@@ -816,7 +814,7 @@ class AutonomousGoalViewTests(TestCase):
             "Improve tests - High ambition - High confidence - Stack 2 of 3",
         )
         self.assertContains(response, "Tokens used: 1,250 tokens")
-        self.assertContains(response, "Stack stopped: no proposal after 3 retries")
+        self.assertContains(response, "Stack stopped: no further proposal found")
 
     def test_proposed_session_stack_label_omits_invalid_iteration(self) -> None:
         proposed_session = ProposedSession(
@@ -1138,9 +1136,7 @@ class AutonomousGoalViewTests(TestCase):
             summary="No concrete test increment was worth proposing.",
             outcome_metadata={
                 "automation_status": "skipped",
-                "skip_reason": "candidate_no_proposal_stall_limit",
-                "no_proposal_retries": 3,
-                "no_proposal_retry_limit": 3,
+                "skip_reason": "candidate_no_proposal",
             },
         )
 
@@ -1152,7 +1148,6 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response, "No concrete test increment was worth proposing."
         )
-        self.assertContains(response, "Run stopped: no proposal after 3 retries")
         self.assertContains(response, "Dismiss")
         self.assertNotContains(response, 'data-proposed-session-id="')
         self.assertNotContains(response, 'data-reject-url="')
@@ -1609,7 +1604,7 @@ class AutonomousGoalViewTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={"autonomous_goal_id": goal.pk},
+            state={"autonomous_goal_id": goal.pk, "tool_protocol": True},
         )
         instance = CodexInstance.objects.create(
             pid=0,
@@ -1748,7 +1743,10 @@ class AutonomousGoalViewTests(TestCase):
             status_code=400,
         )
         mock_interrupt.assert_called_once_with(
-            instance.pk, expected_thread_id=instance.thread_id
+            instance.pk,
+            expected_thread_id=instance.thread_id,
+            force=True,
+            error=system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
         )
         mock_cleanup.assert_not_called()
         run.refresh_from_db()
@@ -2030,6 +2028,44 @@ class AutonomousGoalViewTests(TestCase):
             "candidate-thread", "Add parser coverage"
         )
 
+    def test_tool_protocol_proposal_cannot_promote_hidden_candidate_directly(
+        self,
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="hidden-candidate",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"autonomous_goal_tool_protocol": True},
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.content, b"proposal must be started before acceptance"
+        )
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        candidate.refresh_from_db()
+        self.assertTrue(candidate.is_hidden_system_session)
+
     def test_direct_accept_keeps_upgrade_recovery_proposal_actionable(self) -> None:
         source_session = SessionMetadata.objects.create(
             thread_id="upgrade-recovery-source",
@@ -2129,9 +2165,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b"outcome status is invalid")
 
+    @patch("hitch.main.views.goals.release_snapshot_commit_ref")
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_dismiss_proposed_session_uses_distinct_outcome(
-        self, mock_cleanup: MagicMock
+        self, mock_cleanup: MagicMock, mock_release_snapshot: MagicMock
     ) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -2143,6 +2180,12 @@ class AutonomousGoalViewTests(TestCase):
         proposal = ProposedSession.objects.create(
             autonomous_goal=goal,
             title="Add parser coverage",
+            outcome_metadata={
+                "approved_snapshot_ref": (
+                    "refs/hitch/autonomous-goals/1/"
+                    "0123456789abcdef0123456789abcdef"
+                )
+            },
             candidate_session=SessionMetadata.objects.create(
                 thread_id="candidate-thread",
                 cwd="/repo-worktree",
@@ -2160,6 +2203,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
         self.assertNotEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
         self.assertEqual(proposal.outcome_notes, "")
+        mock_release_snapshot.assert_called_once_with(
+            project.repo_path,
+            "refs/hitch/autonomous-goals/1/0123456789abcdef0123456789abcdef",
+        )
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")

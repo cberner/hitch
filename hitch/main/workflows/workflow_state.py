@@ -10,9 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from hitch.main.models import SessionMetadata, SystemWorkflow
+from hitch.main.models import AutonomousGoal, SessionMetadata, SystemWorkflow
 from hitch.main.workflows import engine
-from hitch.main.workflows.agent_io import _CONFIDENCE_RANK
+
+_CONFIDENCE_RANK = {
+    AutonomousGoal.CONFIDENCE_MEDIUM: 1,
+    AutonomousGoal.CONFIDENCE_HIGH: 2,
+    AutonomousGoal.CONFIDENCE_VERY_HIGH: 3,
+}
 
 
 def _checked_state_key(workflow: SystemWorkflow, key: str) -> str:

@@ -1198,7 +1198,10 @@ class NewSessionViewTests(TestCase):
             autonomous_goal=goal,
             candidate_session=candidate,
             title="Add parser coverage",
-            outcome_metadata={"auto_qa_enabled": True},
+            outcome_metadata={
+                "auto_qa_enabled": True,
+                "approved_snapshot_sha": "",
+            },
         )
 
         response = self.client.post(
@@ -2222,6 +2225,250 @@ class NewSessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_spawn.call_args.kwargs["sandbox_policy"], "readOnly")
+
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.new_session.release_snapshot_commit_ref")
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_ag_snapshot_starts_fresh_visible_thread_and_worktree(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_release_snapshot: MagicMock,
+        mock_cleanup_candidate: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        hidden_candidate = SessionMetadata.objects.create(
+            thread_id="hidden-candidate",
+            cwd="/candidate",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        snapshot = "a" * 40
+        snapshot_ref = (
+            "refs/hitch/autonomous-goals/1/"
+            "0123456789abcdef0123456789abcdef"
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            candidate_session=hidden_candidate,
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+                "approved_snapshot_sha": snapshot,
+                "approved_snapshot_ref": snapshot_ref,
+            },
+        )
+        worktree = ManagedWorktree(
+            path=Path("/home/user/.hitch/worktrees/proj/snapshot"),
+            branch="hitch/proj/snapshot",
+            source_repo=Path(self.REPO),
+        )
+        mock_create_worktree.return_value = worktree
+        mock_spawn.return_value = SimpleNamespace(thread_id="visible-thread")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Continue the approved work.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_create_worktree.assert_called_once_with(
+            self.REPO, base_ref=snapshot
+        )
+        self.assertEqual(mock_spawn.call_args.kwargs["cwd"], str(worktree.path))
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertIsNotNone(proposal.accepted_session)
+        assert proposal.accepted_session is not None
+        self.assertEqual(proposal.accepted_session.thread_id, "visible-thread")
+        mock_release_snapshot.assert_called_once_with(self.REPO, snapshot_ref)
+        mock_cleanup_candidate.assert_called_once_with(hidden_candidate.cwd)
+        hidden_candidate.refresh_from_db()
+        self.assertTrue(hidden_candidate.is_hidden_system_session)
+
+    @patch("hitch.main.views.new_session.release_snapshot_commit_ref")
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_ag_propose_only_snapshot_starts_in_selected_repository(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_release_snapshot: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Find a meaningful reliability improvement.",
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+        )
+        snapshot_ref = (
+            "refs/hitch/autonomous-goals/1/"
+            "0123456789abcdef0123456789abcdef"
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                "approved_snapshot_sha": "a" * 40,
+                "approved_snapshot_ref": snapshot_ref,
+            },
+        )
+        mock_spawn.return_value = SimpleNamespace(thread_id="visible-thread")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Investigate the proposed improvement.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_create_worktree.assert_not_called()
+        self.assertEqual(mock_spawn.call_args.kwargs["cwd"], self.REPO)
+        mock_release_snapshot.assert_called_once_with(self.REPO, snapshot_ref)
+
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
+    def test_hidden_ag_candidate_cleanup_failure_is_nonfatal(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = _make_project(repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="hidden-candidate",
+            cwd="/candidate",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            candidate_session=candidate,
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            },
+        )
+        mock_cleanup.side_effect = WorktreeCleanupError("busy")
+
+        with self.assertLogs("hitch.main.views.common", level="ERROR") as logs:
+            new_session_views._cleanup_hidden_ag_candidate_worktree(proposal)
+
+        mock_cleanup.assert_called_once_with(candidate.cwd)
+        self.assertIn("failed to clean up hidden candidate worktree", logs.output[0])
+
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_ag_tool_proposal_requires_approved_snapshot(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            },
+        )
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Continue the approved work.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertContains(
+            response,
+            "approved autonomous-goal snapshot is missing or invalid",
+            status_code=400,
+        )
+        mock_create_worktree.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_ag_snapshot_worktree_creation_failure_is_reported(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+                "approved_snapshot_sha": "a" * 40,
+            },
+        )
+        mock_create_worktree.side_effect = WorktreeCreationError("snapshot missing")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Continue the approved work.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertContains(response, "snapshot missing", status_code=400)
+        mock_create_worktree.assert_called_once_with(
+            self.REPO, base_ref="a" * 40
+        )
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.common.cleanup_worktree")
     @patch("hitch.main.views.common.create_worktree_for_session")
