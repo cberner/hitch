@@ -97,15 +97,18 @@ that replaces the framework-driven QA verdict-and-repair loop.
   succeeds, whether or not review was delegated.
 - `REVIEW-no-local-merge`: Review guidance never applies session changes
   directly to another local branch.
-- `REVIEW-pr-handoff`: A PR workflow proceeds to publication and one visible,
-  agent-driven `hitch.watch_pr` follow-up turn after its guidance turn succeeds.
+- `REVIEW-pr-handoff`: For a PR workflow, the visible guidance/preparation turn
+  publishes through Codex's built-in PR tool and invokes `hitch.watch_pr` with
+  the resulting URL. The tool registers the PR with Hitch before polling; Hitch
+  does not push the branch, create the PR, or spawn a separate initial watch
+  turn.
 - `REVIEW-guidance-steering`: User steering during QA-only guidance resumes
   guidance without PR preparation, commit, push, or PR publication
   instructions. Guidance failures are attributed to the review workflow.
 - `REVIEW-qa-display`: `/qa` is displayed as a coding-agent inspection with an
   optional reviewer subagent.
 - `REVIEW-pr-now`: `/pr-now` continues to skip review guidance and proceeds
-  directly to PR preparation.
+  directly to the visible PR preparation/publication/watch turn.
 
 ## 4. Success Criteria
 

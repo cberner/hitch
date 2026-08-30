@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+from types import SimpleNamespace
+from typing import override
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, TestCase
@@ -12,6 +14,7 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
+from hitch.main.sessions import pr_prompts
 from hitch.main.workflows import pr_qa, pr_watch, system_agents
 from hitch.main.workflows.gh_cli import _GhPrOpenError
 from hitch.main.workflows.gh_observations import (
@@ -215,6 +218,259 @@ class PrWatchTests(SimpleTestCase):
         ):
             pr_watch.watch_pr(cwd=cwd, url="https://example.com/pr/42")
 
+    def test_recognizes_all_hitch_published_legacy_prompts(self) -> None:
+        legacy_prompts = (
+            "Rebase on the default branch, polish it, get it ready, and commit "
+            "the final changes. Do not push the branch or open a PR; Hitch will "
+            "push and open it after this turn completes.",
+            "Rebase on the repository's default branch, polish it, get it ready, "
+            "and commit the final changes. Do not push the branch or open a PR; "
+            "Hitch will push and open it after this turn completes.",
+            "Rebase on master, polish it, get it ready, and commit the final "
+            "changes. Do not push the branch or open a PR; Hitch will push and "
+            "open it after this turn completes.",
+            "Polish it, get it ready, and commit the final changes. Do not push "
+            "the branch or open a PR; Hitch will push and open it after this turn "
+            "completes.",
+            "Polish it, get it ready, commit the final changes, and push the "
+            "branch. Do not open a PR; Hitch will open it after this turn "
+            "completes.",
+        )
+
+        for prompt in legacy_prompts:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(
+                    pr_prompts.is_legacy_hitch_published_pr_prompt(
+                        f"Review first.\n\n{prompt}\n\nUse the requested title."
+                    )
+                )
+        self.assertFalse(
+            pr_prompts.is_legacy_hitch_published_pr_prompt(
+                pr_prompts.PR_SLASH_PROMPT
+            )
+        )
+
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_pr_must_match_checkout(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+    ) -> None:
+        mock_view.return_value = {
+            "url": "https://github.com/openai/hitch/pull/42",
+            "number": 42,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "headRefOid": "abc123",
+            "headRepository": {"name": "hitch"},
+            "headRepositoryOwner": {"login": "openai"},
+        }
+        mock_git.side_effect = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "origin\tgit@github.com:openai/hitch.git (fetch)\n"
+                    "origin\tgit@github.com:openai/hitch.git (push)\n"
+                ),
+            ),
+            SimpleNamespace(returncode=0, stdout="feature\n"),
+            SimpleNamespace(returncode=0, stdout="abc123\n"),
+        ]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            pr_watch.validate_published_pr_checkout(
+                cwd=cwd,
+                url="https://github.com/openai/hitch/pull/42",
+            )
+
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_pr_rejects_unrelated_repository(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+    ) -> None:
+        mock_view.return_value = {
+            "url": "https://github.com/openai/another/pull/42",
+            "number": 42,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "headRefOid": "abc123",
+            "headRepository": {"name": "another"},
+            "headRepositoryOwner": {"login": "openai"},
+        }
+        mock_git.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="origin\tgit@github.com:openai/hitch.git (fetch)\n",
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            self.assertRaisesRegex(pr_watch.PrWatchError, "does not match"),
+        ):
+            pr_watch.validate_published_pr_checkout(
+                cwd=cwd,
+                url="https://github.com/openai/another/pull/42",
+            )
+
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_pr_must_be_open(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as cwd:
+            for state in ("CLOSED", "MERGED"):
+                with self.subTest(state=state):
+                    mock_view.return_value = {
+                        "url": "https://github.com/openai/hitch/pull/42",
+                        "number": 42,
+                        "state": state,
+                        "headRefName": "feature",
+                        "headRefOid": "abc123",
+                        "headRepository": {"name": "hitch"},
+                        "headRepositoryOwner": {"login": "openai"},
+                    }
+
+                    with self.assertRaisesRegex(
+                        pr_watch.PrWatchError,
+                        "must be open",
+                    ):
+                        pr_watch.validate_published_pr_checkout(
+                            cwd=cwd,
+                            url="https://github.com/openai/hitch/pull/42",
+                        )
+
+        mock_git.assert_not_called()
+
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_pr_rejects_a_different_head(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+    ) -> None:
+        cases = (
+            ("another-branch", "abc123", "head branch"),
+            ("feature", "def456", "head commit"),
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            for head, head_sha, message in cases:
+                with self.subTest(message=message):
+                    mock_view.return_value = {
+                        "url": "https://github.com/openai/hitch/pull/42",
+                        "number": 42,
+                        "state": "OPEN",
+                        "headRefName": head,
+                        "headRefOid": head_sha,
+                        "headRepository": {"name": "hitch"},
+                        "headRepositoryOwner": {"login": "openai"},
+                    }
+                    mock_git.side_effect = [
+                        SimpleNamespace(
+                            returncode=0,
+                            stdout=(
+                                "origin\tgit@github.com:openai/hitch.git (fetch)\n"
+                            ),
+                        ),
+                        SimpleNamespace(returncode=0, stdout="feature\n"),
+                        SimpleNamespace(returncode=0, stdout="abc123\n"),
+                    ]
+
+                    with self.assertRaisesRegex(pr_watch.PrWatchError, message):
+                        pr_watch.validate_published_pr_checkout(
+                            cwd=cwd,
+                            url="https://github.com/openai/hitch/pull/42",
+                        )
+
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_fork_pr_matches_head_repository(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+    ) -> None:
+        mock_view.return_value = {
+            "url": "https://github.com/openai/hitch/pull/42",
+            "number": 42,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "headRefOid": "abc123",
+            "headRepository": {"name": "hitch"},
+            "headRepositoryOwner": {"login": "contributor"},
+        }
+        mock_git.side_effect = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "origin\tgit@github.com:contributor/hitch.git (fetch)\n"
+                ),
+            ),
+            SimpleNamespace(returncode=0, stdout="feature\n"),
+            SimpleNamespace(returncode=0, stdout="abc123\n"),
+        ]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            pr_watch.validate_published_pr_checkout(
+                cwd=cwd,
+                url="https://github.com/openai/hitch/pull/42",
+            )
+
+    @patch(
+        "hitch.main.workflows.pr_watch._resolved_ssh_hostname",
+        return_value="github.com",
+    )
+    @patch("hitch.main.workflows.pr_watch._run_git_cli")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_published_pr_accepts_github_ssh_host_alias(
+        self,
+        mock_view: MagicMock,
+        mock_git: MagicMock,
+        mock_resolve_hostname: MagicMock,
+    ) -> None:
+        mock_view.return_value = {
+            "url": "https://github.com/openai/hitch/pull/42",
+            "number": 42,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "headRefOid": "abc123",
+            "headRepository": {"name": "hitch"},
+            "headRepositoryOwner": {"login": "openai"},
+        }
+        mock_git.side_effect = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "origin\tgit@github-work:openai/hitch.git (fetch)\n"
+                    "origin\tgit@github-work:openai/hitch.git (push)\n"
+                ),
+            ),
+            SimpleNamespace(returncode=0, stdout="feature\n"),
+            SimpleNamespace(returncode=0, stdout="abc123\n"),
+        ]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            pr_watch.validate_published_pr_checkout(
+                cwd=cwd,
+                url="https://github.com/openai/hitch/pull/42",
+            )
+
+        mock_resolve_hostname.assert_called_once_with("github-work")
+
+    @patch("hitch.main.workflows.pr_watch.subprocess.run")
+    def test_resolves_effective_ssh_hostname(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="host github-work\nhostname GitHub.COM.\nport 22\n",
+        )
+
+        hostname = pr_watch._resolved_ssh_hostname("github-work")
+
+        self.assertEqual(hostname, "github.com")
+        mock_run.assert_called_once()
+
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_reports_gh_failure_as_tool_error(self, mock_observe: MagicMock) -> None:
         mock_observe.side_effect = _GhPrOpenError("gh auth failed")
@@ -230,6 +486,13 @@ class PrWatchTests(SimpleTestCase):
 
 
 class PrWatchToolTests(TestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        cwd = tempfile.TemporaryDirectory()
+        self.addCleanup(cwd.cleanup)
+        self.cwd = cwd.name
+
     def test_registered_specs_include_watch_pr(self) -> None:
         specs = registered_dynamic_tool_specs()
 
@@ -244,7 +507,7 @@ class PrWatchToolTests(TestCase):
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
-            cwd="/repo",
+            cwd=self.cwd,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_WATCH_RUNNING,
             state={
@@ -276,7 +539,7 @@ class PrWatchToolTests(TestCase):
                 },
             },
             ToolContext(
-                cwd="/repo",
+                cwd=self.cwd,
                 thread_id="main-thread",
                 workflow_id=workflow.pk,
                 user_message_index=4,
@@ -298,13 +561,158 @@ class PrWatchToolTests(TestCase):
         self.assertEqual(workflow.state["pr_handoff"]["pr_number"], 42)
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    @patch("hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout")
+    def test_publishing_turn_registers_pr_before_polling(
+        self,
+        mock_validate_checkout: MagicMock,
+        mock_watch: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd=self.cwd,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": True,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 4,
+            },
+        )
+        result = {
+            "status": "ready",
+            "summary": "The PR gates are passing.",
+            "feedback": "",
+            "feedback_fingerprint": "",
+            "pr": _observation()["pr"],
+            "gates": _observation()["gates"],
+            "blockers": [],
+        }
+
+        def assert_registered_before_polling(**_kwargs: object) -> dict[str, object]:
+            registered = SystemWorkflow.objects.get(pk=workflow.pk)
+            self.assertEqual(
+                registered.step, system_agents.STEP_PR_WATCH_RUNNING
+            )
+            self.assertEqual(registered.state["pr_handoff"]["pr_number"], 42)
+            self.assertEqual(
+                registered.state["hitch_pr_handoff"]["pr_number"], 42
+            )
+            self.assertEqual(
+                registered.state[
+                    system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY
+                ],
+                system_agents.STEP_PR_WATCH_RUNNING,
+            )
+            return result
+
+        mock_watch.side_effect = assert_registered_before_polling
+
+        response = handle_dynamic_tool_call(
+            {
+                "tool": "watch_pr",
+                "arguments": {
+                    "url": "https://github.com/openai/hitch/pull/42",
+                },
+            },
+            ToolContext(
+                cwd=self.cwd,
+                thread_id="main-thread",
+                workflow_id=workflow.pk,
+                user_message_index=4,
+            ),
+        )
+
+        self.assertTrue(response["success"])
+        mock_validate_checkout.assert_called_once_with(
+            cwd=self.cwd,
+            url="https://github.com/openai/hitch/pull/42",
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_RUNNING)
+        self.assertEqual(
+            workflow.state[pr_watch.PR_WATCH_RESULT_TURN_INDEX_STATE_KEY], 4
+        )
+
+        instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="main-thread",
+            cwd=self.cwd,
+            prompt=system_agents.PR_SLASH_PROMPT,
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            user_message_index=4,
+        )
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    @patch(
+        "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout",
+        side_effect=pr_watch.PrWatchError(
+            "published PR repository does not match the publishing checkout"
+        ),
+    )
+    def test_publishing_turn_rejects_unrelated_pr_before_registration(
+        self,
+        _mock_validate_checkout: MagicMock,
+        mock_watch: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd=self.cwd,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": True,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 4,
+            },
+        )
+
+        response = handle_dynamic_tool_call(
+            {
+                "tool": "watch_pr",
+                "arguments": {
+                    "url": "https://github.com/openai/another/pull/42",
+                },
+            },
+            ToolContext(
+                cwd=self.cwd,
+                thread_id="main-thread",
+                workflow_id=workflow.pk,
+                user_message_index=4,
+            ),
+        )
+
+        self.assertFalse(response["success"])
+        self.assertIn(
+            "does not match the publishing checkout",
+            response["contentItems"][0]["text"],
+        )
+        mock_watch.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        self.assertNotIn("pr_handoff", workflow.state)
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_tool_does_not_record_another_threads_workflow(
         self, mock_watch: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
-            cwd="/repo",
+            cwd=self.cwd,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_WATCH_RUNNING,
             state={},
@@ -324,7 +732,7 @@ class PrWatchToolTests(TestCase):
                 },
             },
             ToolContext(
-                cwd="/repo",
+                cwd=self.cwd,
                 thread_id="other-thread",
                 workflow_id=workflow.pk,
                 user_message_index=4,
@@ -336,13 +744,96 @@ class PrWatchToolTests(TestCase):
         self.assertNotIn(pr_watch.PR_WATCH_RESULT_STATE_KEY, workflow.state)
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_tool_does_not_turn_qa_guidance_into_pr_workflow(
+        self, mock_watch: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd=self.cwd,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 4,
+            },
+        )
+        mock_watch.return_value = {
+            "status": "ready",
+            "summary": "ready",
+            "pr": _observation()["pr"],
+            "gates": _observation()["gates"],
+        }
+
+        response = handle_dynamic_tool_call(
+            {
+                "tool": "watch_pr",
+                "arguments": {
+                    "url": "https://github.com/openai/hitch/pull/42",
+                },
+            },
+            ToolContext(
+                cwd=self.cwd,
+                thread_id="main-thread",
+                workflow_id=workflow.pk,
+                user_message_index=4,
+            ),
+        )
+
+        self.assertTrue(response["success"])
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        self.assertNotIn("pr_handoff", workflow.state)
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_invalid_url_does_not_register_publishing_handoff(
+        self, mock_watch: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd=self.cwd,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": True,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 4,
+            },
+        )
+
+        response = handle_dynamic_tool_call(
+            {
+                "tool": "watch_pr",
+                "arguments": {"url": "https://example.com/not-a-pr"},
+            },
+            ToolContext(
+                cwd=self.cwd,
+                thread_id="main-thread",
+                workflow_id=workflow.pk,
+                user_message_index=4,
+            ),
+        )
+
+        self.assertFalse(response["success"])
+        mock_watch.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
+        self.assertNotIn("pr_handoff", workflow.state)
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_tool_rejects_another_pr_for_owning_workflow(
         self, mock_watch: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
-            cwd="/repo",
+            cwd=self.cwd,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_WATCH_RUNNING,
             state={
@@ -362,7 +853,7 @@ class PrWatchToolTests(TestCase):
                 },
             },
             ToolContext(
-                cwd="/repo",
+                cwd=self.cwd,
                 thread_id="main-thread",
                 workflow_id=workflow.pk,
                 user_message_index=4,
@@ -379,7 +870,7 @@ class PrWatchToolTests(TestCase):
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
-            cwd="/repo",
+            cwd=self.cwd,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_WATCH_RUNNING,
             state={
@@ -405,7 +896,7 @@ class PrWatchToolTests(TestCase):
                 },
             },
             ToolContext(
-                cwd="/repo",
+                cwd=self.cwd,
                 thread_id="main-thread",
                 workflow_id=workflow.pk,
                 user_message_index=4,
@@ -544,30 +1035,12 @@ class AgentDrivenPrWorkflowTests(TestCase):
             mock_spawn.call_args.kwargs["purpose"], CodexInstance.PURPOSE_USER
         )
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_publication_hands_new_workflow_to_agent_watch(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        mock_spawn.return_value = MagicMock(spec=CodexInstance)
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "next_user_message_index": 1,
-            },
-        )
+    def test_pr_prompt_assigns_publication_and_watch_to_codex(self) -> None:
+        prompt = system_agents.PR_SLASH_PROMPT
 
-        pr_qa._commit_pr_prompt_result(
-            workflow,
-            snapshot=_observation()["pr"],  # type: ignore[arg-type]
-        )
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_RUNNING)
-        self.assertIn("hitch.watch_pr", mock_spawn.call_args.kwargs["prompt"])
+        self.assertIn("Codex's built-in PR publishing tool", prompt)
+        self.assertIn("`hitch.watch_pr`", prompt)
+        self.assertIn("registers the PR with Hitch", prompt)
 
     def test_ready_tool_result_completes_watch_as_pr_ready(self) -> None:
         workflow = SystemWorkflow.objects.create(

@@ -232,22 +232,12 @@ def latest_task_plan_from_event_paths(paths: Iterable[str | Path], *, thread_id:
     return current.snapshot if current is not None else None
 
 
-def latest_pr_snapshot_for_instance(instance: CodexInstance | None) -> dict[str, Any] | None:
-    """Return the latest GitHub PR state observed by a worker, if any."""
-    if instance is None or not instance.events_path:
-        return None
-    return latest_pr_snapshot_from_event_paths(
-        [instance.events_path],
-        thread_id=instance.thread_id,
-    )
-
-
 def latest_pr_snapshot_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> dict[str, Any] | None:
-    """Recover a compact PR handoff snapshot from completed GitHub MCP calls.
+    """Recover a compact PR snapshot from completed GitHub MCP calls.
 
-    The PR workflow's visible turn already checks GitHub via MCP tools. Persisting
-    the latest structured results lets Hitch continue follow-up from durable state
-    instead of asking the next agent to rediscover which PR/branch it was handling.
+    This supports general session-stage display. Workflow-owned publication is
+    registered explicitly by ``hitch.watch_pr`` rather than inferred from these
+    events.
     """
     updates = list(
         _parsed_events_from_paths(

@@ -16,16 +16,15 @@ from collections.abc import Callable, Iterable
 from typing import Any, Protocol
 
 from hitch.main.git_support import hermetic_git_env
-from hitch.main.models import SystemWorkflow
 from hitch.main.runtime.sdk_values import string_from_any
 from hitch.main.workflows.gh_observations import _review_threads_page, _status_checks_page
-from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
 
 class _CwdContext(Protocol):
-    cwd: Any
+    @property
+    def cwd(self) -> Any: ...
 
-_GH_PR_CREATE_TIMEOUT_SECONDS = 120
+_GH_CLI_TIMEOUT_SECONDS = 120
 _GH_PR_VIEW_FIELDS = (
     "url",
     "number",
@@ -46,8 +45,8 @@ _GH_REVIEW_THREAD_PAGE_LIMIT = 5
 _GH_STATUS_CHECK_PAGE_LIMIT = 10
 # PR watching uses gh pr view plus paginated
 # reviewThreads/statusCheckRollup GraphQL reads. Without a bound, one watch can
-# inherit the 120s create timeout for every request. These reads normally return in a
-# couple seconds, so cap each call.
+# inherit the 120s general CLI timeout for every request. These reads normally
+# return in a couple seconds, so cap each call.
 _GH_PR_VIEW_TIMEOUT_SECONDS = 20
 _GH_REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
@@ -120,124 +119,13 @@ class _GhPrOpenError(RuntimeError):
     pass
 
 
-class _PrWorkflowNoCommitsError(RuntimeError):
-    """The PR branch has no commits beyond the base, so no PR is warranted.
-
-    The PR cleanup turn can legitimately produce no delta (it rebased its work
-    away or the diff was already clean). That is a successful no-op, not a
-    failure, so it must complete the workflow rather than block it.
-    """
-
-
-def _push_current_branch_with_git_cli(
-    workflow: SystemWorkflow,
-    *,
-    active_pr_handoff: dict[str, Any] | None = None,
-) -> None:
-    branch = _current_git_branch(workflow)
-    _ensure_not_default_git_branch(workflow, branch)
-    refspec = f"HEAD:refs/heads/{branch}"
-    push_args = ["push", "-u", "origin", refspec]
-    pushed = _run_git_cli(workflow, push_args)
-    if pushed.returncode == 0:
-        return
-    expected_head_sha = _force_push_expected_head_sha(
-        branch, pushed, active_pr_handoff=active_pr_handoff
-    )
-    if expected_head_sha:
-        lease = f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}"
-        force_push_args = ["push", lease, "-u", "origin", refspec]
-        force_pushed = _run_git_cli(
-            workflow,
-            force_push_args,
-        )
-        if force_pushed.returncode == 0:
-            return
-        raise _GhPrOpenError(
-            f"`git {' '.join(force_push_args)}` failed after "
-            f"`git {' '.join(push_args)}` was rejected: {_gh_error(force_pushed)}"
-        )
-
-    raise _GhPrOpenError(
-        f"`git {' '.join(push_args)}` failed: {_gh_error(pushed)}"
-    )
-
-
-def _force_push_expected_head_sha(
-    branch: str,
-    failed_push: subprocess.CompletedProcess[str],
-    *,
-    active_pr_handoff: dict[str, Any] | None = None,
-) -> str:
-    if not _git_push_rejected_non_fast_forward(failed_push):
-        return ""
-    handoff = _compact_pr_handoff(active_pr_handoff)
-    if _pr_handoff_is_terminal(handoff):
-        return ""
-    if string_from_any(handoff.get("head")) != branch:
-        return ""
-    return string_from_any(handoff.get("head_sha"))
-
-
-def _git_push_rejected_non_fast_forward(
-    result: subprocess.CompletedProcess[str],
-) -> bool:
-    detail = f"{result.stderr}\n{result.stdout}".lower()
-    rejection_markers = (
-        "non-fast-forward",
-        "fetch first",
-        "tip of your current branch is behind",
-        "updates were rejected because the tip",
-    )
-    return any(marker in detail for marker in rejection_markers)
-
-
-def _current_git_branch(workflow: SystemWorkflow) -> str:
-    result = _run_git_cli(workflow, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-    if result.returncode != 0:
-        raise _GhPrOpenError(
-            f"`git symbolic-ref --short HEAD` failed: {_gh_error(result)}"
-        )
-    branch = result.stdout.strip()
-    if not branch:
-        raise _GhPrOpenError("current checkout is detached; cannot push a PR branch")
-    return branch
-
-
-def _ensure_not_default_git_branch(workflow: SystemWorkflow, branch: str) -> None:
-    default_branch = _origin_default_git_branch(workflow)
-    if default_branch:
-        if branch == default_branch:
-            raise _GhPrOpenError(f"refusing to push default branch {branch!r}")
-        return
-    if branch in {"main", "master", "trunk", "develop"}:
-        raise _GhPrOpenError(f"refusing to push likely default branch {branch!r}")
-
-
-def _origin_default_git_branch(workflow: SystemWorkflow) -> str:
-    result = _run_git_cli(
-        workflow, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
-    )
-    if result.returncode != 0:
-        return ""
-    remote_ref = result.stdout.strip()
-    if not remote_ref:
-        return ""
-    prefix = "origin/"
-    return (
-        remote_ref.removeprefix(prefix)
-        if remote_ref.startswith(prefix)
-        else remote_ref
-    )
-
-
 def _gh_pr_view_payload(
     workflow: _CwdContext,
     *,
     selector: str | None,
     fields: Iterable[str],
     optional: bool = False,
-    timeout_seconds: float = _GH_PR_CREATE_TIMEOUT_SECONDS,
+    timeout_seconds: float = _GH_CLI_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     args = ["pr", "view"]
     if selector:
@@ -261,7 +149,7 @@ def _run_gh_cli(
     workflow: _CwdContext,
     args: list[str],
     *,
-    timeout_seconds: float = _GH_PR_CREATE_TIMEOUT_SECONDS,
+    timeout_seconds: float = _GH_CLI_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
     command = ["gh", *args]
@@ -282,7 +170,7 @@ def _run_gh_cli(
 
 
 def _run_git_cli(
-    workflow: SystemWorkflow, args: list[str]
+    workflow: _CwdContext, args: list[str]
 ) -> subprocess.CompletedProcess[str]:
     command = ["git", *args]
     try:
@@ -291,12 +179,11 @@ def _run_git_cli(
             cwd=workflow.cwd,
             capture_output=True,
             text=True,
-            timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
+            timeout=_GH_CLI_TIMEOUT_SECONDS,
             check=False,
             # Inherited repo-discovery overrides (GIT_DIR & co.) would point
-            # the push at a different repo; the hermetic env also disables
-            # credential prompts so an unauthenticated push fails fast
-            # instead of stalling out the full timeout.
+            # the command at a different repo. The hermetic environment also
+            # prevents an unexpected credential prompt from stalling it.
             env=hermetic_git_env(),
         )
     except subprocess.TimeoutExpired as exc:

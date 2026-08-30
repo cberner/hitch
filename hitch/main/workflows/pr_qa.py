@@ -1,9 +1,10 @@
-"""Optional coding-agent review, PR publication, and agent-driven follow-up.
+"""Optional coding-agent review and agent-owned PR publication/watch turns.
 
 New workflows start with one coding turn that recommends, but does not require,
-the native ``hitch_reviewer`` subagent. PR workflows then publish and hand the
-watch/fix cycle to that visible agent through ``hitch.watch_pr``; QA-only
-workflows complete after review guidance.
+the native ``hitch_reviewer`` subagent. For PR workflows, that same visible
+agent publishes through Codex and calls ``hitch.watch_pr``; the tool registers
+the PR with Hitch before it performs bounded polling. QA-only workflows
+complete after review guidance.
 
 Shared spawn/transition/blocking helpers stay in ``system_agents`` and are
 reached through the module object so test patches on that namespace keep
@@ -27,26 +28,20 @@ from hitch.main.models import (
     SystemWorkflow,
     WorkflowSteeringMessage,
 )
-from hitch.main.runtime import codex_events, rate_limit
+from hitch.main.runtime import rate_limit
 from hitch.main.runtime.sdk_values import string_from_any
 from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions.pr_prompts import is_legacy_hitch_published_pr_prompt
 from hitch.main.sessions.review_prompts import optional_review_prompt
 from hitch.main.workflows import engine, pr_watch, system_agents
 from hitch.main.workflows.gh_cli import (
-    _GH_PR_CREATE_TIMEOUT_SECONDS,
+    _GH_CLI_TIMEOUT_SECONDS,
     _GH_PR_VIEW_FIELDS,
-    _gh_error,
     _gh_pr_view_payload,
     _GhPrOpenError,
-    _PrWorkflowNoCommitsError,
-    _push_current_branch_with_git_cli,
-    _run_gh_cli,
     _run_git_cli,
 )
-from hitch.main.workflows.gh_observations import (
-    _github_pr_url_from_text,
-    _pr_handoff_from_github_url,
-)
+from hitch.main.workflows.gh_observations import _pr_handoff_from_github_url
 from hitch.main.workflows.pr_handoff import (
     _compact_pr_handoff,
     _merge_pr_handoff_dicts,
@@ -73,13 +68,11 @@ logger = logging.getLogger(__name__)
 _USER_STEERING_PROMPT_STATE_KEY = "user_steering_prompt"
 _USER_STEERING_RESUME_STEP_STATE_KEY = "user_steering_resume_step"
 _USER_STEERING_MESSAGE_INDEX_STATE_KEY = "user_steering_message_index"
-_PR_PUBLICATION_INSTANCE_STATE_KEY = (
-    system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY
+_LEGACY_PR_WATCH_UNAVAILABLE_ERROR = (
+    "This PR preparation turn predates `hitch.watch_pr`, which cannot be added "
+    "to an existing session. Start a new session to publish and watch the "
+    "prepared changes."
 )
-
-
-class _PrPublicationSupersededError(RuntimeError):
-    pass
 
 
 class PrWatchUnavailableError(RuntimeError):
@@ -417,7 +410,6 @@ _PR_QA_STATE_KEYS = frozenset(
         "pr_gates",
         "pr_handoff",
         "pr_prompt",
-        _PR_PUBLICATION_INSTANCE_STATE_KEY,
         "pr_stage_refresh",
         "pr_title",
         system_agents.REVIEW_GUIDANCE_STATE_KEY,
@@ -498,6 +490,32 @@ def _recover_pr_prompt_turn(workflow: SystemWorkflow) -> None:
         if system_agents.is_review_guidance_only_workflow(workflow)
         else "failed to restart PR prompt after its spawn handler died"
     )
+    _restart_pr_prompt_or_block_legacy(workflow, failure=failure)
+
+
+def _restart_pr_prompt_or_block_legacy(
+    workflow: SystemWorkflow,
+    *,
+    failure: str,
+) -> None:
+    workflow.refresh_from_db()
+    if (
+        workflow.state.get("open_pr_on_lgtm", True) is True
+        and is_legacy_hitch_published_pr_prompt(
+            _state_string(workflow, "pr_prompt")
+        )
+    ):
+        if _start_queued_user_steering(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        ):
+            return
+        _block_pr_step_if_owned(
+            workflow,
+            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+            error=_LEGACY_PR_WATCH_UNAVAILABLE_ERROR,
+        )
+        return
     _run_pr_step_action_if_owned(
         workflow,
         system_agents.STEP_PR_PROMPT_RUNNING,
@@ -529,12 +547,7 @@ def _handle_user_steering_finished(
             if system_agents.is_review_guidance_only_workflow(workflow)
             else "failed to restart PR preparation"
         )
-        _run_pr_step_action_if_owned(
-            workflow,
-            next_step,
-            lambda: _spawn_pr_prompt(workflow, lifecycle_lock_held=True),
-            failure=failure,
-        )
+        _restart_pr_prompt_or_block_legacy(workflow, failure=failure)
         return
     if next_step == system_agents.STEP_PR_WATCH_RUNNING:
         _run_pr_step_action_if_owned(
@@ -632,103 +645,23 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if system_agents.is_review_guidance_only_workflow(workflow):
         _complete_review_prompt_result(workflow, instance)
         return
-    worker_snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
-    if not _claim_pr_publication(
+    if _pr_branch_has_no_new_commits(workflow):
+        _complete_pr_prompt_no_changes(workflow, instance)
+        return
+    legacy_publication_turn = is_legacy_hitch_published_pr_prompt(instance.prompt)
+    _block_pr_step_if_owned(
         workflow,
-        instance,
         expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-    ):
-        _start_queued_user_steering(
-            workflow, expected_step=system_agents.STEP_PR_PROMPT_RUNNING
-        )
-        return
-    snapshot = worker_snapshot
-    hitch_handoff_snapshot = False
-    if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
-        if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
-            try:
-                _push_current_branch_for_pr_workflow(
-                    workflow,
-                    publication_instance=instance,
-                    expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-                )
-            except _PrPublicationSupersededError:
-                return
-            except _GhPrOpenError as exc:
-                _block_pr_step_if_owned(
-                    workflow,
-                    expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-                    error=(
-                        "PR prompt worker completed, but Hitch could not push "
-                        f"the branch with git: {exc}"
-                    ),
-                )
-                return
-            _commit_pr_prompt_result(workflow)
-            return
-        try:
-            snapshot = _open_or_find_pr_with_gh_cli(
-                workflow,
-                publication_instance=instance,
-                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        error=(
+            _LEGACY_PR_WATCH_UNAVAILABLE_ERROR
+            if legacy_publication_turn
+            else (
+                "PR turn completed without calling `hitch.watch_pr` with the "
+                "published PR URL. Publish through Codex's built-in PR tool, then "
+                "register and watch the PR with `hitch.watch_pr`."
             )
-            hitch_handoff_snapshot = True
-        except _PrPublicationSupersededError:
-            return
-        except _PrWorkflowNoCommitsError:
-            _commit_pr_prompt_result(workflow, no_changes=True)
-            return
-        except _GhPrOpenError as exc:
-            _block_pr_step_if_owned(
-                workflow,
-                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-                error=(
-                    "PR prompt worker completed, but Hitch could not open the PR "
-                    f"with gh: {exc}"
-                ),
-            )
-            return
-    if snapshot is None:
-        _block_pr_step_if_owned(
-            workflow,
-            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-            error=(
-                "PR prompt worker completed, but Hitch could not identify the PR "
-                "to watch."
-            ),
-        )
-        return
-    # Merge enrichment into the final ownership-checked transition. A PR URL
-    # created by Hitch was already persisted with the create mutation.
-    _merge_pr_handoff(workflow, snapshot)
-    if hitch_handoff_snapshot:
-        _mark_hitch_pr_handoff(workflow, snapshot)
-    if (
-        not _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow))
-        and not hitch_handoff_snapshot
-    ):
-        try:
-            _push_current_branch_for_pr_workflow(
-                workflow,
-                publication_instance=instance,
-                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-            )
-        except _PrPublicationSupersededError:
-            return
-        except _GhPrOpenError as exc:
-            _block_pr_step_if_owned(
-                workflow,
-                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-                error=(
-                    "PR prompt worker completed, but Hitch could not push "
-                    f"the branch with git: {exc}"
-                ),
-            )
-            return
-    _commit_pr_prompt_result(
-        workflow,
-        snapshot=snapshot,
-        hitch_handoff_snapshot=hitch_handoff_snapshot,
+        ),
+        instance=instance,
     )
 
 
@@ -832,94 +765,36 @@ def _complete_review_prompt_result(
             workflow,
             expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
         )
-def _claim_pr_publication(
-    workflow: SystemWorkflow,
-    instance: CodexInstance,
-    *,
-    expected_step: str,
-) -> bool:
-    """Order accepted steering before PR publication starts."""
+def _complete_pr_prompt_no_changes(
+    workflow: SystemWorkflow, instance: CodexInstance
+) -> None:
+    """Complete a clean no-op only while the publishing turn still owns it."""
 
-    def _claim(locked: SystemWorkflow) -> bool:
-        if not _instance_owns_workflow_turn(
-            locked,
-            instance,
-            step=expected_step,
-        ):
-            return False
-        owner = locked.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
-        if isinstance(owner, int) and not isinstance(owner, bool):
-            return owner == instance.pk
-        if not _steering_inbox_is_empty(locked):
-            return False
-        locked.state = {
-            **locked.state,
-            _PR_PUBLICATION_INSTANCE_STATE_KEY: instance.pk,
-        }
-        locked.save(update_fields=["state", "updated_at"])
+    def _complete(locked: SystemWorkflow) -> bool:
+        system_agents._complete_workflow(
+            locked, system_agents.STEP_PR_NO_CHANGES
+        )
         return True
 
-    return bool(
-        engine.claim_workflow_transition(
-            workflow,
-            _claim,
-            expect_step=expected_step,
-        )
-    )
-
-
-def _commit_pr_prompt_result(
-    workflow: SystemWorkflow,
-    *,
-    snapshot: dict[str, Any] | None = None,
-    hitch_handoff_snapshot: bool = False,
-    no_changes: bool = False,
-) -> None:
-    """Finalize PR preparation only while it still owns an empty inbox."""
-
-    def _commit(locked: SystemWorkflow) -> str | None:
-        if not _steering_inbox_is_empty(locked):
-            return None
-        locked.state = dict(locked.state)
-        locked.state.pop(_PR_PUBLICATION_INSTANCE_STATE_KEY, None)
-        if no_changes:
-            system_agents._complete_workflow(
-                locked, system_agents.STEP_PR_NO_CHANGES
-            )
-            return "no_changes"
-        if snapshot is not None:
-            _merge_pr_handoff(locked, snapshot)
-            if hitch_handoff_snapshot:
-                _mark_hitch_pr_handoff(locked, snapshot)
-            if _pr_handoff_is_terminal(_pr_handoff_from_workflow(locked)):
-                _complete_terminal_pr_workflow(locked, run_auto_pull=False)
-                return "terminal"
-        system_agents._advance_workflow_step(
-            locked, system_agents.STEP_PR_WATCH_RUNNING
-        )
-        return "watch"
-
-    action = engine.claim_workflow_transition(
+    completed = engine.claim_workflow_transition(
         workflow,
-        _commit,
+        _complete,
         expect_step=system_agents.STEP_PR_PROMPT_RUNNING,
+        guard=lambda locked: (
+            _instance_owns_workflow_turn(
+                locked,
+                instance,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
+            )
+            and _steering_inbox_is_empty(locked)
+        ),
     )
-    if action is None:
+    if completed is None:
         _start_queued_user_steering(
             workflow, expected_step=system_agents.STEP_PR_PROMPT_RUNNING
         )
         return
-    if action == "no_changes":
-        _surface_pr_workflow_no_changes(workflow)
-        return
-    if action == "watch":
-        _run_pr_step_action_if_owned(
-            workflow,
-            system_agents.STEP_PR_WATCH_RUNNING,
-            lambda: _spawn_pr_watch_turn(workflow, lifecycle_lock_held=True),
-            failure="failed to start agent-driven PR watch",
-        )
-        return
+    _surface_pr_workflow_no_changes(workflow)
 
 def _complete_terminal_pr_workflow(
     workflow: SystemWorkflow, *, run_auto_pull: bool = True
@@ -944,8 +819,8 @@ def _surface_pr_workflow_no_changes(workflow: SystemWorkflow) -> None:
         system_agents._spawn_workflow_turn(
             workflow,
             prompt=(
-                "Hitch did not open a pull request because the PR cleanup turn "
-                "produced no commits beyond the base branch.\n\n"
+                "The PR publishing turn found no commits beyond the base branch "
+                "and did not open a pull request.\n\n"
                 "Tell the user that no PR was opened because there were no "
                 "changes to submit. This is a successful no-op outcome, not a "
                 "failure. Keep the explanation concise."
@@ -958,168 +833,28 @@ def _surface_pr_workflow_no_changes(workflow: SystemWorkflow) -> None:
             "failed to surface no-change PR completion for workflow %s", workflow.pk
         )
 
-def _pr_prompt_worker_snapshot_is_authoritative(
-    snapshot: dict[str, Any] | None,
-) -> bool:
-    # Hitch owns branch pushing and PR creation after the cleanup turn; terminal
-    # worker observations are often stale branch PRs and must not close the new
-    # workflow.
-    return snapshot is not None and not _pr_handoff_is_terminal(snapshot)
-
-def _open_or_find_pr_with_gh_cli(
-    workflow: SystemWorkflow,
-    *,
-    publication_instance: CodexInstance | None = None,
-    expected_step: str = "",
-) -> dict[str, Any]:
-    _push_current_branch_for_pr_workflow(
-        workflow,
-        publication_instance=publication_instance,
-        expected_step=expected_step,
-    )
-    existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
-    if existing is not None and not _pr_handoff_is_terminal(existing):
-        return existing
-
-    if _pr_branch_has_no_new_commits(workflow):
-        raise _PrWorkflowNoCommitsError()
-
-    create_args = ["pr", "create", "--fill"]
-    if pr_title := _state_string(workflow, "pr_title"):
-        create_args.extend(["--title", pr_title])
-
-    def _create_and_record() -> dict[str, Any]:
-        created = _run_gh_cli(workflow, create_args)
-        if created.returncode != 0:
-            raise _GhPrOpenError(
-                f"`gh pr create --fill` failed: {_gh_error(created)}"
-            )
-        url = _github_pr_url_from_text(f"{created.stdout}\n{created.stderr}")
-        if not url:
-            raise _GhPrOpenError("`gh pr create --fill` did not print a PR URL")
-        handoff = _pr_handoff_from_github_url(url, source_tool="gh_pr_create")
-        if publication_instance is not None:
-            _merge_pr_handoff(workflow, handoff)
-            _mark_hitch_pr_handoff(workflow, handoff)
-            workflow.save(update_fields=["state", "updated_at"])
-        return handoff
-
-    created_handoff = (
-        _run_pr_publication_mutation(
-            workflow,
-            publication_instance=publication_instance,
-            expected_step=expected_step,
-            mutation=_create_and_record,
-        )
-        if publication_instance is not None
-        else _create_and_record()
-    )
-    url = string_from_any(created_handoff.get("url"))
-    viewed = _view_created_pr_for_enrichment(workflow, url)
-    if viewed is None:
-        return created_handoff
-    return _merge_pr_handoff_dicts(created_handoff, viewed)
-
 def _pr_branch_has_no_new_commits(workflow: SystemWorkflow) -> bool:
-    # `gh pr create --fill` refuses to open a PR when the head branch carries no
-    # commits beyond the base branch. Detect that here so the no-op case
-    # completes the workflow cleanly instead of blocking on gh's error. When the
-    # count cannot be determined, fall through and let gh surface the real error.
+    # A clean branch with no commits beyond the base is a successful no-op. If
+    # the count cannot be determined, let the missing watch-tool handoff surface
+    # as a workflow error instead of guessing that there was nothing to publish.
     result = _run_git_cli(workflow, ["rev-list", "--count", "origin/HEAD..HEAD"])
     if result.returncode != 0:
         return False
     if result.stdout.strip() != "0":
         return False
-    # Uncommitted worktree changes with no commits mean the PR worker failed to
-    # commit its work -- not a clean no-op. Fall through so the gh handoff path
-    # blocks rather than silently completing and discarding the diff.
+    # Uncommitted changes mean the publishing turn failed to commit its work,
+    # not that the workflow had nothing to submit.
     status = _run_git_cli(workflow, ["status", "--porcelain"])
     if status.returncode != 0:
         return False
     return status.stdout.strip() == ""
-
-def _push_current_branch_for_pr_workflow(
-    workflow: SystemWorkflow,
-    *,
-    publication_instance: CodexInstance | None = None,
-    expected_step: str = "",
-) -> None:
-    # Workflow pushes must refresh PR state here before the lower-level git push
-    # can consider a force-with-lease recovery.
-    stored_handoff = _pr_handoff_from_workflow(workflow)
-    if _pr_handoff_is_terminal(stored_handoff):
-        stored_handoff = {}
-    active_pr_handoff = _fresh_active_pr_handoff_before_push(
-        workflow, stored_handoff
-    )
-
-    def _push() -> None:
-        _push_current_branch_with_git_cli(
-            workflow, active_pr_handoff=active_pr_handoff or None
-        )
-
-    if publication_instance is None:
-        _push()
-        return
-    _run_pr_publication_mutation(
-        workflow,
-        publication_instance=publication_instance,
-        expected_step=expected_step,
-        mutation=_push,
-    )
-
-
-def _run_pr_publication_mutation(
-    workflow: SystemWorkflow,
-    *,
-    publication_instance: CodexInstance,
-    expected_step: str,
-    mutation: Callable[[], Any],
-) -> Any:
-    """Run one remote mutation while publication and Stop are mutually exclusive."""
-    with session_lifecycle.hold(workflow.main_thread_id):
-        workflow.refresh_from_db()
-        if (
-            not workflow.is_active
-            or workflow.step != expected_step
-            or workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY)
-            != publication_instance.pk
-        ):
-            raise _PrPublicationSupersededError()
-        return mutation()
-
-
-def _fresh_active_pr_handoff_before_push(
-    workflow: SystemWorkflow, stored_handoff: dict[str, Any]
-) -> dict[str, Any]:
-    selector = string_from_any(stored_handoff.get("url"))
-    try:
-        existing = _gh_pr_view(
-            workflow, selector=selector or None, source_tool="gh_pr_view"
-        )
-    except _GhPrOpenError:
-        if selector:
-            return {}
-        raise
-    if existing is not None and not _pr_handoff_is_terminal(existing):
-        return existing
-    return {}
-
-def _view_created_pr_for_enrichment(
-    workflow: SystemWorkflow, url: str
-) -> dict[str, Any] | None:
-    # Once create prints a PR URL, the URL is the durable handoff; view is metadata enrichment only.
-    try:
-        return _gh_pr_view(workflow, selector=url, source_tool="gh_pr_create")
-    except _GhPrOpenError:
-        return None
 
 def _gh_pr_view(
     workflow: SystemWorkflow,
     *,
     selector: str | None = None,
     source_tool: str,
-    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
+    timeout_seconds: int = _GH_CLI_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     payload = _gh_pr_view_payload(
         workflow,
@@ -1264,12 +999,25 @@ def _spawn_pr_prompt(
         )
         return system_agents._spawn_workflow_turn(
             workflow,
-            prompt=(
-                _state_string(workflow, "pr_prompt")
-                or system_agents.PR_SLASH_PROMPT
-            ),
+            prompt=_pr_prompt_for_workflow(workflow),
             user_message_index=message_index,
         )
+
+
+def _pr_prompt_for_workflow(workflow: SystemWorkflow) -> str:
+    if workflow.state.get("open_pr_on_lgtm", True) is True:
+        prompt = (
+            optional_review_prompt(prepare_pull_request=True)
+            if workflow.state.get(system_agents.REVIEW_GUIDANCE_STATE_KEY) is True
+            else system_agents.PR_SLASH_PROMPT
+        )
+        if pr_title := _state_string(workflow, "pr_title"):
+            prompt = f"{prompt}\n\nUse this pull request title: {pr_title}"
+        return prompt
+    return (
+        _state_string(workflow, "pr_prompt")
+        or optional_review_prompt(prepare_pull_request=False)
+    )
 
 
 def _current_workflow_turn_index(
@@ -1542,17 +1290,19 @@ def _user_steering_developer_instructions(workflow: SystemWorkflow) -> str:
         "editing. If they do not, create a fresh branch from current master."
         if handoff
         else (
-            "Hitch has not published a PR for this workflow yet. Keep the current "
-            "branch and preserve its existing reviewed and PR-preparation commits; "
-            "do not create a fresh branch merely because no active PR exists."
+            "Codex has not registered a PR for this workflow yet. Keep the "
+            "current branch and preserve its existing reviewed and PR-preparation "
+            "commits; do not create a fresh branch merely because no active PR "
+            "exists."
         )
     )
     return (
         f"PR workflow continuation requirements: {branch_instructions} Implement "
         "the request, run the "
         "relevant tests, commit all resulting changes with a descriptive message, "
-        "and leave the worktree clean. Do not push or open a pull request; Hitch "
-        "will run its existing PR preparation phase after this turn."
+        "and leave the worktree clean. Do not publish or invoke `hitch.watch_pr` "
+        "in this steering turn; the resumed workflow-owned publishing turn will "
+        "use Codex's built-in PR tool and register the PR with `hitch.watch_pr`."
     )
 
 def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:

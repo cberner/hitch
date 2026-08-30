@@ -1772,47 +1772,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
-    def test_workflow_claiming_publication_during_enqueue_rejects_follow_up(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_enqueue_steering: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="abc",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        def claim_publication(*_args: object, **_kwargs: object) -> bool:
-            SystemWorkflow.objects.filter(pk=workflow.pk).update(
-                state={
-                    system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY: 17,
-                }
-            )
-            return False
-
-        mock_enqueue_steering.side_effect = claim_publication
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "please also do this"},
-        )
-
-        self.assertContains(
-            response,
-            "PR workflow is running for this session",
-            status_code=400,
-        )
-        mock_codex.assert_not_called()
-        mock_spawn.assert_not_called()
-
-
-    @patch("hitch.main.workflows.pr_qa.enqueue_user_steering")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
     def test_workflow_steering_rejects_unrelated_posted_worker(
         self,
         mock_codex: MagicMock,

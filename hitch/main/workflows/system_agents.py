@@ -106,7 +106,6 @@ _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
 _DEFERRED_FAILURE_SURFACE_STATE_KEY = "deferred_failure_surface"
 _WORKFLOW_STEERING_REVISION_STATE_KEY = "workflow_steering_revision"
 _WORKFLOW_STOP_REQUESTED_STATE_KEY = "workflow_stop_requested"
-_PR_PUBLICATION_INSTANCE_STATE_KEY = "pr_publication_instance"
 _ARCHIVED_FROM_BLOCKED_STATE_KEY = "archived_from_blocked"
 # How long a blocked PR-QA workflow lingers before it is auto-archived off the
 # inbox Blocked stage. Shared by the maintenance scheduler (which applies the
@@ -237,14 +236,12 @@ def active_workflow_snapshot_for_thread(
 
 
 def workflow_accepts_steering(workflow: SystemWorkflow | None) -> bool:
-    publication_owner = workflow.state.get(_PR_PUBLICATION_INSTANCE_STATE_KEY) if workflow is not None else None
     return (
         workflow is not None
         and workflow.kind == SystemWorkflow.KIND_PR_QA
         and workflow.is_active
         and workflow.step in PR_QA_STEERABLE_STEPS
         and workflow.state.get(_WORKFLOW_STOP_REQUESTED_STATE_KEY) is not True
-        and not (isinstance(publication_owner, int) and not isinstance(publication_owner, bool))
     )
 
 
