@@ -39,7 +39,6 @@ from hitch.main.workflows import (
     agent_io,
     autonomous_goals,
     engine,
-    gh_cli,
     gh_observations,
     pr_handoff,
     pr_qa,
@@ -219,30 +218,6 @@ def _rollout_token_file(test: TestCase, total_tokens: int) -> str:
         rollout_path = fh.name
     test.addCleanup(Path(rollout_path).unlink, missing_ok=True)
     return rollout_path
-
-
-def _pr_tool_event(
-    *,
-    thread_id: str,
-    tool: str,
-    arguments: dict[str, object] | None = None,
-    structured_content: dict[str, object] | None = None,
-) -> dict[str, object]:
-    return {
-        "method": "item/completed",
-        "payload": {
-            "threadId": thread_id,
-            "item": {
-                "type": "mcpToolCall",
-                "server": "codex_apps",
-                "tool": tool,
-                "arguments": arguments or {},
-                "result": {
-                    "structuredContent": structured_content or {},
-                },
-            },
-        },
-    }
 
 
 class PrQaWorkflowTests(TestCase):
@@ -1264,46 +1239,6 @@ class SystemAgentWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_merge")
-    @patch("hitch.main.workflows.pr_qa.codex_events.latest_pr_snapshot_for_instance")
-    def test_pr_prompt_completion_with_terminal_handoff_does_not_auto_pull(
-        self, mock_latest_snapshot: MagicMock, mock_auto_pull: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/worktrees/session",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                system_agents._PR_HANDOFF_STATE_KEY: {
-                    "url": "https://github.com/cberner/hitch/pull/201",
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 201,
-                    "state": "merged",
-                    "merged": True,
-                }
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_latest_snapshot.return_value = {
-            "url": "https://github.com/cberner/hitch/pull/201",
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 201,
-            "state": "open",
-        }
-
-        pr_qa._handle_pr_prompt_finished(instance, workflow)
-
-        mock_auto_pull.assert_not_called()
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
-
-    @patch("hitch.main.workflows.system_agents._maybe_auto_pull_default_repo_after_pr_merge")
     def test_terminal_merged_pr_completion_auto_pulls(self, mock_auto_pull: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -1349,11 +1284,11 @@ class SystemAgentWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
 
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_pr_prompt_completion_passes_stored_pr_title_to_gh_cli(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+    def test_pr_prompt_passes_stored_title_to_agent(
+        self, mock_spawn: MagicMock
     ) -> None:
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
@@ -1362,64 +1297,25 @@ class SystemAgentWorkflowTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={
                 "next_user_message_index": 5,
+                "open_pr_on_lgtm": True,
                 "pr_title": "Expand parser coverage",
             },
         )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
+
+        pr_qa._spawn_pr_prompt(workflow)
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("Codex's built-in PR publishing tool", prompt)
+        self.assertIn("`hitch.watch_pr`", prompt)
+        self.assertIn(
+            "Use this pull request title: Expand parser coverage",
+            prompt,
         )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
-            SimpleNamespace(
-                returncode=0,
-                stdout="https://github.com/cberner/hitch/pull/170\n",
-                stderr="",
-            ),
-            SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    {
-                        "url": "https://github.com/cberner/hitch/pull/170",
-                        "number": 170,
-                        "state": "OPEN",
-                        "isDraft": False,
-                        "title": "Expand parser coverage",
-                        "baseRefName": "master",
-                        "headRefName": "feature",
-                        "headRefOid": "head123",
-                        "mergeable": "MERGEABLE",
-                        "mergeCommit": {"oid": "merge123"},
-                        "createdAt": "2026-06-01T00:00:00Z",
-                        "updatedAt": "2026-06-01T00:01:00Z",
-                        "closedAt": None,
-                        "mergedAt": None,
-                    }
-                ),
-                stderr="",
-            ),
-        ]
-        mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
-        system_agents.on_codex_instance_finished(instance)
-
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(
-            commands[6],
-            ["gh", "pr", "create", "--fill", "--title", "Expand parser coverage"],
-        )
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    def test_pr_prompt_completion_completes_without_changes_when_no_commits(
-        self, mock_run: MagicMock, mock_spawn_turn: MagicMock
+    @patch("hitch.main.workflows.pr_qa._surface_pr_workflow_no_changes")
+    @patch("hitch.main.workflows.pr_qa._run_git_cli")
+    def test_pr_prompt_completion_completes_clean_branch_without_changes(
+        self, mock_run_git: MagicMock, mock_surface: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -1434,49 +1330,177 @@ class SystemAgentWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_USER,
             workflow_id=workflow.pk,
         )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+        mock_run_git.side_effect = [
             SimpleNamespace(returncode=0, stdout="0\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
-        mock_spawn_turn.return_value = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            workflow_id=workflow.pk,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
+        pr_qa._handle_pr_prompt_finished(instance, workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(commands[-2], ["git", "rev-list", "--count", "origin/HEAD..HEAD"])
-        self.assertEqual(commands[-1], ["git", "status", "--porcelain"])
-        self.assertNotIn(["gh", "pr", "create", "--fill"], commands)
-        self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
-        mock_spawn_turn.assert_called_once()
         self.assertEqual(
-            mock_spawn_turn.call_args.kwargs["purpose"],
-            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            [call.args[1] for call in mock_run_git.call_args_list],
+            [
+                ["rev-list", "--count", "origin/HEAD..HEAD"],
+                ["status", "--porcelain"],
+            ],
+        )
+        mock_surface.assert_called_once_with(workflow)
+
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_branch_has_no_new_commits",
+        return_value=False,
+    )
+    def test_pr_prompt_completion_without_watch_call_blocks(
+        self, _mock_no_changes: MagicMock, mock_surface: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+
+        pr_qa._handle_pr_prompt_finished(instance, workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("without calling `hitch.watch_pr`", workflow.state["error"])
+        self.assertIn("Codex's built-in PR tool", workflow.state["error"])
+        self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
+        mock_surface.assert_called_once()
+
+    @patch(
+        "hitch.main.workflows.pr_qa._pr_branch_has_no_new_commits",
+        return_value=False,
+    )
+    def test_legacy_pr_prompt_completion_explains_tool_upgrade(
+        self,
+        _mock_no_changes: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "next_user_message_index": 6,
+                "open_pr_on_lgtm": True,
+                system_agents._WORKFLOW_TURN_OWNER_STEP_STATE_KEY: (
+                    system_agents.STEP_PR_PROMPT_RUNNING
+                ),
+                system_agents._WORKFLOW_TURN_OWNER_INDEX_STATE_KEY: 5,
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            prompt=(
+                "Rebase on the default branch, polish it, get it ready, and "
+                "commit the final changes. Do not push the branch or open a PR; "
+                "Hitch will push and open it after this turn completes."
+            ),
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            user_message_index=5,
+        )
+
+        pr_qa._handle_pr_prompt_finished(instance, workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("predates `hitch.watch_pr`", workflow.state["error"])
+        self.assertIn("Start a new session", workflow.state["error"])
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    def test_legacy_pr_prompt_recovery_blocks_before_respawn(
+        self,
+        _mock_surface: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "open_pr_on_lgtm": True,
+                "pr_prompt": (
+                    "Rebase on master, polish it, get it ready, and commit the "
+                    "final changes. Do not push the branch or open a PR; Hitch "
+                    "will push and open it after this turn completes."
+                ),
+            },
+        )
+
+        pr_qa._recover_pr_prompt_turn(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("predates `hitch.watch_pr`", workflow.state["error"])
+        self.assertIn("Start a new session", workflow.state["error"])
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
+    def test_legacy_pr_prompt_recovery_yields_to_queued_steering(
+        self,
+        mock_spawn: MagicMock,
+    ) -> None:
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "next_user_message_index": 3,
+                "open_pr_on_lgtm": True,
+                "pr_prompt": (
+                    "Rebase on the default branch, polish it, get it ready, and "
+                    "commit the final changes. Do not push the branch or open a "
+                    "PR; Hitch will push and open it after this turn completes."
+                ),
+            },
+        )
+        WorkflowSteeringMessage.objects.create(
+            workflow=workflow,
+            prompt="also update the docs",
+        )
+
+        pr_qa._recover_pr_prompt_turn(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
+        self.assertNotIn("error", workflow.state)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["prompt"],
+            "also update the docs",
         )
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.pr_qa._surface_pr_workflow_no_changes")
-    @patch("hitch.main.workflows.pr_qa._open_or_find_pr_with_gh_cli")
-    @patch(
-        "hitch.main.workflows.pr_qa.codex_events.latest_pr_snapshot_for_instance",
-        return_value=None,
-    )
-    def test_pr_prompt_publication_claim_yields_to_steering(
+    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
+    @patch("hitch.main.workflows.pr_qa._pr_branch_has_no_new_commits")
+    def test_missing_watch_call_yields_to_concurrent_steering(
         self,
-        _mock_snapshot: MagicMock,
-        mock_open_pr: MagicMock,
-        mock_surface_no_changes: MagicMock,
+        mock_no_changes: MagicMock,
+        mock_surface: MagicMock,
         mock_spawn: MagicMock,
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -1493,696 +1517,38 @@ class SystemAgentWorkflowTests(TestCase):
             workflow_id=workflow.pk,
         )
 
-        mock_spawn.side_effect = lambda **_kwargs: _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-        )
-        original_start = pr_qa._start_queued_user_steering
-        checks = 0
+        def enqueue_while_settling(_workflow: SystemWorkflow) -> bool:
+            WorkflowSteeringMessage.objects.create(
+                workflow=workflow,
+                prompt="also update docs",
+            )
+            return False
 
-        def enqueue_after_initial_check(current: SystemWorkflow, **kwargs: Any) -> bool:
-            nonlocal checks
-            checks += 1
-            if checks == 1:
-                WorkflowSteeringMessage.objects.create(workflow=workflow, prompt="also update docs")
-                return False
-            return original_start(current, **kwargs)
+        mock_no_changes.side_effect = enqueue_while_settling
+        mock_spawn.return_value = MagicMock(spec=CodexInstance)
 
-        with patch.object(
-            pr_qa,
-            "_start_queued_user_steering",
-            side_effect=enqueue_after_initial_check,
-        ):
-            pr_qa._handle_pr_prompt_finished(instance, workflow)
+        pr_qa._handle_pr_prompt_finished(instance, workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
         self.assertEqual(workflow.state["user_steering_prompt"], "also update docs")
+        self.assertNotIn("error", workflow.state)
         self.assertFalse(workflow.steering_messages.exists())
-        mock_open_pr.assert_not_called()
-        mock_surface_no_changes.assert_not_called()
+        mock_surface.assert_not_called()
         self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "also update docs")
-        self.assertIn(
-            "commit all resulting changes",
-            mock_spawn.call_args.kwargs["developer_instructions"],
-        )
 
-    def test_publication_claim_rejects_new_steering(self) -> None:
-        for step in (system_agents.STEP_PR_PROMPT_RUNNING,):
-            with self.subTest(step=step):
-                workflow = SystemWorkflow.objects.create(
-                    kind=SystemWorkflow.KIND_PR_QA,
-                    main_thread_id=f"main-thread-{step}",
-                    cwd="/repo",
-                    status=SystemWorkflow.STATUS_RUNNING,
-                    step=step,
-                    state={
-                        system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY: 17,
-                    },
-                )
-
-                self.assertFalse(system_agents.workflow_accepts_steering(workflow))
-                self.assertFalse(pr_qa.enqueue_user_steering(workflow, prompt="also update docs"))
-
-                workflow.refresh_from_db()
-                self.assertEqual(workflow.step, step)
-                self.assertEqual(
-                    workflow.state[system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY],
-                    17,
-                )
-                self.assertFalse(workflow.steering_messages.exists())
-
-    @patch("hitch.main.workflows.pr_qa._fresh_active_pr_handoff_before_push")
-    @patch("hitch.main.workflows.pr_qa._push_current_branch_with_git_cli")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_publication_mutation_revalidates_after_stop(
-        self,
-        mock_spawn: MagicMock,
-        mock_push: MagicMock,
-        mock_fresh_handoff: MagicMock,
+    @patch("hitch.main.workflows.pr_qa._run_git_cli")
+    def test_no_change_detection_requires_clean_worktree(
+        self, mock_run_git: MagicMock
     ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=0,
-        )
-        workflow.state = {
-            system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY: instance.pk,
-        }
-        workflow.save(update_fields=["state", "updated_at"])
-        mock_fresh_handoff.return_value = {}
-
-        self.assertTrue(system_agents.stop_active_workflow("main-thread"))
-        mock_spawn.reset_mock()
-
-        with self.assertRaises(pr_qa._PrPublicationSupersededError):
-            pr_qa._push_current_branch_for_pr_workflow(
-                workflow,
-                publication_instance=instance,
-                expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-            )
-
-        mock_push.assert_not_called()
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.workflows.pr_qa._view_created_pr_for_enrichment")
-    @patch("hitch.main.workflows.pr_qa._pr_branch_has_no_new_commits")
-    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
-    @patch("hitch.main.workflows.pr_qa._push_current_branch_for_pr_workflow")
-    @patch("hitch.main.workflows.pr_qa._run_gh_cli")
-    def test_publication_records_created_pr_before_releasing_ownership(
-        self,
-        mock_run_gh: MagicMock,
-        _mock_push: MagicMock,
-        mock_view: MagicMock,
-        mock_no_commits: MagicMock,
-        mock_enrich: MagicMock,
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_COMPLETED,
-            user_message_index=0,
-        )
-        workflow.state = {
-            system_agents._PR_PUBLICATION_INSTANCE_STATE_KEY: instance.pk,
-        }
-        workflow.save(update_fields=["state", "updated_at"])
-        mock_view.return_value = None
-        mock_no_commits.return_value = False
-        mock_run_gh.return_value = SimpleNamespace(
-            returncode=0,
-            stdout="https://github.com/cberner/hitch/pull/588\n",
-            stderr="",
-        )
-        mock_enrich.return_value = None
-
-        handoff = pr_qa._open_or_find_pr_with_gh_cli(
-            workflow,
-            publication_instance=instance,
-            expected_step=system_agents.STEP_PR_PROMPT_RUNNING,
-        )
-
-        workflow.refresh_from_db()
-        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/588")
-        self.assertEqual(
-            workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["url"],
-            "https://github.com/cberner/hitch/pull/588",
-        )
-        self.assertEqual(
-            workflow.state["hitch_pr_handoff"]["url"],
-            "https://github.com/cberner/hitch/pull/588",
-        )
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_pr_prompt_completion_blocks_when_no_commits_but_worktree_dirty(
-        self,
-        mock_surface: MagicMock,
-        mock_run: MagicMock,
-    ) -> None:
-        # A dirty worktree with no commits means the worker failed to commit its
-        # work, so it must not be treated as a clean no-op completion.
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+        workflow = SystemWorkflow(cwd="/repo")
+        mock_run_git.side_effect = [
             SimpleNamespace(returncode=0, stdout="0\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout=" M file.py\n", stderr=""),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="could not find any commits between origin/master and feature",
-            ),
+            SimpleNamespace(returncode=0, stdout=" M hitch/main/views.py\n", stderr=""),
         ]
 
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertIn(["git", "status", "--porcelain"], commands)
-        self.assertEqual(commands[-1], ["gh", "pr", "create", "--fill"])
-        mock_surface.assert_called_once()
-
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_pr_prompt_completion_refuses_to_push_default_branch(
-        self, mock_surface: MagicMock, mock_run: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-        ]
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertIn("refusing to push default branch", workflow.state["error"])
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(
-            commands,
-            [
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    "--json",
-                    ",".join(gh_cli._GH_PR_VIEW_FIELDS),
-                ],
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                [
-                    "git",
-                    "symbolic-ref",
-                    "--quiet",
-                    "--short",
-                    "refs/remotes/origin/HEAD",
-                ],
-            ],
-        )
-        mock_surface.assert_called_once()
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    def test_pr_branch_push_does_not_force_when_active_pr_head_differs(self, mock_run: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_WATCH_RUNNING,
-            state={
-                system_agents._PR_HANDOFF_STATE_KEY: {
-                    "url": "https://github.com/cberner/hitch/pull/181",
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 181,
-                    "state": "open",
-                    "head": "old-feature",
-                },
-            },
-        )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
-            ),
-        ]
-
-        with self.assertRaises(gh_cli._GhPrOpenError):
-            gh_cli._push_current_branch_with_git_cli(
-                workflow,
-                active_pr_handoff=workflow.state[system_agents._PR_HANDOFF_STATE_KEY],
-            )
-
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(len(commands), 3)
-        self.assertEqual(
-            commands[2],
-            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
-        )
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_pr_prompt_completion_keeps_created_pr_when_view_fails(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
-            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
-            SimpleNamespace(
-                returncode=0,
-                stdout="https://github.com/cberner/hitch/pull/171\n",
-                stderr="",
-            ),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr='Unknown JSON field: "baseRefOid"',
-            ),
-        ]
-        mock_spawn.return_value = MagicMock(spec=CodexInstance)
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_RUNNING)
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"])
-        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
-        self.assertEqual(
-            commands[7][:4],
-            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/171"],
-        )
-        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
-        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/171")
-        self.assertEqual(handoff["repository_full_name"], "cberner/hitch")
-        self.assertEqual(handoff["pr_number"], 171)
-        self.assertEqual(handoff["source_tool"], "gh_pr_create")
-        self.assertNotIn("head_sha", handoff)
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    def test_pr_prompt_completion_without_handoff_blocks_workflow(
-        self, mock_surface: MagicMock, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
-        self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
-        mock_spawn.assert_not_called()
-        mock_surface.assert_called_once()
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_pr_prompt_completion_without_snapshot_monitors_existing_handoff(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={
-                "next_user_message_index": 5,
-                system_agents._PR_HANDOFF_STATE_KEY: {
-                    "url": "https://github.com/cberner/hitch/pull/169",
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 169,
-                },
-            },
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-        )
-        mock_spawn.return_value = MagicMock(spec=CodexInstance)
-        open_pr = {
-            "url": "https://github.com/cberner/hitch/pull/169",
-            "number": 169,
-            "state": "OPEN",
-            "isDraft": False,
-            "title": "Existing PR",
-            "baseRefName": "master",
-            "headRefName": "feature",
-            "headRefOid": "oldsha",
-            "mergeable": "MERGEABLE",
-            "mergeCommit": None,
-            "createdAt": "2026-06-01T00:00:00Z",
-            "updatedAt": "2026-06-01T00:01:00Z",
-            "closedAt": None,
-            "mergedAt": None,
-        }
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-        ]
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_RUNNING)
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(
-            commands[0][:4],
-            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
-        )
-        self.assertEqual(
-            commands[3],
-            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
-        )
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_pr_prompt_completion_force_pushes_authoritative_worker_snapshot(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
-        )
-        events_path = _raw_events_file(
-            self,
-            [
-                _pr_tool_event(
-                    thread_id="main-thread",
-                    tool="github_get_pr_info",
-                    arguments={
-                        "repository_full_name": "cberner/hitch",
-                        "pr_number": 169,
-                    },
-                    structured_content={
-                        "url": "https://github.com/cberner/hitch/pull/169",
-                        "repository_full_name": "cberner/hitch",
-                        "pr_number": 169,
-                        "state": "open",
-                        "merged": False,
-                        "head": "feature",
-                        "head_sha": "oldsha",
-                    },
-                )
-            ],
-        )
-        instance = _instance(
-            thread_id="main-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        mock_spawn.return_value = MagicMock(spec=CodexInstance)
-        open_pr = {
-            "url": "https://github.com/cberner/hitch/pull/169",
-            "number": 169,
-            "state": "OPEN",
-            "isDraft": False,
-            "title": "Existing PR",
-            "baseRefName": "master",
-            "headRefName": "feature",
-            "headRefOid": "oldsha",
-            "mergeable": "MERGEABLE",
-            "mergeCommit": None,
-            "createdAt": "2026-06-01T00:00:00Z",
-            "updatedAt": "2026-06-01T00:01:00Z",
-            "closedAt": None,
-            "mergedAt": None,
-        }
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
-            ),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-        ]
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_PR_WATCH_RUNNING)
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(
-            commands[0][:4],
-            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
-        )
-        self.assertEqual(
-            commands[3],
-            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
-        )
-        self.assertEqual(
-            commands[4],
-            [
-                "git",
-                "push",
-                "--force-with-lease=refs/heads/feature:oldsha",
-                "-u",
-                "origin",
-                "HEAD:refs/heads/feature",
-            ],
-        )
-        mock_spawn.assert_called_once()
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    def test_pr_open_force_pushes_observed_current_branch_pr_without_handoff(self, mock_run: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={},
-        )
-        open_pr = {
-            "url": "https://github.com/cberner/hitch/pull/169",
-            "number": 169,
-            "state": "OPEN",
-            "isDraft": False,
-            "title": "Existing PR",
-            "baseRefName": "master",
-            "headRefName": "feature",
-            "headRefOid": "oldsha",
-            "mergeable": "MERGEABLE",
-            "mergeCommit": None,
-            "createdAt": "2026-06-01T00:00:00Z",
-            "updatedAt": "2026-06-01T00:01:00Z",
-            "closedAt": None,
-            "mergedAt": None,
-        }
-        refreshed_pr = {**open_pr, "headRefOid": "newsha"}
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
-            ),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-            SimpleNamespace(returncode=0, stdout=json.dumps(refreshed_pr), stderr=""),
-        ]
-
-        handoff = pr_qa._open_or_find_pr_with_gh_cli(workflow)
-
-        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
-        self.assertEqual(handoff["head_sha"], "newsha")
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(commands[0][:3], ["gh", "pr", "view"])
-        self.assertEqual(
-            commands[3],
-            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
-        )
-        self.assertEqual(
-            commands[4],
-            [
-                "git",
-                "push",
-                "--force-with-lease=refs/heads/feature:oldsha",
-                "-u",
-                "origin",
-                "HEAD:refs/heads/feature",
-            ],
-        )
-        self.assertEqual(commands[5][:3], ["gh", "pr", "view"])
-
-    @patch("hitch.main.workflows.gh_cli.subprocess.run")
-    def test_pr_open_revalidates_stored_pr_before_force_pushing(self, mock_run: MagicMock) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_PR_WATCH_RUNNING,
-            state={
-                system_agents._PR_HANDOFF_STATE_KEY: {
-                    "url": "https://github.com/cberner/hitch/pull/169",
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 169,
-                    "state": "open",
-                    "head": "feature",
-                    "head_sha": "oldsha",
-                }
-            },
-        )
-        closed_pr = {
-            "url": "https://github.com/cberner/hitch/pull/169",
-            "number": 169,
-            "state": "CLOSED",
-            "isDraft": False,
-            "title": "Closed PR",
-            "baseRefName": "master",
-            "headRefName": "feature",
-            "headRefOid": "oldsha",
-            "mergeable": "UNKNOWN",
-            "mergeCommit": None,
-            "createdAt": "2026-05-01T00:00:00Z",
-            "updatedAt": "2026-06-01T00:01:00Z",
-            "closedAt": "2026-06-01T00:02:00Z",
-            "mergedAt": None,
-        }
-        mock_run.side_effect = [
-            SimpleNamespace(returncode=0, stdout=json.dumps(closed_pr), stderr=""),
-            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
-            SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
-            ),
-        ]
-
-        with self.assertRaises(gh_cli._GhPrOpenError):
-            pr_qa._open_or_find_pr_with_gh_cli(workflow)
-
-        commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(
-            commands[0][:4],
-            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
-        )
-        self.assertEqual(
-            commands,
-            [
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    "https://github.com/cberner/hitch/pull/169",
-                    "--json",
-                    ",".join(gh_cli._GH_PR_VIEW_FIELDS),
-                ],
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                [
-                    "git",
-                    "symbolic-ref",
-                    "--quiet",
-                    "--short",
-                    "refs/remotes/origin/HEAD",
-                ],
-                ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
-            ],
-        )
+        self.assertFalse(pr_qa._pr_branch_has_no_new_commits(workflow))
 
     def test_structured_error_info_overrides_legacy_overload_message(self) -> None:
         instance = _instance(
@@ -2192,22 +1558,6 @@ class SystemAgentWorkflowTests(TestCase):
         )
 
         self.assertFalse(system_agents._is_retryable_workflow_turn_error(instance))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_reserved_steering_ignores_previous_terminal_claim(self, mock_spawn: MagicMock) -> None:
@@ -2352,9 +1702,11 @@ class SystemAgentWorkflowTests(TestCase):
 
         unpublished = pr_qa._user_steering_developer_instructions(workflow)
 
-        self.assertIn("has not published a PR", unpublished)
+        self.assertIn("has not registered a PR", unpublished)
         self.assertIn("Keep the current branch", unpublished)
         self.assertIn("preserve its existing", unpublished)
+        self.assertIn("Codex's built-in PR tool", unpublished)
+        self.assertIn("`hitch.watch_pr`", unpublished)
         self.assertNotIn("Re-check whether the active PR", unpublished)
 
         workflow.state = {
@@ -2370,7 +1722,7 @@ class SystemAgentWorkflowTests(TestCase):
 
         self.assertIn("Re-check whether the active PR", published)
         self.assertIn("create a fresh branch from current master", published)
-        self.assertNotIn("has not published a PR", published)
+        self.assertNotIn("has not registered a PR", published)
 
     def test_review_guidance_steering_instructions_do_not_leak_pr_semantics(
         self,

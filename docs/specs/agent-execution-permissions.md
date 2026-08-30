@@ -14,7 +14,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Approval mode: How Hitch resolves Codex escalation requests.
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
-- System session: A Hitch-owned background session for workflows such as Autonomous Goals. The visible coding turn that invokes `hitch.watch_pr` is a user session, not a system session.
+- System session: A Hitch-owned background session for workflows such as Autonomous Goals. The visible coding turn that publishes a PR and invokes `hitch.watch_pr` is a user session, not a system session.
 - Separate worktree: A git worktree distinct from the associated user session's active checkout.
 
 ## 2. Goals and Non-Goals

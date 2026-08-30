@@ -46,8 +46,12 @@ framework-driven PR monitor and feedback loop.
 - `PRWATCH-upgrade-compatibility`: Dynamic-tool registration is immutable
   thread metadata. A session created before `hitch.watch_pr` was available
   rejects PR workflow activation with a clear instruction to start a new
-  session. An in-flight workflow on a removed monitor step is blocked during
-  reconciliation instead of restarting hidden monitor work.
+  session. An in-flight publishing turn created under any historical
+  Hitch-owned publication prompt blocks with the same instruction after its
+  legacy preparation work completes, or before recovery respawns a missing turn,
+  because the existing thread cannot gain the tool. An in-flight workflow on a
+  removed monitor step is blocked during reconciliation instead of restarting
+  hidden monitor work.
 - `PRWATCH-url-input`: The tool accepts one required full GitHub pull-request
   URL and rejects non-PR URLs or missing repository working directories.
 - `PRWATCH-read-only`: An invocation uses non-interactive `gh` reads for PR
@@ -66,15 +70,22 @@ framework-driven PR monitor and feedback loop.
 - `PRWATCH-repeat-suppression`: A workflow remembers the last feedback
   fingerprint so re-invoking the tool does not immediately return the same
   pending feedback in a hot loop.
+- `PRWATCH-publication-registration`: When the workflow-owned publishing turn
+  invokes the tool, it verifies the requested base PR identity, requires the PR
+  to be open, and requires its head repository, branch, and commit to match the
+  publishing checkout, resolving configured SSH host aliases locally when
+  identifying GitHub remotes. It then atomically records the PR URL and number
+  for the Hitch UI and transitions that same turn into the watch step before
+  polling.
 - `PRWATCH-standalone`: A visible coding agent may invoke the tool outside a PR
   workflow. Workflow state is recorded only when the invocation belongs to the
-  active watch step of that exact thread, checkout, and workflow.
+  active publishing or watch step of that exact thread, checkout, and workflow.
 
 ### 3.2 Agent-Driven Follow-Up
 
-- `PRWATCH-agent-owner`: After PR publication, Hitch starts one visible coding
-  turn that owns the watch/fix cycle and instructs it to invoke
-  `hitch.watch_pr`.
+- `PRWATCH-agent-owner`: One visible coding turn publishes through Codex's
+  built-in PR publishing tool, then invokes `hitch.watch_pr` and owns the
+  resulting watch/fix cycle. Hitch does not push the branch or create the PR.
 - `PRWATCH-agent-decisions`: The coding agent decides whether feedback is
   valid, makes any warranted changes, runs tests, commits and pushes, manages
   review threads when appropriate, and chooses when to invoke the tool again.
@@ -82,12 +93,12 @@ framework-driven PR monitor and feedback loop.
   equivalent publication workflows do not launch a
   hidden PR monitor, parse a monitor verdict, schedule framework backoff, or
   launch a separate feedback repair turn.
-- `PRWATCH-setting-inheritance`: The visible follow-up turn retains the coding
-  session's model, reasoning effort, developer instructions, sandbox, approval,
-  memory, and web-search settings.
+- `PRWATCH-setting-inheritance`: The visible publishing/watch turn retains the
+  coding session's model, reasoning effort, developer instructions, sandbox,
+  approval, memory, and web-search settings.
 - `PRWATCH-user-control`: User steering is durably queued and takes precedence
-  when the current follow-up turn settles. After steering is handled, the
-  visible agent resumes the watch with the tool. Stop follows the normal
+  when the current publishing/watch turn settles. After steering is handled,
+  the visible agent resumes the watch with the tool. Stop follows the normal
   visible-turn cancellation and force-stop behavior.
 
 ### 3.3 Completion and Stage Tracking
@@ -105,9 +116,9 @@ framework-driven PR monitor and feedback loop.
 
 ## 4. Success Criteria
 
-- `PRWATCH-accept-tool-driven`: A newly published PR is followed by one visible
-  coding turn that invokes `hitch.watch_pr`, with no hidden monitor or feedback
-  agent run.
+- `PRWATCH-accept-tool-driven`: The visible coding turn publishes the PR,
+  registers it with Hitch by invoking `hitch.watch_pr`, and follows it through
+  that tool, with no Hitch publication path, hidden monitor, or feedback agent.
 - `PRWATCH-accept-bounded`: Pending gates are polled inside the invocation and
   return `timed_out` after the bounded watch window.
 - `PRWATCH-accept-agent-fix`: Actionable evidence returns to the invoking

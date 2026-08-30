@@ -8,6 +8,8 @@ decide what to fix and whether another watch is useful.
 from __future__ import annotations
 
 import hashlib
+import re
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from hitch.main.workflows.gh_cli import (
     _gh_pr_status_checks,
     _gh_pr_view_payload,
     _GhPrOpenError,
+    _run_git_cli,
 )
 from hitch.main.workflows.gh_observations import (
     _copy_gh_comment_fields,
@@ -78,6 +81,25 @@ _GH_PR_WATCH_FIELDS = (
     "reviewDecision",
     "reviews",
 )
+_PUBLISHED_PR_VALIDATION_FIELDS = (
+    *_GH_PR_VIEW_FIELDS,
+    "headRepository",
+    "headRepositoryOwner",
+)
+_GITHUB_REMOTE_RE = re.compile(
+    r"^(?:(?:https?|git|ssh)://(?:[^/@]+@)?github\.com/|"
+    r"(?:[^/@]+@)?github\.com:)"
+    r"(?P<repository>[^/\s]+/[^/\s]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+_SSH_REMOTE_RE = re.compile(
+    r"^(?:ssh://(?:[^/@\s]+@)?(?P<url_host>[^/:\s]+)(?::\d+)?/|"
+    r"(?:[^/@:\s]+@)?(?P<scp_host>[^/:\s]+):)"
+    r"(?P<repository>[^/\s]+/[^/\s]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+_GITHUB_SSH_HOSTS = frozenset({"github.com", "ssh.github.com"})
+_SSH_CONFIG_TIMEOUT_SECONDS = 5
 
 
 class PrWatchError(RuntimeError):
@@ -109,9 +131,7 @@ def watch_pr(
     cancel_requested: Callable[[], bool] = _not_cancelled,
 ) -> dict[str, Any]:
     """Watch until the PR needs attention, is ready/terminal, or times out."""
-    normalized_url = _normalized_pr_url(url)
-    if not Path(cwd).is_dir():
-        raise PrWatchError(f"repository cwd is missing: {cwd}")
+    normalized_url = validate_pr_watch_target(cwd=cwd, url=url)
     if poll_seconds < 0 or timeout_seconds < 0:
         raise ValueError("watch timing values must be non-negative")
 
@@ -154,6 +174,146 @@ def watch_pr(
             sleep=sleep,
             cancel_requested=cancel_requested,
         )
+
+
+def validate_pr_watch_target(*, cwd: str, url: str) -> str:
+    """Validate the local checkout and return the canonical GitHub PR URL."""
+    normalized_url = _normalized_pr_url(url)
+    if not Path(cwd).is_dir():
+        raise PrWatchError(f"repository cwd is missing: {cwd}")
+    return normalized_url
+
+
+def validate_published_pr_checkout(*, cwd: str, url: str) -> None:
+    """Require a newly published PR to identify the active checkout HEAD."""
+    normalized_url = validate_pr_watch_target(cwd=cwd, url=url)
+    target = _WatchTarget(cwd=cwd)
+    try:
+        payload = _gh_pr_view_payload(
+            target,
+            selector=normalized_url,
+            fields=_PUBLISHED_PR_VALIDATION_FIELDS,
+            timeout_seconds=_GH_PR_VIEW_TIMEOUT_SECONDS,
+        )
+    except _GhPrOpenError as exc:
+        raise PrWatchError(str(exc)) from exc
+    if payload is None:
+        raise PrWatchError("`gh pr view` did not return PR data")
+    observed = pr_handoff_from_gh_view(
+        payload,
+        source_tool="hitch_watch_pr_validation",
+    )
+    requested = _compact_pr_handoff(
+        _pr_handoff_from_github_url(
+            normalized_url,
+            source_tool="hitch_watch_pr_validation",
+        )
+    )
+    if not pr_identity_matches(requested, observed):
+        raise PrWatchError("GitHub returned a different pull request than requested")
+    if string_from_any(observed.get("state")) != "open":
+        raise PrWatchError("published pull request must be open")
+
+    head_repository = _github_pr_head_repository(payload)
+    head = string_from_any(observed.get("head"))
+    head_sha = string_from_any(observed.get("head_sha"))
+    if not head_repository or not head or not head_sha:
+        raise PrWatchError(
+            "GitHub did not return the published PR head repository and commit"
+        )
+
+    try:
+        remote_result = _run_git_cli(target, ["remote", "-v"])
+    except _GhPrOpenError as exc:
+        raise PrWatchError(str(exc)) from exc
+    if remote_result.returncode != 0:
+        raise PrWatchError("could not inspect publishing checkout remotes")
+    repositories = _github_remote_repositories(remote_result.stdout)
+    if head_repository not in repositories:
+        raise PrWatchError(
+            f"published PR head repository {head_repository} does not match the "
+            "publishing checkout"
+        )
+
+    branch = _publishing_checkout_value(target, ["branch", "--show-current"])
+    if branch != head:
+        raise PrWatchError(
+            f"published PR head branch {head} does not match publishing checkout "
+            f"branch {branch}"
+        )
+    checkout_sha = _publishing_checkout_value(target, ["rev-parse", "HEAD"])
+    if checkout_sha.lower() != head_sha.lower():
+        raise PrWatchError(
+            "published PR head commit does not match publishing checkout HEAD"
+        )
+
+
+def _publishing_checkout_value(target: _WatchTarget, args: list[str]) -> str:
+    try:
+        result = _run_git_cli(target, args)
+    except _GhPrOpenError as exc:
+        raise PrWatchError(str(exc)) from exc
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        raise PrWatchError(
+            f"could not inspect publishing checkout with `git {' '.join(args)}`"
+        )
+    return value
+
+
+def _github_remote_repositories(output: str) -> set[str]:
+    repositories: set[str] = set()
+    remote_urls: set[str] = set()
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 2:
+            remote_urls.add(fields[1])
+    for remote_url in remote_urls:
+        match = _GITHUB_REMOTE_RE.fullmatch(remote_url)
+        if match is not None:
+            repositories.add(match.group("repository").lower())
+            continue
+        match = _SSH_REMOTE_RE.fullmatch(remote_url)
+        if match is None:
+            continue
+        host = match.group("url_host") or match.group("scp_host")
+        if _resolved_ssh_hostname(host) in _GITHUB_SSH_HOSTS:
+            repositories.add(match.group("repository").lower())
+    return repositories
+
+
+def _resolved_ssh_hostname(host: str) -> str:
+    try:
+        result = subprocess.run(
+            ["ssh", "-G", "--", host],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_SSH_CONFIG_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0].lower() == "hostname":
+            return fields[1].strip().rstrip(".").lower()
+    return ""
+
+
+def _github_pr_head_repository(payload: dict[str, Any]) -> str:
+    repository = payload.get("headRepository")
+    owner = payload.get("headRepositoryOwner")
+    if not isinstance(repository, dict) or not isinstance(owner, dict):
+        return ""
+    name_with_owner = string_from_any(repository.get("nameWithOwner"))
+    if "/" in name_with_owner:
+        return name_with_owner.lower()
+    name = string_from_any(repository.get("name"))
+    login = string_from_any(owner.get("login"))
+    return f"{login}/{name}".lower() if login and name else ""
 
 
 def observe_pr(
