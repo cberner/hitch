@@ -10,10 +10,7 @@ from hitch.main import repos
 from hitch.main.git_support import GitCommandError
 from hitch.main.repos import (
     AutoPullError,
-    commit_hash_for_ref,
-    default_branch_checkout_commit_hash,
     default_branch_commit_hash,
-    default_branch_name,
     discover_repos,
     git_common_dir,
     pull_default_branch_from_origin,
@@ -28,9 +25,8 @@ class HermeticGitEnvTests(TestCase):
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw) / "repo"
             _init_repo(repo)
-            head = _git(repo, "rev-parse", "HEAD")
             with patch.dict(os.environ, {"GIT_DIR": str(Path(raw) / "nowhere")}):
-                self.assertEqual(commit_hash_for_ref(repo, "HEAD"), head)
+                self.assertEqual(repo_root(repo), repo.resolve())
 
 
 class DiscoverReposTests(TestCase):
@@ -95,11 +91,7 @@ class DiscoverReposTests(TestCase):
             )
             _git(repo, "checkout", "master")
 
-            self.assertEqual(default_branch_name(repo), "main")
             self.assertEqual(default_branch_commit_hash(repo), main_sha)
-            self.assertIsNone(default_branch_checkout_commit_hash(repo))
-            _git(repo, "checkout", "main")
-            self.assertEqual(default_branch_checkout_commit_hash(repo), main_sha)
 
     def test_default_branch_commit_hash_does_not_guess_between_main_and_master(
         self,
@@ -117,7 +109,6 @@ class DiscoverReposTests(TestCase):
             (repo / "README.md").write_text("main\n")
             _git(repo, "commit", "-am", "main")
 
-            self.assertIsNone(default_branch_name(repo))
             self.assertIsNone(default_branch_commit_hash(repo))
 
     def test_pull_default_branch_from_origin_rejects_non_default_checkout(self) -> None:
@@ -288,59 +279,7 @@ class DiscoverReposTests(TestCase):
             self.assertRaisesRegex(AutoPullError, "repository is unavailable"),
         ):
             missing = Path(raw_root) / "missing"
-            self.assertIsNone(default_branch_name(missing))
             pull_default_branch_from_origin(missing)
-
-    def test_default_branch_checkout_rejects_ambiguous_local_named_branches(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            repo = Path(raw_root) / "repo"
-            repo.mkdir()
-            _git(repo, "init", "--initial-branch=master")
-            _git(repo, "config", "user.email", "dev@example.com")
-            _git(repo, "config", "user.name", "Dev")
-            (repo / "README.md").write_text("master\n")
-            _git(repo, "add", "README.md")
-            _git(repo, "commit", "-m", "master")
-            _git(repo, "checkout", "-b", "main")
-            (repo / "README.md").write_text("main\n")
-            _git(repo, "commit", "-am", "main")
-            _git(repo, "checkout", "master")
-
-            self.assertIsNone(default_branch_checkout_commit_hash(repo))
-
-    def test_default_branch_checkout_rejects_feature_branch_at_same_commit(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            repo = Path(raw_root) / "repo"
-            repo.mkdir()
-            _git(repo, "init", "--initial-branch=main")
-            _git(repo, "config", "user.email", "dev@example.com")
-            _git(repo, "config", "user.name", "Dev")
-            (repo / "README.md").write_text("hello\n")
-            _git(repo, "add", "README.md")
-            _git(repo, "commit", "-m", "initial")
-            _git(repo, "checkout", "-b", "feature")
-
-            self.assertIsNone(default_branch_checkout_commit_hash(repo))
-
-    def test_default_branch_checkout_commit_hash_requires_clean_worktree(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            repo = Path(raw_root) / "repo"
-            repo.mkdir()
-            _git(repo, "init", "--initial-branch=main")
-            _git(repo, "config", "user.email", "dev@example.com")
-            _git(repo, "config", "user.name", "Dev")
-            (repo / "README.md").write_text("hello\n")
-            _git(repo, "add", "README.md")
-            _git(repo, "commit", "-m", "initial")
-            main_sha = _git(repo, "rev-parse", "HEAD")
-
-            self.assertEqual(default_branch_checkout_commit_hash(repo), main_sha)
-
-            (repo / "README.md").write_text("local change\n")
-
-            self.assertIsNone(default_branch_checkout_commit_hash(repo))
 
     def test_git_output_returns_none_on_spawn_failure(self) -> None:
         with patch(

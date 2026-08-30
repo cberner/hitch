@@ -88,14 +88,14 @@ used by QA and pull-request shortcuts.
 - `REVIEW-fix-pr`: `/fix-pr` starts an ordinary visible follow-up turn for the
   PR currently registered to the session. It does not infer or create a PR when
   no registered identity exists.
-- `REVIEW-auto-triggers`: After an eligible user turn completes successfully,
-  Auto-QA or Auto-PR starts the corresponding ordinary visible turn at most
-  once. A pending proposed plan, archived session, active turn, or missing
-  `hitch.watch_pr` capability defers the trigger without consuming it.
-- `REVIEW-trigger-settings`: Manual and automatic review/PR turns retain the
-  session's model, reasoning effort, developer instructions, sandbox, approval,
-  memory, web-search, and message-index settings. Automatic triggers run under
-  the source turn's approval mode, including Always prompt and Deny all.
+- `REVIEW-auto-guidance`: Auto-QA or Auto-PR adds the corresponding review or
+  publication/watch instruction to the original non-Plan coding turn. The
+  coding agent completes it in that turn; Hitch does not launch a follow-up
+  turn or track a framework trigger.
+- `REVIEW-trigger-settings`: Manual review/PR turns retain the session's model,
+  reasoning effort, developer instructions, sandbox, approval, memory,
+  web-search, and message-index settings. Automatic guidance runs under the
+  original coding turn's settings.
 - `REVIEW-selected-checkout`: Review and PR tasks inspect the selected session
   checkout as it exists. Starting them does not Auto-pull or create a separate
   clean worktree first.

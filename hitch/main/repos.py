@@ -91,25 +91,6 @@ def default_branch_commit_hash(cwd: str | Path) -> str | None:
     return _commit_hash_for_ref(repo, ref)
 
 
-def commit_hash_for_ref(cwd: str | Path, ref: str) -> str | None:
-    """Return the commit hash for ``ref`` in the repository containing ``cwd``."""
-    repo = _repo_root(Path(cwd).expanduser())
-    if repo is None:
-        return None
-    return _commit_hash_for_ref(repo, ref)
-
-
-def default_branch_name(cwd: str | Path) -> str | None:
-    """Return the repository default branch name when it can be resolved."""
-    repo = _repo_root(Path(cwd).expanduser())
-    if repo is None:
-        return None
-    ref = _default_branch_ref(repo)
-    if ref is None:
-        return None
-    return _branch_name_from_ref(ref) or None
-
-
 def pull_default_branch_from_origin(cwd: str | Path) -> AutoPullResult:
     """Fast-forward the default branch in ``cwd`` from ``origin``.
 
@@ -156,29 +137,6 @@ def pull_default_branch_from_origin(cwd: str | Path) -> AutoPullResult:
         after_sha=after_sha,
         changed=bool(before_sha and after_sha and before_sha != after_sha),
     )
-
-
-def default_branch_checkout_commit_hash(cwd: str | Path) -> str | None:
-    """Return the default branch SHA only when the checkout has that clean tree."""
-    repo = _repo_root(Path(cwd).expanduser())
-    if repo is None:
-        return None
-    default_ref = _default_branch_ref(repo)
-    if default_ref is None:
-        return None
-    default_branch = _branch_name_from_ref(default_ref)
-    current_branch = _current_branch_name(repo)
-    if not default_branch or current_branch != default_branch:
-        return None
-    default_sha = _commit_hash_for_ref(repo, default_ref)
-    if not default_sha:
-        return None
-    head_sha = _commit_hash_for_ref(repo, "HEAD")
-    if head_sha != default_sha:
-        return None
-    if not _worktree_is_clean(repo):
-        return None
-    return default_sha
 
 
 def same_repo_or_worktree(cwd: str | Path, repo_path: str | Path, repo_common_dir: str = "") -> bool:

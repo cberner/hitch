@@ -54,14 +54,8 @@ def derive_stage(
     active_instance: CodexInstance | None = None,
     awaiting_user_input: bool = False,
     pr_snapshot: Mapping[str, Any] | None = None,
-    registered_pr_snapshot: Mapping[str, Any] | None = None,
 ) -> SessionStage:
     """Return the current stage from ordinary turns and durable PR state."""
-    selected_pr = _select_pr_snapshot(
-        log_pr_snapshot=pr_snapshot,
-        registered_pr_snapshot=registered_pr_snapshot,
-    )
-
     if awaiting_user_input:
         return AWAITING_INPUT
 
@@ -73,11 +67,11 @@ def derive_stage(
             return PR
         return PLAN if active_instance.plan_mode else IMPLEMENTATION
 
-    if terminal_stage := _terminal_pr_stage(selected_pr):
+    if terminal_stage := _terminal_pr_stage(pr_snapshot):
         return terminal_stage
 
     entries_list = list(entries)
-    if _has_pr_identity(selected_pr):
+    if _has_pr_identity(pr_snapshot):
         return PR
     if _latest_agent_task_stage(entries_list) == "qa":
         return QA
@@ -88,40 +82,8 @@ def derive_stage(
     return NEW
 
 
-def merge_pr_snapshots(
-    *,
-    log_pr_snapshot: Mapping[str, Any] | None,
-    registered_pr_snapshot: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    return dict(
-        _select_pr_snapshot(
-            log_pr_snapshot=log_pr_snapshot,
-            registered_pr_snapshot=registered_pr_snapshot,
-        )
-        or {}
-    )
-
-
 def stage_for_key(key: str) -> SessionStage | None:
     return _STAGES_BY_KEY.get(key) or _LEGACY_STAGES_BY_KEY.get(key)
-
-
-def _select_pr_snapshot(
-    *,
-    log_pr_snapshot: Mapping[str, Any] | None,
-    registered_pr_snapshot: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    if not log_pr_snapshot:
-        return registered_pr_snapshot
-    if not registered_pr_snapshot:
-        return log_pr_snapshot
-    if _same_pr_identity(log_pr_snapshot, registered_pr_snapshot):
-        if _terminal_pr_stage(registered_pr_snapshot):
-            return {**log_pr_snapshot, **registered_pr_snapshot}
-        return {**registered_pr_snapshot, **log_pr_snapshot}
-    if _has_pr_identity(registered_pr_snapshot):
-        return registered_pr_snapshot
-    return log_pr_snapshot
 
 
 def _latest_agent_task_stage(entries: list[Mapping[str, Any]]) -> str:
@@ -155,24 +117,6 @@ def _has_pr_identity(snapshot: Mapping[str, Any] | None) -> bool:
         bool(_string(snapshot.get("repository_full_name")))
         and isinstance(snapshot.get("pr_number"), int)
         and not isinstance(snapshot.get("pr_number"), bool)
-    )
-
-
-def _same_pr_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_url = _string(left.get("url"))
-    right_url = _string(right.get("url"))
-    if left_url and right_url:
-        return left_url == right_url
-    left_repo = _string(left.get("repository_full_name"))
-    right_repo = _string(right.get("repository_full_name"))
-    left_number = left.get("pr_number")
-    right_number = right.get("pr_number")
-    return (
-        bool(left_repo)
-        and left_repo == right_repo
-        and isinstance(left_number, int)
-        and not isinstance(left_number, bool)
-        and left_number == right_number
     )
 
 

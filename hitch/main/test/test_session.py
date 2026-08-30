@@ -22,12 +22,7 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_events
 from hitch.main.sessions.entry_render import tool_call_detail, tool_call_status
-from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
-from hitch.main.sessions.session_pr_plan import (
-    _fix_pr_url_for_thread,
-    _pr_snapshot_for_thread,
-    _pr_url_for_thread,
-)
+from hitch.main.sessions.session_pr_plan import _fix_pr_url_for_thread
 from hitch.main.test.support import (
     _make_project,
     _rollout_line,
@@ -203,74 +198,6 @@ def _diff_view() -> DiffView:
 
 
 class PrUrlDetectionTests(TestCase):
-    def test_detects_pr_url_from_latest_pr_turn_github_mcp_result(self) -> None:
-        earlier = "https://github.com/cberner/hitch/pull/93"
-        latest = "https://github.com/cberner/hitch/pull/94"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message("ordinary follow-up"),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {"structuredContent": {"display_url": earlier}},
-                        ),
-                        _agent_message("Done."),
-                    ]
-                ),
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {
-                                "content": [{"text": json.dumps({"url": earlier, "display_url": latest})}],
-                            },
-                        ),
-                        _agent_message("Opened the PR."),
-                    ]
-                ),
-            ]
-        )
-
-        self.assertEqual(_pr_url_for_thread(thread), latest)
-
-    def test_ignores_incomplete_pr_turns(self) -> None:
-        url = "https://github.com/cberner/hitch/pull/94"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call("github", "_create_pull_request", {"url": url}),
-                    ]
-                )
-            ]
-        )
-
-        self.assertIsNone(_pr_url_for_thread(thread))
-
-    def test_fix_pr_does_not_infer_an_unregistered_observed_pr(self) -> None:
-        url = "https://github.com/cberner/hitch/pull/94"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call(
-                            "github", "_create_pull_request", {"url": url}
-                        ),
-                        _agent_message("Opened the PR."),
-                    ]
-                )
-            ]
-        )
-
-        self.assertEqual(_pr_url_for_thread(thread), url)
-        self.assertIsNone(_fix_pr_url_for_thread("thread-1"))
-
     def test_fix_pr_uses_registered_repo_and_number_identity(self) -> None:
         SessionPullRequest.objects.create(
             thread_id="thread-1",
@@ -287,46 +214,6 @@ class PrUrlDetectionTests(TestCase):
             _fix_pr_url_for_thread("thread-1"),
             "https://github.com/cberner/hitch/pull/94",
         )
-
-    def test_pr_snapshot_when_mcp_tool_call_follows_final_message(self) -> None:
-        # ``_pr_observation_result_for_thread`` reads the PR identity that
-        # the session-stage badge and the cached ``derived_stage`` both
-        # depend on. With the post-final ``mcpToolCall`` dropped, the URL
-        # pill could still render (from ``_pr_url_for_thread``) while the
-        # snapshot stayed empty -- so the stage fell back to
-        # ``IMPLEMENTATION`` and any ``closed``/``merged`` state from
-        # ``structuredContent`` was lost.
-        url = "https://github.com/cberner/hitch/pull/95"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _agent_message("Closed it.", phase="final_answer"),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {
-                                "structuredContent": {
-                                    "url": url,
-                                    "state": "closed",
-                                    "merged": False,
-                                }
-                            },
-                        ),
-                    ]
-                )
-            ]
-        )
-
-        snapshot = _pr_snapshot_for_thread(thread)
-
-        self.assertIsNotNone(snapshot)
-        assert snapshot is not None
-        self.assertEqual(snapshot["url"], url)
-        self.assertEqual(snapshot["state"], "closed")
-        self.assertIs(snapshot["merged"], False)
-
 
 class SessionViewTests(TestCase):
     @override
@@ -425,122 +312,6 @@ class SessionViewTests(TestCase):
         metadata.refresh_from_db()
         self.assertIsNone(metadata.project)
         self.assertTrue(metadata.project_cleared)
-
-    @patch("hitch.main.views.common.Codex")
-    def test_stage_reads_sdk_mcp_result_model(self, mock_codex: MagicMock) -> None:
-        url = "https://github.com/cberner/hitch/pull/94"
-        sdk_result = SimpleNamespace(
-            model_dump=lambda by_alias=False: {
-                "structuredContent": {
-                    "url": url,
-                    "state": "closed",
-                    "merged": False,
-                }
-            }
-        )
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call("github", "_create_pull_request", sdk_result),
-                        _agent_message("Closed."),
-                    ]
-                )
-            ]
-        )
-        _patch_thread(self, mock_codex, thread)
-
-        response = _get_session(self.client)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response,
-            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>',
-            html=True,
-        )
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="done">Done: Closed</span>',
-        )
-
-    @patch("hitch.main.views.common.Codex")
-    def test_hides_open_pr_menu_link_without_detected_pr(self, mock_codex: MagicMock) -> None:
-        thread = _thread([_turn([_user_message("hi"), _agent_message("Hello.")])])
-        _patch_thread(self, mock_codex, thread)
-
-        response = _get_session(self.client)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "Open PR")
-
-    @patch("hitch.main.views.common.Codex")
-    def test_stage_clears_sdk_pr_snapshot_when_latest_pr_turn_has_no_pr(self, mock_codex: MagicMock) -> None:
-        stale_url = "https://github.com/cberner/hitch/pull/93"
-        thread = _thread(
-            [
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {
-                                "url": stale_url,
-                                "state": "closed",
-                                "merged": False,
-                            },
-                        ),
-                        _agent_message("Closed."),
-                    ]
-                ),
-                _turn(
-                    [
-                        _user_message(PR_SLASH_PROMPT),
-                        _mcp_tool_call(
-                            "github",
-                            "_create_pull_request",
-                            {"content": []},
-                        ),
-                        _agent_message("No PR."),
-                    ]
-                ),
-            ]
-        )
-        _patch_thread(self, mock_codex, thread)
-
-        response = _get_session(self.client)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "Open PR")
-        self.assertNotContains(response, "Done: Closed")
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
-        )
-
-    @patch("hitch.main.views.common.Codex")
-    def test_system_feedback_renders_with_display_author(self, mock_codex: MagicMock) -> None:
-        prompt = "Hitch review workflow could not complete.\n\nFix the failing flow."
-        thread = _thread([_turn([_user_message(prompt), _agent_message("fixed")])])
-        _patch_thread(self, mock_codex, thread)
-        CodexInstance.objects.create(
-            pid=1,
-            thread_id="thread-1",
-            cwd="/tmp/repo",
-            prompt=prompt,
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            display_author="Review workflow",
-            user_message_index=0,
-        )
-
-        response = _get_session(self.client)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<span class="role">Review workflow</span>')
-        self.assertNotContains(response, '<span class="role">User</span>')
 
     @patch("hitch.main.views.common.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(self, mock_codex: MagicMock) -> None:

@@ -25,7 +25,6 @@ from hitch.main.test.support import (
     _seed_cookies,
 )
 from hitch.main.views import common as common_views
-from hitch.main.workflows import system_agents
 
 
 class SetSessionNameViewTests(TestCase):
@@ -495,51 +494,6 @@ class SetSessionArchivedViewTests(TestCase):
         self.assertEqual(metadata.codex_path, "/archived/rollout-abc.jsonl")
         self.assertTrue(metadata.codex_archived)
 
-    @patch(
-        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
-        return_value=None,
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.views.common.Codex")
-    def test_unarchive_retries_auto_review_deferred_by_archive(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        _mock_rollout_path: MagicMock,
-    ) -> None:
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            codex_archived=True,
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="Implement it",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            auto_qa_enabled=True,
-            approval_mode="auto_review",
-        )
-        mock_spawn.return_value = MagicMock(spec=CodexInstance, pk=99)
-        system_agents.on_codex_instance_finished(instance)
-        instance.refresh_from_db()
-        self.assertIsNone(instance.auto_qa_triggered_at)
-
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "false"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        instance.refresh_from_db()
-        self.assertIsNotNone(instance.auto_qa_triggered_at)
-        mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["thread_id"], "abc")
-        mock_codex.return_value.__enter__.return_value.thread_unarchive.assert_called_once_with(
-            "abc"
-        )
 
     @patch(
         "hitch.main.views.session_actions._stored_rollout_path_for_thread",
@@ -773,10 +727,9 @@ class SetSessionArchivedViewTests(TestCase):
             "abc"
         )
 
-    @patch("hitch.main.runtime.codex_pool.cleanup_input_images_for_thread")
     @patch("hitch.main.views.common.Codex")
     def test_archive_keeps_retained_input_images_for_unarchive(
-        self, mock_codex: MagicMock, mock_cleanup_images: MagicMock
+        self, mock_codex: MagicMock
     ) -> None:
         response = self.client.post(
             reverse("set_session_archived", kwargs={"session_id": "abc"}),
@@ -784,7 +737,6 @@ class SetSessionArchivedViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_cleanup_images.assert_not_called()
         mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
             "abc"
         )

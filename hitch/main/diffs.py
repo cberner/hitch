@@ -2,10 +2,7 @@
 
 import difflib
 import html
-import os
 import re
-import stat
-import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -22,9 +19,6 @@ DiffLineKind = Literal["add", "remove", "context", "hunk", "meta"]
 
 _GIT_TIMEOUT_SECONDS = 3
 _MAX_DIFF_PREVIEW_CHARS = 500_000
-# Larger reviewer diffs use chunked handoffs, but their aggregate resource use
-# must remain bounded independently from the smaller rendered preview.
-REVIEWER_DIFF_MAX_BYTES = 2 * 1024 * 1024
 # Highlighting and table markup can expand raw diff lines several-fold.
 _MAX_DIFF_PREVIEW_LINES = 1_000
 _MAX_UNTRACKED_FILES = 25
@@ -95,16 +89,6 @@ class DiffView:
         return len(self.files)
 
 
-class IncompleteDiffError(Exception):
-    """Raised when a complete reviewer diff cannot be constructed."""
-
-
-@dataclass(frozen=True)
-class _GitlinkDiffMetadata:
-    has_same_commit_dirty_gitlink: bool
-    renamed_destinations: frozenset[str]
-
-
 def build_worktree_diff(cwd: str | None) -> DiffView:
     """Return the current git session diff for ``cwd``.
 
@@ -121,69 +105,6 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
         truncated = True
     text = "\n".join(lines)
     return _parse_unified_diff(text, truncated=truncated)
-
-
-def build_worktree_diff_text(cwd: str | None) -> str:
-    """Return a complete reviewer diff, or raise when it cannot be represented."""
-    text = _strict_worktree_diff_text(cwd)
-    validate_reviewer_diff_size(text)
-    for line in text.split("\n"):
-        if line.startswith("Binary files ") and line.endswith(" differ"):
-            raise IncompleteDiffError(
-                "tracked binary changes cannot be represented in the reviewer diff"
-            )
-    return text
-
-
-def validate_reviewer_diff_size(text: str) -> None:
-    """Reject reviewer text that would exceed the aggregate handoff budget."""
-    if (
-        len(text) > REVIEWER_DIFF_MAX_BYTES
-        or len(text.encode()) > REVIEWER_DIFF_MAX_BYTES
-    ):
-        _raise_reviewer_diff_too_large()
-
-
-def _has_dirty_gitlink_section(
-    text: str, renamed_gitlink_destinations: frozenset[str]
-) -> bool:
-    section_is_gitlink = False
-    section_rename_destination = ""
-    section_has_dirty_marker = False
-    for line in text.split("\n"):
-        if line.startswith("diff --git "):
-            if (
-                section_is_gitlink
-                or section_rename_destination in renamed_gitlink_destinations
-            ) and section_has_dirty_marker:
-                return True
-            section_is_gitlink = False
-            section_rename_destination = ""
-            section_has_dirty_marker = False
-            continue
-        if (
-            line in {
-                "new file mode 160000",
-                "deleted file mode 160000",
-                "old mode 160000",
-                "new mode 160000",
-            }
-            or line.startswith("index ")
-            and line.endswith(" 160000")
-        ):
-            section_is_gitlink = True
-        elif line.startswith("rename to "):
-            section_rename_destination = _decode_git_path(
-                line.removeprefix("rename to ")
-            )
-        elif line.startswith(
-            ("+Subproject commit ", "-Subproject commit ")
-        ) and line.endswith("-dirty"):
-            section_has_dirty_marker = True
-    return (
-        section_is_gitlink
-        or section_rename_destination in renamed_gitlink_destinations
-    ) and section_has_dirty_marker
 
 
 def _worktree_diff_text(cwd: str | None) -> str:
@@ -213,199 +134,6 @@ def _tracked_diff(repo: Path) -> str:
     if raw_diff is not None:
         return raw_diff
     return _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
-
-
-def _strict_worktree_diff_text(cwd: str | None) -> str:
-    if not cwd:
-        raise IncompleteDiffError("reviewed checkout path is unavailable")
-    checkout = Path(cwd)
-    if not checkout.is_dir():
-        raise IncompleteDiffError("reviewed checkout path is unavailable")
-    root_result = _strict_git_result(checkout, ["rev-parse", "--show-toplevel"])
-    try:
-        root_text = root_result.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise IncompleteDiffError("reviewed repository path is not UTF-8") from exc
-    root = root_text.strip()
-    if not root:
-        raise IncompleteDiffError("git could not identify the reviewed repository")
-    repo = Path(root)
-    parts = (_strict_tracked_diff(repo), _strict_untracked_diff(repo))
-    return "\n".join(part for part in parts if part)
-
-
-def _strict_tracked_diff(repo: Path) -> str:
-    diff_base = _strict_branch_diff_base_ref(repo)
-    result = _strict_git_result(
-        repo, ["-c", "core.quotePath=true", *_DIFF_ARGS, diff_base, "--"]
-    )
-    if len(result.stdout) > REVIEWER_DIFF_MAX_BYTES:
-        _raise_reviewer_diff_too_large()
-    if b"\0" in result.stdout:
-        raise IncompleteDiffError(
-            "tracked NUL-bearing changes cannot be represented in the reviewer diff"
-        )
-    try:
-        text = result.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise IncompleteDiffError(
-            "tracked non-UTF-8 changes cannot be represented in the reviewer diff"
-        ) from exc
-    gitlinks = _strict_gitlink_diff_metadata(repo, diff_base)
-    if gitlinks.has_same_commit_dirty_gitlink or _has_dirty_gitlink_section(
-        text, gitlinks.renamed_destinations
-    ):
-        raise IncompleteDiffError(
-            "dirty submodule changes cannot be represented in the reviewer diff"
-        )
-    return text
-
-
-def _raise_reviewer_diff_too_large() -> None:
-    raise IncompleteDiffError(
-        "worktree diff exceeds the "
-        f"{REVIEWER_DIFF_MAX_BYTES:,}-byte reviewer handoff limit"
-    )
-
-
-def _strict_gitlink_diff_metadata(
-    repo: Path, diff_base: str
-) -> _GitlinkDiffMetadata:
-    # Raw output identifies same-commit dirtiness by equal OIDs and gives
-    # renamed gitlinks unambiguous NUL-delimited destination paths. Formatted
-    # ``diff --git`` headers alone cannot safely split paths containing `` b/``.
-    result = _strict_git_result(
-        repo,
-        [
-            "diff",
-            "--raw",
-            "-z",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            "--find-renames",
-            diff_base,
-            "--",
-        ],
-    )
-    fields = result.stdout.split(b"\0")
-    if fields and fields[-1] == b"":
-        fields.pop()
-    index = 0
-    has_same_commit_dirty = False
-    renamed_destinations: set[str] = set()
-    while index < len(fields):
-        metadata = fields[index].split()
-        index += 1
-        if len(metadata) != 5 or not metadata[0].startswith(b":"):
-            raise IncompleteDiffError("git returned malformed raw reviewer diff metadata")
-        old_mode = metadata[0][1:]
-        new_mode, old_oid, new_oid, status = metadata[1:]
-        if index >= len(fields):
-            raise IncompleteDiffError("git returned malformed raw reviewer diff metadata")
-        index += 1  # source path
-        destination_path: bytes | None = None
-        if status[:1] in {b"R", b"C"}:
-            if index >= len(fields):
-                raise IncompleteDiffError(
-                    "git returned malformed raw reviewer diff metadata"
-                )
-            destination_path = fields[index]
-            index += 1
-        if (
-            old_mode == b"160000"
-            and new_mode == b"160000"
-            and old_oid == new_oid
-            and status == b"M"
-        ):
-            has_same_commit_dirty = True
-        if (
-            old_mode == b"160000"
-            and new_mode == b"160000"
-            and status.startswith(b"R")
-            and destination_path is not None
-        ):
-            try:
-                renamed_destinations.add(destination_path.decode("utf-8"))
-            except UnicodeDecodeError as exc:
-                raise IncompleteDiffError(
-                    "renamed non-UTF-8 gitlink path cannot be represented in the reviewer diff"
-                ) from exc
-    return _GitlinkDiffMetadata(
-        has_same_commit_dirty_gitlink=has_same_commit_dirty,
-        renamed_destinations=frozenset(renamed_destinations),
-    )
-
-
-def _strict_branch_diff_base_ref(repo: Path) -> str:
-    head_exists = _strict_ref_exists(repo, "HEAD")
-    if not head_exists:
-        return _strict_empty_tree_hash(repo)
-
-    saw_base_ref = False
-    saw_no_common_ancestor = False
-    closest_merge_base = ""
-    closest_distance: int | None = None
-    for index, base_ref in enumerate(
-        (_BRANCH_DIFF_DEFAULT_REF, *_BRANCH_DIFF_FALLBACK_REFS)
-    ):
-        if not _strict_ref_exists(repo, base_ref):
-            continue
-        saw_base_ref = True
-        result = _strict_git_result(
-            repo,
-            ["merge-base", "HEAD", base_ref],
-            allow_statuses={0, 1},
-        )
-        if result.returncode == 1:
-            saw_no_common_ancestor = True
-            continue
-        merge_base = _strict_ascii_output(result, "merge base")
-        if not merge_base:
-            raise IncompleteDiffError("git returned an empty merge base")
-        if index == 0:
-            return merge_base
-        distance_result = _strict_git_result(
-            repo, ["rev-list", "--count", f"{merge_base}..HEAD"]
-        )
-        distance_text = _strict_ascii_output(distance_result, "commit distance")
-        try:
-            distance = int(distance_text)
-        except ValueError as exc:
-            raise IncompleteDiffError("git returned an invalid commit distance") from exc
-        if closest_distance is None or distance < closest_distance:
-            closest_merge_base = merge_base
-            closest_distance = distance
-    if closest_merge_base:
-        return closest_merge_base
-    if saw_base_ref and saw_no_common_ancestor:
-        shallow_result = _strict_git_result(repo, ["rev-parse", "--is-shallow-repository"])
-        shallow = _strict_ascii_output(shallow_result, "shallow repository state")
-        if shallow == "true":
-            raise IncompleteDiffError(
-                "git cannot determine the reviewer baseline in this shallow repository"
-            )
-        if shallow != "false":
-            raise IncompleteDiffError("git returned an invalid shallow repository state")
-        return _strict_empty_tree_hash(repo)
-    return "HEAD"
-
-
-def _strict_ref_exists(repo: Path, ref: str) -> bool:
-    result = _strict_git_result(
-        repo,
-        ["rev-parse", "--verify", "--quiet", ref],
-        allow_statuses={0, 1},
-    )
-    return result.returncode == 0
-
-
-def _strict_empty_tree_hash(repo: Path) -> str:
-    result = _strict_git_result(repo, ["hash-object", "-t", "tree", "/dev/null"])
-    value = _strict_ascii_output(result, "empty tree hash")
-    if not value:
-        raise IncompleteDiffError("git returned an empty tree hash")
-    return value
 
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
@@ -510,35 +238,6 @@ def _git_output(cwd: Path, args: list[str], *, allow_statuses: set[int] | None =
     return result.stdout.decode("utf-8", errors="replace")
 
 
-def _strict_git_result(
-    cwd: Path,
-    args: list[str],
-    *,
-    allow_statuses: set[int] | None = None,
-) -> subprocess.CompletedProcess[bytes]:
-    statuses = allow_statuses or {0}
-    try:
-        result = run_git(cwd, args, timeout=_GIT_TIMEOUT_SECONDS)
-    except GitCommandError as exc:
-        raise IncompleteDiffError(f"git could not run {args[0]}") from exc
-    if result.returncode not in statuses:
-        raise IncompleteDiffError(
-            f"git {args[0]} failed while building the reviewer diff"
-        )
-    return result
-
-
-def _strict_ascii_output(
-    result: subprocess.CompletedProcess[bytes], description: str
-) -> str:
-    stdout = result.stdout
-    try:
-        value = stdout.decode("ascii").strip()
-    except UnicodeDecodeError as exc:
-        raise IncompleteDiffError(f"git returned an invalid {description}") from exc
-    return value
-
-
 def _untracked_diff(repo: Path) -> str:
     raw = _git_output(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
     if not raw:
@@ -558,51 +257,6 @@ def _untracked_diff(repo: Path) -> str:
             f"+{len(relpaths) - _MAX_UNTRACKED_FILES} untracked files omitted from diff preview"
         )
     return "\n".join(pieces)
-
-
-def _strict_untracked_diff(repo: Path) -> str:
-    result = _strict_git_result(
-        repo, ["ls-files", "--others", "--exclude-standard", "-z"]
-    )
-    raw_paths = [path for path in result.stdout.split(b"\0") if path]
-    if len(raw_paths) > _MAX_UNTRACKED_FILES:
-        raise IncompleteDiffError(
-            f"worktree has more than {_MAX_UNTRACKED_FILES} untracked files"
-        )
-    relpaths: list[str] = []
-    for raw_path in raw_paths:
-        try:
-            relpath = raw_path.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise IncompleteDiffError(
-                "untracked non-UTF-8 path cannot be represented in the reviewer diff"
-            ) from exc
-        if "\n" in relpath or "\r" in relpath or "\t" in relpath:
-            raise IncompleteDiffError(
-                f"untracked path cannot be represented in the reviewer diff: {relpath!r}"
-            )
-        relpaths.append(relpath)
-    if not relpaths:
-        return ""
-    file_mode_enabled = _strict_core_file_mode(repo)
-    return "\n".join(
-        _strict_synthetic_new_file_diff(repo, relpath, file_mode_enabled)
-        for relpath in relpaths
-    )
-
-
-def _strict_core_file_mode(repo: Path) -> bool:
-    result = _strict_git_result(
-        repo,
-        ["config", "--type=bool", "--get", "core.fileMode"],
-        allow_statuses={0, 1},
-    )
-    if result.returncode == 1:
-        return True
-    value = _strict_ascii_output(result, "core.fileMode value")
-    if value not in {"true", "false"}:
-        raise IncompleteDiffError("git returned an invalid core.fileMode value")
-    return value == "true"
 
 
 def _synthetic_new_file_diff(repo: Path, relpath: str) -> str:
@@ -656,67 +310,6 @@ def _synthetic_new_file_diff(repo: Path, relpath: str) -> str:
     if lines and not clipped and not file_ends_with_newline:
         body.append("\\ No newline at end of file")
     return "\n".join([f"diff --git a/{relpath} b/{relpath}", "new file mode 100644", *body])
-
-
-def _strict_synthetic_new_file_diff(
-    repo: Path, relpath: str, file_mode_enabled: bool
-) -> str:
-    path = repo / relpath
-    if path.is_symlink():
-        raise IncompleteDiffError(
-            f"untracked symbolic link cannot be represented in the reviewer diff: {relpath}"
-        )
-    try:
-        with path.open("rb") as fh:
-            file_stat = os.fstat(fh.fileno())
-            data = fh.read(_MAX_UNTRACKED_FILE_BYTES + 1)
-    except OSError as exc:
-        raise IncompleteDiffError(
-            f"untracked file could not be read for the reviewer diff: {relpath}"
-        ) from exc
-    if not stat.S_ISREG(file_stat.st_mode):
-        raise IncompleteDiffError(
-            f"untracked path is not a regular file: {relpath}"
-        )
-    if len(data) > _MAX_UNTRACKED_FILE_BYTES:
-        raise IncompleteDiffError(
-            f"untracked file exceeds the reviewer size limit: {relpath}"
-        )
-    if b"\0" in data:
-        raise IncompleteDiffError(
-            f"untracked binary file cannot be represented in the reviewer diff: {relpath}"
-        )
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise IncompleteDiffError(
-            f"untracked non-UTF-8 file cannot be represented in the reviewer diff: {relpath}"
-        ) from exc
-    lines = _split_file_lines(text)
-    body = list(
-        difflib.unified_diff(
-            [],
-            lines,
-            fromfile="/dev/null",
-            tofile=f"b/{relpath}",
-            lineterm="",
-        )
-    )
-    if lines and not text.endswith("\n"):
-        body.append("\\ No newline at end of file")
-    executable = file_mode_enabled and bool(file_stat.st_mode & stat.S_IXUSR)
-    mode = "100755" if executable else "100644"
-    return "\n".join(
-        [f"diff --git a/{relpath} b/{relpath}", f"new file mode {mode}", *body]
-    ) + "\n"
-
-
-def _split_file_lines(text: str) -> list[str]:
-    """Split file content on LF while preserving every preceding CR byte."""
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
 
 
 def _synthetic_notice_diff(relpath: str, message: str) -> str:

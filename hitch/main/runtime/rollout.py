@@ -25,9 +25,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hitch.main.runtime import codex_events
-from hitch.main.sessions.pr_prompts import is_pr_creation_prompt, is_pr_workflow_notice
-
 logger = logging.getLogger(__name__)
 
 # Function names codex assigns to shell-like tools (see
@@ -43,13 +40,6 @@ _SHELL_TOOL_NAMES = frozenset(
     }
 )
 _SHELL_FAILURE_PREFIXES = tuple(f"{name} failed for `" for name in sorted(_SHELL_TOOL_NAMES))
-_GITHUB_PR_TOOL_RE = re.compile(
-    r"(?i)(?:^|[/:\s._-])(?:github|mcp__codex_apps__github)(?:$|[/:\s._-]).*"
-    r"(?:_?create[_\s-]?(?:pr|pull[_\s-]?request)|open[_\s-]?(?:pr|pull[_\s-]?request))"
-)
-_GITHUB_PR_URL_RE = re.compile(
-    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
-)
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _COLLABORATION_MODE_PLAN = "plan"
 _COLLABORATION_MODE_DEFAULT = "default"
@@ -67,8 +57,6 @@ class SessionDetailData:
     latest_token_usage: dict[str, int] | None
     latest_collaboration_mode: str | None
     latest_model_config: SessionModelConfig | None
-    latest_pr_url: str | None
-    pr_observation: codex_events.PrObservationResult
 
 
 @dataclass(frozen=True)
@@ -93,7 +81,6 @@ class SessionHistoryUserIdentity:
 @dataclass(frozen=True)
 class SessionStageData:
     entries: tuple[dict[str, Any], ...]
-    pr_observation: codex_events.PrObservationResult
 
 
 def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
@@ -106,8 +93,6 @@ def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
         latest_token_usage=_latest_token_usage_from_lines(lines),
         latest_collaboration_mode=_latest_collaboration_mode_from_lines(lines),
         latest_model_config=_latest_model_config_from_lines(lines),
-        latest_pr_url=_latest_pr_url_from_lines(lines),
-        pr_observation=_latest_pr_observation_result_from_lines(lines),
     )
 
 
@@ -116,10 +101,7 @@ def session_stage_data(rollout_path: Path) -> SessionStageData | None:
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return None
-    return SessionStageData(
-        entries=tuple(_entries_from_lines(lines)),
-        pr_observation=_latest_pr_observation_result_from_lines(lines),
-    )
+    return SessionStageData(entries=tuple(_entries_from_lines(lines)))
 
 
 def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -491,8 +473,7 @@ def _iter_token_count_events(
 ) -> Iterator[tuple[int, dict[str, Any], dict[str, Any]]]:
     """Yield ``(timestamp, total_token_usage, info)`` per token_count event.
 
-    Both the cumulative total (``latest_token_usage``) and the daily breakdown
-    (``token_usage_history``) iterate this single source so they can never
+    Both the cumulative total and daily breakdown iterate this single source so they can never
     disagree about which events are counted: an event missing a parseable
     timestamp or a ``total_token_usage`` dict is dropped from *both*, keeping
     the headline figure and the per-day chart consistent by construction.
@@ -529,7 +510,7 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     therefore discard every token spent before the reset. We instead sum the
     positive per-event deltas of each counter, which equals the final total
     for an unbroken session and survives any reset. The events are drawn from
-    the same `_iter_token_count_events` source as `token_usage_history`, so the
+    the same `_iter_token_count_events` source as the daily breakdown, so the
     headline figure and the per-day chart always count the same events.
 
     The reset event itself is skipped entirely: its `total_tokens` is the
@@ -594,6 +575,21 @@ def token_usage_snapshot(
     if lines is None:
         return None, []
     return _latest_token_usage_from_lines(lines), _token_usage_history_from_lines(lines)
+
+
+def _token_usage_history_from_lines(
+    lines: list[dict[str, Any]],
+) -> list[dict[str, int]]:
+    return [
+        {
+            "timestamp": timestamp,
+            "input_tokens": _coerce_int(total.get("input_tokens")),
+            "cached_input_tokens": _coerce_int(total.get("cached_input_tokens")),
+            "output_tokens": _coerce_int(total.get("output_tokens")),
+            "total_tokens": _coerce_int(total.get("total_tokens")),
+        }
+        for timestamp, total, _info in _iter_token_count_events(lines)
+    ]
 
 
 def latest_collaboration_mode(rollout_path: Path) -> str | None:
@@ -753,108 +749,6 @@ def _latest_collaboration_mode_from_lines(lines: list[dict[str, Any]]) -> str | 
     if not modes:
         return None
     return modes[max(modes)]
-
-
-def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
-    """Return cumulative token counts for every timestamped token_count event."""
-    lines = _load_rollout_lines(rollout_path)
-    if lines is None:
-        return []
-    return _token_usage_history_from_lines(lines)
-
-
-def _token_usage_history_from_lines(
-    lines: list[dict[str, Any]],
-) -> list[dict[str, int]]:
-    history: list[dict[str, int]] = []
-    for timestamp, total, _info in _iter_token_count_events(lines):
-        history.append(
-            {
-                "timestamp": timestamp,
-                "input_tokens": _coerce_int(total.get("input_tokens")),
-                "cached_input_tokens": _coerce_int(total.get("cached_input_tokens")),
-                "output_tokens": _coerce_int(total.get("output_tokens")),
-                "total_tokens": _coerce_int(total.get("total_tokens")),
-            }
-        )
-    return history
-
-
-def latest_pr_url(rollout_path: Path) -> str | None:
-    """Return the last GitHub PR URL produced by a completed /pr turn."""
-    lines = _load_rollout_lines(rollout_path)
-    if lines is None:
-        return None
-    return _latest_pr_url_from_lines(lines)
-
-
-def _latest_pr_url_from_lines(lines: list[dict[str, Any]]) -> str | None:
-    function_calls_by_id = _function_calls_by_id(lines)
-    latest: str | None = None
-    for _, turn_lines in _lines_by_turn(lines):
-        if not _turn_is_pr_creation_prompt(turn_lines):
-            continue
-        if _find_final_agent_line_idx(turn_lines) == -1:
-            continue
-        # The model can emit a final-answer message in the same response that
-        # carries the create-PR function_call, so the function_call_output --
-        # written to the rollout when the tool actually completes -- can land
-        # AFTER the final-answer line for the same turn. Scan every entry in
-        # the turn rather than stopping at the final-answer index, or the URL
-        # of the PR the user just opened is silently dropped.
-        urls: list[str] = []
-        for entry in turn_lines:
-            urls.extend(
-                _github_pr_urls_from_value(
-                    _github_pr_tool_result_value(entry, function_calls_by_id)
-                )
-            )
-        latest = urls[-1] if urls else None
-    return latest
-
-
-def latest_pr_snapshot(rollout_path: Path) -> dict[str, Any] | None:
-    """Return the latest GitHub PR state observed in a rollout file."""
-    return latest_pr_observation_result(rollout_path).snapshot
-
-
-def latest_pr_observation_result(rollout_path: Path) -> codex_events.PrObservationResult:
-    """Return latest PR state plus whether later normal work superseded it."""
-    lines = _load_rollout_lines(rollout_path)
-    if lines is None:
-        return codex_events.PrObservationResult(snapshot=None)
-    return _latest_pr_observation_result_from_lines(lines)
-
-
-def _latest_pr_observation_result_from_lines(
-    lines: list[dict[str, Any]],
-) -> codex_events.PrObservationResult:
-    turns: list[codex_events.PrObservationTurn] = []
-    for _, turn_lines in _lines_by_turn(lines):
-        mcp_items = tuple(_github_mcp_items_from_lines(turn_lines))
-        is_pr_prompt = _turn_starts_pr_observation_epoch(turn_lines, mcp_items)
-        is_pr_workflow_notice = _turn_is_pr_workflow_notice(turn_lines)
-        final_idx = _find_final_agent_line_idx(turn_lines)
-        # Scan every entry in a PR-prompt turn, not just lines before the
-        # final-answer message: the same Responses-API shape behind the
-        # ``latest_pr_url`` fix lands the ``function_call_output`` /
-        # ``mcp_tool_call_end`` AFTER the final-answer line, so slicing here
-        # would silently drop the create_pull_request result from the
-        # snapshot. ``final_idx != -1`` still guards out incomplete turns.
-        turns.append(
-            codex_events.PrObservationTurn(
-                is_pr_prompt=is_pr_prompt,
-                is_completed=final_idx != -1,
-                items=mcp_items,
-                has_lifecycle_activity=(
-                    not is_pr_prompt
-                    and not is_pr_workflow_notice
-                    and final_idx != -1
-                    and _turn_has_lifecycle_activity(turn_lines)
-                ),
-            )
-        )
-    return codex_events.pr_observation_result_from_turns(turns)
 
 
 def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
@@ -1151,199 +1045,6 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
         return False
     payload = entry.get("payload") or {}
     return payload.get("type") == "user_message"
-
-
-def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    calls: dict[str, dict[str, Any]] = {}
-    for entry in lines:
-        if entry.get("type") != "response_item":
-            continue
-        payload = entry.get("payload") or {}
-        if payload.get("type") != "function_call":
-            continue
-        call_id = payload.get("call_id")
-        if isinstance(call_id, str):
-            calls[call_id] = payload
-    return calls
-
-
-def _turn_is_pr_creation_prompt(turn_lines: list[dict[str, Any]]) -> bool:
-    for entry in turn_lines:
-        if not _is_user_message_line(entry):
-            continue
-        payload = entry.get("payload") or {}
-        return is_pr_creation_prompt(_user_message_text(payload))
-    return False
-
-
-def _turn_is_pr_workflow_notice(turn_lines: list[dict[str, Any]]) -> bool:
-    for entry in turn_lines:
-        if not _is_user_message_line(entry):
-            continue
-        payload = entry.get("payload") or {}
-        return is_pr_workflow_notice(_user_message_text(payload))
-    return False
-
-
-def _turn_starts_pr_observation_epoch(
-    turn_lines: list[dict[str, Any]], mcp_items: tuple[dict[str, Any], ...]
-) -> bool:
-    if _turn_is_pr_creation_prompt(turn_lines):
-        return True
-    if not _turn_is_pr_workflow_notice(turn_lines):
-        return False
-    return codex_events.pr_snapshot_from_completed_mcp_items(mcp_items) is not None
-
-
-def _find_final_agent_line_idx(turn_lines: list[dict[str, Any]]) -> int:
-    for idx in range(len(turn_lines) - 1, -1, -1):
-        if _is_agent_response_line(turn_lines[idx]) and _agent_response_phase(
-            turn_lines[idx]
-        ) == "final_answer":
-            return idx
-    for idx in range(len(turn_lines) - 1, -1, -1):
-        if _is_agent_response_line(turn_lines[idx]):
-            return idx
-    return -1
-
-
-def _github_pr_tool_result_value(
-    entry: dict[str, Any], function_calls_by_id: dict[str, dict[str, Any]]
-) -> Any:
-    payload = entry.get("payload") or {}
-    if entry.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
-        invocation = payload.get("invocation") or {}
-        if not isinstance(invocation, dict):
-            return None
-        if _github_pr_tool_used(invocation.get("server"), invocation.get("tool")):
-            return payload.get("result")
-        return None
-    if entry.get("type") == "response_item" and payload.get("type") == "function_call_output":
-        call_id = payload.get("call_id")
-        call = function_calls_by_id.get(call_id) if isinstance(call_id, str) else None
-        if call is not None and _github_pr_tool_used(call.get("name")):
-            return payload.get("output")
-    return None
-
-
-def _github_mcp_items_from_lines(lines: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    function_calls_by_id = _function_calls_by_id(lines)
-    for entry in lines:
-        payload = entry.get("payload") or {}
-        if entry.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
-            invocation = payload.get("invocation") or {}
-            if not isinstance(invocation, dict):
-                continue
-            server = invocation.get("server")
-            tool = invocation.get("tool")
-            if not _github_pr_observation_tool_used(server, tool):
-                continue
-            yield {
-                "type": "mcpToolCall",
-                "server": server,
-                "tool": tool,
-                "arguments": invocation.get("arguments") or {},
-                "result": payload.get("result"),
-            }
-            continue
-        if entry.get("type") != "response_item" or payload.get("type") != "function_call_output":
-            continue
-        call_id = payload.get("call_id")
-        call = function_calls_by_id.get(call_id) if isinstance(call_id, str) else None
-        if call is None or not _github_pr_observation_tool_used(call.get("name")):
-            continue
-        yield {
-            "type": "mcpToolCall",
-            "server": "github",
-            "tool": call.get("name"),
-            "arguments": _json_dict(call.get("arguments")),
-            "result": payload.get("output"),
-        }
-
-
-def _github_pr_tool_used(*parts: Any) -> bool:
-    detail = " / ".join(part for part in parts if isinstance(part, str))
-    return _GITHUB_PR_TOOL_RE.search(detail) is not None
-
-
-def _github_pr_observation_tool_used(*parts: Any) -> bool:
-    detail = " / ".join(part for part in parts if isinstance(part, str)).lower()
-    if "github" not in detail:
-        return False
-    normalized = detail.replace("-", "_")
-    return any(
-        token in normalized
-        for token in (
-            "create_pr",
-            "create_pull_request",
-            "get_pr_info",
-            "fetch_pr",
-            "merge_pull_request",
-            "fetch_pr_comments",
-            "list_pull_request_review_threads",
-            "list_pull_request_reviews",
-            "get_pr_reactions",
-            "get_commit_combined_status",
-            "fetch_commit_workflow_runs",
-            "fetch_workflow_run_jobs",
-        )
-    )
-
-
-def _json_dict(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str) or not value.strip():
-        return {}
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _github_pr_urls_from_value(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return _GITHUB_PR_URL_RE.findall(value)
-    if isinstance(value, dict):
-        urls: list[str] = []
-        for child in value.values():
-            urls.extend(_github_pr_urls_from_value(child))
-        return urls
-    if isinstance(value, list | tuple):
-        urls = []
-        for child in value:
-            urls.extend(_github_pr_urls_from_value(child))
-        return urls
-    return []
-
-
-def _is_agent_response_line(entry: dict[str, Any]) -> bool:
-    payload = entry.get("payload") or {}
-    if _agent_response_phase(entry) == "commentary":
-        return False
-    if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
-        return True
-    return (
-        entry.get("type") == "response_item"
-        and payload.get("type") == "message"
-        and payload.get("role") == "assistant"
-    )
-
-
-def _turn_has_lifecycle_activity(turn_lines: list[dict[str, Any]]) -> bool:
-    return any(
-        _is_user_message_line(entry) or _is_agent_response_line(entry)
-        for entry in turn_lines
-    )
-
-
-def _agent_response_phase(entry: dict[str, Any]) -> str | None:
-    payload = entry.get("payload") or {}
-    phase = payload.get("phase")
-    return phase if isinstance(phase, str) else None
 
 
 def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:

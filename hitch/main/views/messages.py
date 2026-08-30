@@ -547,6 +547,21 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             codex_pool.spawn_turn(**task_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
+        automatic_pr_available = bool(
+            auto_pr_enabled
+            and not plan_mode
+            and thread_has_dynamic_tool(
+                session_id,
+                namespace="hitch",
+                name="watch_pr",
+            )
+        )
+        if not plan_mode:
+            prompt = agent_tasks.with_automatic_review_guidance(
+                prompt,
+                auto_pr_enabled=automatic_pr_available,
+                auto_qa_enabled=auto_qa_enabled,
+            )
         spawn_kwargs: dict[str, Any] = {
             "thread_id": session_id,
             "cwd": cwd,
@@ -554,6 +569,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": approval_mode,
         }
+        if automatic_pr_available:
+            spawn_kwargs["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
+            spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
         if input_image_paths:
             spawn_kwargs["input_image_paths"] = input_image_paths
         if should_forward_web_search_mode:
@@ -562,17 +580,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["developer_instructions"] = developer_instructions
         if settings.enable_memories:
             spawn_kwargs["enable_memories"] = True
-        if auto_pr_enabled or auto_qa_enabled:
-            auto_review_model, auto_review_reasoning_effort = _stored_model_and_effort(
-                resumed, settings
-            )
-            if auto_pr_enabled:
-                spawn_kwargs["auto_pr_enabled"] = True
-            if auto_qa_enabled:
-                spawn_kwargs["auto_qa_enabled"] = True
-            spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
-            spawn_kwargs["stored_model"] = auto_review_model or None
-            spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
         if plan_mode:
             if not collaboration_model:
                 raise _TurnRejectedError(

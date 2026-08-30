@@ -22,7 +22,6 @@ from hitch.main.goals.autonomous_goal_form import (
 )
 from hitch.main.goals.autonomous_goal_proposal_stack import (
     AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY,
-    AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
     _autonomous_goal_accepted_session_blocks_start,
     _autonomous_goal_pending_proposal_blocks_start,
     _proposal_outcome_metadata,
@@ -393,22 +392,7 @@ def update_proposed_session_outcome(
         and outcome_status != ProposedSession.OUTCOME_DISMISSED
     ):
         return HttpResponseBadRequest("outcome status is invalid")
-    if (
-        outcome_status == ProposedSession.OUTCOME_ACCEPTED
-        and isinstance(proposed_session.outcome_metadata, dict)
-        and proposed_session.outcome_metadata.get(
-            AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY
-        )
-        is True
-    ):
-        return HttpResponseBadRequest("proposal must be started before acceptance")
-    if (
-        outcome_status == ProposedSession.OUTCOME_ACCEPTED
-        and proposed_session.candidate_session is None
-    ):
-        # This endpoint can adopt an existing candidate, but proposals that
-        # need a new turn (including upgrade recovery) must retain their
-        # provisional state until the new-session flow starts that turn.
+    if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
         return HttpResponseBadRequest("proposal must be started before acceptance")
     update_values: dict[str, Any] = {
         "outcome_status": outcome_status,
@@ -420,25 +404,6 @@ def update_proposed_session_outcome(
         proposed_session,
         {"resolved_by": "user"},
     )
-    if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
-        update_values["accepted_session"] = proposed_session.candidate_session
-        outcome_metadata = _proposal_outcome_metadata(
-            proposed_session,
-            {
-                **outcome_metadata,
-                "accepted_by": "user",
-                "accepted_session_id": (
-                    proposed_session.candidate_session_id
-                    if proposed_session.candidate_session_id is not None
-                    else None
-                ),
-                "accepted_thread_id": (
-                    proposed_session.candidate_session.thread_id
-                    if proposed_session.candidate_session is not None
-                    else ""
-                ),
-            },
-        )
     update_values["outcome_metadata"] = outcome_metadata
     # Inbox decisions are one-way: only an undecided item may be resolved
     # (UNSET -> accepted/rejected/dismissed), matching the OUTCOME_UNSET filter
@@ -463,15 +428,6 @@ def update_proposed_session_outcome(
     stack_continuation_stopped = common._stop_autonomous_goal_stack_after_proposal_resolution(
         proposed_session
     )
-    if (
-        outcome_status == ProposedSession.OUTCOME_ACCEPTED
-        and proposed_session.candidate_session is not None
-    ):
-        common._rename_codex_thread_from_proposal(
-            proposed_session=proposed_session,
-            session_metadata=proposed_session.candidate_session,
-            settings=_stored_settings(request),
-        )
     if outcome_status in {
         ProposedSession.OUTCOME_DISMISSED,
         ProposedSession.OUTCOME_REJECTED,

@@ -1,79 +1,21 @@
-"""Derive a thread/session's PR, plan-mode, and auto-flag state.
-
-This module owns the helpers that read a thread's rollout, registered PR, and
-metadata to derive its PR state (URLs, snapshots, observation epochs), Plan
-Mode state, and auto-PR/auto-QA settings. It is a leaf module: it depends only
-on sibling helpers and never imports views.
-"""
+"""Derive a thread/session's registered PR, plan-mode, and auto-flag state."""
 
 from __future__ import annotations
 
-import logging
-import re
-from collections.abc import Iterable, Iterator, Mapping
-from pathlib import Path
 from typing import Any, NamedTuple
 
 from hitch.main.models import CodexInstance, SessionMetadata, SessionPullRequest
-from hitch.main.runtime import codex_events, codex_pool, rollout
+from hitch.main.runtime import codex_pool, rollout
 from hitch.main.runtime.rollout_state import _rollout_path_for
-from hitch.main.runtime.sdk_values import (
-    is_nonbool_int,
-    plain_sdk_value,
-    sdk_model_dump_value,
-    string_value,
-    value_for,
-)
-from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
-from hitch.main.sessions.pr_prompts import is_pr_creation_prompt, is_pr_workflow_notice
+from hitch.main.runtime.sdk_values import string_value
 from hitch.main.workflows import pr_tracking
 
-logger = logging.getLogger(__name__)
-
-_GITHUB_PR_TOOL_RE = re.compile(
-    r"(?i)(?:^|[/:\s._-])(?:github|mcp__codex_apps__github)(?:$|[/:\s._-]).*"
-    r"(?:_?create[_\s-]?(?:pr|pull[_\s-]?request)|open[_\s-]?(?:pr|pull[_\s-]?request))"
-)
-_GITHUB_PR_URL_RE = re.compile(
-    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
-)
-_GITHUB_PR_IDENTITY_RE = re.compile(
-    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
-)
 _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED = object()
 
 
 class _ThreadPlanModeState(NamedTuple):
     active: bool
     awaiting_approval: bool
-
-
-def _pr_observation_result_for_rollout_path(
-    rollout_path: Path | None,
-) -> codex_events.PrObservationResult:
-    if rollout_path is None:
-        return codex_events.PrObservationResult(snapshot=None)
-    try:
-        return rollout.latest_pr_observation_result(rollout_path)
-    except Exception:
-        logger.exception("failed to parse rollout %s for PR stage snapshot", rollout_path)
-        return codex_events.PrObservationResult(snapshot=None)
-
-
-def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
-    if not snapshot:
-        return None
-    url = string_value(snapshot.get("url"))
-    if url:
-        match = _GITHUB_PR_IDENTITY_RE.search(url)
-        if match is not None:
-            owner, repo, number = match.groups()
-            return f"{owner}/{repo}", int(number)
-    repo = string_value(snapshot.get("repository_full_name"))
-    number = snapshot.get("pr_number")
-    if repo and is_nonbool_int(number):
-        return repo, number
-    return None
 
 
 def _thread_plan_mode_state(
@@ -125,57 +67,6 @@ def _latest_rollout_collaboration_mode(thread: Any) -> str | None:
     return rollout.latest_collaboration_mode(rollout_path)
 
 
-def _pr_url_for_thread(thread: Any) -> str | None:
-    """Return the PR opened by the latest completed /pr turn, if any."""
-    turns = getattr(thread, "turns", []) or []
-    for turn in reversed(turns):
-        items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
-        if not _is_pr_creation_prompt_turn(items):
-            continue
-        final_idx = find_final_agent_idx(items)
-        if final_idx == -1:
-            continue
-        # The model can emit the create_pull_request MCP call in the same
-        # response that also carries the final-answer ``agentMessage``: the
-        # tool runs after that response, so the completed ``mcpToolCall`` item
-        # lands in the turn AFTER the final-answer item. ``items[:final_idx]``
-        # would silently drop that result and the session page would render
-        # no PR pill for the PR the user just opened. Iterate every item in
-        # the turn after confirming a final-answer exists; the ``-1`` guard
-        # above keeps incomplete turns out. Mirrors the fix applied to
-        # ``rollout.latest_pr_url`` for the function_call_output-after-final
-        # shape on the rollout path.
-        urls: list[str] = []
-        for item in items:
-            if _github_pr_tool_call_used(item):
-                urls.extend(_pr_urls_from_value(value_for(item, "result")))
-        return urls[-1] if urls else None
-    if turns:
-        return None
-    rollout_path = _rollout_path_for(thread)
-    return rollout.latest_pr_url(rollout_path) if rollout_path is not None else None
-
-
-def _current_pr_url_for_thread(
-    thread: Any,
-    *,
-    pr_observation: codex_events.PrObservationResult,
-    registered_pr: SessionPullRequest | None,
-    latest_pr_url: str | None = None,
-    latest_pr_url_loaded: bool = False,
-) -> str | None:
-    if registered_pr is not None:
-        return _registered_pr_url(registered_pr)
-    # A raw latest PR URL is only valid while the PR observation epoch is
-    # current. Lifecycle-cleared sessions must not expose old PR actions.
-    if not pr_observation.superseded_by_lifecycle:
-        thread_url = latest_pr_url if latest_pr_url_loaded else _pr_url_for_thread(thread)
-        if thread_url:
-            return thread_url
-    snapshot = pr_observation.snapshot
-    return string_value(snapshot.get("url") if snapshot else None) or None
-
-
 def _fix_pr_url_for_thread(session_id: str) -> str | None:
     registered_pr = pr_tracking.record_for_thread(session_id)
     return _registered_pr_url(registered_pr)
@@ -201,128 +92,6 @@ def _registered_pr_url(record: SessionPullRequest | None) -> str | None:
     ):
         return f"https://github.com/{repository}/pull/{number}"
     return None
-
-
-def _pr_snapshot_for_thread(thread: Any) -> dict[str, Any] | None:
-    return _pr_observation_result_for_thread(thread).snapshot
-
-
-def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservationResult:
-    turns = getattr(thread, "turns", []) or []
-    if not turns:
-        return _pr_observation_result_for_rollout_path(_rollout_path_for(thread))
-    observation_turns: list[codex_events.PrObservationTurn] = []
-    for turn in getattr(thread, "turns", []) or []:
-        items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
-        mcp_items = tuple(_mcp_tool_items_for_items(items))
-        is_pr_prompt = _turn_starts_pr_observation_epoch(items, mcp_items)
-        is_pr_workflow_notice = _is_pr_workflow_notice_turn(items)
-        final_idx = find_final_agent_idx(items)
-        # Scan the whole turn rather than ``items[:final_idx]``: the create_
-        # pull_request ``mcpToolCall`` (and any other GitHub MCP result) can
-        # land AFTER the final-answer ``agentMessage`` when the model emits
-        # the call and narrates it in the same response. Slicing here would
-        # leave ``pr_observation.snapshot`` missing the PR identity even
-        # though ``_pr_url_for_thread`` recovers the link, so the session
-        # stage badge and ``derived_stage`` cache fall back to
-        # ``IMPLEMENTATION`` and any ``closed``/``merged`` state is dropped.
-        observation_turns.append(
-            codex_events.PrObservationTurn(
-                is_pr_prompt=is_pr_prompt,
-                is_completed=final_idx != -1,
-                items=mcp_items,
-                has_lifecycle_activity=(
-                    not is_pr_prompt
-                    and not is_pr_workflow_notice
-                    and final_idx != -1
-                    and _turn_has_lifecycle_activity(items)
-                ),
-            )
-        )
-    return codex_events.pr_observation_result_from_turns(observation_turns)
-
-
-def _mcp_tool_items_for_items(items: Iterable[Any]) -> Iterator[dict[str, Any]]:
-    for item in items:
-        if value_for(item, "type") != "mcpToolCall":
-            continue
-        yield {
-            "type": "mcpToolCall",
-            "server": string_value(value_for(item, "server")),
-            "tool": string_value(value_for(item, "tool")),
-            "arguments": plain_sdk_value(value_for(item, "arguments")) or {},
-            "result": plain_sdk_value(value_for(item, "result")),
-        }
-
-
-def _is_pr_creation_prompt_turn(items: list[Any]) -> bool:
-    for item in items:
-        if value_for(item, "type") != "userMessage":
-            continue
-        if is_pr_creation_prompt(user_message_text(item)):
-            return True
-    return False
-
-
-def _is_pr_workflow_notice_turn(items: list[Any]) -> bool:
-    for item in items:
-        if value_for(item, "type") != "userMessage":
-            continue
-        if is_pr_workflow_notice(user_message_text(item)):
-            return True
-    return False
-
-
-def _turn_starts_pr_observation_epoch(
-    items: list[Any], mcp_items: tuple[dict[str, Any], ...]
-) -> bool:
-    if _is_pr_creation_prompt_turn(items):
-        return True
-    if not _is_pr_workflow_notice_turn(items):
-        return False
-    return codex_events.pr_snapshot_from_completed_mcp_items(mcp_items) is not None
-
-
-def _turn_has_lifecycle_activity(items: list[Any]) -> bool:
-    return any(
-        value_for(item, "type") in {"userMessage", "agentMessage"} for item in items
-    )
-
-
-def _github_pr_tool_call_used(item: Any) -> bool:
-    if value_for(item, "type") != "mcpToolCall":
-        return False
-    server = string_value(value_for(item, "server"))
-    tool = string_value(value_for(item, "tool"))
-    detail = f"{server} / {tool}".strip()
-    return _GITHUB_PR_TOOL_RE.search(detail) is not None
-
-
-def _pr_urls_from_value(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return _GITHUB_PR_URL_RE.findall(value)
-    if isinstance(value, dict):
-        urls: list[str] = []
-        for child in value.values():
-            urls.extend(_pr_urls_from_value(child))
-        return urls
-    if isinstance(value, list | tuple):
-        urls = []
-        for child in value:
-            urls.extend(_pr_urls_from_value(child))
-        return urls
-    text = string_value(value_for(value, "text"))
-    if text:
-        return _GITHUB_PR_URL_RE.findall(text)
-    dumped = sdk_model_dump_value(value)
-    if dumped is not value:
-        return _pr_urls_from_value(dumped)
-    urls = []
-    for attr in ("url", "display_url", "displayUrl", "structured_content", "content"):
-        urls.extend(_pr_urls_from_value(value_for(value, attr)))
-    return urls
 
 
 def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:

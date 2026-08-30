@@ -117,6 +117,9 @@ that lets Hitch display and refresh a session's registered PR.
   per thread. It contains the registered handoff, latest gates/result,
   ownership, stage-refresh bookkeeping, and optional Auto-pull result rather
   than executable workflow state.
+- `PRWATCH-display-source`: The current URL and PR stage come only from the
+  current `SessionPullRequest`; Hitch does not infer them from rollout text or
+  historical MCP calls.
 - `PRWATCH-lifecycle`: A later unrelated visible turn marks the registered PR
   historical so it no longer controls the current URL or stage. A PR watch
   follow-up preserves it, and a later successful task registration makes its

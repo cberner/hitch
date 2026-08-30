@@ -512,7 +512,8 @@ def _attach_proposed_session_display_state(
         metadata = _proposal_metadata(proposed_session)
         proposed_session.accept_auto_review_explicit = (  # type: ignore[attr-defined]
             proposed_session.autonomous_goal is not None
-            or metadata.get("resume_source_session") is True
+            or "auto_pr_enabled" in metadata
+            or "auto_qa_enabled" in metadata
         )
         proposed_session.stack_label = _proposed_session_stack_label(  # type: ignore[attr-defined]
             proposed_session

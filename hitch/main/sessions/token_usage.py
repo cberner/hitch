@@ -427,15 +427,13 @@ def _lifetime_token_usage_for_metadata(
     *,
     selected_project_id: int | None = None,
 ) -> dict[str, Any]:
-    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
-    hidden_thread_ids = system_agents.hidden_thread_ids(
-        accepted_visible_thread_ids=accepted_visible_thread_ids
-    )
+    legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
+    hidden_thread_ids = system_agents.hidden_thread_ids()
     hidden_thread_ids.update(
         metadata.thread_id
         for metadata in metadata_rows
         if metadata.codex_thread_source == "subagent"
-        and metadata.thread_id not in accepted_visible_thread_ids
+        and metadata.thread_id not in legacy_promoted_ids
     )
     cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
         metadata.thread_id for metadata in metadata_rows

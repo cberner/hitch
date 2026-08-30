@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -65,7 +65,6 @@ from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
     SessionMetadata,
-    SystemWorkflow,
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
@@ -702,25 +701,6 @@ class SpawnFailureTests(TestCase):
         self.assertEqual(metadata.codex_updated_at, instance.ended_at)
 
 
-class SpawnTurnTests(TestCase):
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_spawn_turn_persists_auto_qa_enabled(self, mock_launch: MagicMock) -> None:
-        mock_launch.return_value = SimpleNamespace(pid=1234)
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz",
-                cwd="/repo",
-                prompt="follow-up",
-                auto_qa_enabled=True,
-            )
-
-        instance.refresh_from_db()
-        self.assertTrue(instance.auto_qa_enabled)
-        self.assertFalse(instance.auto_pr_enabled)
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_marks_only_user_reviewer_approval_modes_live_editable(
@@ -1402,33 +1382,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         self.assertEqual(len(hierarchy_warnings), 1, logs.output)
 
 
-class IsAliveTests(TestCase):
-    def test_known_pid_states(self) -> None:
-        self.assertTrue(codex_pool.is_alive(os.getpid()))
-        self.assertFalse(codex_pool.is_alive(0))
-        self.assertFalse(codex_pool.is_alive(-1))
-        # 2**22 is well above the default pid_max on Linux/macOS.
-        self.assertFalse(codex_pool.is_alive(2**22))
 
-    def test_tracked_finished_worker_is_reaped_by_liveness_check(self) -> None:
-        pid = 98766
-        proc = MagicMock()
-        proc.wait.return_value = 0
-        try:
-            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                codex_pool._TRACKED_WORKER_PROCS[pid] = (
-                    42,
-                    cast(subprocess.Popen[bytes], proc),
-                )
-
-            self.assertFalse(codex_pool.is_alive(pid))
-
-            proc.wait.assert_called_once_with(timeout=0)
-            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                self.assertNotIn(pid, codex_pool._TRACKED_WORKER_PROCS)
-                self.assertIn((pid, 42), codex_pool._REAPED_WORKERS)
-        finally:
-            _forget_worker_pid(pid)
 
     def test_worker_is_alive_handles_unset_pid_and_tracked_running_process(self) -> None:
         self.assertFalse(codex_pool.worker_is_alive(CodexInstance(pid=0)))
@@ -1476,17 +1430,7 @@ class IsAliveTests(TestCase):
             stat_path.read_bytes.return_value = b"malformed"
             self.assertIsNone(codex_pool._linux_proc_state(1))
 
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_permission_error_means_alive(self, mock_kill: MagicMock) -> None:
-        # ``os.kill(pid, 0)`` raises PermissionError when the pid exists but
-        # is owned by another user; the process is still alive in that case.
-        mock_kill.side_effect = PermissionError
-        self.assertTrue(codex_pool.is_alive(1234))
 
-    @patch("hitch.main.runtime.codex_pool.os.kill")
-    def test_other_os_error_is_treated_as_dead(self, mock_kill: MagicMock) -> None:
-        mock_kill.side_effect = OSError
-        self.assertFalse(codex_pool.is_alive(1234))
 
 
 class CodexInstanceModelTests(TestCase):
@@ -2038,54 +1982,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(n, 1)
 
-    @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=True)
-    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_dead_for_workflow_scopes_pending_rows(
-        self,
-        _mock_worker_alive: MagicMock,
-        _mock_notify: MagicMock,
-        mock_reconcile: MagicMock,
-    ) -> None:
-        target_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
-            main_thread_id="main-thread",
-            cwd="/repo",
-        )
-        other_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
-            main_thread_id="other-thread",
-            cwd="/repo",
-        )
-        target = self._make(
-            pid=10,
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        )
-        other = self._make(
-            pid=11,
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        )
-        CodexInstance.objects.filter(pk=target.pk).update(
-            workflow_id=target_workflow.pk
-        )
-        CodexInstance.objects.filter(pk=other.pk).update(workflow_id=other_workflow.pk)
-
-        n = reconciliation.reconcile_dead_for_workflow(
-            target_workflow.pk,
-            main_thread_id=target_workflow.main_thread_id,
-        )
-
-        self.assertEqual(n, 1)
-        target.refresh_from_db()
-        other.refresh_from_db()
-        self.assertEqual(target.status, CodexInstance.STATUS_FAILED)
-        self.assertEqual(other.status, CodexInstance.STATUS_RUNNING)
-        mock_reconcile.assert_called_once_with(
-            main_thread_id=target_workflow.main_thread_id,
-            workflow_id=target_workflow.pk,
-        )
 
     def test_cleanup_keeps_attachment_ledger_for_unlink_failures(self) -> None:
         with (
@@ -2179,47 +2075,6 @@ class ReconcileAndLookupTests(TestCase):
                 retained_instance.input_attachment_paths, [str(retained_path)]
             )
 
-    def test_cleanup_input_images_for_thread_deletes_retained_thread_images(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw)),
-        ):
-            target_path = codex_pool.input_attachments_dir() / "target" / "1.png"
-            active_path = codex_pool.input_attachments_dir() / "active" / "1.png"
-            other_path = codex_pool.input_attachments_dir() / "other" / "1.png"
-            for path in (target_path, active_path, other_path):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"image")
-            target = self._make(thread_id="target", status=CodexInstance.STATUS_COMPLETED)
-            active = self._make(thread_id="target", status=CodexInstance.STATUS_RUNNING)
-            other = self._make(thread_id="other", status=CodexInstance.STATUS_COMPLETED)
-            CodexInstance.objects.filter(pk=target.pk).update(
-                input_image_paths=[str(target_path)],
-                input_attachment_paths=[str(target_path)],
-            )
-            CodexInstance.objects.filter(pk=active.pk).update(
-                input_image_paths=[str(active_path)],
-                input_attachment_paths=[str(active_path)],
-            )
-            CodexInstance.objects.filter(pk=other.pk).update(
-                input_image_paths=[str(other_path)],
-                input_attachment_paths=[str(other_path)],
-            )
-
-            codex_pool.cleanup_input_images_for_thread("target")
-
-            self.assertFalse(target_path.exists())
-            self.assertTrue(active_path.exists())
-            self.assertTrue(other_path.exists())
-            target.refresh_from_db()
-            active.refresh_from_db()
-            other.refresh_from_db()
-            self.assertEqual(target.input_image_paths, [])
-            self.assertEqual(target.input_attachment_paths, [])
-            self.assertFalse(target.input_attachment_cleanup_requested)
-            self.assertEqual(active.input_attachment_paths, [str(active_path)])
-            self.assertTrue(active.input_attachment_cleanup_requested)
-            self.assertEqual(other.input_attachment_paths, [str(other_path)])
 
     def test_cleanup_keeps_attachment_ledger_for_paths_outside_root(self) -> None:
         outside_path = "/tmp/not-hitch-input.png"
@@ -2261,9 +2116,8 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.runtime.codex_pool.is_alive", return_value=True)
     def test_reconcile_marks_recycled_pid_failed(
-        self, mock_alive: MagicMock, mock_identity: MagicMock
+        self, mock_identity: MagicMock
     ) -> None:
         instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
 
@@ -2274,7 +2128,6 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertIn("exited", instance.error)
         mock_identity.assert_called_once_with(4321, instance.pk)
-        mock_alive.assert_not_called()
 
     def test_reconcile_sweeps_finished_tracked_workers(self) -> None:
         pid = 98768
@@ -2323,17 +2176,6 @@ class ReconcileAndLookupTests(TestCase):
         finally:
             _forget_worker_pid(pid)
 
-    def test_list_and_latest_for_thread(self) -> None:
-        first = self._make(thread_id="t1")
-        second = self._make(thread_id="t1")
-        self._make(thread_id="t2")
-
-        self.assertEqual(
-            [r.pk for r in codex_pool.list_for_thread("t1")],
-            [second.pk, first.pk],
-        )
-        self.assertEqual(codex_pool.latest_for_thread("t1"), second)
-        self.assertIsNone(codex_pool.latest_for_thread("nothing"))
 
 
 class ReapScopeCgroupTests(TestCase):
@@ -2749,91 +2591,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
         # Never act on incomplete information.
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
-
-
-class FinalizeReapedInstanceTests(TestCase):
-    def _make(
-        self,
-        *,
-        status: str,
-        auto_pr_enabled: bool = False,
-        auto_qa_enabled: bool = False,
-        auto_pr_triggered_at: datetime | None = None,
-        plan_mode: bool = False,
-        workflow_id: int | None = None,
-        purpose: str = CodexInstance.PURPOSE_USER,
-    ) -> CodexInstance:
-        return CodexInstance.objects.create(
-            pid=1,
-            thread_id="t",
-            cwd="/r",
-            events_path="/dev/null",
-            status=status,
-            purpose=purpose,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-            auto_pr_triggered_at=auto_pr_triggered_at,
-            plan_mode=plan_mode,
-            workflow_id=workflow_id,
-        )
-
-    @patch(
-        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
-        return_value=False,
-    )
-    def test_completed_auto_pr_not_fired_is_marked_failed(
-        self, _mock_skipped: MagicMock
-    ) -> None:
-        done = self._make(
-            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
-        )
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        done.refresh_from_db()
-        self.assertEqual(done.status, CodexInstance.STATUS_FAILED)
-        self.assertIn("auto-PR", done.error)
-        self.assertIn("retry", done.error)
-
-    @patch(
-        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
-        return_value=True,
-    )
-    def test_completed_auto_pr_intentionally_skipped_is_preserved(
-        self, _mock_skipped: MagicMock
-    ) -> None:
-        # Visible-approval mode / pending proposed plan: the null trigger is by
-        # design, so a successful turn must not be rewritten as failed.
-        done = self._make(
-            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
-        )
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        done.refresh_from_db()
-        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
-        self.assertEqual(done.error, "")
-
-    @patch(
-        "hitch.main.workflows.system_agents.auto_review_intentionally_skipped",
-        side_effect=RuntimeError("boom"),
-    )
-    def test_completed_auto_pr_preserved_when_intent_check_errors(
-        self, _mock_skipped: MagicMock
-    ) -> None:
-        # If we cannot determine auto-review intent, bias against a false
-        # failure and leave the completed turn intact.
-        done = self._make(
-            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
-        )
-
-        reconciliation._finalize_reaped_instance(done.pk)
-
-        done.refresh_from_db()
-        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
-        self.assertEqual(done.error, "")
-
-
 class IterRunningWorkerPidsTests(SimpleTestCase):
     def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
         pid_dir = proc_root / str(pid)
@@ -3717,36 +3474,7 @@ class SteerInstanceTests(TestCase):
             side_effect=append_and_ack,
         )
 
-    @patch("hitch.main.runtime.codex_pool._steer_instance")
-    def test_steer_active_targets_latest_active_instance(
-        self, mock_steer: MagicMock
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            active = self._make(
-                thread_id="t",
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "active.jsonl"),
-            )
-            self._make(
-                thread_id="other",
-                status=CodexInstance.STATUS_RUNNING,
-                events_path=str(Path(raw) / "other.jsonl"),
-            )
-            mock_steer.return_value = active
 
-            result = codex_pool.steer_active("t", prompt="also do this")
-
-        self.assertEqual(result, active)
-        mock_steer.assert_called_once_with(active, prompt="also do this")
-
-    @patch("hitch.main.runtime.codex_pool._steer_instance")
-    def test_steer_active_returns_none_without_active_instance(
-        self, mock_steer: MagicMock
-    ) -> None:
-        result = codex_pool.steer_active("missing", prompt="also do this")
-
-        self.assertIsNone(result)
-        mock_steer.assert_not_called()
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")

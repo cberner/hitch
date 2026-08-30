@@ -75,14 +75,10 @@ class SessionStageTests(SimpleTestCase):
 
         self.assertEqual(stage, session_stage.PLAN)
 
-    def test_registered_pr_identity_wins_over_unrelated_log_snapshot(self) -> None:
+    def test_registered_pr_identity_sets_pr_stage(self) -> None:
         stage = session_stage.derive_stage(
             entries=[{"kind": "user"}],
             pr_snapshot={
-                "url": "https://github.com/cberner/hitch/pull/93",
-                "state": "closed",
-            },
-            registered_pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/94",
                 "state": "open",
             },
@@ -90,17 +86,13 @@ class SessionStageTests(SimpleTestCase):
 
         self.assertEqual(stage, session_stage.PR)
 
-    def test_terminal_log_observation_wins_for_registered_pr(self) -> None:
+    def test_terminal_registered_pr_sets_done_stage(self) -> None:
         stage = session_stage.derive_stage(
             entries=[{"kind": "user"}],
             pr_snapshot={
                 "url": "https://github.com/cberner/hitch/pull/93",
                 "state": "closed",
                 "merged": True,
-            },
-            registered_pr_snapshot={
-                "url": "https://github.com/cberner/hitch/pull/93",
-                "state": "open",
             },
         )
 

@@ -24,7 +24,6 @@ from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.models import (
     AutonomousGoal,
-    CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
@@ -35,13 +34,11 @@ from hitch.main.sessions import (
     agent_tasks,
     session_settings,
 )
-from hitch.main.sessions.settings_cookies import SettingsValues
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
     _make_model,
     _make_project,
-    _rollout_line,
     _seed_cookies,
     _setup_codex,
 )
@@ -59,9 +56,6 @@ from hitch.main.test.views_helpers import (
     _USE_WORKTREES_COOKIE,
     _WEB_SEARCH_COOKIE,
     _FailingUploadWriter,
-    _make_rollout,
-    _run_borrowed_with,
-    _session,
     _UnreadableUpload,
 )
 from hitch.main.views import common as common_views
@@ -755,760 +749,88 @@ class NewSessionViewTests(TestCase):
         )
         self._assert_new_session_spawn(
             mock_spawn,
-            prompt=prompt,
+            prompt=agent_tasks.with_automatic_review_guidance(
+                prompt,
+                auto_pr_enabled=False,
+                auto_qa_enabled=True,
+            ),
             thread_name="Add parser coverage",
-            auto_qa_enabled=True,
         )
 
-    @patch(
-        "hitch.main.views.new_session._next_user_message_index_for_candidate_thread",
-        return_value=0,
-    )
-    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_upgrade_recovery_proposal_resumes_original_no_project_session(
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    def test_upgrade_recovery_starts_fresh_with_stored_target_and_auto_pr(
         self,
-        mock_turn: MagicMock,
-        mock_new_session: MagicMock,
+        _mock_discover: MagicMock,
+        mock_spawn: MagicMock,
         mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        _mock_managed_worktrees: MagicMock,
-        mock_next_user_message_index: MagicMock,
     ) -> None:
-        recovery_repo = "/preserved/recovery-repo"
-        mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
-        source_session = SessionMetadata.objects.create(
-            thread_id="interrupted-request",
-            cwd=recovery_repo,
-            project_cleared=True,
-            codex_name="Original session title",
-            codex_display_title="Original session title",
+        source = SessionMetadata.objects.create(
+            thread_id="legacy-source",
+            cwd=self.REPO,
+            auto_pr_enabled=False,
         )
-        prompt = "Implement the accepted request\n\n```python\ndef preserved():\n    return 'exact indentation'\n```"
         proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt=prompt,
+            source_session=source,
+            title="Recovered request",
+            prompt="Finish the interrupted request.",
             outcome_metadata={
                 "resume_source_session": True,
                 "auto_pr_enabled": True,
                 "auto_qa_enabled": False,
             },
         )
+        mock_spawn.return_value = SimpleNamespace(thread_id="fresh-recovery")
 
-        with patch.object(
-            new_session_views,
-            "_recovery_cwd_is_usable",
-            return_value=True,
-        ):
-            response = self.client.post(
+        with patch("hitch.main.repos.repo_root", return_value=Path(self.REPO)):
+            get_response = self.client.get(
                 reverse("new_session"),
-                data={
-                    "project": session_settings._BARE_REPO_PROJECT_VALUE,
-                    "cwd": recovery_repo,
-                    "prompt": prompt,
+                {"proposed_session": str(proposal.pk)},
+            )
+            post_response = self.client.post(
+                reverse("new_session"),
+                {
+                    "prompt": proposal.prompt,
+                    "cwd": self.REPO,
                     "proposed_session": str(proposal.pk),
                     "auto_pr": "false",
                 },
             )
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": source_session.thread_id}),
-        )
-        mock_new_session.assert_not_called()
-        self.assertEqual(mock_turn.call_args.kwargs["prompt"], prompt)
-        self.assertEqual(mock_turn.call_args.kwargs["cwd"], recovery_repo)
-        self.assertIs(mock_turn.call_args.kwargs["auto_pr_enabled"], True)
-        mock_next_user_message_index.assert_called_once()
-        self.assertNotIn("rebase", mock_turn.call_args.kwargs["prompt"].lower())
-        proposal.refresh_from_db()
-        source_session.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        self.assertEqual(proposal.accepted_session, source_session)
-        self.assertEqual(source_session.codex_name, "Original session title")
-        self.assertEqual(source_session.codex_display_title, "Original session title")
-        self.assertTrue(source_session.auto_pr_enabled)
-        self.assertFalse(source_session.auto_qa_enabled)
-
-    @patch("hitch.main.views.new_session._unarchive_session_for_turn")
-    @patch("hitch.main.views.new_session._next_user_message_index_for_candidate_thread")
-    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_upgrade_recovery_unarchives_source_with_stale_archive_flag(
-        self,
-        mock_turn: MagicMock,
-        mock_new_session: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        _mock_managed_worktrees: MagicMock,
-        mock_next_user_message_index: MagicMock,
-        mock_unarchive: MagicMock,
-    ) -> None:
-        recovery_repo = "/preserved/archived-recovery-repo"
-        mock_discover.return_value = [Path(self.REPO)]
-        _setup_codex(mock_codex, models=[])
-        project = _make_project(repo_path=self.REPO)
-        archived_root = tempfile.TemporaryDirectory()
-        self.addCleanup(archived_root.cleanup)
-        archived_rollout = (
-            Path(archived_root.name)
-            / "archived_sessions"
-            / "2026"
-            / "08"
-            / "28"
-            / "rollout-2026-08-28T12-00-00-archived-interrupted-request.jsonl"
-        )
-        archived_rollout.parent.mkdir(parents=True)
-        archived_rollout.write_text("", encoding="utf-8")
-        source_session = SessionMetadata.objects.create(
-            thread_id="archived-interrupted-request",
-            cwd=recovery_repo,
-            codex_archived=False,
-            codex_archived_at=timezone.now(),
-            codex_path=str(archived_rollout),
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt="Continue the archived request.",
-            outcome_metadata={
-                "resume_source_session": True,
-                "auto_pr_enabled": False,
-                "auto_qa_enabled": True,
-            },
-        )
-
-        def next_user_message_index(*_args: Any) -> int:
-            self.assertTrue(mock_unarchive.called)
-            return 0
-
-        mock_next_user_message_index.side_effect = next_user_message_index
-
-        with patch.object(
-            new_session_views,
-            "_recovery_cwd_is_usable",
-            return_value=True,
-        ):
-            response = self.client.post(
-                reverse("new_session"),
-                data={
-                    "project": str(project.pk),
-                    "prompt": proposal.prompt,
-                    "proposed_session": str(proposal.pk),
-                    "auto_qa": "false",
-                },
-            )
-
-        self.assertEqual(response.status_code, 302)
-        mock_unarchive.assert_called_once()
-        self.assertEqual(mock_unarchive.call_args.args[0], source_session.thread_id)
-        mock_new_session.assert_not_called()
-        mock_turn.assert_called_once()
-        mock_next_user_message_index.assert_called_once()
-        self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 0)
-        self.assertEqual(mock_turn.call_args.kwargs["cwd"], recovery_repo)
-        self.assertIs(mock_turn.call_args.kwargs["auto_qa_enabled"], True)
-        source_session.refresh_from_db()
-        self.assertFalse(source_session.codex_archived)
-        self.assertIsNone(source_session.codex_archived_at)
-        self.assertEqual(source_session.codex_path, "")
-        self.assertEqual(source_session.project, project)
-        self.assertFalse(source_session.project_cleared)
-        self.assertFalse(source_session.auto_pr_enabled)
-        self.assertTrue(source_session.auto_qa_enabled)
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.accepted_session, source_session)
-
-    @patch("hitch.main.views.new_session._restore_archived_session_for_rejected_turn")
-    @patch("hitch.main.views.new_session._record_session_unarchived")
-    @patch("hitch.main.views.new_session._unarchive_session_for_turn")
-    def test_upgrade_recovery_rearchives_source_when_start_is_rejected(
-        self,
-        mock_unarchive: MagicMock,
-        mock_record_unarchived: MagicMock,
-        mock_restore_archived: MagicMock,
-    ) -> None:
-        source_session = SessionMetadata.objects.create(
-            thread_id="rejected-archived-recovery",
-            cwd=self.REPO,
-            codex_archived=True,
-            codex_archived_at=timezone.now(),
-        )
-        proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            outcome_metadata={"resume_source_session": True},
-        )
-        settings = cast(SettingsValues, SimpleNamespace(enable_memories=False))
-
-        with (
-            self.assertRaisesRegex(RuntimeError, "start rejected"),
-            new_session_views._recovery_source_lifecycle_for_turn(
-                proposal,
-                source_session,
-                settings,
-            ) as lifecycle_lock_held,
-        ):
-            self.assertTrue(lifecycle_lock_held)
-            raise RuntimeError("start rejected")
-
-        mock_unarchive.assert_called_once_with(source_session.thread_id, settings)
-        mock_record_unarchived.assert_called_once_with(source_session.thread_id)
-        mock_restore_archived.assert_called_once_with(
-            source_session.thread_id,
-            settings,
-        )
-
-    @patch("hitch.main.repos.pull_default_branch_from_origin")
-    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.repos.discover_repos", return_value=[])
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_upgrade_recovery_rejects_busy_source_session(
-        self,
-        mock_turn: MagicMock,
-        mock_new_session: MagicMock,
-        mock_codex: MagicMock,
-        _mock_discover: MagicMock,
-        _mock_managed_worktrees: MagicMock,
-        mock_pull: MagicMock,
-    ) -> None:
-        _setup_codex(mock_codex, models=[])
-
-        cases = (
-            ("turn", "Continue the preserved request."),
-            ("review task", "/qa"),
-        )
-        for index, (active_kind, prompt) in enumerate(cases):
-            with self.subTest(active_kind=active_kind, prompt=prompt):
-                thread_id = f"busy-recovery-{index}"
-                recovery_repo = f"/preserved/busy-recovery-{index}"
-                project = _make_project(
-                    name=f"Recovery {index}",
-                    repo_path=recovery_repo,
-                    auto_pull_enabled=True,
-                )
-                source_session = SessionMetadata.objects.create(
-                    thread_id=thread_id,
-                    cwd=recovery_repo,
-                    project=project,
-                )
-                proposal = ProposedSession.objects.create(
-                    project=project,
-                    source_session=source_session,
-                    title="Request not started during upgrade",
-                    prompt=prompt,
-                    outcome_metadata={"resume_source_session": True},
-                )
-                CodexInstance.objects.create(
-                    pid=12345,
-                    thread_id=thread_id,
-                    cwd=recovery_repo,
-                    prompt="Other active work",
-                    events_path="/tmp/active-events.jsonl",
-                    status=CodexInstance.STATUS_RUNNING,
-                    agent_kind=(
-                        agent_tasks.REVIEW_AGENT_KIND
-                        if active_kind == "review task"
-                        else ""
-                    ),
-                )
-
-                with patch.object(
-                    new_session_views,
-                    "_recovery_cwd_is_usable",
-                    return_value=True,
-                ):
-                    response = self.client.post(
-                        reverse("new_session"),
-                        data={
-                            "project": str(project.pk),
-                            "prompt": proposal.prompt,
-                            "proposed_session": str(proposal.pk),
-                        },
-                    )
-
-                self.assertContains(
-                    response,
-                    "source session is already running work",
-                    status_code=400,
-                )
-                proposal.refresh_from_db()
-                self.assertEqual(
-                    proposal.outcome_status,
-                    ProposedSession.OUTCOME_UNSET,
-                )
-                self.assertIsNone(proposal.accepted_session)
-                self.assertNotIn(
-                    ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
-                    proposal.outcome_metadata,
-                )
-
-        mock_turn.assert_not_called()
-        mock_new_session.assert_not_called()
-        mock_pull.assert_not_called()
-
-    def test_upgrade_recovery_falls_back_to_project_when_source_checkout_is_missing(
-        self,
-    ) -> None:
-        project = _make_project(repo_path=self.REPO)
-        source_session = SessionMetadata.objects.create(
-            thread_id="removed-recovery-worktree",
-            cwd="/removed/managed-worktree",
-            project=project,
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt="Continue from a usable checkout.",
-            outcome_metadata={"resume_source_session": True},
-        )
-
-        def repo_root(cwd: str) -> Path | None:
-            return Path(self.REPO) if cwd == self.REPO else None
-
-        with (
-            patch.object(repos_module, "repo_root", side_effect=repo_root),
-            patch("hitch.main.views.common.Codex") as mock_codex,
-            patch("hitch.main.runtime.codex_pool.spawn_new_session") as mock_new_session,
-            patch("hitch.main.runtime.codex_pool.spawn_turn") as mock_turn,
-        ):
-            _setup_codex(mock_codex, models=[])
-            mock_new_session.return_value = SimpleNamespace(thread_id="recovered-fresh")
-
-            get_response = self.client.get(
-                f"{reverse('new_session')}?proposed_session={proposal.pk}"
-            )
-            response = self.client.post(
-                reverse("new_session"),
-                data={
-                    "project": str(project.pk),
-                    "prompt": proposal.prompt,
-                    "proposed_session": str(proposal.pk),
-                },
-            )
-
         self.assertEqual(get_response.status_code, 200)
-        self.assertEqual(response.status_code, 302)
-        mock_turn.assert_not_called()
+        self.assertEqual(post_response.status_code, 302)
+        accepted = SessionMetadata.objects.get(thread_id="fresh-recovery")
+        self.assertNotEqual(accepted.pk, source.pk)
+        self.assertTrue(accepted.auto_pr_enabled)
+        source.refresh_from_db()
+        self.assertFalse(source.auto_pr_enabled)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.accepted_session, accepted)
         self._assert_new_session_spawn(
-            mock_new_session,
-            prompt=proposal.prompt,
+            mock_spawn,
+            prompt=agent_tasks.with_automatic_review_guidance(
+                proposal.prompt,
+                auto_pr_enabled=True,
+                auto_qa_enabled=False,
+                pr_title=proposal.title,
+            ),
             thread_name=proposal.title,
-        )
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        accepted_session = proposal.accepted_session
-        self.assertIsNotNone(accepted_session)
-        assert accepted_session is not None
-        self.assertEqual(accepted_session.thread_id, "recovered-fresh")
-        self.assertNotEqual(accepted_session, source_session)
-
-    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    @patch("hitch.main.repos.repo_root", return_value=None)
-    def test_upgrade_recovery_keeps_proposal_when_no_checkout_is_usable(
-        self,
-        _mock_repo_root: MagicMock,
-        mock_turn: MagicMock,
-        mock_new_session: MagicMock,
-    ) -> None:
-        source_session = SessionMetadata.objects.create(
-            thread_id="missing-projectless-recovery",
-            cwd="/removed/managed-worktree",
-            project_cleared=True,
-        )
-        proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt="Keep this request available.",
-            outcome_metadata={"resume_source_session": True},
-        )
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "project": session_settings._BARE_REPO_PROJECT_VALUE,
-                "cwd": source_session.cwd,
-                "prompt": proposal.prompt,
-                "proposed_session": str(proposal.pk),
-            },
-        )
-
-        self.assertContains(
-            response,
-            "recovery repository is unavailable",
-            status_code=400,
-        )
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertIsNone(proposal.accepted_session)
-        mock_turn.assert_not_called()
-        mock_new_session.assert_not_called()
-
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_candidate_worktree_uses_local_instance_for_next_user_message_index(
-        self,
-        mock_turn: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        codex = _setup_codex(mock_codex, models=[])
-        codex._client.thread_resume.side_effect = AssertionError("thread_resume should not be needed")
-        project = _make_project(repo_path=self.REPO)
-        goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-            auto_qa_enabled=True,
-        )
-        candidate = SessionMetadata.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            project=project,
-        )
-        CodexInstance.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            prompt="Find useful test coverage increments.",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            pid=123,
+            agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND,
             user_message_index=0,
         )
-        proposal = ProposedSession.objects.create(
-            autonomous_goal=goal,
-            candidate_session=candidate,
-            title="Add parser coverage",
-            outcome_metadata={
-                "auto_qa_enabled": True,
-                "approved_snapshot_sha": "",
-            },
-        )
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 1)
-        codex._client.thread_resume.assert_not_called()
 
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_candidate_worktree_resumes_thread_when_latest_local_index_failed(
-        self,
-        mock_turn: MagicMock,
-        mock_run_borrowed: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        codex = _setup_codex(mock_codex, models=[])
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {
-                        "type": "user_message",
-                        "message": "Find useful test coverage increments.",
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Failed retry."},
-                ),
-            ],
-        )
-        codex._client.thread_resume.return_value = SimpleNamespace(
-            thread=_session("candidate-thread", path=str(rollout_path))
-        )
-        mock_run_borrowed.side_effect = _run_borrowed_with(codex)
-        project = _make_project(repo_path=self.REPO)
-        goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-            auto_qa_enabled=True,
-        )
-        candidate = SessionMetadata.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            project=project,
-        )
-        CodexInstance.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            prompt="Find useful test coverage increments.",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_COMPLETED,
-            pid=123,
-            user_message_index=0,
-        )
-        CodexInstance.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            prompt="Failed retry.",
-            events_path="/tmp/events-failed.jsonl",
-            status=CodexInstance.STATUS_FAILED,
-            pid=124,
-            user_message_index=1,
-        )
-        proposal = ProposedSession.objects.create(
-            autonomous_goal=goal,
-            candidate_session=candidate,
-            title="Add parser coverage",
-            outcome_metadata={"auto_qa_enabled": True},
-        )
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 2)
-        codex._client.thread_resume.assert_called_once_with("candidate-thread")
-        mock_run_borrowed.assert_called_once()
-        self.assertIs(mock_run_borrowed.call_args.args[0], mock_codex)
-        self.assertEqual(
-            mock_run_borrowed.call_args.kwargs,
-            {"enable_memories": False},
-        )
 
-    @patch("hitch.main.views.new_session._auto_review_settings_for_proposed_session")
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_candidate_accept_losing_race_aborts_to_inbox(
-        self,
-        mock_turn: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-        mock_auto_review: MagicMock,
-    ) -> None:
-        # Stale-tab race: new_session fetched the still-unset proposal and began
-        # continuing its candidate worktree, but an inbox reject commits before
-        # the accept transition runs. The accept must lose, and the caller must
-        # abort to the inbox rather than unhide the candidate (whose worktree the
-        # reject path may have cleaned up) and redirect to it as a live session.
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        _setup_codex(mock_codex, models=[])
-        project = _make_project(repo_path=self.REPO)
-        goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-        )
-        candidate = SessionMetadata.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            project=project,
-            is_hidden_system_session=True,
-        )
-        proposal = ProposedSession.objects.create(
-            autonomous_goal=goal,
-            candidate_session=candidate,
-            title="Add parser coverage",
-        )
 
-        def reject_concurrently(*_args: Any, **_kwargs: Any) -> tuple[bool, bool]:
-            ProposedSession.objects.filter(pk=proposal.pk).update(
-                outcome_status=ProposedSession.OUTCOME_REJECTED,
-                outcome_notes="Resolved from another tab.",
-            )
-            return False, False
 
-        mock_auto_review.side_effect = reject_concurrently
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], reverse("inbox"))
-        proposal.refresh_from_db()
-        candidate.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
-        self.assertIsNone(proposal.accepted_session)
-        # The losing accept must not have adopted the candidate as a live session.
-        self.assertTrue(candidate.is_hidden_system_session)
-        mock_turn.assert_not_called()
 
-    @patch("hitch.main.views.common.goal_workflows.stop_running_autonomous_goal_stack_after_proposal_resolution")
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_candidate_worktree_qa_start_failure_resets_accept_claim(
-        self,
-        mock_turn: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-        mock_stop_stack: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        codex = _setup_codex(mock_codex, models=[])
-        codex._client.thread_resume.return_value = SimpleNamespace(thread=SimpleNamespace(turns=[]))
-        mock_turn.side_effect = RuntimeError("turn failed")
-        project = _make_project(repo_path=self.REPO)
-        goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-        )
-        candidate = SessionMetadata.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            project=project,
-            is_hidden_system_session=True,
-        )
-        proposal = ProposedSession.objects.create(
-            autonomous_goal=goal,
-            candidate_session=candidate,
-            title="Add parser coverage",
-        )
-
-        with self.assertRaises(RuntimeError):
-            self.client.post(
-                reverse("new_session"),
-                data={
-                    "prompt": "/qa",
-                    "cwd": self.REPO,
-                    "proposed_session": str(proposal.pk),
-                },
-            )
-
-        mock_turn.assert_called_once()
-        proposal.refresh_from_db()
-        candidate.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertIsNone(proposal.accepted_session)
-        self.assertTrue(candidate.is_hidden_system_session)
-        mock_stop_stack.assert_not_called()
-
-    @patch("hitch.main.worktrees.discover_managed_worktrees")
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
-    def test_candidate_worktree_slash_command_preserves_goal_auto_review(
-        self,
-        mock_turn: MagicMock,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_managed_worktrees: MagicMock,
-    ) -> None:
-        # Accepting an autonomous-goal proposal with a /qa (or /pr) prompt must
-        # persist the goal-derived auto-review configuration onto the session,
-        # so subsequent turns keep honoring it rather than silently reverting
-        # to manual review.
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        codex = _setup_codex(mock_codex, models=[])
-        codex._client.thread_resume.return_value = SimpleNamespace(thread=SimpleNamespace(turns=[]))
-        project = _make_project(repo_path=self.REPO)
-        goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
-            auto_qa_enabled=True,
-        )
-        candidate = SessionMetadata.objects.create(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            project=project,
-            is_hidden_system_session=True,
-        )
-        proposal = ProposedSession.objects.create(
-            autonomous_goal=goal,
-            candidate_session=candidate,
-            title="Add parser coverage",
-            outcome_metadata={
-                "auto_pr_enabled": False,
-                "auto_qa_enabled": True,
-            },
-        )
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "/qa",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "candidate-thread"}),
-        )
-        mock_turn.assert_called_once_with(
-            thread_id="candidate-thread",
-            cwd="/repo-worktree",
-            prompt=agent_tasks.review_task(prepare_pull_request=False).prompt,
-            sandbox_policy="workspaceWrite",
-            approval_mode="auto_review",
-            model=None,
-            reasoning_effort=None,
-            developer_instructions=None,
-            enable_memories=False,
-            user_message_index=0,
-            agent_kind=agent_tasks.REVIEW_AGENT_KIND,
-        )
-        proposal.refresh_from_db()
-        candidate.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        self.assertEqual(proposal.accepted_session, candidate)
-        self.assertFalse(candidate.is_hidden_system_session)
-        # The goal enabled auto-QA; the accepted session must retain it so
-        # future turns continue to review.
-        self.assertFalse(candidate.auto_pr_enabled)
-        self.assertTrue(candidate.auto_qa_enabled)
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -1697,7 +1019,11 @@ class NewSessionViewTests(TestCase):
                 self.assertEqual(metadata.auto_pr_enabled, case["expected"])
                 expected_spawn: dict[str, Any] = {
                     "cwd": repo,
-                    "prompt": "do thing",
+                    "prompt": agent_tasks.with_automatic_review_guidance(
+                        "do thing",
+                        auto_pr_enabled=case["expected"],
+                        auto_qa_enabled=False,
+                    ),
                     "developer_instructions": None,
                     "model": None,
                     "reasoning_effort": None,
@@ -1705,7 +1031,8 @@ class NewSessionViewTests(TestCase):
                     "approval_mode": "auto_review",
                 }
                 if case["expected"]:
-                    expected_spawn["auto_pr_enabled"] = True
+                    expected_spawn["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
+                    expected_spawn["user_message_index"] = 0
                 mock_spawn.assert_called_once_with(**expected_spawn)
 
     @patch("hitch.main.views.common.Codex")
@@ -2225,6 +1552,76 @@ class NewSessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_spawn.call_args.kwargs["sandbox_policy"], "readOnly")
+
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
+    @patch("hitch.main.views.new_session.snapshot_worktree_to_commit")
+    @patch("hitch.main.views.common.create_worktree_for_session")
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    def test_legacy_ag_candidate_is_snapshotted_into_fresh_session(
+        self,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_snapshot: MagicMock,
+        mock_cleanup_candidate: MagicMock,
+    ) -> None:
+        project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="legacy-candidate",
+            cwd="/candidate",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            candidate_session=candidate,
+            outcome_metadata={
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            },
+        )
+        snapshot = "b" * 40
+        worktree = ManagedWorktree(
+            path=Path("/home/user/.hitch/worktrees/proj/legacy-snapshot"),
+            branch="hitch/proj/legacy-snapshot",
+            source_repo=Path(self.REPO),
+        )
+        mock_snapshot.return_value = snapshot
+        mock_create_worktree.return_value = worktree
+        mock_spawn.return_value = SimpleNamespace(thread_id="visible-thread")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Continue the proposed work.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_snapshot.assert_called_once_with(
+            candidate.cwd,
+            message="Snapshot legacy autonomous-goal proposal",
+        )
+        mock_create_worktree.assert_called_once_with(
+            self.REPO, base_ref=snapshot
+        )
+        self.assertEqual(mock_spawn.call_args.kwargs["cwd"], str(worktree.path))
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertIsNotNone(proposal.accepted_session)
+        assert proposal.accepted_session is not None
+        self.assertEqual(proposal.accepted_session.thread_id, "visible-thread")
+        self.assertNotEqual(proposal.accepted_session_id, candidate.pk)
+        mock_cleanup_candidate.assert_called_once_with(candidate.cwd)
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch("hitch.main.views.new_session.release_snapshot_commit_ref")

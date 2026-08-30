@@ -45,7 +45,3 @@ class RateLimitTests(TestCase):
         self.assertFalse(RefreshThrottle.objects.filter(key="k").exists())
         # A claim is still available because `due` recorded nothing.
         self.assertTrue(rate_limit.claim("k", now=self.now))
-
-    def test_mark_blocks_a_following_claim(self) -> None:
-        rate_limit.mark("k", now=self.now)
-        self.assertFalse(rate_limit.claim("k", now=self.now + timedelta(seconds=30)))

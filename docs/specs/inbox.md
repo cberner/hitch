@@ -77,12 +77,15 @@ acknowledge notices from Hitch background systems.
 - `INBOX-proposal-display`: The Inbox displays Proposal source, confidence,
   relevant files, stack labels, token usage, stack-stop reason, and candidate or
   judge logs when available.
-- `INBOX-proposal-accept`: Accepting a Proposal starts or continues a normal
+- `INBOX-proposal-accept`: Accepting a Proposal starts a fresh normal
   user-visible session using the Proposal prompt and source context.
-- `INBOX-proposal-candidate`: A non-AG Proposal may continue an eligible source
-  candidate thread. An AG Proposal instead starts a fresh visible thread and
-  worktree from its approved candidate snapshot; hidden AG candidate and judge
-  threads remain hidden.
+- `INBOX-proposal-candidate`: An AG Proposal starts its fresh visible session
+  and worktree from the approved candidate snapshot. Hidden candidate and judge
+  threads remain hidden and are never promoted into user-visible sessions.
+  Pending implementation proposals created before snapshot-based acceptance
+  snapshot their candidate checkout when starting the fresh visible session.
+  Candidate threads promoted by older Hitch versions remain visible after an
+  upgrade, but no new acceptance uses that path.
 - `INBOX-proposal-reject`: Rejecting a Proposal requires a user-provided reason.
 - `INBOX-proposal-dismiss`: Dismissing a Proposal resolves it without requiring a
   reason.

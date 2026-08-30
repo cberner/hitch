@@ -24,7 +24,7 @@ from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
 )
-from hitch.main.runtime import app_server_pool, codex_events, codex_pool, rollout
+from hitch.main.runtime import app_server_pool, codex_pool, rollout
 from hitch.main.runtime.rollout_state import (
     _ARCHIVED_SESSIONS_DIR,
     _rollout_path_from_value,
@@ -268,8 +268,6 @@ def _metadata_resume_for_inactive_session(
                 rollout_path
             ),
             latest_model_config=model_config,
-            latest_pr_url=None,
-            pr_observation=codex_events.PrObservationResult(None),
         )
     else:
         rollout_data = _session_detail_data_for_metadata_resume(rollout_path)

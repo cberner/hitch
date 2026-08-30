@@ -27,6 +27,7 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
+from hitch.main.workflows import system_agents
 
 _SESSION_PAGE_SIZE = 50
 
@@ -36,7 +37,6 @@ def _system_session_metadata_rows(
     current_project: Project | None,
     show_archived: bool,
     system_thread_ids: set[str],
-    accepted_visible_thread_ids: set[str],
 ) -> QuerySet[SessionMetadata]:
     rows = (
         SessionMetadata.objects.exclude(codex_updated_at__isnull=True)
@@ -58,7 +58,9 @@ def _system_session_metadata_rows(
         rows = rows.filter(project=current_project)
     if not show_archived:
         rows = rows.filter(codex_archived=False)
-    return rows.exclude(thread_id__in=accepted_visible_thread_ids).filter(
+    return rows.exclude(
+        thread_id__in=system_agents.legacy_promoted_system_thread_ids()
+    ).filter(
         Q(thread_id__in=system_thread_ids) | Q(is_hidden_system_session=True)
     )
 
@@ -137,8 +139,6 @@ def _metadata_rows_after_index_cursor(
 
 def _filter_visible_session_metadata_rows(
     rows: QuerySet[SessionMetadata],
-    *,
-    accepted_visible_thread_ids: set[str],
 ) -> QuerySet[SessionMetadata]:
     system_run_exists = SystemAgentRun.objects.filter(
         thread_id=OuterRef("thread_id")
@@ -153,9 +153,14 @@ def _filter_visible_session_metadata_rows(
         _has_system_run=Exists(system_run_exists),
         _has_system_instance=Exists(system_instance_exists),
     )
-    visible_filter = Q(is_hidden_system_session=False) & Q(_has_system_run=False) & Q(_has_system_instance=False)
-    if accepted_visible_thread_ids:
-        visible_filter |= Q(thread_id__in=accepted_visible_thread_ids)
+    visible_filter = (
+        Q(is_hidden_system_session=False)
+        & Q(_has_system_run=False)
+        & Q(_has_system_instance=False)
+    )
+    legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
+    if legacy_promoted_ids:
+        visible_filter |= Q(thread_id__in=legacy_promoted_ids)
     return rows.filter(visible_filter)
 
 

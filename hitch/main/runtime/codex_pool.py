@@ -138,8 +138,6 @@ def spawn_new_session(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = 0,
-    auto_pr_enabled: bool = False,
-    auto_qa_enabled: bool = False,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -227,8 +225,6 @@ def spawn_new_session(
         display_author=display_author,
         output_schema=output_schema,
         user_message_index=user_message_index,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
     )
     if thread_path:
         setattr(instance, _CODEX_THREAD_PATH_ATTR, thread_path)
@@ -353,8 +349,6 @@ def spawn_turn(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
-    auto_pr_enabled: bool = False,
-    auto_qa_enabled: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt.
 
@@ -389,33 +383,7 @@ def spawn_turn(
         display_author=display_author,
         output_schema=output_schema,
         user_message_index=user_message_index,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
     )
-
-
-def is_alive(pid: int) -> bool:
-    """Return whether ``pid`` is currently a live process on this host.
-
-    PIDs can be recycled, so the answer is only meaningful when combined with
-    a recent CodexInstance.started_at. A false reading triggers a status
-    reconciliation; a true reading is treated as best-effort.
-    """
-    if pid <= 0:
-        return False
-    if _reap_tracked_worker(pid):
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but is owned by another user.
-        return True
-    except OSError:
-        return False
-    state = _linux_proc_state(pid)
-    return state not in ("", "X", "Z", "x")
 
 
 def worker_is_alive(instance: CodexInstance) -> bool:
@@ -552,11 +520,6 @@ def _linux_proc_state(pid: int) -> str | None:
     return stat[end + 2]
 
 
-def list_for_thread(thread_id: str) -> list[CodexInstance]:
-    """Return all workers ever spawned for a thread, newest first."""
-    return list(CodexInstance.objects.filter(thread_id=thread_id).order_by("-started_at"))
-
-
 def latest_for_thread(thread_id: str) -> CodexInstance | None:
     return (
         CodexInstance.objects.filter(thread_id=thread_id).order_by("-started_at").first()
@@ -650,19 +613,6 @@ def interrupt_instance(
     if not instance.is_active:
         return None
     return _interrupt_instance(instance, force=force, error=error)
-
-
-def steer_active(
-    thread_id: str, *, prompt: str, input_image_paths: list[str] | None = None
-) -> CodexInstance | None:
-    """Inject ``prompt`` into the most recent active worker for ``thread_id``."""
-    instance = latest_active_for_thread(thread_id)
-    if instance is None:
-        return None
-    kwargs: dict[str, Any] = {"prompt": prompt}
-    if input_image_paths:
-        kwargs["input_image_paths"] = input_image_paths
-    return _steer_instance(instance, **kwargs)
 
 
 def steer_instance(
@@ -1242,22 +1192,6 @@ def cleanup_input_images_for(instance: CodexInstance) -> None:
     instance.input_attachment_cleanup_requested = bool(new_attachment)
 
 
-def cleanup_input_images_for_thread(thread_id: str) -> None:
-    """Delete retained input images for every turn in a thread."""
-    CodexInstance.objects.filter(
-        thread_id=thread_id,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    ).exclude(input_attachment_paths=[]).update(
-        input_attachment_cleanup_requested=True
-    )
-    terminal_instances = CodexInstance.objects.filter(
-        thread_id=thread_id,
-        status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED),
-    )
-    for instance in terminal_instances:
-        cleanup_input_images_for(instance)
-
-
 def cleanup_requested_input_images_for(instance: CodexInstance) -> None:
     current = CodexInstance.objects.filter(pk=instance.pk).first()
     if current is None or not current.input_attachment_cleanup_requested:
@@ -1691,8 +1625,6 @@ def _spawn_worker(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
-    auto_pr_enabled: bool = False,
-    auto_qa_enabled: bool = False,
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1731,8 +1663,6 @@ def _spawn_worker(
             ),
             web_search_mode=web_search_mode or "",
             plan_mode=plan_mode,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

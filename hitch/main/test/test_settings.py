@@ -345,7 +345,7 @@ class UsageRateLimitCacheTests(SimpleTestCase):
         ):
             caches._start_rate_limits_refresh_thread(enable_memories=False)
 
-        self.assertEqual(caches._cached_rate_limits(), snapshot)
+        self.assertEqual(caches._RATE_LIMITS_CACHE_VALUE, snapshot)
         with caches._RATE_LIMITS_REFRESH_LOCK:
             attempted_at = caches._RATE_LIMITS_REFRESH_ATTEMPTED_AT
         self.assertIsNotNone(attempted_at)

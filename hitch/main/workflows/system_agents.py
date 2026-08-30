@@ -13,21 +13,14 @@ from django.db import models
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from hitch.main.goals.autonomous_goal_proposal_stack import (
-    _proposal_outcome_metadata,
-)
 from hitch.main.models import (
     CodexInstance,
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
-    UserInputRequest,
 )
-from hitch.main.runtime import codex_pool, rollout
-from hitch.main.runtime.sdk_values import is_nonbool_int
-from hitch.main.sessions import agent_tasks, session_index
-from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions import session_index
 from hitch.main.workflows import engine, pr_tracking
 from hitch.main.workflows.workflow_state import (
     _session_metadata_from_state,
@@ -48,9 +41,6 @@ AUTONOMOUS_GOAL_PROPOSAL_DISMISSED_ERROR = "Autonomous goal proposal dismissed b
 
 
 
-class _AutoReviewDeferredError(RuntimeError):
-    pass
-
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
@@ -65,21 +55,14 @@ _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # A system workflow can commit a transient step before spawning its worker.
 # Reconciliation retries that step after this window if no worker appeared.
 _WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
-_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
-_WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
-_WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
-    "worker process exited before reporting completion"
-)
-_LEGACY_SERVER_OVERLOADED_ERROR = (
-    "Selected model is at capacity. Please try a different model."
-)
 def _sync_workflow_instance(target: SystemWorkflow, source: SystemWorkflow) -> None:
     target.status = source.status
     target.step = source.step
     target.state = source.state
 
 
-def accepted_visible_system_thread_ids() -> set[str]:
+def legacy_promoted_system_thread_ids() -> set[str]:
+    """Return candidate threads promoted before proposals began starting fresh."""
     return set(
         ProposedSession.objects.filter(
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
@@ -89,7 +72,7 @@ def accepted_visible_system_thread_ids() -> set[str]:
     )
 
 
-def hidden_thread_ids(*, accepted_visible_thread_ids: set[str] | None = None) -> set[str]:
+def hidden_thread_ids() -> set[str]:
     hidden_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
         .values_list("thread_id", flat=True)
@@ -107,22 +90,16 @@ def hidden_thread_ids(*, accepted_visible_thread_ids: set[str] | None = None) ->
         .values_list("thread_id", flat=True)
         .distinct()
     )
-    if accepted_visible_thread_ids is None:
-        accepted_visible_thread_ids = accepted_visible_system_thread_ids()
-    return hidden_ids - accepted_visible_thread_ids
+    return hidden_ids - legacy_promoted_system_thread_ids()
 
 
-def hidden_thread_ids_from_threads(
-    threads: Iterable[Any], *, accepted_visible_thread_ids: set[str] | None = None
-) -> set[str]:
+def hidden_thread_ids_from_threads(threads: Iterable[Any]) -> set[str]:
     hidden_ids = {
         thread_id
         for thread in threads
         if isinstance(thread_id := getattr(thread, "id", None), str) and hitch_system_agent_thread(thread)
     }
-    if accepted_visible_thread_ids is None:
-        accepted_visible_thread_ids = accepted_visible_system_thread_ids()
-    return hidden_ids - accepted_visible_thread_ids
+    return hidden_ids - legacy_promoted_system_thread_ids()
 
 
 def hitch_system_agent_thread(thread: Any) -> bool:
@@ -303,7 +280,6 @@ def _route_finished_codex_instance(instance: CodexInstance) -> bool:
         _dispatch_workflow_event(instance, "on_feedback_finished")
         return True
     pr_tracking.supersede_pr_after_turn(instance)
-    _maybe_start_auto_review_task(instance)
     return False
 
 
@@ -360,209 +336,6 @@ def _clear_workflow_instance_routing_claim(instance: CodexInstance) -> None:
         instance.workflow_routing_started_at = None
 
 
-def _maybe_start_auto_review_task(
-    instance: CodexInstance, *, lifecycle_lock_held: bool = False
-) -> None:
-    if (
-        instance.purpose != CodexInstance.PURPOSE_USER
-        or instance.workflow_id is not None
-        or not (instance.auto_pr_enabled or instance.auto_qa_enabled)
-        or instance.plan_mode
-        or instance.status != CodexInstance.STATUS_COMPLETED
-    ):
-        return
-    if _completed_turn_has_pending_proposed_plan(instance):
-        return
-    automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
-    trigger_field = "auto_pr_triggered_at" if automation == "auto_pr" else "auto_qa_triggered_at"
-    claimed = CodexInstance.objects.filter(
-        pk=instance.pk,
-        **{f"{trigger_field}__isnull": True},
-    ).update(**{trigger_field: timezone.now()})
-    if not claimed:
-        return
-    try:
-        if automation == "auto_pr" and _auto_pr_watch_unavailable(instance):
-            raise agent_tasks.PrWatchUnavailableError
-        task = agent_tasks.review_task(
-            prepare_pull_request=automation == "auto_pr",
-            pr_title=(
-                _accepted_auto_pr_proposal_title(instance.thread_id)
-                if automation == "auto_pr"
-                else ""
-            ),
-        )
-        task_kwargs: dict[str, Any] = {
-            "thread_id": instance.thread_id,
-            "cwd": instance.cwd,
-            "prompt": task.prompt,
-            "sandbox_policy": instance.sandbox_policy or None,
-            "approval_mode": instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
-            "model": instance.model or None,
-            "stored_model": instance.model or None,
-            "reasoning_effort": instance.reasoning_effort or None,
-            "stored_reasoning_effort": instance.reasoning_effort or None,
-            "developer_instructions": instance.developer_instructions or None,
-            "enable_memories": instance.enable_memories,
-            "web_search_mode": instance.web_search_mode or None,
-            "user_message_index": (
-                instance.user_message_index + 1
-                if instance.user_message_index is not None
-                else None
-            ),
-            "agent_kind": task.agent_kind,
-        }
-
-        def spawn_task() -> CodexInstance:
-            archived = SessionMetadata.objects.filter(
-                thread_id=instance.thread_id,
-                codex_archived=True,
-            ).exists()
-            active_turn = CodexInstance.objects.filter(
-                thread_id=instance.thread_id,
-                status__in=CodexInstance.ACTIVE_STATUSES,
-            ).exists()
-            if archived or active_turn:
-                raise _AutoReviewDeferredError(
-                    f"session {instance.thread_id} is archived or already running work"
-                )
-            return codex_pool.spawn_turn(**task_kwargs)
-
-        if lifecycle_lock_held:
-            task_instance = spawn_task()
-        else:
-            with session_lifecycle.hold(instance.thread_id):
-                task_instance = spawn_task()
-        _record_auto_review_task_for_proposals(
-            instance,
-            task_instance,
-            automation=automation,
-        )
-    except _AutoReviewDeferredError:
-        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
-        return
-    except agent_tasks.PrWatchUnavailableError:
-        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
-        return
-    except Exception:
-        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
-        raise
-
-
-def retry_deferred_auto_review_for_thread(thread_id: str, *, lifecycle_lock_held: bool = False) -> None:
-    """Retry the latest auto-review deferred while its session was archived."""
-    instance = (
-        CodexInstance.objects.filter(
-            thread_id=thread_id,
-            purpose=CodexInstance.PURPOSE_USER,
-            workflow_id__isnull=True,
-            status=CodexInstance.STATUS_COMPLETED,
-            plan_mode=False,
-        )
-        .filter(
-            models.Q(auto_pr_enabled=True, auto_pr_triggered_at__isnull=True)
-            | models.Q(
-                auto_pr_enabled=False,
-                auto_qa_enabled=True,
-                auto_qa_triggered_at__isnull=True,
-            )
-        )
-        .order_by("-started_at", "-pk")
-        .first()
-    )
-    if instance is not None:
-        _maybe_start_auto_review_task(instance, lifecycle_lock_held=lifecycle_lock_held)
-
-
-def _accepted_auto_pr_proposal_title(thread_id: str) -> str:
-    proposal = (
-        ProposedSession.objects.filter(
-            accepted_session__thread_id=thread_id,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata__auto_pr_enabled=True,
-        )
-        .order_by("-updated_at", "-pk")
-        .first()
-    )
-    if proposal is None:
-        return ""
-    return " ".join(proposal.title.split())
-
-
-def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
-    """Whether auto-PR/QA would decline for this completed turn by design.
-
-    ``_maybe_start_auto_review_task`` returns without claiming a trigger when
-    the turn ends with a pending proposed plan, so a null trigger timestamp is
-    expected rather than a dropped follow-up. The orphan reaper uses this so it
-    does not rewrite such an intentionally-skipped successful turn as failed.
-    """
-    return _completed_turn_has_pending_proposed_plan(instance) or _auto_pr_watch_unavailable(instance)
-
-
-def _auto_pr_watch_unavailable(instance: CodexInstance) -> bool:
-    if not instance.auto_pr_enabled:
-        return False
-    from hitch.main.sessions.session_resume import thread_has_dynamic_tool
-
-    return not thread_has_dynamic_tool(
-        instance.thread_id,
-        namespace="hitch",
-        name="watch_pr",
-    )
-
-
-def auto_review_waits_for_unarchive(instance: CodexInstance) -> bool:
-    """Whether a completed turn's unclaimed auto-review is durably deferred."""
-    return SessionMetadata.objects.filter(
-        thread_id=instance.thread_id,
-        codex_archived=True,
-    ).exists()
-
-
-def _completed_turn_has_pending_proposed_plan(instance: CodexInstance) -> bool:
-    rollout_pending = _thread_rollout_has_pending_plan(instance.thread_id)
-    if rollout_pending is not None:
-        return rollout_pending
-    final_text = _final_agent_text(instance.events_path)
-    plan_text = rollout.proposed_plan_text_from_agent_text(final_text) if final_text else None
-    return plan_text is not None and rollout.looks_like_plan_text(plan_text)
-
-
-def _thread_rollout_has_pending_plan(thread_id: str) -> bool | None:
-    metadata = SessionMetadata.objects.filter(thread_id=thread_id).first()
-    if metadata is None or not metadata.codex_path:
-        return None
-    entries = list(rollout.iter_entries(Path(metadata.codex_path)))
-    if not entries:
-        return None
-    return rollout.entries_await_plan_approval(entries)
-
-
-def _record_auto_review_task_for_proposals(
-    instance: CodexInstance, task_instance: CodexInstance, *, automation: str
-) -> None:
-    metadata = SessionMetadata.objects.filter(thread_id=instance.thread_id).first()
-    if metadata is None:
-        return
-    if automation == "auto_qa":
-        base_updates: dict[str, object] = {
-            "auto_qa_status": "started",
-            "auto_qa_instance_id": task_instance.pk,
-        }
-    else:
-        base_updates = {
-            "auto_pr_status": "started",
-            "auto_pr_instance_id": task_instance.pk,
-        }
-    for proposal in ProposedSession.objects.filter(accepted_session=metadata):
-        proposal.outcome_metadata = _proposal_outcome_metadata(
-            proposal,
-            base_updates,
-        )
-        proposal.save(update_fields=["outcome_metadata", "updated_at"])
-
-
 def _handle_system_agent_finished(instance: CodexInstance) -> bool:
     run = _system_agent_run_for_instance(instance)
     if run is None:
@@ -581,86 +354,6 @@ def _route_system_agent_finished(instance: CodexInstance, run: SystemAgentRun, w
         _fail_unsupported_system_agent_run(run, workflow)
         return
     handler.on_agent_finished(instance, run, workflow)
-
-
-def _claim_workflow_turn_retry(
-    workflow: SystemWorkflow,
-    instance: CodexInstance,
-    retry_kind: str,
-) -> bool:
-    """Claim one bounded retry for a transient autonomous-workflow failure."""
-    if (
-        not workflow.is_active
-        or not retry_kind
-        or _instance_interrupt_requested(instance)
-        or not _is_retryable_workflow_turn_error(instance)
-    ):
-        return False
-    retries = _workflow_turn_death_retries(workflow.state)
-    retry_count = retries.get(retry_kind, 0)
-    if retry_count >= _WORKFLOW_TURN_DEATH_RETRY_LIMIT:
-        return False
-    workflow.state = {
-        **workflow.state,
-        _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-            **retries,
-            retry_kind: retry_count + 1,
-        },
-    }
-    workflow.save(update_fields=["state", "updated_at"])
-    return True
-
-
-def _instance_interrupt_requested(instance: CodexInstance) -> bool:
-    """Return the latest Stop state even when the routed worker object is stale."""
-    if instance.interrupt_requested_at is not None:
-        return True
-    return CodexInstance.objects.filter(
-        pk=instance.pk,
-        interrupt_requested_at__isnull=False,
-    ).exists()
-
-
-def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
-    raw = state.get(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY)
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(key): value
-        for key, value in raw.items()
-        if is_nonbool_int(value) and value > 0
-    }
-
-
-def _state_without_workflow_turn_death_retry(
-    state: Mapping[str, Any], retry_kind: str
-) -> dict[str, Any]:
-    retries = _workflow_turn_death_retries(state)
-    if retry_kind not in retries:
-        return dict(state)
-    retries.pop(retry_kind, None)
-    updated = dict(state)
-    if retries:
-        updated[_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY] = retries
-    else:
-        updated.pop(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, None)
-    return updated
-
-
-def _is_retryable_workflow_turn_error(instance: CodexInstance) -> bool:
-    error_info: object = instance.codex_error_info
-    if error_info is not None:
-        return error_info == CodexInstance.CODEX_ERROR_SERVER_OVERLOADED
-    normalized = instance.error.strip()
-    return normalized.startswith(
-        _WORKER_EXITED_BEFORE_COMPLETION_ERROR
-    ) or normalized == _LEGACY_SERVER_OVERLOADED_ERROR
-
-
-def _run_gh_observation_fallback(run: SystemAgentRun) -> dict[str, Any]:
-    run_input = run.input if isinstance(run.input, dict) else {}
-    gh_observation = run_input.get("gh_observation")
-    return gh_observation if isinstance(gh_observation, dict) else {}
 
 
 def _fail_unsupported_system_agent_run(run: SystemAgentRun, workflow: SystemWorkflow) -> None:
@@ -790,21 +483,6 @@ def _complete_workflow(
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
-def _advance_workflow_step(workflow: SystemWorkflow, step: str, *, bump_iteration: bool = False) -> None:
-    """Advance a running workflow to its next transient step and persist it.
-
-    Counterpart of _complete_workflow for non-terminal transitions; callers
-    that also change ``workflow.state`` assign it before calling.
-    """
-    _validate_workflow_step(workflow, step)
-    update_fields = ["step", "state", "updated_at"]
-    if bump_iteration:
-        workflow.iteration += 1
-        update_fields.insert(0, "iteration")
-    workflow.step = step
-    workflow.save(update_fields=update_fields)
-
-
 def _validate_workflow_step(workflow: SystemWorkflow, step: str) -> None:
     """Refuse to persist a step the workflow's kind does not declare.
 
@@ -841,38 +519,6 @@ def _persist_workflow_block(workflow: SystemWorkflow, error: str) -> None:
     workflow.step = STEP_BLOCKED
     workflow.state = {**workflow.state, "error": error}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
-
-
-def _question_for_user_input(question: dict[str, Any]) -> dict[str, Any]:
-    required = question.get("required") is True
-    safe_default = question.get("safe_default")
-    has_safe_default = (
-        question.get("allow_safe_default") is True and isinstance(safe_default, str) and bool(safe_default.strip())
-    )
-    return {
-        "id": question["id"],
-        "header": question.get("header") or question["id"],
-        "question": question.get("question") or question["id"],
-        "required": required,
-        "requires_explicit_choice": required and not has_safe_default,
-        "options": question.get("options") or [],
-    }
-
-
-def _answers_from_input_request(input_request: UserInputRequest) -> dict[str, Any]:
-    response = input_request.response if isinstance(input_request.response, dict) else {}
-    answers = response.get("answers")
-    return answers if isinstance(answers, dict) else {}
-
-
-def _answer_is_present(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, list | tuple | dict):
-        return bool(value)
-    return True
 
 
 def _workflow_web_search_mode(workflow: SystemWorkflow) -> str | None:
