@@ -101,9 +101,8 @@ from hitch.main.sessions.session_entry_display import (
 )
 from hitch.main.sessions.session_pr_plan import (
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
-    _current_pr_url_for_thread,
     _mark_pending_plan_actions,
-    _pr_observation_result_for_thread,
+    _registered_pr_url,
     _thread_plan_mode_state,
 )
 from hitch.main.sessions.session_resume import (
@@ -616,15 +615,8 @@ def _render_session_detail(
     if metadata is not None:
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
-    latest_pr_url = rollout_data.latest_pr_url if rollout_data is not None else None
-    pr_observation = (
-        rollout_data.pr_observation
-        if rollout_data is not None
-        else _pr_observation_result_for_thread(thread)
-    )
     stored_pr = pr_tracking.stored_record_for_thread(session_id)
     registered_pr = stored_pr if pr_tracking.record_is_current(stored_pr) else None
-    historical_pr = stored_pr is not None and registered_pr is None
     publishing_before_registration = bool(
         active_instance is not None
         and active_instance.agent_kind == agent_tasks.PR_PUBLISH_AGENT_KIND
@@ -632,17 +624,7 @@ def _render_session_detail(
             registered_pr, active_instance.pk
         )
     )
-    pr_url = (
-        None
-        if publishing_before_registration or historical_pr
-        else _current_pr_url_for_thread(
-            thread,
-            pr_observation=pr_observation,
-            registered_pr=registered_pr,
-            latest_pr_url=latest_pr_url,
-            latest_pr_url_loaded=rollout_data is not None,
-        )
-    )
+    pr_url = None if publishing_before_registration else _registered_pr_url(registered_pr)
     stage_context: dict[str, Any] | None = None
     if not read_only:
         awaiting_user_input = session_id in _thread_ids_awaiting_input([session_id])
@@ -651,7 +633,7 @@ def _render_session_detail(
         # (up to a 5s timeout) and dominated page latency; instead the badge is
         # flagged as refreshing and the actual gh call runs in the background,
         # persisting the result for a later render to read back.
-        registered_pr_snapshot = (
+        pr_snapshot = (
             {}
             if publishing_before_registration
             else pr_tracking.pr_handoff_for_record(registered_pr)
@@ -665,65 +647,20 @@ def _render_session_detail(
             pr_stage_displayed
             and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
         )
-        log_pr_snapshot = (
-            None
-            if publishing_before_registration or historical_pr
-            else pr_observation.snapshot
-        )
-        if (
-            pr_stage_displayed
-            and registered_pr is None
-            and log_pr_snapshot is not None
-        ):
-            detail_cwd = (
-                metadata.cwd
-                if metadata is not None and metadata.cwd
-                else _thread_cwd(thread) or ""
-            )
-            if pr_tracking.pr_snapshot_stage_refresh_due(
-                cwd=detail_cwd,
-                snapshot=log_pr_snapshot,
-                attempted_at=(
-                    metadata.derived_stage_pr_refresh_attempted_at
-                    if metadata is not None
-                    else None
-                ),
-            ):
-                stage_refreshing = True
         if stage_refreshing:
             _schedule_pr_stage_refresh(session_id)
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
             awaiting_user_input=awaiting_user_input,
-            pr_snapshot=log_pr_snapshot,
-            registered_pr_snapshot=registered_pr_snapshot,
+            pr_snapshot=pr_snapshot,
         )
-        # A background PR refresh persists a terminal stage to the mtime-keyed
-        # cache, but the detail render otherwise re-derives from the (still-open)
-        # rollout. Prefer the cached terminal stage when it matches the current
-        # rollout so the async result surfaces on reload instead of reverting to
-        # the open-PR badge while the gh refresh stays throttled.
-        if (
-            stage.key == session_stage.PR.key
-            and stored_pr is None
-            and metadata is not None
-            and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
-        ):
-            cached_terminal = session_stage.stage_for_key(metadata.derived_stage)
-            if cached_terminal is not None and cached_terminal.key in (
-                session_stage.DONE_MERGED.key,
-                session_stage.DONE_CLOSED.key,
-            ):
-                stage = cached_terminal
-                stage_refreshing = False
         if (
             history_paginated
-            and stored_pr is None
             and metadata is not None
             and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
+            and registered_pr is None
             and active_instance is None
-            and not historical_pr
             and not awaiting_user_input
         ):
             cached_stage = session_stage.stage_for_key(metadata.derived_stage)

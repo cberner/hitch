@@ -32,7 +32,6 @@ from hitch.main.sessions.settings_cookies import (
     _VALID_APPROVAL_MODES,
 )
 from hitch.main.views import common
-from hitch.main.workflows import system_agents
 
 _ARCHIVE_ACTIVE_WORK_MESSAGE = (
     "Stop the active turn before archiving this session."
@@ -214,10 +213,6 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                         session_id,
                     )
                 raise
-        if not is_archived:
-            system_agents.retry_deferred_auto_review_for_thread(
-                session_id, lifecycle_lock_held=True
-            )
         if rollout_path is not None:
             # This thread's rollout moved, so only its file-keyed cache is stale.
             ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()

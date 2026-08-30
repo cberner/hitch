@@ -931,104 +931,6 @@ class SessionDetailFastPathTests(TestCase):
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
 
-    @patch("hitch.main.caches._start_models_refresh_thread")
-    @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_uses_pr_workflow_failure_observation_for_pr_link(
-        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
-    ) -> None:
-        pr_url = "https://github.com/cberner-ai/raptorq-ai/pull/44"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Committed."}],
-                        "phase": "final_answer",
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {
-                        "type": "user_message",
-                        "message": (
-                            "Hitch PR workflow could not complete.\n\n"
-                            "Status: Hitch checked the PR gates and is waiting on "
-                            "external PR state.\n\n"
-                            "Tell the user the PR workflow needs attention before "
-                            "continuing."
-                        ),
-                    },
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {
-                        "type": "mcp_tool_call_end",
-                        "invocation": {
-                            "server": "codex_apps",
-                            "tool": "github_get_pr_info",
-                            "arguments": {
-                                "repo_full_name": "cberner-ai/raptorq-ai",
-                                "pr_number": 44,
-                            },
-                        },
-                        "result": {
-                            "Ok": {
-                                "structuredContent": {
-                                    "url": pr_url,
-                                    "number": 44,
-                                    "state": "open",
-                                    "merged": False,
-                                }
-                            }
-                        },
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": "PR workflow needs attention.",
-                            }
-                        ],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        SessionMetadata.objects.create(
-            thread_id="pr-workflow-failure-observed-pr",
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_name="Observed PR",
-            codex_preview="Open a PR",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-
-        response = self.client.get(
-            reverse(
-                "session", kwargs={"session_id": "pr-workflow-failure-observed-pr"}
-            )
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'href="{pr_url}"')
-        self.assertContains(
-            response, '<span class="stage-badge" data-tone="active">PR</span>'
-        )
-        mock_codex.assert_not_called()
 
     def test_stored_model_config_keeps_latest_partial_row_atomic(self) -> None:
         CodexInstance.objects.create(
@@ -1150,10 +1052,11 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
+    def test_paginated_detail_prefers_registered_pr_to_cached_stage(
         self,
         mock_codex: MagicMock,
         _start_models_refresh: MagicMock,
@@ -1207,6 +1110,23 @@ class SessionDetailFastPathTests(TestCase):
             derived_stage="pr",
             derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
         )
+        registered_pr = SessionPullRequest.objects.create(
+            thread_id=metadata.thread_id,
+            cwd=metadata.cwd,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 94,
+                    "state": "open",
+                },
+                "hitch_pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 94,
+                },
+            },
+        )
         mock_gh_pr_view.return_value = {
             "url": pr_url,
             "repository_full_name": "cberner/hitch",
@@ -1216,9 +1136,10 @@ class SessionDetailFastPathTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
-        # First load serves the cached (open) PR stage with the refreshing
+        # First load serves the durable open PR stage with the refreshing
         # highlight and runs the gh refresh off-request, persisting the terminal
-        # stage to the mtime-keyed cache.
+        # state onto the registered PR. The stale rollout cache cannot override
+        # that durable state.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
         )
@@ -1228,14 +1149,15 @@ class SessionDetailFastPathTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
         )
+        registered_pr.refresh_from_db()
+        self.assertTrue(registered_pr.state["pr_handoff"]["merged"])
         metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "done_merged")
-        self.assertIsNotNone(metadata.derived_stage_pr_refresh_attempted_at)
+        self.assertEqual(metadata.derived_stage, "pr")
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
 
-        # The next load surfaces the cached terminal stage without hitting gh
-        # again, even though the rollout still shows the PR open.
+        # The next load surfaces the durable terminal stage without hitting gh
+        # again, even though the rollout cache still says PR.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
         )
@@ -1705,6 +1627,18 @@ class SessionDetailFastPathTests(TestCase):
             codex_path=str(rollout_path),
             codex_preview="First prompt",
             codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        SessionPullRequest.objects.create(
+            thread_id="pending-rollout",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 94,
+                    "state": "open",
+                }
+            },
         )
         CodexInstance.objects.create(
             pid=os.getpid(),

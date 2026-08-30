@@ -82,14 +82,3 @@ def due(
     if attempted_at is None:
         return True
     return moment - attempted_at >= min_interval
-
-
-def mark(key: str, *, now: datetime | None = None) -> None:
-    """Record an attempt against ``key`` without gating (for always-hit callers)."""
-    moment = now if now is not None else timezone.now()
-    run_ignoring_database_locks(
-        lambda: RefreshThrottle.objects.update_or_create(
-            key=key, defaults={"attempted_at": moment}
-        ),
-        description=f"rate-limit mark {key}",
-    )

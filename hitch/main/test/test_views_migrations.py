@@ -1315,3 +1315,66 @@ class PrQaWrapperRemovalMigrationTests(TransactionTestCase):
         self.assertTrue(migrated_blocked.state["pr_qa_wrapper_retired"])
         with self.assertRaises(LookupError):
             new_apps.get_model("main", "WorkflowSteeringMessage")
+
+
+class AutoReviewFieldRemovalMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0073_remove_autonomousgoalmemory")]
+    migrate_to = [("main", "0074_remove_codexinstance_auto_review")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_keeps_columns_available_to_workers_started_before_upgrade(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        legacy_codex_instance = old_apps.get_model("main", "CodexInstance")
+        legacy_worker = legacy_codex_instance.objects.create(
+            pid=7,
+            thread_id="legacy-auto-review-worker",
+            cwd="/repo",
+            prompt="finish publishing",
+            events_path="/dev/null",
+            status="running",
+            auto_pr_enabled=True,
+            auto_qa_enabled=False,
+        )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        CodexInstance = new_apps.get_model("main", "CodexInstance")
+        removed_fields = {
+            "auto_pr_enabled",
+            "auto_qa_enabled",
+            "auto_pr_triggered_at",
+            "auto_qa_triggered_at",
+        }
+        for field_name in removed_fields:
+            with self.assertRaises(FieldDoesNotExist):
+                CodexInstance._meta.get_field(field_name)
+
+        with connection.cursor() as cursor:
+            columns = {
+                column.name: column
+                for column in connection.introspection.get_table_description(
+                    cursor, CodexInstance._meta.db_table
+                )
+            }
+        self.assertLessEqual(removed_fields, columns.keys())
+        self.assertTrue(columns["auto_pr_enabled"].null_ok)
+        self.assertTrue(columns["auto_qa_enabled"].null_ok)
+
+        triggered_at = timezone.now()
+        legacy_codex_instance.objects.filter(pk=legacy_worker.pk).update(
+            auto_pr_triggered_at=triggered_at
+        )
+        legacy_worker.refresh_from_db()
+        self.assertTrue(legacy_worker.auto_pr_enabled)
+        self.assertEqual(legacy_worker.auto_pr_triggered_at, triggered_at)

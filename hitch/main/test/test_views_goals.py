@@ -24,7 +24,6 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
-from hitch.main.sessions import session_settings
 from hitch.main.test.support import (
     _cookie_value,
     _make_project,
@@ -730,49 +729,6 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
 
-    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.common.Codex")
-    def test_inbox_page_exposes_upgrade_recovery_as_actionable_proposal(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, hitch_show_no_project_sessions="true")
-        _setup_codex(mock_codex)
-        source_session = SessionMetadata.objects.create(
-            thread_id="interrupted-request",
-            cwd="/repo",
-            project_cleared=True,
-        )
-        prompt = "Keep the boundary whitespace.\n\n```python\ndef preserved():\n    return 'exact indentation'\n```"
-        proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            summary="Select Do it to continue the original request in its session.",
-            prompt=prompt,
-            outcome_metadata={
-                "resume_source_session": True,
-                "auto_pr_enabled": True,
-                "auto_qa_enabled": False,
-            },
-        )
-
-        response = self.client.get(reverse("inbox"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'data-proposed-session-id="{proposal.pk}"')
-        self.assertContains(
-            response,
-            f'data-proposed-session-project="{session_settings._BARE_REPO_PROJECT_VALUE}"',
-        )
-        self.assertContains(response, 'data-proposed-session-cwd="/repo"')
-        self.assertContains(
-            response,
-            f'data-proposed-session-prompt="{html.escape(prompt, quote=True)}"',
-            html=False,
-        )
-        self.assertContains(response, 'data-proposed-session-auto-pr="true"')
-        self.assertContains(response, 'data-proposed-session-auto-qa="false"')
-        self.assertContains(response, "Do it")
-        self.assertNotContains(response, "Candidate log")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -989,50 +945,6 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         mock_cleanup.assert_not_called()
 
-    @patch(
-        "hitch.main.repos.repo_root",
-        return_value=Path("/recovery-worktree"),
-    )
-    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.views.common.Codex")
-    def test_new_session_page_prefills_projectless_recovery_proposal(
-        self,
-        mock_codex: MagicMock,
-        _mock_discover: MagicMock,
-        _mock_repo_root: MagicMock,
-    ) -> None:
-        _setup_codex(mock_codex)
-        source_session = SessionMetadata.objects.create(
-            thread_id="interrupted-request",
-            cwd="/recovery-worktree",
-            project_cleared=True,
-        )
-        proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt="Continue the exact original request.",
-            outcome_metadata={
-                "resume_source_session": True,
-                "auto_pr_enabled": False,
-                "auto_qa_enabled": True,
-            },
-        )
-
-        response = self.client.get(
-            f"{reverse('new_session')}?proposed_session={proposal.pk}"
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'value="{proposal.pk}"')
-        self.assertContains(response, "Continue the exact original request.")
-        self.assertContains(
-            response,
-            f'value="{session_settings._BARE_REPO_PROJECT_VALUE}" selected',
-        )
-        self.assertContains(response, 'value="/recovery-worktree" selected')
-        self.assertContains(response, "data-new-session-auto-qa checked")
-        self.assertNotContains(response, "data-new-session-auto-pr checked")
-        self.assertContains(response, f'href="{reverse("inbox")}"')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -1551,10 +1463,6 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIsNotNone(goal.deleted_at)
         proposal.refresh_from_db()
         self.assertEqual(proposal.autonomous_goal_id, goal.pk)
-        self.assertEqual(
-            system_agents.accepted_visible_system_thread_ids(),
-            {"candidate-thread"},
-        )
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(
@@ -1587,7 +1495,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_reconciles_terminal_running_workflow(
         self, mock_interrupt: MagicMock
     ) -> None:
@@ -1645,7 +1553,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_cleans_worktree_when_interrupt_is_terminal(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -1695,7 +1603,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.codex_pool.interrupt_instance",
+        "hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance",
         return_value=None,
     )
     def test_delete_autonomous_goal_keeps_goal_when_running_workflow_cannot_stop(
@@ -1989,11 +1897,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.content, b"reason is required")
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.views.common.Codex")
-    def test_accept_proposed_session_links_candidate_session(
-        self, mock_codex: MagicMock
-    ) -> None:
-        codex = _setup_codex(mock_codex, models=[])
+    def test_outcome_endpoint_cannot_promote_candidate_session(self) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -2017,16 +1921,16 @@ class AutonomousGoalViewTests(TestCase):
             {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
         )
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.content, b"proposal must be started before acceptance"
+        )
         proposal.refresh_from_db()
         candidate.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        self.assertEqual(proposal.accepted_session, candidate)
-        self.assertEqual(candidate.codex_name, "Add parser coverage")
-        self.assertEqual(candidate.codex_display_title, "Add parser coverage")
-        codex._client.thread_set_name.assert_called_once_with(
-            "candidate-thread", "Add parser coverage"
-        )
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(candidate.codex_name, "")
+        self.assertEqual(candidate.codex_display_title, "")
 
     def test_tool_protocol_proposal_cannot_promote_hidden_candidate_directly(
         self,
@@ -2066,31 +1970,6 @@ class AutonomousGoalViewTests(TestCase):
         candidate.refresh_from_db()
         self.assertTrue(candidate.is_hidden_system_session)
 
-    def test_direct_accept_keeps_upgrade_recovery_proposal_actionable(self) -> None:
-        source_session = SessionMetadata.objects.create(
-            thread_id="upgrade-recovery-source",
-            cwd="/repo",
-        )
-        proposal = ProposedSession.objects.create(
-            source_session=source_session,
-            title="Request not started during upgrade",
-            prompt="Continue the original request.",
-            outcome_metadata={"resume_source_session": True},
-        )
-
-        response = self.client.post(
-            reverse("update_proposed_session_outcome", args=[proposal.pk]),
-            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.content,
-            b"proposal must be started before acceptance",
-        )
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertIsNone(proposal.accepted_session)
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch(
@@ -2213,12 +2092,9 @@ class AutonomousGoalViewTests(TestCase):
     def test_update_outcome_rejects_already_resolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
-        # A proposal accepted into its candidate session (accepted_session ==
-        # candidate_session) un-hides that otherwise-hidden system thread, so the
-        # user can see and work in it. A stale inbox tab can still post a
-        # dismiss/reject for the same proposal; re-deciding it must be refused so
-        # the recorded outcome is not corrupted and the live session stays
-        # visible.
+        # A stale inbox tab can still post a dismiss/reject for an already
+        # accepted legacy proposal. Re-deciding it must be refused so the
+        # recorded outcome is not corrupted.
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -2239,11 +2115,6 @@ class AutonomousGoalViewTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=candidate,
         )
-        self.assertIn(
-            "candidate-thread",
-            system_agents.accepted_visible_system_thread_ids(),
-        )
-
         for outcome in (
             ProposedSession.OUTCOME_DISMISSED,
             ProposedSession.OUTCOME_REJECTED,
@@ -2263,11 +2134,7 @@ class AutonomousGoalViewTests(TestCase):
                     proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED
                 )
                 self.assertEqual(proposal.accepted_session, candidate)
-        # The accepted session stayed visible and its worktree was never removed.
-        self.assertIn(
-            "candidate-thread",
-            system_agents.accepted_visible_system_thread_ids(),
-        )
+        # Resolving an already accepted proposal never removes its worktree.
         mock_cleanup.assert_not_called()
 
     def test_update_outcome_rejects_unset_target_status(self) -> None:

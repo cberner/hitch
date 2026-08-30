@@ -691,14 +691,6 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
             )
     return started
 
-def _reset_auto_proposal_quota_cache() -> None:
-    """Clear the throttled quota verdict. Used by tests to isolate the
-    module-level cache between cases."""
-    global _quota_cache_status, _quota_cache_checked_at
-    with _quota_cache_lock:
-        _quota_cache_status = "available"
-        _quota_cache_checked_at = None
-
 def _auto_proposals_paused_by_usage_quota_throttled() -> bool:
     return _auto_proposal_quota_status_throttled() != "available"
 
@@ -1000,14 +992,6 @@ def _lock_auto_proposal_queue() -> None:
     _lock_autonomous_goal_queue()
 
 
-def _running_auto_proposal_workflow_exists() -> bool:
-    return SystemWorkflow.objects.filter(
-        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        status=SystemWorkflow.STATUS_RUNNING,
-        state__auto_proposal=True,
-    ).exists()
-
-
 def autonomous_goal_queue_busy() -> bool:
     return SystemWorkflow.objects.filter(
         kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
@@ -1021,32 +1005,6 @@ def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) ->
         main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal.pk),
         status=SystemWorkflow.STATUS_RUNNING,
     ).exists()
-
-
-def start_autonomous_goal_workflow(
-    *,
-    autonomous_goal: AutonomousGoal,
-    auto_proposal: bool = False,
-    default_branch_sha: str | None = None,
-    use_worktrees: bool = False,
-) -> SystemWorkflow:
-    with transaction.atomic():
-        autonomous_goal = (
-            AutonomousGoal.objects.select_related("project")
-            .select_for_update()
-            .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
-            .get()
-        )
-        workflow, created = _create_autonomous_goal_workflow_record(
-            autonomous_goal=autonomous_goal,
-            auto_proposal=auto_proposal,
-            default_branch_sha=default_branch_sha,
-            use_worktrees=use_worktrees,
-            stack_continuation_proposal=None,
-        )
-    if created:
-        _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
-    return workflow
 
 
 def start_autonomous_goal_workflow_if_queue_idle(
@@ -2970,8 +2928,6 @@ def _spawn_autonomous_goal_candidate_run(
             cwd=session_cwd,
             project=autonomous_goal.project,
             preview=prompt,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
             codex_path=thread_path,
             is_hidden_system_session=True,
         )
@@ -3225,8 +3181,6 @@ def _spawn_autonomous_goal_judge_run(
             cwd=session_cwd,
             project=autonomous_goal.project,
             preview=prompt,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
             codex_path=thread_path,
             is_hidden_system_session=True,
         )

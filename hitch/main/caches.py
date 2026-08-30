@@ -207,11 +207,6 @@ def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
             _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
 
 
-def _cached_rate_limits() -> dict[str, Any] | None:
-    with _RATE_LIMITS_REFRESH_LOCK:
-        return _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
-
-
 def _rate_limits_for_usage_context(*, enable_memories: bool) -> _RateLimitsUsageState:
     _schedule_rate_limits_refresh(enable_memories=enable_memories)
     with _RATE_LIMITS_REFRESH_LOCK:

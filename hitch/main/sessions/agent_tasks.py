@@ -65,6 +65,28 @@ def watch_pr_task(url: str) -> AgentTask:
     )
 
 
+def with_automatic_review_guidance(
+    prompt: str,
+    *,
+    auto_pr_enabled: bool,
+    auto_qa_enabled: bool,
+    pr_title: str = "",
+) -> str:
+    """Tell the coding agent to finish the configured review in the same turn."""
+    if not auto_pr_enabled and not auto_qa_enabled:
+        return prompt
+    task = review_task(
+        prepare_pull_request=auto_pr_enabled,
+        pr_title=pr_title if auto_pr_enabled else "",
+    )
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "After completing the requested implementation, continue in this same "
+        "turn with the following standing instruction:\n\n"
+        f"{task.prompt}"
+    )
+
+
 def stage_for_agent_kind(agent_kind: str) -> str:
     if agent_kind == REVIEW_AGENT_KIND:
         return "qa"

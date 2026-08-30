@@ -100,13 +100,6 @@ def _archived_rollout_paths_for_session_path(rollout_path: Path) -> tuple[Path, 
     return tuple(candidates)
 
 
-def _rollout_mtime_ns(rollout_path: Path | None) -> int:
-    if rollout_path is None:
-        return 0
-    rollout_state = _rollout_file_state_for_path(rollout_path)
-    return rollout_state.mtime_ns if rollout_state is not None else 0
-
-
 def _thread_is_archived(thread: Any) -> bool:
     """Return whether Codex resumed this thread from archived rollout storage."""
     archived = getattr(thread, "archived", None)

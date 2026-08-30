@@ -1122,8 +1122,13 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")
+    @patch(
+        "hitch.main.views.messages.thread_has_dynamic_tool",
+        return_value=True,
+    )
     def test_plan_routing_to_spawn_matrix(
         self,
+        _mock_has_watch_tool: MagicMock,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
@@ -1314,13 +1319,15 @@ class SendMessageViewTests(TestCase):
                 "gpt-5.4",
                 True,
                 {
-                    "prompt": "Implement the plan.",
-                    "auto_pr_enabled": True,
-                    "user_message_index": 1,
-                    "stored_model": "gpt-5.4",
-                    "stored_reasoning_effort": None,
+                    "prompt": agent_tasks.with_automatic_review_guidance(
+                        "Implement the plan.",
+                        auto_pr_enabled=True,
+                        auto_qa_enabled=False,
+                    ),
                     "model": "gpt-5.4",
                     "collaboration_mode": "default",
+                    "agent_kind": agent_tasks.PR_PUBLISH_AGENT_KIND,
+                    "user_message_index": 1,
                 },
             ),
             (
@@ -1365,6 +1372,38 @@ class SendMessageViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self._assert_follow_up_spawn(mock_spawn, **expected)
+
+    @patch(
+        "hitch.main.views.messages.thread_has_dynamic_tool",
+        return_value=False,
+    )
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_auto_pr_follow_up_stays_ordinary_without_watch_tool(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_discover: MagicMock,
+        mock_has_watch_tool: MagicMock,
+    ) -> None:
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_pr_enabled=True,
+        )
+        self._patch_codex(mock_codex)
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(mock_spawn)
+        mock_has_watch_tool.assert_called_once_with(
+            "abc", namespace="hitch", name="watch_pr"
+        )
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")

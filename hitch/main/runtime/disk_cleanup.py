@@ -348,8 +348,8 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
         if not _safe_to_remove_worktree(metadata, context):
             continue
         is_system = _is_system_session(metadata, context)
-        is_accepted_visible = metadata.thread_id in context.accepted_visible_thread_ids
-        if is_system and not is_accepted_visible:
+        is_legacy_promoted = metadata.thread_id in context.legacy_promoted_thread_ids
+        if is_system and not is_legacy_promoted:
             candidates.append(_metadata_cleanup_candidate(metadata, reason="system"))
         elif _archived_pr_done_user_session(metadata, context):
             candidates.append(_metadata_cleanup_candidate(metadata, reason="archived_pr"))
@@ -367,7 +367,7 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
 
 @dataclass(frozen=True)
 class _CleanupContext:
-    accepted_visible_thread_ids: frozenset[str]
+    legacy_promoted_thread_ids: frozenset[str]
     hidden_system_thread_ids: frozenset[str]
     protected_proposal_session_ids: frozenset[int]
     active_thread_ids: frozenset[str]
@@ -376,7 +376,7 @@ class _CleanupContext:
 
 
 def _cleanup_context(*, now: datetime) -> _CleanupContext:
-    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
+    legacy_promoted_thread_ids = system_agents.legacy_promoted_system_thread_ids()
     hidden_system_thread_ids = _hidden_system_thread_ids()
     protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
@@ -405,13 +405,13 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         | active_workflow_paths
         | _pending_proposal_worktree_paths(protected_proposal_session_ids)
         | _protected_visible_user_worktree_paths(
-            accepted_visible_thread_ids,
+            legacy_promoted_thread_ids,
             hidden_system_thread_ids,
             now=now,
         )
     )
     return _CleanupContext(
-        accepted_visible_thread_ids=frozenset(accepted_visible_thread_ids),
+        legacy_promoted_thread_ids=frozenset(legacy_promoted_thread_ids),
         hidden_system_thread_ids=frozenset(hidden_system_thread_ids),
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
@@ -469,7 +469,10 @@ def _old_archived_user_session(metadata: SessionMetadata, context: _CleanupConte
 
 
 def _is_user_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
-    return not _is_system_session(metadata, context) or metadata.thread_id in context.accepted_visible_thread_ids
+    return (
+        not _is_system_session(metadata, context)
+        or metadata.thread_id in context.legacy_promoted_thread_ids
+    )
 
 
 def _metadata_cleanup_candidate(metadata: SessionMetadata, *, reason: str) -> _CleanupCandidate:
@@ -582,7 +585,7 @@ def _hidden_system_thread_ids() -> set[str]:
         .values_list("thread_id", flat=True)
         .distinct()
     )
-    return thread_ids
+    return thread_ids - system_agents.legacy_promoted_system_thread_ids()
 
 
 def _active_workflow_paths(workflows: list[SystemWorkflow]) -> set[str]:
@@ -605,7 +608,7 @@ def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
 
 
 def _protected_visible_user_worktree_paths(
-    accepted_visible_thread_ids: set[str],
+    legacy_promoted_thread_ids: set[str],
     hidden_system_thread_ids: set[str],
     *,
     now: datetime,
@@ -613,7 +616,8 @@ def _protected_visible_user_worktree_paths(
     paths: set[str] = set()
     rows = (
         SessionMetadata.objects.filter(
-            models.Q(is_hidden_system_session=False) | models.Q(thread_id__in=accepted_visible_thread_ids)
+            models.Q(is_hidden_system_session=False)
+            | models.Q(thread_id__in=legacy_promoted_thread_ids)
         )
         .exclude(cwd="")
         .only(
@@ -627,7 +631,7 @@ def _protected_visible_user_worktree_paths(
     )
     for metadata in rows:
         is_system = metadata.is_hidden_system_session or metadata.thread_id in hidden_system_thread_ids
-        if is_system and metadata.thread_id not in accepted_visible_thread_ids:
+        if is_system and metadata.thread_id not in legacy_promoted_thread_ids:
             continue
         if not metadata.codex_archived or (
             metadata.derived_stage not in _PR_DONE_STAGE_KEYS

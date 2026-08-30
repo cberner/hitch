@@ -391,11 +391,6 @@ def _end_frame(status: str) -> bytes:
     return b"event: end\ndata: " + json.dumps({"status": status}).encode("utf-8") + b"\n\n"
 
 
-def _message_frame(method: str, payload: dict[str, object]) -> bytes:
-    event = {"method": method, "payload": payload}
-    return b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
-
-
 def _heartbeat_frame(
     *,
     working: bool,
@@ -436,13 +431,6 @@ def _current_status(instance_id: int) -> str:
             )
         except CodexInstance.DoesNotExist:
             return "unknown"
-    finally:
-        close_old_connections()
-
-
-def _latest_id_for_thread(session_id: str) -> int | None:
-    try:
-        return codex_pool.latest_id_for_thread(session_id)
     finally:
         close_old_connections()
 

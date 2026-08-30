@@ -29,9 +29,7 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
-from hitch.main.sessions import agent_tasks
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
-from hitch.main.sessions.review_prompts import optional_review_prompt
 from hitch.main.test.support import _make_project, _rollout_line
 from hitch.main.workflows import (
     autonomous_goals,
@@ -51,8 +49,6 @@ def _instance(
     status: str = CodexInstance.STATUS_COMPLETED,
     agent_kind: str = "",
     display_author: str = "",
-    auto_pr_enabled: bool = False,
-    auto_qa_enabled: bool = False,
     plan_mode: bool = False,
     model: str = "",
     reasoning_effort: str = "",
@@ -78,8 +74,6 @@ def _instance(
         approval_mode=approval_mode,
         web_search_mode=web_search_mode,
         plan_mode=plan_mode,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
         events_path=events_path,
         status=status,
         purpose=purpose,
@@ -134,6 +128,12 @@ def _events_file(
         events_path = fh.name
     test.addCleanup(Path(events_path).unlink, missing_ok=True)
     return events_path
+
+
+def _reset_auto_proposal_quota_cache() -> None:
+    with autonomous_goals._quota_cache_lock:
+        autonomous_goals._quota_cache_status = "available"
+        autonomous_goals._quota_cache_checked_at = None
 
 
 def _agent_message_events_file(test: TestCase, text: str, *, phase: str | None = "final_answer") -> str:
@@ -366,8 +366,8 @@ class AutoProposalQuotaPauseTests(TestCase):
     @patch("hitch.main.workflows.system_agents.timezone.now")
     @patch("hitch.main.workflows.autonomous_goals._auto_proposal_quota_status")
     def test_quota_throttle_caches_verdict_within_ttl(self, mock_quota: MagicMock, mock_now: MagicMock) -> None:
-        autonomous_goals._reset_auto_proposal_quota_cache()
-        self.addCleanup(autonomous_goals._reset_auto_proposal_quota_cache)
+        _reset_auto_proposal_quota_cache()
+        self.addCleanup(_reset_auto_proposal_quota_cache)
         start = datetime(2026, 1, 1, tzinfo=UTC)
         mock_quota.return_value = "low"
 
@@ -391,7 +391,7 @@ class AutonomousGoalAutoProposalConcurrencyTests(TransactionTestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
-        autonomous_goals._reset_auto_proposal_quota_cache()
+        _reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
             "hitch.main.workflows.autonomous_goals._auto_proposal_quota_status",
             return_value="available",
@@ -515,7 +515,7 @@ class AutonomousGoalWorkflowTests(TestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
-        autonomous_goals._reset_auto_proposal_quota_cache()
+        _reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
             "hitch.main.workflows.autonomous_goals._auto_proposal_quota_status",
             return_value="available",
@@ -528,6 +528,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.mock_create_worktree = self.worktree_patcher.start()
         self.addCleanup(self.worktree_patcher.stop)
+        self.thread_patcher = patch(
+            "hitch.main.workflows.autonomous_goals.codex_pool.create_session_thread_with_path",
+            return_value=("candidate-thread", "/rollouts/candidate-thread.jsonl"),
+        )
+        self.thread_patcher.start()
+        self.addCleanup(self.thread_patcher.stop)
 
 
 
@@ -694,7 +700,10 @@ class AutonomousGoalWorkflowTests(TestCase):
             "hitch.main.workflows.autonomous_goals._create_autonomous_goal_workflow_record",
             side_effect=fake_create,
         ):
-            workflow = autonomous_goals.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
+            workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+                autonomous_goal=autonomous_goal
+            )
+        assert workflow is not None
 
         mock_spawn.assert_not_called()
         workflow.refresh_from_db()
@@ -869,7 +878,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             ["/repo-worktree-3", "/repo-worktree-2"],
         )
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_ignores_different_proposal(self, mock_interrupt: MagicMock) -> None:
         project = _make_project()
         autonomous_goal = AutonomousGoal.objects.create(
@@ -940,7 +949,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_cleans_worktree_between_agent_turns(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -1019,7 +1028,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree-3")
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_keeps_accepted_worktree_before_next_candidate(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -1084,7 +1093,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_not_called()
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_waits_when_one_force_stop_fails(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -1208,10 +1217,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_worktree.return_value = managed_worktree
         mock_spawn.side_effect = RuntimeError("boom")
 
-        workflow = autonomous_goals.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
+        assert workflow is not None
 
         mock_cleanup.assert_called_once_with(managed_worktree)
         workflow.refresh_from_db()
@@ -1528,16 +1538,6 @@ class AutonomousGoalWorkflowTests(TestCase):
                 completed_stack_proposal, autonomous_goal
             )
         )
-        self.assertEqual(
-            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_iteration(completed_stack_proposal),
-            3,
-        )
-        plain_proposal = ProposedSession(outcome_metadata={})
-        self.assertEqual(
-            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_iteration(plain_proposal),
-            1,
-        )
-
     def test_create_workflow_record_rejects_invalid_stack_continuation_metadata(
         self,
     ) -> None:
@@ -1817,146 +1817,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             )
         )
 
-    @patch(
-        "hitch.main.goals.autonomous_goal_proposal_stack.rollout.session_stage_data",
-        side_effect=ValueError("broken rollout"),
-    )
-    def test_accepted_session_rollout_error_is_logged(self, mock_stage_data: MagicMock) -> None:
-        temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        rollout_path = Path(temp_dir.name) / "rollout.jsonl"
-        rollout_path.write_text("{}\n", encoding="utf-8")
 
-        with self.assertLogs(
-            autonomous_goal_proposal_stack.logger,
-            level="ERROR",
-        ) as captured:
-            evidence = autonomous_goal_proposal_stack._accepted_session_rollout_evidence(str(rollout_path))
-
-        assert evidence is not None
-        self.assertFalse(evidence.done)
-        self.assertFalse(evidence.superseded_by_lifecycle)
-        self.assertIn(
-            f"failed to read accepted-session rollout stage from {rollout_path}",
-            "\n".join(captured.output),
-        )
-        mock_stage_data.assert_called_once_with(rollout_path)
-
-    @patch(
-        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
-        return_value="a" * 40,
-    )
-    @patch("hitch.main.workflows.autonomous_goals.codex_pool.spawn_turn")
-    def test_auto_proposal_blocks_stale_done_after_resumed_accepted_session(
-        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
-    ) -> None:
-        project = _make_project()
-        autonomous_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Improve tests",
-            goal="Find useful test coverage increments.",
-            auto_proposal_enabled=True,
-        )
-        temp_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(temp_dir.cleanup)
-        rollout_path = Path(temp_dir.name) / "rollout.jsonl"
-        pr_url = "https://github.com/cberner/hitch/pull/94"
-        rollout_path.write_text(
-            "\n".join(
-                [
-                    _rollout_line(
-                        "event_msg",
-                        {
-                            "type": "user_message",
-                            "message": PR_SLASH_PROMPT,
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "function_call",
-                            "name": "github_fetch_pr",
-                            "arguments": json.dumps(
-                                {
-                                    "repo_full_name": "cberner/hitch",
-                                    "pr_number": 94,
-                                }
-                            ),
-                            "call_id": "call-fetch",
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "function_call_output",
-                            "call_id": "call-fetch",
-                            "output": json.dumps(
-                                {
-                                    "url": pr_url,
-                                    "state": "closed",
-                                    "merged": True,
-                                }
-                            ),
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "Merged."}],
-                            "phase": "final_answer",
-                        },
-                    ),
-                    _rollout_line(
-                        "event_msg",
-                        {"type": "user_message", "message": "Follow-up work"},
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "Updated."}],
-                            "phase": "final_answer",
-                        },
-                    ),
-                ]
-            ),
-            encoding="utf-8",
-        )
-        implementation = SessionMetadata.objects.create(
-            thread_id="implementation-thread",
-            cwd="/repo",
-            project=project,
-            codex_path=str(rollout_path),
-            derived_stage="done_merged",
-            derived_stage_source_mtime_ns=1,
-        )
-        ProposedSession.objects.create(
-            project=project,
-            autonomous_goal=autonomous_goal,
-            title="Automated proposal",
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            accepted_session=implementation,
-            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
-        )
-        SessionPullRequest.objects.create(
-            thread_id="implementation-thread",
-            cwd="/repo",
-            state={
-                "pr_handoff": {
-                    "url": pr_url,
-                    "state": "closed",
-                    "merged": True,
-                }
-            },
-        )
-
-        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
-
-        self.assertEqual(started, 0)
-        mock_spawn.assert_not_called()
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
@@ -2023,7 +1884,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.spawn_turn")
-    def test_auto_proposal_blocks_registered_pr_older_than_session_activity(
+    def test_auto_proposal_blocks_stale_ownerless_migrated_pr(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = _make_project()
@@ -2062,6 +1923,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         SessionPullRequest.objects.filter(pk=registered_pr.pk).update(
             updated_at=now - timedelta(minutes=1)
         )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
 
         started = autonomous_goals.maybe_start_auto_proposal_workflows(
             project=project
@@ -2075,7 +1941,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.spawn_turn")
-    def test_auto_proposal_allows_uncached_done_accepted_session_from_rollout(
+    def test_auto_proposal_blocks_rollout_only_done_accepted_session(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = _make_project()
@@ -2154,20 +2020,10 @@ class AutonomousGoalWorkflowTests(TestCase):
             accepted_session=implementation,
             outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
         )
-        mock_spawn.return_value = _instance(
-            thread_id="candidate-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        )
-
         started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
-        self.assertEqual(started, 1)
-        workflow = SystemWorkflow.objects.get()
-        self.assertEqual(
-            workflow.main_thread_id,
-            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
-        )
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
 
     @patch(
         "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
@@ -2223,6 +2079,17 @@ class AutonomousGoalWorkflowTests(TestCase):
                 outcome_status=ProposedSession.OUTCOME_ACCEPTED,
                 accepted_session=session,
                 outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
+            )
+            SessionPullRequest.objects.create(
+                thread_id=session.thread_id,
+                cwd=session.cwd,
+                state={
+                    "pr_handoff": {
+                        "url": f"https://github.com/cberner/hitch/pull/{100 + index}",
+                        "state": "closed",
+                        "merged": True,
+                    }
+                },
             )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
@@ -2379,7 +2246,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
 
 
-    @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.spawn_turn")
     def test_candidate_spawn_interrupts_worker_when_goal_deleted_mid_spawn(
         self, mock_spawn: MagicMock, mock_interrupt: MagicMock
@@ -2404,7 +2271,10 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_spawn.side_effect = spawn_candidate
 
-        workflow = autonomous_goals.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
+        workflow = autonomous_goals.start_autonomous_goal_workflow_if_queue_idle(
+            autonomous_goal=autonomous_goal
+        )
+        assert workflow is not None
 
         workflow.refresh_from_db()
         run = SystemAgentRun.objects.get()
@@ -2419,148 +2289,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             error="autonomous goal no longer exists",
         )
 
-    def test_dead_autonomous_goal_candidate_worker_blocks_after_retry_budget(
-        self,
-    ) -> None:
-        project = _make_project()
-        autonomous_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Production issues",
-            goal="Inspect production logs and the main database.",
-        )
-        candidate_metadata = SessionMetadata.objects.create(
-            thread_id="candidate-thread-1",
-            cwd="/repo",
-            project=project,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={
-                "autonomous_goal_id": autonomous_goal.pk,
-                "tool_protocol": True,
-                "candidate_session_id": candidate_metadata.pk,
-                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-                    autonomous_goals._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
-                },
-            },
-        )
-        instance = _instance(
-            thread_id="candidate-thread-1",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            error=("worker process exited before reporting completion; last event: command failed"),
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            thread_id="candidate-thread-1",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
 
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        run.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertIn("worker process exited", workflow.state["error"])
-        notice = ProposedSession.objects.get()
-        self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
-        self.assertEqual(notice.candidate_session, candidate_metadata)
-
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_dead_candidate_worker_retries_within_proposal_budget_after_death_retry(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        project = _make_project()
-        autonomous_goal = AutonomousGoal.objects.create(
-            project=project,
-            title="Production issues",
-            goal="Inspect production logs and the main database.",
-        )
-        candidate_metadata = SessionMetadata.objects.create(
-            thread_id="candidate-thread-1",
-            cwd="/repo",
-            project=project,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={
-                "autonomous_goal_id": autonomous_goal.pk,
-                "tool_protocol": True,
-                "candidate_session_id": candidate_metadata.pk,
-                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-                    autonomous_goals._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
-                },
-                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
-                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
-                    "candidate-thread-1": 400,
-                },
-            },
-        )
-        instance = _instance(
-            thread_id="candidate-thread-1",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_FAILED,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            error=("worker process exited before reporting completion; last event: command failed"),
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            thread_id="candidate-thread-1",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-        retry_instance = _instance(
-            thread_id="candidate-thread-1",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        )
-        mock_spawn.return_value = retry_instance
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        run.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
-        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
-        self.assertEqual(
-            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY],
-            400,
-        )
-        self.assertEqual(
-            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
-            1,
-        )
-        self.assertEqual(
-            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY],
-            1,
-        )
-        failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
-        self.assertEqual(failure["reason"], "candidate_failed")
-        self.assertIn("worker process exited", failure["error"])
-        retry_run = SystemAgentRun.objects.get(instance=retry_instance)
-        self.assertEqual(retry_run.status, SystemAgentRun.STATUS_RUNNING)
-        self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 400)
-        self.assertFalse(ProposedSession.objects.exists())
-        mock_spawn.assert_called_once()
 
 
 
@@ -2848,148 +2577,6 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.save(update_fields=["state"])
 
         self.assertEqual(autonomous_goals._autonomous_goal_current_stack_proposal(workflow), proposal)
-
-
-
-class AutoReviewTaskTests(TestCase):
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_auto_qa_starts_one_ordinary_review_turn(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        mock_spawn.return_value = SimpleNamespace(pk=101)
-        instance = _instance(
-            thread_id="auto-qa-thread",
-            cwd="/repo",
-            auto_qa_enabled=True,
-            model="gpt-test",
-            reasoning_effort="high",
-            sandbox_policy="workspaceWrite",
-            approval_mode="prompt_user",
-            web_search_mode="live",
-            developer_instructions="Keep it small.",
-            enable_memories=True,
-            user_message_index=7,
-        )
-
-        self.assertFalse(system_agents.on_codex_instance_finished(instance))
-        self.assertFalse(system_agents.on_codex_instance_finished(instance))
-
-        instance.refresh_from_db()
-        self.assertIsNotNone(instance.auto_qa_triggered_at)
-        mock_spawn.assert_called_once_with(
-            thread_id="auto-qa-thread",
-            cwd="/repo",
-            prompt=optional_review_prompt(prepare_pull_request=False),
-            sandbox_policy="workspaceWrite",
-            approval_mode="prompt_user",
-            model="gpt-test",
-            stored_model="gpt-test",
-            reasoning_effort="high",
-            stored_reasoning_effort="high",
-            developer_instructions="Keep it small.",
-            enable_memories=True,
-            web_search_mode="live",
-            user_message_index=8,
-            agent_kind=agent_tasks.REVIEW_AGENT_KIND,
-        )
-        self.assertFalse(SystemWorkflow.objects.exists())
-
-    @patch(
-        "hitch.main.sessions.session_resume.thread_has_dynamic_tool",
-        return_value=True,
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_auto_pr_uses_review_publish_prompt_and_records_proposal_turn(
-        self,
-        mock_spawn: MagicMock,
-        _mock_has_tool: MagicMock,
-    ) -> None:
-        mock_spawn.return_value = SimpleNamespace(pk=202)
-        project = _make_project()
-        metadata = SessionMetadata.objects.create(
-            thread_id="auto-pr-thread",
-            cwd="/repo",
-        )
-        proposal = ProposedSession.objects.create(
-            project=project,
-            title="  Improve   parser coverage  ",
-            accepted_session=metadata,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={"auto_pr_enabled": True, "keep": "value"},
-        )
-        instance = _instance(
-            thread_id="auto-pr-thread",
-            cwd="/repo",
-            auto_pr_enabled=True,
-            approval_mode="deny_all",
-            user_message_index=2,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertIn(PR_SLASH_PROMPT, kwargs["prompt"])
-        self.assertIn(
-            "Use this pull request title: Improve parser coverage",
-            kwargs["prompt"],
-        )
-        self.assertEqual(kwargs["agent_kind"], agent_tasks.PR_PUBLISH_AGENT_KIND)
-        self.assertEqual(kwargs["approval_mode"], "deny_all")
-        self.assertEqual(kwargs["user_message_index"], 3)
-        instance.refresh_from_db()
-        self.assertIsNotNone(instance.auto_pr_triggered_at)
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_metadata["auto_pr_status"], "started")
-        self.assertEqual(proposal.outcome_metadata["auto_pr_instance_id"], 202)
-        self.assertEqual(proposal.outcome_metadata["keep"], "value")
-        self.assertFalse(SystemWorkflow.objects.exists())
-
-    @patch(
-        "hitch.main.sessions.session_resume.thread_has_dynamic_tool",
-        return_value=False,
-    )
-    @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    def test_auto_pr_without_watch_tool_remains_retryable(
-        self,
-        mock_spawn: MagicMock,
-        _mock_has_tool: MagicMock,
-    ) -> None:
-        instance = _instance(auto_pr_enabled=True)
-
-        system_agents.on_codex_instance_finished(instance)
-
-        instance.refresh_from_db()
-        self.assertIsNone(instance.auto_pr_triggered_at)
-        mock_spawn.assert_not_called()
-
-    @patch(
-        "hitch.main.workflows.system_agents.codex_pool.spawn_turn",
-        side_effect=RuntimeError("spawn failed"),
-    )
-    def test_spawn_failure_releases_auto_qa_trigger(
-        self, _mock_spawn: MagicMock
-    ) -> None:
-        instance = _instance(auto_qa_enabled=True)
-
-        with self.assertRaisesRegex(RuntimeError, "spawn failed"):
-            system_agents.on_codex_instance_finished(instance)
-
-        instance.refresh_from_db()
-        self.assertIsNone(instance.auto_qa_triggered_at)
-
-
-class AutoReviewIntentionallySkippedTests(TestCase):
-    @patch(
-        "hitch.main.sessions.session_resume.thread_has_dynamic_tool",
-        return_value=True,
-    )
-    def test_user_approval_mode_is_not_skipped(
-        self, _mock_has_tool: MagicMock
-    ) -> None:
-        instance = _instance(approval_mode="prompt_user", auto_pr_enabled=True)
-        self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
-
-
 class ClaimWorkflowTransitionTests(TestCase):
     def _workflow(self, **overrides: Any) -> SystemWorkflow:
         defaults: dict[str, Any] = {

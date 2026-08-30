@@ -20,26 +20,17 @@ from django.db import close_old_connections
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
-    SessionMetadata,
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, rollout
+from hitch.main.runtime import rollout
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _RolloutFileState,
 )
-from hitch.main.runtime.sdk_values import (
-    datetime_value,
-    is_nonbool_int,
-    string_value,
-)
+from hitch.main.runtime.sdk_values import is_nonbool_int, string_value
 from hitch.main.sequences import unique_nonempty
 from hitch.main.sessions import agent_tasks, session_stage
-from hitch.main.sessions.session_pr_plan import (
-    _pr_observation_result_for_rollout_path,
-    _pr_snapshot_identity,
-)
 from hitch.main.workflows import pr_stage, pr_tracking
 
 logger = logging.getLogger(__name__)
@@ -96,39 +87,10 @@ def _pr_stage_refresh_worker(session_id: str) -> None:
 
 
 def _refresh_session_pr_stage(session_id: str) -> None:
-    """Perform the gh-backed PR stage refresh for one session and persist it.
-
-    A registered PR refresh persists onto ``SessionPullRequest``; the log-snapshot path
-    re-derives and updates the cached ``derived_stage``. The gh call is gated by
-    the per-PR global ``rate_limit`` claim inside the refreshers, so this is a
-    cheap no-op when the same PR was refreshed elsewhere recently.
-    """
-    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
-    rollout_state = _rollout_file_state_from_value(
-        metadata.codex_path if metadata is not None else None
-    )
-    rollout_path = rollout_state.path if rollout_state is not None else None
-    pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
+    """Refresh one session's durable PR state when it is still current."""
     stored_pr = pr_tracking.stored_record_for_thread(session_id)
-    if stored_pr is not None:
-        if pr_tracking.record_is_current(stored_pr):
-            pr_tracking.refreshed_pr_handoff_for_stage(stored_pr)
-        return
-    snapshot = pr_observation.snapshot
-    if metadata is None or snapshot is None or rollout_state is None:
-        return
-    if not pr_tracking.pr_snapshot_stage_refresh_due(
-        cwd=metadata.cwd,
-        snapshot=snapshot,
-        attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
-    ):
-        return
-    pr_stage._mark_cached_pr_stage_refresh_attempt(session_id)
-    refreshed = pr_tracking.refreshed_pr_snapshot_for_stage(
-        cwd=metadata.cwd, snapshot=snapshot
-    )
-    stage = session_stage.derive_stage(pr_snapshot=refreshed)
-    pr_stage._update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
+    if stored_pr is not None and pr_tracking.record_is_current(stored_pr):
+        pr_tracking.refreshed_pr_handoff_for_stage(stored_pr)
 
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
@@ -148,7 +110,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         registered_pr = (
             stored_pr if pr_tracking.record_is_current(stored_pr) else None
         )
-        historical_pr = stored_pr is not None and registered_pr is None
         active_instance = active_instances_by_thread_id.get(session_id)
         publishing_before_registration = bool(
             active_instance is not None
@@ -164,34 +125,23 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and stored_pr is None
             and not awaiting_user_input
             and cached_stage is not None
+            and cached_stage.key
+            not in {
+                session_stage.PR.key,
+                session_stage.DONE_MERGED.key,
+                session_stage.DONE_CLOSED.key,
+            }
         ):
-            assert rollout_state is not None
-            stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing = (
-                _stage_from_cached_session_row(
-                    session_id,
-                    session,
-                    rollout_state=rollout_state,
-                    cached_stage=cached_stage,
-                    pr_stage_refreshes_remaining=pr_stage_refreshes_remaining,
-                )
-            )
-            session["stage"] = _session_list_stage_context(
-                stage, pr_snapshot=pr_snapshot, refreshing=refreshing
-            )
+            session["stage"] = _session_list_stage_context(cached_stage)
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
-        entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
+        entries = _session_stage_data_for_rollout_path(rollout_path)
         if not entries and session.get("has_activity"):
             entries = [{"kind": "user"}]
-        log_pr_snapshot = (
-            None
-            if publishing_before_registration or historical_pr
-            else pr_observation.snapshot
-        )
         # Serve the last-known PR stage now; when a gh refresh is due, flag the
         # badge as refreshing and do the actual refresh off-request so the page
         # is not blocked on a ``gh`` call (the result lands on a later render).
-        registered_pr_snapshot = (
+        pr_snapshot = (
             {}
             if publishing_before_registration
             else pr_tracking.pr_handoff_for_record(registered_pr)
@@ -204,19 +154,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             pr_stage_displayed
             and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
         )
-        if (
-            pr_stage_displayed
-            and registered_pr is None
-            and log_pr_snapshot is not None
-            and pr_tracking.pr_snapshot_stage_refresh_due(
-                cwd=string_value(session.get("cwd")),
-                snapshot=log_pr_snapshot,
-                attempted_at=datetime_value(
-                    session.get("stage_pr_refresh_attempted_at")
-                ),
-            )
-        ):
-            refresh_due = True
         # Flag the badge refreshing only when a refresh actually runs this
         # render. A row whose refresh is due but falls outside the per-render
         # budget must not keep data-refreshing set, or _stage_refresh_script
@@ -233,18 +170,14 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             entries=entries,
             active_instance=active_instance,
             awaiting_user_input=awaiting_user_input,
-            pr_snapshot=log_pr_snapshot,
-            registered_pr_snapshot=registered_pr_snapshot,
+            pr_snapshot=pr_snapshot,
         )
         stage_executing = stage.key == session_stage.IMPLEMENTATION.key and (
             active_instance is not None
         )
         session["stage"] = _session_list_stage_context(
             stage,
-            pr_snapshot=_session_list_pr_snapshot_for_stage(
-                log_pr_snapshot=log_pr_snapshot,
-                registered_pr_snapshot=registered_pr_snapshot,
-            ),
+            pr_snapshot=pr_snapshot,
             refreshing=badge_refreshing,
             executing=stage_executing,
         )
@@ -269,50 +202,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 stage,
                 rollout_state.mtime_ns if rollout_state is not None else 0,
             )
-
-
-def _stage_from_cached_session_row(
-    session_id: str,
-    session: Mapping[str, Any],
-    *,
-    rollout_state: _RolloutFileState,
-    cached_stage: session_stage.SessionStage,
-    pr_stage_refreshes_remaining: int,
-) -> tuple[session_stage.SessionStage, Mapping[str, Any] | None, int, bool]:
-    pr_snapshot = None
-    stage = cached_stage
-    refreshing = False
-    if cached_stage.key == session_stage.PR.key:
-        pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
-        if pr_snapshot is not None and pr_tracking.pr_snapshot_stage_refresh_due(
-            cwd=string_value(session.get("cwd")),
-            snapshot=pr_snapshot,
-            attempted_at=datetime_value(session.get("stage_pr_refresh_attempted_at")),
-        ):
-            # Serve the cached stage now and refresh off-request; the result is
-            # persisted to the stage cache for a later render to read back.
-            refreshing = True
-            if pr_stage_refreshes_remaining > 0:
-                _schedule_pr_stage_refresh(session_id)
-                pr_stage_refreshes_remaining -= 1
-            else:
-                # Budget spent on earlier PR rows: no refresh scheduled, so don't
-                # flag this badge refreshing or _stage_refresh_script reloads
-                # every 7s for a result that never lands (mirrors the
-                # rollout-derived path in _attach_session_stage_context).
-                refreshing = False
-    return stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing
-
-
-def _session_list_pr_snapshot_for_stage(
-    *,
-    log_pr_snapshot: Mapping[str, Any] | None,
-    registered_pr_snapshot: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    return session_stage.merge_pr_snapshots(
-        log_pr_snapshot=log_pr_snapshot,
-        registered_pr_snapshot=registered_pr_snapshot,
-    )
 
 
 def _session_list_stage_context(
@@ -344,8 +233,7 @@ def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
     number = snapshot.get("pr_number")
     if is_nonbool_int(number) and number > 0:
         return number
-    identity = _pr_snapshot_identity(snapshot)
-    return identity[1] if identity is not None else None
+    return None
 
 
 def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
@@ -427,19 +315,14 @@ def _cached_stage_for_session_row(
 
 def _session_stage_data_for_rollout_path(
     rollout_path: Path | None,
-) -> tuple[list[dict[str, Any]], codex_events.PrObservationResult]:
-    empty_pr_observation = codex_events.PrObservationResult(snapshot=None)
+) -> list[dict[str, Any]]:
     if rollout_path is None:
-        return [], empty_pr_observation
+        return []
     try:
         stage_data = rollout.session_stage_data(rollout_path)
     except Exception:
         logger.exception("failed to parse rollout %s for session stage", rollout_path)
-        return [], empty_pr_observation
+        return []
     if stage_data is None:
-        return [], empty_pr_observation
-    return list(stage_data.entries), stage_data.pr_observation
-
-
-def _pr_snapshot_for_rollout_path(rollout_path: Path | None) -> dict[str, Any] | None:
-    return _pr_observation_result_for_rollout_path(rollout_path).snapshot
+        return []
+    return list(stage_data.entries)

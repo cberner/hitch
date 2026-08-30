@@ -1,8 +1,6 @@
 """Session list pages: index, system sessions, inbox, and usage."""
 import uuid
-from collections.abc import Iterable
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from typing import Any, NamedTuple
 
 from django.http import (
@@ -12,13 +10,8 @@ from django.http import (
 )
 from django.shortcuts import render
 from django.urls import reverse
-from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from openai_codex import CodexError
-from openai_codex.generated.v2_all import (
-    SortDirection,
-    ThreadSortKey,
-)
 
 from hitch.main.goals.autonomous_goal_run_display import (
     _attach_proposed_session_display_state,
@@ -31,20 +24,12 @@ from hitch.main.models import (
     SystemAgentRun,
 )
 from hitch.main.runtime import app_server_pool, reconciliation
-from hitch.main.runtime.rollout_state import (
-    _thread_is_archived,
-)
-from hitch.main.runtime.sdk_values import (
-    string_value,
-    updated_at_seconds,
-)
 from hitch.main.sessions import session_index, system_agent_summary
 from hitch.main.sessions.project_visibility import (
     _filter_session_metadata_by_project_visibility,
     _project_visibility_label,
     _project_visibility_shows_project_names,
     _session_list_title,
-    _session_project_is_visible,
     _session_project_visibility_context,
 )
 from hitch.main.sessions.project_visibility import (
@@ -54,9 +39,6 @@ from hitch.main.sessions.session_cursor import (
     _index_cursor,
     _index_cursor_sort_key,
     _is_index_cursor,
-)
-from hitch.main.sessions.session_entry_display import (
-    _display_title,
 )
 from hitch.main.sessions.session_metadata_display import (
     _ensure_indexed_system_threads,
@@ -93,22 +75,10 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_instance_for_thread,
     _system_agent_run_detail_title,
     _system_agent_run_for_thread,
-    _system_agent_run_label,
-    _system_agent_status,
-    _updated_at_sort_key,
 )
 from hitch.main.views import common
 from hitch.main.workflows import system_agents
 
-
-class ThreadListPage(NamedTuple):
-    threads: list[Any]
-    next_cursor: str
-
-class VisibleSessionPage(NamedTuple):
-    sessions: list[dict[str, Any]]
-    next_cursor: str
-    next_offset: int
 
 class SessionListPage(NamedTuple):
     sessions: list[dict[str, Any]]
@@ -121,39 +91,23 @@ class SessionListPage(NamedTuple):
     archived_next_done: bool
 
 @dataclass
-class SessionPageSource:
-    archived: bool
-    cursor: str
-    offset: int
-    page: ThreadListPage | None = None
-    next_page_cursor: str = ""
-    seen_cursors: set[str] = dataclass_field(default_factory=set)
-    metadata_by_thread: dict[str, SessionMetadata] | None = None
-    candidate: dict[str, Any] | None = None
-    candidate_offset: int = 0
-    exhausted: bool = False
-
-@dataclass
 class _SessionListQuery:
     """Shared inputs for building one session-list page.
 
     Bundles the viewer/filter context that every page builder needs so it is
-    threaded through the pagination variants as one value. The id sets and
-    ``project_cache`` are intentionally shared and mutable: builders add
-    thread-derived hidden/system ids as they fetch Codex pages, and the cache
-    memoizes per-cwd project lookups across rows of the same request.
+    threaded through the pagination variants as one value. The id sets are
+    shared and mutable so index builders can add hidden system sessions
+    discovered from durable metadata.
     """
 
     projects: list[Project]
     current_project: Project | None
     project_visibility: SessionProjectVisibility | None
     system_only: bool
-    accepted_visible_thread_ids: set[str]
     hidden_thread_ids: set[str]
     system_thread_ids: set[str]
     runs_by_thread_id: dict[str, SystemAgentRun]
     instances_by_thread_id: dict[str, CodexInstance]
-    project_cache: dict[str, Project | None] = dataclass_field(default_factory=dict)
 
 _SESSION_PAGE_SIZE = 50
 
@@ -167,17 +121,13 @@ def _session_list_page(
     project_visibility: SessionProjectVisibility | None,
     system_only: bool,
 ) -> SessionListPage:
-    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
-    hidden_thread_ids = system_agents.hidden_thread_ids(
-        accepted_visible_thread_ids=accepted_visible_thread_ids
-    )
+    hidden_thread_ids = system_agents.hidden_thread_ids()
     system_thread_ids = hidden_thread_ids if system_only else set()
     query = _SessionListQuery(
         projects=projects,
         current_project=current_project,
         project_visibility=project_visibility,
         system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
         runs_by_thread_id=(
@@ -196,24 +146,19 @@ def _session_list_page(
     archived_complete = (
         not required_archived or session_index.is_complete(archived=True)
     )
-    if (
-        not _request_uses_codex_cursor(request)
-        and (not active_complete or not archived_complete)
-    ):
-        session_index.refresh_from_codex(
-            codex,
-            projects=projects,
-            include_active=not active_complete,
-            include_archived=required_archived and not archived_complete,
-            max_pages=None,
-        )
-    if (
-        _request_uses_codex_cursor(request)
-        or not _session_index_sources_complete(include_archived=required_archived)
-    ):
-        return _session_list_page_from_codex(
-            codex, request, query, current_settings=current_settings
-        )
+    if not active_complete or not archived_complete:
+        try:
+            session_index.refresh_from_codex(
+                codex,
+                projects=projects,
+                include_active=not active_complete,
+                include_archived=required_archived and not archived_complete,
+                max_pages=None,
+            )
+        except CodexError:
+            common.logger.warning(
+                "failed to initialize the session index; rendering indexed sessions"
+            )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
         not request_uses_index_cursor
@@ -231,18 +176,26 @@ def _session_list_page(
         )
     )
     if refresh_active or refresh_archived:
-        refresh_result = session_index.refresh_from_codex(
-            codex,
-            projects=projects,
-            include_active=refresh_active,
-            include_archived=refresh_archived,
-            max_pages=1,
-        )
-        capped_refresh_has_more = bool(
-            refresh_result.active_next_cursor
-            or (required_archived and refresh_result.archived_next_cursor)
-        )
-        if capped_refresh_has_more:
+        try:
+            refresh_result = session_index.refresh_from_codex(
+                codex,
+                projects=projects,
+                include_active=refresh_active,
+                include_archived=refresh_archived,
+                max_pages=1,
+            )
+        except CodexError:
+            common.logger.warning(
+                "failed to refresh the session index; rendering indexed sessions"
+            )
+            refresh_result = None
+        if (
+            refresh_result is not None
+            and (
+                refresh_result.active_next_cursor
+                or (required_archived and refresh_result.archived_next_cursor)
+            )
+        ):
             common._schedule_session_index_refresh(
                 enable_memories=current_settings.enable_memories,
                 include_active=bool(refresh_result.active_next_cursor),
@@ -250,34 +203,8 @@ def _session_list_page(
                     required_archived and refresh_result.archived_next_cursor
                 ),
             )
-            # Coverage remains the availability contract; a capped freshness
-            # probe that sees more pages only hands this response to live
-            # cursor pagination when Codex is healthy.
-            try:
-                return _session_list_page_from_codex(
-                    codex, request, query, current_settings=current_settings
-                )
-            except CodexError:
-                common.logger.warning(
-                    "failed to fetch live session page after capped refresh; "
-                    "rendering cached sessions"
-                )
     return _session_list_page_from_index(
         request, query, show_archived=current_settings.show_archived_sessions
-    )
-
-def _request_uses_codex_cursor(request: HttpRequest) -> bool:
-    cursor = request.GET.get("cursor", "")
-    if cursor and not _is_index_cursor(cursor):
-        return True
-    return any(
-        request.GET.get(param)
-        for param in (
-            "done",
-            "archived_cursor",
-            "archived_offset",
-            "archived_done",
-        )
     )
 
 def _request_uses_index_cursor(request: HttpRequest) -> bool:
@@ -287,33 +214,6 @@ def _session_index_sources_complete(*, include_archived: bool) -> bool:
     if not session_index.is_complete(archived=False):
         return False
     return not include_archived or session_index.is_complete(archived=True)
-
-def _session_list_page_from_codex(
-    codex: common.Codex,
-    request: HttpRequest,
-    query: _SessionListQuery,
-    *,
-    current_settings: SettingsValues,
-) -> SessionListPage:
-    if current_settings.show_archived_sessions:
-        return _merged_session_list_page_from_codex(codex, request, query)
-    active = _visible_session_page_from_codex(
-        codex,
-        request,
-        query,
-        archived=False,
-        cursor_param="cursor",
-    )
-    return SessionListPage(
-        sessions=active.sessions,
-        next_cursor=active.next_cursor,
-        next_offset=active.next_offset,
-        next_done=not bool(active.next_cursor or active.next_offset),
-        include_archived_source=False,
-        archived_next_cursor="",
-        archived_next_offset=0,
-        archived_next_done=True,
-    )
 
 def _session_list_page_from_warm_index(
     request: HttpRequest,
@@ -326,25 +226,19 @@ def _session_list_page_from_warm_index(
     allow_refresh_needed: bool = False,
 ) -> SessionListPage | None:
     required_archived = current_settings.show_archived_sessions
-    if _request_uses_codex_cursor(request) or not _session_index_sources_complete(
-        include_archived=required_archived
-    ):
+    if not _session_index_sources_complete(include_archived=required_archived):
         return None
 
-    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
     hidden_thread_ids: set[str] = set()
     system_thread_ids: set[str] = set()
     if system_only:
-        hidden_thread_ids = system_agents.hidden_thread_ids(
-            accepted_visible_thread_ids=accepted_visible_thread_ids
-        )
+        hidden_thread_ids = system_agents.hidden_thread_ids()
         system_thread_ids = hidden_thread_ids
     query = _SessionListQuery(
         projects=projects,
         current_project=current_project,
         project_visibility=project_visibility,
         system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
         runs_by_thread_id={},
@@ -379,7 +273,6 @@ def _session_list_page_from_warm_index(
             show_archived=current_settings.show_archived_sessions,
             system_thread_ids=system_thread_ids,
             projects=projects,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     return _session_list_page_from_index(
         request, query, show_archived=current_settings.show_archived_sessions
@@ -392,13 +285,13 @@ def _system_session_list_page_from_index(
     show_archived: bool,
     system_thread_ids: set[str],
     projects: list[Project],
-    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
     _ensure_indexed_system_threads(system_thread_ids, projects=projects)
+    legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
     indexed_system_thread_ids = set(
         SessionMetadata.objects.filter(is_hidden_system_session=True)
         .exclude(codex_updated_at__isnull=True)
-        .exclude(thread_id__in=accepted_visible_thread_ids)
+        .exclude(thread_id__in=legacy_promoted_ids)
         .values_list("thread_id", flat=True)
     )
     system_thread_ids = system_thread_ids | indexed_system_thread_ids
@@ -406,7 +299,6 @@ def _system_session_list_page_from_index(
         current_project=current_project,
         show_archived=show_archived,
         system_thread_ids=system_thread_ids,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
     )
     index_cursor = _index_cursor(request.GET.get("cursor", ""))
     next_cursor = ""
@@ -477,9 +369,10 @@ def _session_list_page_from_index(
     if query.system_only:
         _ensure_indexed_system_threads(query.system_thread_ids, projects=query.projects)
         rows = session_index.indexed_sessions()
+        legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
         indexed_system_thread_ids = set(
             rows.filter(is_hidden_system_session=True)
-            .exclude(thread_id__in=query.accepted_visible_thread_ids)
+            .exclude(thread_id__in=legacy_promoted_ids)
             .values_list("thread_id", flat=True)
         )
         query.hidden_thread_ids.update(indexed_system_thread_ids)
@@ -495,10 +388,7 @@ def _session_list_page_from_index(
     if query.system_only:
         rows = rows.filter(thread_id__in=query.system_thread_ids)
     else:
-        rows = _filter_visible_session_metadata_rows(
-            rows,
-            accepted_visible_thread_ids=query.accepted_visible_thread_ids,
-        )
+        rows = _filter_visible_session_metadata_rows(rows)
         if query.hidden_thread_ids:
             rows = rows.exclude(thread_id__in=query.hidden_thread_ids)
     if query.system_only:
@@ -565,321 +455,6 @@ def _session_list_page_from_index(
         archived_next_offset=0,
         archived_next_done=True,
     )
-
-def _merged_session_list_page_from_codex(
-    codex: common.Codex,
-    request: HttpRequest,
-    query: _SessionListQuery,
-) -> SessionListPage:
-    active = _session_page_source(request, archived=False, cursor_param="cursor")
-    archived = _session_page_source(
-        request, archived=True, cursor_param="archived_cursor"
-    )
-    sources = [active, archived]
-    sessions: list[dict[str, Any]] = []
-    while len(sessions) < _SESSION_PAGE_SIZE:
-        candidates = [
-            source
-            for source in sources
-            if _peek_source_session(source, codex, query) is not None
-        ]
-        if not candidates:
-            break
-        source = max(
-            candidates,
-            key=lambda item: (
-                _updated_at_sort_key(item.candidate["updated_at"])
-                if item.candidate
-                else 0
-            ),
-        )
-        session = _pop_source_session(source)
-        if session is not None:
-            sessions.append(session)
-    active_cursor, active_offset, active_done = _source_next_cursor(active)
-    archived_cursor, archived_offset, archived_done = _source_next_cursor(archived)
-    return SessionListPage(
-        sessions=sessions,
-        next_cursor=active_cursor,
-        next_offset=active_offset,
-        next_done=active_done,
-        include_archived_source=True,
-        archived_next_cursor=archived_cursor,
-        archived_next_offset=archived_offset,
-        archived_next_done=archived_done,
-    )
-
-def _session_page_source(
-    request: HttpRequest, *, archived: bool, cursor_param: str
-) -> SessionPageSource:
-    done = request.GET.get(_cursor_done_param(cursor_param)) == "1"
-    return SessionPageSource(
-        archived=archived,
-        cursor=request.GET.get(cursor_param, ""),
-        offset=_non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), "")),
-        exhausted=done,
-    )
-
-def _peek_source_session(
-    source: SessionPageSource,
-    codex: common.Codex,
-    query: _SessionListQuery,
-) -> dict[str, Any] | None:
-    if source.candidate is not None or source.exhausted:
-        return source.candidate
-    while True:
-        if source.page is None:
-            if source.cursor in source.seen_cursors:
-                source.exhausted = True
-                return None
-            source.seen_cursors.add(source.cursor)
-            observed_at = timezone.now()
-            source.page = _thread_list_page(
-                codex, archived=source.archived, cursor=source.cursor
-            )
-            _add_thread_derived_hidden_ids(query, source.page.threads)
-            for thread in source.page.threads:
-                session_index.upsert_thread(
-                    thread,
-                    projects=query.projects,
-                    observed_at=observed_at,
-                )
-            source.next_page_cursor = source.page.next_cursor
-            source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
-        if source.offset >= len(source.page.threads):
-            if not source.next_page_cursor:
-                source.exhausted = True
-                return None
-            source.cursor = source.next_page_cursor
-            source.offset = 0
-            source.page = None
-            source.next_page_cursor = ""
-            source.metadata_by_thread = None
-            continue
-        metadata_by_thread = source.metadata_by_thread or {}
-        while source.offset < len(source.page.threads):
-            index = source.offset
-            thread = source.page.threads[index]
-            session = _session_row_for_thread(
-                thread,
-                query,
-                metadata_by_thread=metadata_by_thread,
-            )
-            if session is not None:
-                source.candidate = session
-                source.candidate_offset = index + 1
-                return session
-            source.offset = index + 1
-
-def _pop_source_session(source: SessionPageSource) -> dict[str, Any] | None:
-    session = source.candidate
-    if session is not None:
-        source.offset = source.candidate_offset
-    source.candidate = None
-    source.candidate_offset = 0
-    return session
-
-def _source_next_cursor(source: SessionPageSource) -> tuple[str, int, bool]:
-    if source.exhausted:
-        return "", 0, True
-    if source.page is None:
-        return source.cursor, source.offset, False
-    if source.offset < len(source.page.threads):
-        return source.cursor, source.offset, False
-    if source.next_page_cursor:
-        return source.next_page_cursor, 0, False
-    return "", 0, True
-
-def _visible_session_page_from_codex(
-    codex: common.Codex,
-    request: HttpRequest,
-    query: _SessionListQuery,
-    *,
-    archived: bool,
-    cursor_param: str,
-) -> VisibleSessionPage:
-    cursor = request.GET.get(cursor_param, "")
-    offset = _non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), ""))
-    sessions: list[dict[str, Any]] = []
-    seen_cursors: set[str] = set()
-    while len(sessions) < _SESSION_PAGE_SIZE:
-        if cursor in seen_cursors:
-            common.logger.warning("thread list returned duplicate cursor; stopping pagination")
-            return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
-        seen_cursors.add(cursor)
-        observed_at = timezone.now()
-        page = _thread_list_page(codex, archived=archived, cursor=cursor)
-        _add_thread_derived_hidden_ids(query, page.threads)
-        for thread in page.threads:
-            session_index.upsert_thread(
-                thread,
-                projects=query.projects,
-                observed_at=observed_at,
-            )
-        if offset >= len(page.threads):
-            offset = 0
-            next_cursor = page.next_cursor
-            if not next_cursor:
-                return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
-            cursor = next_cursor
-            continue
-        metadata_by_thread = _metadata_by_thread_id(page.threads)
-        for index, thread in enumerate(page.threads[offset:], start=offset):
-            session = _session_row_for_thread(
-                thread,
-                query,
-                metadata_by_thread=metadata_by_thread,
-            )
-            if session is not None:
-                sessions.append(session)
-                if len(sessions) >= _SESSION_PAGE_SIZE:
-                    next_offset = index + 1
-                    if next_offset < len(page.threads):
-                        return VisibleSessionPage(
-                            _sort_session_rows(sessions), cursor, next_offset
-                        )
-                    break
-        offset = 0
-        next_cursor = page.next_cursor
-        if not next_cursor:
-            return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
-        cursor = next_cursor
-    return VisibleSessionPage(_sort_session_rows(sessions), cursor, 0)
-
-def _add_thread_derived_hidden_ids(
-    query: _SessionListQuery, threads: Iterable[Any]
-) -> None:
-    thread_hidden_ids = system_agents.hidden_thread_ids_from_threads(
-        threads, accepted_visible_thread_ids=query.accepted_visible_thread_ids
-    )
-    query.hidden_thread_ids.update(thread_hidden_ids)
-    if query.system_only:
-        query.system_thread_ids.update(thread_hidden_ids)
-
-def _thread_list_page(codex: common.Codex, *, archived: bool, cursor: str) -> ThreadListPage:
-    kwargs: dict[str, Any] = {
-        "limit": common._THREAD_LIST_FETCH_LIMIT,
-        "sort_key": ThreadSortKey.updated_at,
-        "sort_direction": SortDirection.desc,
-        "use_state_db_only": common._THREAD_LIST_USE_STATE_DB_ONLY,
-    }
-    if archived:
-        kwargs["archived"] = True
-    if cursor:
-        kwargs["cursor"] = cursor
-    response = codex.thread_list(**kwargs)
-    next_cursor = getattr(response, "next_cursor", "")
-    return ThreadListPage(
-        threads=sorted(
-            response.data,
-            # Normalize through updated_at_seconds: SDK threads may carry
-            # datetime, epoch int/float, or no updated_at at all, and sorting a
-            # mix (or a datetime against the default 0) would raise TypeError.
-            key=lambda thread: updated_at_seconds(getattr(thread, "updated_at", None))
-            or 0.0,
-            reverse=True,
-        ),
-        next_cursor=next_cursor if isinstance(next_cursor, str) else "",
-    )
-
-def _session_row_for_thread(
-    thread: Any,
-    query: _SessionListQuery,
-    *,
-    metadata_by_thread: dict[str, SessionMetadata],
-) -> dict[str, Any] | None:
-    thread_id = getattr(thread, "id", None)
-    if not isinstance(thread_id, str) or not thread_id:
-        return None
-    if query.system_only:
-        if thread_id not in query.system_thread_ids:
-            return None
-    elif thread_id in query.hidden_thread_ids:
-        return None
-    session_project = _project_for_thread_cached(
-        thread, metadata_by_thread, query.projects, query.project_cache
-    )
-    if query.project_visibility is not None:
-        if not _session_project_is_visible(session_project, query.project_visibility):
-            return None
-    elif query.current_project is not None and session_project != query.current_project:
-        return None
-    row = {
-        "id": thread_id,
-        "cwd": common._thread_cwd(thread) or "",
-        "updated_at": getattr(thread, "updated_at", None),
-        "display_title": _display_title(thread),
-        "name_value": getattr(thread, "name", None) or "",
-        "is_archived": _thread_is_archived(thread),
-        "project": session_project,
-    }
-    if not query.system_only:
-        metadata = metadata_by_thread.get(thread_id)
-        codex_path = string_value(getattr(thread, "path", None))
-        if not codex_path and metadata is not None:
-            codex_path = metadata.codex_path
-        row.update(
-            {
-                "codex_path": codex_path,
-                "has_activity": bool(getattr(thread, "preview", None)),
-                "stage_main_updated_at": getattr(thread, "updated_at", None),
-                "stage_cache_key": metadata.derived_stage if metadata is not None else "",
-                "stage_cache_mtime_ns": (
-                    metadata.derived_stage_source_mtime_ns
-                    if metadata is not None
-                    else 0
-                ),
-                "stage_pr_refresh_attempted_at": (
-                    metadata.derived_stage_pr_refresh_attempted_at
-                    if metadata is not None
-                    else None
-                ),
-            }
-        )
-    if query.system_only:
-        run = query.runs_by_thread_id.get(thread_id)
-        instance = (
-            run.instance
-            if run is not None
-            else query.instances_by_thread_id.get(thread_id)
-        )
-        row.update(
-            {
-                "detail_url": reverse(
-                    "system_session", kwargs={"session_id": thread_id}
-                ),
-                "system_kind": (
-                    _system_agent_run_label(run, instance)
-                    if run is not None or instance is not None
-                    else "Hitch system"
-                ),
-                "system_status": (
-                    _system_agent_status(run, instance)
-                    if run is not None or instance is not None
-                    else "untracked"
-                ),
-            }
-        )
-    return row
-
-def _project_for_thread_cached(
-    thread: Any,
-    metadata_by_thread: dict[str, SessionMetadata],
-    projects: list[Project],
-    project_cache: dict[str, Project | None],
-) -> Project | None:
-    thread_id = getattr(thread, "id", "")
-    metadata = metadata_by_thread.get(thread_id) if isinstance(thread_id, str) else None
-    if metadata is not None and (
-        metadata.project_id is not None or metadata.project_cleared
-    ):
-        return metadata.project
-    cwd = common._thread_cwd(thread)
-    if not cwd:
-        return None
-    if cwd not in project_cache:
-        project_cache[cwd] = common._project_for_cwd(cwd, projects)
-    return project_cache[cwd]
 
 def _next_sessions_url(request: HttpRequest, page: SessionListPage) -> str:
     if (

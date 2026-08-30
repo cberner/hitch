@@ -58,11 +58,9 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-config`: Each AG stores goal text, autonomy, ambition, confidence threshold,
   web search, auto-QA, auto-proposal, stack depth, and optional token budget.
 - `AG-auto-qa-guidance`: When an accepted AG session has Auto-QA enabled, its
-  completed implementation turn starts one normal coding turn that recommends
-  the optional native `hitch_reviewer` subagent. Hitch registers the role in
-  the promoted coding worker's app-server configuration before resuming the
-  candidate; it does not require delegation or start a hidden QA
-  verdict-and-repair loop.
+  initial implementation turn receives guidance recommending the optional
+  native `hitch_reviewer` subagent after implementation. It does not require
+  delegation or start a separate QA verdict-and-repair turn.
 - `AG-stack-default`: If stack depth is unset, the effective stack depth is `1`.
 - `AG-stack-depth-range`: Supported stack depth values are integers from `1`
   through `100`. Hitch must reject stack depth values above `100`.
@@ -157,7 +155,9 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
   user-visible thread with the proposed work and prompt. Implementation
   proposals start in a fresh worktree at the approved snapshot; propose-only
   results start in the selected repository. Acceptance never resumes or
-  reveals the hidden candidate thread.
+  reveals the hidden candidate thread. Pending implementation proposals from
+  before snapshot-based acceptance are first snapshotted from their candidate
+  checkout so the fresh session preserves their work.
 - `AG-proposal-resolution`: Rejecting or dismissing a Proposal records the outcome and stops any
   background continuation tied to that Proposal.
 
@@ -166,7 +166,9 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-accepted-session-block`: Once a Proposal is accepted, the producing AG must not run more
   background sessions until the accepted session is Done or archived.
 - `AG-inactive-accepted-session-block`: If the accepted session is inactive but not Done or archived, the AG
-  remains blocked indefinitely.
+  remains blocked indefinitely. A terminal ownerless PR record migrated from a
+  legacy wrapper counts as Done only when it is at least as new as the accepted
+  session's latest indexed activity.
 - `AG-accepted-block-visible`: The AG page must clearly show when `AG-accepted-session-block` or `AG-inactive-accepted-session-block` is the reason an
   AG is blocked.
 - `AG-accepted-block-scope`: Accepted-session blocking applies only to the AG that produced the

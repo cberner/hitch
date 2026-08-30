@@ -545,46 +545,6 @@ def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
         if (ppid := _proc_ppid(entry)) is None or ppid not in matched
     )
 
-def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
-    """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
-
-    The worker fires the auto-review follow-up from ``_notify_system_agents``
-    *after* committing the terminal status, claiming ``auto_pr_triggered_at`` /
-    ``auto_qa_triggered_at`` as it does. A reaped COMPLETED user turn with the
-    automation enabled but neither field set was killed before it could fire --
-    and unlike workflow-owned rows there is no later reconcile that recovers it.
-
-    Excludes turns where the automation would have been *intentionally* declined
-    (visible-approval mode, or a pending proposed plan): there the null
-    timestamps are by design, so the turn is a real success, not a lost
-    follow-up, and must not be rewritten as failed.
-    """
-    if not (
-        instance.status == CodexInstance.STATUS_COMPLETED
-        and instance.purpose == CodexInstance.PURPOSE_USER
-        and instance.workflow_id is None
-        and not instance.plan_mode
-        and (instance.auto_pr_enabled or instance.auto_qa_enabled)
-        and instance.auto_pr_triggered_at is None
-        and instance.auto_qa_triggered_at is None
-    ):
-        return False
-    try:
-        from hitch.main.workflows import system_agents
-
-        if system_agents.auto_review_intentionally_skipped(
-            instance
-        ) or system_agents.auto_review_waits_for_unarchive(instance):
-            return False
-    except Exception:
-        # If we cannot determine intent, prefer leaving a completed turn intact
-        # over rewriting a successful result as a false failure.
-        codex_pool.logger.exception(
-            "could not check auto-review intent for reaped instance %s", instance.pk
-        )
-        return False
-    return True
-
 def _finalize_reaped_instance(instance_id: int) -> None:
     """Clean up after force-killing a reaped worker so its turn isn't left in a
     silently-broken state.
@@ -600,10 +560,6 @@ def _finalize_reaped_instance(instance_id: int) -> None:
       approval/input prompts before exiting, and reaped terminal rows never pass
       through ``_mark_dead_instances_failed`` (which does the same), so otherwise
       the UI keeps actionable cards no worker can answer;
-    * a ``COMPLETED`` plain user turn whose auto-PR/QA never fired
-      (``_reaped_turn_lost_auto_review``; not covered by the routing above):
-      surface it as a failed turn with a retry hint so the user sees the dropped
-      follow-up instead of a silent success.
     """
     try:
         instance = CodexInstance.objects.filter(pk=instance_id).first()
@@ -621,18 +577,6 @@ def _finalize_reaped_instance(instance_id: int) -> None:
     # no-op for a plain user turn, which the lost-auto-review check below covers).
     _notify_system_agents_if_needed(instance)
     codex_pool.cleanup_requested_input_images_for(instance)
-    if _reaped_turn_lost_auto_review(instance):
-        automation = "auto-PR" if instance.auto_pr_enabled else "auto-QA"
-        CodexInstance.objects.filter(
-            pk=instance_id, status=CodexInstance.STATUS_COMPLETED
-        ).update(
-            status=CodexInstance.STATUS_FAILED,
-            error=(
-                f"This turn finished, but its {automation} follow-up could not "
-                "start because the worker had to be terminated while holding the "
-                "Codex database lock. Send the message again to retry."
-            ),
-        )
 
 _RECONCILE_DEAD_MIN_INTERVAL = timedelta(seconds=2)
 
@@ -672,30 +616,6 @@ def reconcile_dead_for_thread(thread_id: str) -> int:
     _reconcile_terminal_workflow_instances(main_thread_id=thread_id)
     if updated:
         _reconcile_orphaned_workers_if_due()
-    _prune_reaped_workers()
-    return updated
-
-def reconcile_dead_for_workflow(
-    workflow_id: int, *, main_thread_id: str | None = None
-) -> int:
-    """Mark dead workers for one workflow without sweeping every session."""
-    codex_pool._reap_finished_workers()
-    pending = CodexInstance.objects.filter(
-        workflow_id=workflow_id,
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    )
-    updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances(
-        main_thread_id=main_thread_id,
-        workflow_id=workflow_id,
-    )
-    # A hidden workflow stream may be the only thing reconciling (maintenance
-    # scheduler disabled, or between its 60s ticks), so reap leaked workers here
-    # too -- otherwise a wedged workflow worker keeps the Codex state-DB lock.
-    # The reap is a global /proc scan, so debounce it: many concurrent workflow
-    # streams collapse to one sweep per interval (the 60s reap grace makes this
-    # coarse gate harmless).
-    _reconcile_orphaned_workers_if_due()
     _prune_reaped_workers()
     return updated
 

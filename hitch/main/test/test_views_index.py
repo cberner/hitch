@@ -38,10 +38,8 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.runtime.rollout_state import _RolloutFileState
 from hitch.main.sessions import (
     session_index,
-    session_stage,
     session_stage_refresh,
     settings_cookies,
     token_usage,
@@ -68,7 +66,6 @@ from hitch.main.test.views_helpers import (
     _token_count_line,
 )
 from hitch.main.views import common as common_views
-from hitch.main.views import session_list
 from hitch.main.workflows import gh_cli, system_agents
 
 
@@ -87,51 +84,12 @@ class IndexViewTests(TestCase):
         self.assertIn("cursor=idx%3A", url)
         return url
 
-    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_shows_pr_number_in_cached_pr_badge(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_cached_session_list_shows_registered_pr_number(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
         now = datetime.now(UTC)
-        pr_url = "https://github.com/cberner/hitch/pull/94"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": PR_SLASH_PROMPT},
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "github_fetch_pr",
-                        "arguments": "{}",
-                        "call_id": "call-pr",
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-pr",
-                        "output": json.dumps({"url": pr_url, "state": "open"}),
-                    },
-                ),
-                _rollout_line(
-                    "response_item",
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Open."}],
-                        "phase": "final_answer",
-                    },
-                ),
-            ],
-        )
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
             last_synced_at=now,
@@ -142,12 +100,20 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             codex_display_title="Cached PR",
             codex_preview="Open a PR",
-            codex_path=str(rollout_path),
             codex_created_at=now,
             codex_updated_at=now,
             codex_last_synced_at=now,
-            derived_stage="pr",
-            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        SessionPullRequest.objects.create(
+            thread_id="cached-pr",
+            cwd="/repo",
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/94",
+                    "pr_number": 94,
+                    "state": "open",
+                }
+            },
         )
 
         response = self.client.get(reverse("index"))
@@ -159,101 +125,8 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">PR #94</span>',
         )
         mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
 
-    @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
-    @patch(
-        "hitch.main.workflows.pr_tracking.pr_snapshot_stage_refresh_due",
-        return_value=True,
-    )
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        _mock_due: MagicMock,
-        mock_schedule: MagicMock,
-    ) -> None:
-        # Two PR rows are due for a gh refresh but the per-render budget allows
-        # only one. The deferred row's snapshot is known-stale, so its derived
-        # terminal stage must not be persisted to the mtime-keyed cache: the
-        # cached fast path only rechecks PR stages, so a stale Done badge would
-        # otherwise stick without ever scheduling another refresh.
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        pr_url = "https://github.com/cberner/hitch/pull/94"
-        rows = []
-        for index in range(2):
-            rollout_path = _make_rollout(
-                self,
-                [
-                    _rollout_line(
-                        "event_msg",
-                        {
-                            "type": "user_message",
-                            "message": PR_SLASH_PROMPT,
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "function_call",
-                            "name": "github_fetch_pr",
-                            "arguments": "{}",
-                            "call_id": "call-pr",
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "function_call_output",
-                            "call_id": "call-pr",
-                            "output": json.dumps({"url": pr_url, "state": "closed", "merged": True}),
-                        },
-                    ),
-                    _rollout_line(
-                        "response_item",
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "Merged."}],
-                            "phase": "final_answer",
-                        },
-                    ),
-                ],
-            )
-            rows.append(
-                SessionMetadata.objects.create(
-                    thread_id=f"pr-row-{index}",
-                    cwd=str(rollout_path.parent),
-                    codex_display_title=f"PR row {index}",
-                    codex_preview="Open a PR",
-                    codex_path=str(rollout_path),
-                    codex_created_at=now,
-                    codex_updated_at=now - timedelta(minutes=index),
-                    codex_last_synced_at=now,
-                )
-            )
 
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        # Budget is 1: exactly one row schedules an off-request refresh.
-        self.assertEqual(mock_schedule.call_count, 1)
-        # Neither row caches its stale terminal stage while a refresh is due.
-        for metadata in rows:
-            metadata.refresh_from_db()
-            self.assertEqual(metadata.derived_stage, "")
-            self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
-        mock_codex.assert_not_called()
 
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
@@ -921,72 +794,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(metadata.project, project)
         self.assertIsNotNone(metadata.codex_updated_at)
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_incomplete_session_index_uses_codex_cursor_pagination(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        cached_page = [_session(f"thread-{i}", name=f"Cached {i}", updated_at=1000 - i) for i in range(50)]
-        client = _setup_codex(mock_codex)
-        client.thread_list.return_value = SimpleNamespace(
-            data=cached_page,
-            next_cursor="page-2",
-        )
-        client.thread_list.side_effect = None
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=False,
-            next_cursor="page-2",
-        )
-        for thread in cached_page:
-            SessionMetadata.objects.create(
-                thread_id=thread.id,
-                cwd="/repo",
-                codex_display_title=thread.name,
-                codex_name=thread.name,
-                codex_created_at=now,
-                codex_updated_at=now,
-                codex_last_synced_at=now,
-            )
 
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Cached 0")
-        self.assertContains(response, 'href="/?cursor=page-2"')
-        mock_codex.assert_called_once()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_codex_cursor_request_uses_codex_even_when_index_complete(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        cursor_page = [_session("cursor-thread", name="Cursor session")]
-        client = _setup_codex(mock_codex)
-        client.thread_list.return_value = SimpleNamespace(data=cursor_page)
-        client.thread_list.side_effect = None
-        mock_discover.return_value = []
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=datetime.now(UTC),
-            is_complete=True,
-        )
-
-        response = self.client.get(f"{reverse('index')}?cursor=page-2")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Cursor session")
-        mock_codex.assert_called_once()
-        client.thread_list.assert_called_once_with(
-            limit=100,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-            cursor="page-2",
-            use_state_db_only=True,
-        )
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1178,7 +986,19 @@ class IndexViewTests(TestCase):
         )
         _setup_codex(mock_codex, threads=[accepted])
         mock_discover.return_value = []
-        metadata = SessionMetadata.objects.create(thread_id="accepted-candidate")
+        metadata = SessionMetadata.objects.create(
+            thread_id="accepted-candidate",
+            is_hidden_system_session=True,
+        )
+        CodexInstance.objects.create(
+            pid=0,
+            thread_id="accepted-candidate",
+            cwd="/repo",
+            prompt="Analyze the repo.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
         ProposedSession.objects.create(
             title="Accepted proposal",
             candidate_session=metadata,
@@ -1191,28 +1011,10 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Accepted candidate")
 
+        system_response = self.client.get(reverse("system_sessions"))
+        self.assertNotContains(system_response, "Accepted candidate")
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_active_session_pagination_stops_before_refetching_seen_cursor(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
 
-        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if cursor == "b":
-                return SimpleNamespace(data=[_session("session-b", name="Session B")], next_cursor="a")
-            return SimpleNamespace(data=[_session("session-a", name="Session A")], next_cursor="b")
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("index"), {"cursor": "a"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Session A")
-        self.assertContains(response, "Session B")
-        self.assertEqual(client.thread_list.call_count, 2)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1497,7 +1299,6 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.runtime.rollout.latest_token_usage") as latest_usage,
-            patch("hitch.main.runtime.rollout.token_usage_history") as usage_history,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -1507,7 +1308,6 @@ class IndexViewTests(TestCase):
             response = self.client.get(reverse("usage"))
 
         latest_usage.assert_not_called()
-        usage_history.assert_not_called()
         rollout_state.assert_not_called()
         start_refresh.assert_not_called()
         self.assertNotContains(response, "Refreshing session token usage...")
@@ -1525,7 +1325,6 @@ class IndexViewTests(TestCase):
         )
         with (
             patch("hitch.main.runtime.rollout.latest_token_usage") as latest_usage,
-            patch("hitch.main.runtime.rollout.token_usage_history") as usage_history,
             patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
@@ -1535,7 +1334,6 @@ class IndexViewTests(TestCase):
             response = self.client.get(reverse("usage"))
 
         latest_usage.assert_not_called()
-        usage_history.assert_not_called()
         rollout_state.assert_not_called()
         start_refresh.assert_called_once()
         refresh_items = start_refresh.call_args.args[0]
@@ -1748,7 +1546,7 @@ class IndexViewTests(TestCase):
         # A session that exhausts its context window records a token_count
         # whose total_token_usage is reset to zero (plus the window size). The
         # headline cumulative figure and the per-day chart are derived from two
-        # different rollout reads (latest_token_usage vs token_usage_history),
+        # different rollout reads (latest totals vs daily history),
         # so both must account for the pre-reset spend or the usage page shows
         # a session that suddenly "lost" most of its tokens and a chart that
         # disagrees with its own total.
@@ -1873,31 +1671,6 @@ class IndexViewTests(TestCase):
         assert refreshed is not None
         self.assertEqual(refreshed["usage"]["input_tokens"], 500)
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_archived_session_pagination_exhausts_cursor_cycles(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        client = _setup_codex(mock_codex)
-
-        def thread_list(*, archived: bool | None = None, cursor: str | None = None, **_: Any) -> SimpleNamespace:
-            if archived and cursor == "a":
-                return SimpleNamespace(data=[], next_cursor="b")
-            if archived and cursor == "b":
-                return SimpleNamespace(data=[], next_cursor="a")
-            if archived:
-                return SimpleNamespace(data=[], next_cursor="a")
-            return SimpleNamespace(data=[])
-
-        client.thread_list.side_effect = thread_list
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "No sessions found.")
-        self.assertEqual(client.thread_list.call_count, 8)
 
     @patch("hitch.main.views.common.Codex")
     def test_profile_shows_selected_project_token_usage(self, mock_codex: MagicMock) -> None:
@@ -2572,48 +2345,6 @@ class PrStageRefreshSchedulingTests(TestCase):
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
-    @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
-    @patch(
-        "hitch.main.sessions.session_stage_refresh.pr_tracking.pr_snapshot_stage_refresh_due",
-        return_value=True,
-    )
-    @patch("hitch.main.sessions.session_stage_refresh._pr_snapshot_for_rollout_path")
-    def test_cached_pr_row_drops_refreshing_when_budget_exhausted(
-        self,
-        mock_snapshot: MagicMock,
-        _mock_due: MagicMock,
-        mock_schedule: MagicMock,
-    ) -> None:
-        # A cached PR row whose refresh is due must only render data-refreshing
-        # when a refresh was actually scheduled; otherwise rows beyond the
-        # per-render budget keep _stage_refresh_script reloading forever.
-        mock_snapshot.return_value = {"url": "https://github.com/cberner/hitch/pull/94"}
-        rollout_state = _RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
-        session = {"cwd": "/repo", "stage_pr_refresh_attempted_at": None}
-
-        _stage, _snap, remaining, refreshing = session_stage_refresh._stage_from_cached_session_row(
-            "sess-budget",
-            session,
-            rollout_state=rollout_state,
-            cached_stage=session_stage.PR,
-            pr_stage_refreshes_remaining=1,
-        )
-        self.assertTrue(refreshing)
-        self.assertEqual(remaining, 0)
-        mock_schedule.assert_called_once_with("sess-budget")
-
-        mock_schedule.reset_mock()
-
-        _stage, _snap, remaining, refreshing = session_stage_refresh._stage_from_cached_session_row(
-            "sess-exhausted",
-            session,
-            rollout_state=rollout_state,
-            cached_stage=session_stage.PR,
-            pr_stage_refreshes_remaining=0,
-        )
-        self.assertFalse(refreshing)
-        self.assertEqual(remaining, 0)
-        mock_schedule.assert_not_called()
 
 
 class ArchiveUndoToastTests(TestCase):
@@ -2851,32 +2582,6 @@ class UnarchiveFailureTests(TestCase):
                 )
             finally:
                 browser.close()
-
-
-class ThreadListSortTests(TestCase):
-    """`_thread_list_page` must sort SDK threads with heterogeneous timestamps.
-
-    Regression guard: threads can carry a datetime, an epoch int/float, or no
-    `updated_at` at all. Sorting that mix directly (or a datetime against the
-    default 0) raises TypeError and 500s the session list, so the sort key is
-    normalized through `updated_at_seconds`.
-    """
-
-    def test_sorts_mixed_and_absent_updated_at_without_crashing(self) -> None:
-        threads = [
-            SimpleNamespace(id="missing"),  # no updated_at attribute at all
-            SimpleNamespace(id="epoch", updated_at=1_700_000_000),
-            SimpleNamespace(id="dt", updated_at=datetime(2025, 1, 2, tzinfo=UTC)),
-        ]
-        codex = SimpleNamespace(thread_list=lambda **kwargs: SimpleNamespace(data=list(threads), next_cursor=""))
-
-        page = session_list._thread_list_page(cast(Any, codex), archived=False, cursor="")
-
-        # Newest first: the 2025 datetime, then the 2023 epoch, then the
-        # timestampless thread (treated as oldest).
-        self.assertEqual([thread.id for thread in page.threads], ["dt", "epoch", "missing"])
-
-
 class UsageTileAccessibilityTests(TestCase):
     """Only lifetime-stat tiles that actually have a chart may be interactive.
 

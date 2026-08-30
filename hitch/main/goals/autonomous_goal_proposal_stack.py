@@ -9,7 +9,6 @@ Leaf module: imports nothing from ``system_agents`` to avoid an import cycle.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,12 +23,8 @@ from hitch.main.models import (
     SessionPullRequest,
     SystemWorkflow,
 )
-from hitch.main.runtime import rollout
-from hitch.main.runtime.rollout_state import _rollout_file_state_from_value
 from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sequences import unique_nonempty
-
-logger = logging.getLogger(__name__)
 
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
 LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
@@ -42,7 +37,6 @@ _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKENS_USED_METADATA_KEY = (
     "proposal_budget_tokens_used"
 )
-_DONE_ACCEPTED_SESSION_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
 
 
@@ -56,13 +50,6 @@ class _AutonomousGoalProposalStackMetadata:
 class _AutonomousGoalPendingProposalState:
     blocking_goal_ids: set[int]
     continuable_stack_goal_ids: set[int]
-
-
-@dataclass(frozen=True)
-class _AcceptedSessionRolloutEvidence:
-    done: bool
-    superseded_by_lifecycle: bool
-    mtime_ns: int
 
 
 def _proposal_outcome_metadata(
@@ -280,14 +267,6 @@ def _valid_autonomous_goal_stack_metadata_int(value: object) -> bool:
     return is_nonbool_int(value)
 
 
-def _autonomous_goal_proposal_stack_iteration(proposal: ProposedSession) -> int:
-    metadata = (
-        proposal.outcome_metadata if isinstance(proposal.outcome_metadata, dict) else {}
-    )
-    value = metadata.get("stacked_diff_iteration")
-    return max(value, 1) if isinstance(value, int) else 1
-
-
 def _autonomous_goal_unresolved_failure_notice_exists(
     autonomous_goal: AutonomousGoal,
 ) -> bool:
@@ -339,45 +318,22 @@ def _autonomous_goal_accepted_session_blocking_ids(
         .values_list(
             "autonomous_goal_id",
             "accepted_session__thread_id",
-            "accepted_session__derived_stage",
-            "accepted_session__derived_stage_source_mtime_ns",
             "accepted_session__codex_updated_at",
-            "accepted_session__codex_path",
         )
     )
     accepted_thread_ids = [
         thread_id
-        for (
-            _goal_id,
-            thread_id,
-            _derived_stage,
-            _derived_stage_source_mtime_ns,
-            _codex_updated_at,
-            _codex_path,
-        ) in accepted_session_rows
+        for _goal_id, thread_id, _codex_updated_at in accepted_session_rows
         if isinstance(thread_id, str) and thread_id
     ]
     live_thread_ids = _accepted_session_live_thread_ids(accepted_thread_ids)
     done_prs_by_thread_id = _accepted_session_done_prs_by_thread_id(
         accepted_thread_ids
     )
-    for (
-        goal_id,
-        thread_id,
-        derived_stage,
-        derived_stage_source_mtime_ns,
-        codex_updated_at,
-        codex_path,
-    ) in accepted_session_rows:
+    for goal_id, thread_id, codex_updated_at in accepted_session_rows:
         if not isinstance(goal_id, int):
             continue
         if isinstance(thread_id, str) and thread_id in live_thread_ids:
-            blocking_ids.add(goal_id)
-            continue
-        rollout_evidence = _accepted_session_rollout_evidence(codex_path)
-        if rollout_evidence is not None and rollout_evidence.done:
-            continue
-        if rollout_evidence is not None and rollout_evidence.superseded_by_lifecycle:
             blocking_ids.add(goal_id)
             continue
         registered_pr = (
@@ -387,10 +343,6 @@ def _autonomous_goal_accepted_session_blocking_ids(
         )
         if registered_pr is not None and _accepted_session_pr_is_current(
             registered_pr, codex_updated_at
-        ):
-            continue
-        if _accepted_session_cached_stage_is_done(
-            derived_stage, derived_stage_source_mtime_ns, rollout_evidence
         ):
             continue
         blocking_ids.add(goal_id)
@@ -442,50 +394,6 @@ def _accepted_session_pr_is_current(
     if registered_pr.updated_at is None or not isinstance(codex_updated_at, datetime):
         return True
     return registered_pr.updated_at >= codex_updated_at
-
-
-def _accepted_session_cached_stage_is_done(
-    derived_stage: object,
-    derived_stage_source_mtime_ns: object,
-    rollout_evidence: _AcceptedSessionRolloutEvidence | None,
-) -> bool:
-    if derived_stage not in _DONE_ACCEPTED_SESSION_STAGE_KEYS:
-        return False
-    if rollout_evidence is None:
-        return True
-    return derived_stage_source_mtime_ns == rollout_evidence.mtime_ns
-
-
-def _accepted_session_rollout_evidence(
-    codex_path: object,
-) -> _AcceptedSessionRolloutEvidence | None:
-    rollout_state = _rollout_file_state_from_value(codex_path)
-    if rollout_state is None:
-        return None
-    try:
-        stage_data = rollout.session_stage_data(rollout_state.path)
-    except Exception:
-        logger.exception(
-            "failed to read accepted-session rollout stage from %s",
-            rollout_state.path,
-        )
-        return _AcceptedSessionRolloutEvidence(
-            done=False,
-            superseded_by_lifecycle=False,
-            mtime_ns=rollout_state.mtime_ns,
-        )
-    if stage_data is None:
-        return _AcceptedSessionRolloutEvidence(
-            done=False,
-            superseded_by_lifecycle=False,
-            mtime_ns=rollout_state.mtime_ns,
-        )
-    return _AcceptedSessionRolloutEvidence(
-        done=_pr_snapshot_done_stage_key(stage_data.pr_observation.snapshot)
-        is not None,
-        superseded_by_lifecycle=stage_data.pr_observation.superseded_by_lifecycle,
-        mtime_ns=rollout_state.mtime_ns,
-    )
 
 
 def _pr_snapshot_done_stage_key(snapshot: object) -> str | None:

@@ -1,8 +1,6 @@
 """The new-session page and start flow, including proposal acceptance."""
 
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any, NamedTuple
 
 from django.http import (
@@ -31,17 +29,15 @@ from hitch.main.goals.autonomous_goal_run_display import (
 )
 from hitch.main.models import (
     AutonomousGoal,
-    CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
 )
-from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
+from hitch.main.runtime import codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
 )
 from hitch.main.sessions import agent_tasks, session_index
-from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions.message_intent import (
     _message_intent,
 )
@@ -49,27 +45,12 @@ from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
-from hitch.main.sessions.session_entry_display import (
-    _entries_for,
-)
-from hitch.main.sessions.session_pr_plan import (
-    _count_user_entries,
-)
-from hitch.main.sessions.session_resume import (
-    _metadata_rollout_path_indicates_archived,
-    _record_session_unarchived,
-    _restore_archived_session_for_rejected_turn,
-    _session_detail_metadata,
-    _unarchive_session_for_turn,
-    thread_has_dynamic_tool,
-)
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
     _PLAN_MODE_REASONING_EFFORT,
     _QA_SLASH_PROMPT,
     _authenticated_user,
     _cached_models_and_settings,
-    _effective_approval_mode_for_session,
     _effective_auto_pr_enabled,
     _effective_sandbox_policy_for_cwd,
     _new_session_form_context,
@@ -99,6 +80,7 @@ from hitch.main.worktrees import (
     WorktreeCleanupError,
     WorktreeCreationError,
     release_snapshot_commit_ref,
+    snapshot_worktree_to_commit,
 )
 
 
@@ -109,93 +91,46 @@ class _NewSessionTarget(NamedTuple):
     requires_discovered_repo: bool
 
 
-_RESUME_SOURCE_SESSION_METADATA_KEY = "resume_source_session"
-_RECOVERY_SOURCE_BUSY_MESSAGE = "source session is already running work"
-_RECOVERY_TARGET_UNAVAILABLE_MESSAGE = "recovery repository is unavailable"
 _GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
+_UPGRADE_RECOVERY_METADATA_KEY = "resume_source_session"
 
 
-class _RecoverySourceBusyError(RuntimeError):
-    pass
-
-
-def _proposal_resumes_source_session(proposed_session: ProposedSession) -> bool:
-    metadata = proposed_session.outcome_metadata
-    return (
-        isinstance(metadata, dict)
-        and metadata.get(_RESUME_SOURCE_SESSION_METADATA_KEY) is True
-        and proposed_session.source_session_id is not None
+def _is_upgrade_recovery_proposal(
+    proposed_session: ProposedSession | None,
+) -> bool:
+    return bool(
+        proposed_session is not None
+        and proposed_session.source_session is not None
+        and isinstance(proposed_session.outcome_metadata, dict)
+        and proposed_session.outcome_metadata.get(_UPGRADE_RECOVERY_METADATA_KEY)
+        is True
     )
 
 
-def _proposal_has_trusted_source_target(
-    proposed_session: ProposedSession | None, cwd: str
-) -> bool:
-    if (
-        proposed_session is None
-        or not _proposal_resumes_source_session(proposed_session)
-        or not cwd
-    ):
-        return False
-    trusted_cwds = {_target_cwd_for_proposed_session(proposed_session)}
-    source_session = proposed_session.source_session
-    if source_session is not None:
-        trusted_cwds.add(source_session.cwd.strip())
-    return cwd in trusted_cwds and _recovery_cwd_is_usable(cwd)
-
-
-def _recovery_cwd_is_usable(cwd: str) -> bool:
-    return bool(cwd and repos_module.repo_root(cwd) is not None)
-
-
-def _recovery_proposal_has_usable_target(
+def _proposal_has_usable_stored_target(
     proposed_session: ProposedSession | None,
+    cwd: str,
 ) -> bool:
-    if (
-        proposed_session is None
-        or not _proposal_resumes_source_session(proposed_session)
-    ):
-        return True
-    source_session = proposed_session.source_session
-    if source_session is not None and _recovery_cwd_is_usable(
-        source_session.cwd.strip()
-    ):
-        return True
-    project = _project_for_proposed_session(proposed_session)
-    return project is not None and _recovery_cwd_is_usable(project.repo_path)
+    """Allow migrated proposals to start fresh from their stored repository."""
+    return bool(
+        _is_upgrade_recovery_proposal(proposed_session)
+        and cwd
+        and cwd == _target_cwd_for_proposed_session(proposed_session)
+        and repos_module.repo_root(cwd) is not None
+    )
 
 
-@contextmanager
-def _recovery_source_lifecycle_for_turn(
+def _proposal_has_explicit_auto_review_settings(
     proposed_session: ProposedSession,
-    source_session: SessionMetadata,
-    settings: SettingsValues,
-) -> Iterator[bool]:
-    """Own source-session archive state through a recovery turn start."""
-    if not _proposal_resumes_source_session(proposed_session):
-        yield False
-        return
-    with session_lifecycle.hold(source_session.thread_id):
-        if session_lifecycle.archive_has_active_work(source_session.thread_id):
-            raise _RecoverySourceBusyError(_RECOVERY_SOURCE_BUSY_MESSAGE)
-        unarchived = False
-        try:
-            archive_metadata = _session_detail_metadata(source_session.thread_id) or source_session
-            if archive_metadata.codex_archived or _metadata_rollout_path_indicates_archived(archive_metadata):
-                _unarchive_session_for_turn(source_session.thread_id, settings)
-                unarchived = True
-                _record_session_unarchived(source_session.thread_id)
-                source_session.codex_archived = False
-                source_session.codex_archived_at = None
-                source_session.codex_path = ""
-            yield True
-        except Exception:
-            if unarchived:
-                _restore_archived_session_for_rejected_turn(
-                    source_session.thread_id,
-                    settings,
-                )
-            raise
+) -> bool:
+    metadata = proposed_session.outcome_metadata
+    return bool(
+        proposed_session.autonomous_goal is not None
+        or (
+            isinstance(metadata, dict)
+            and ("auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata)
+        )
+    )
 
 
 def _new_session_post_models_and_settings(
@@ -283,31 +218,6 @@ def _posted_proposed_session_for_new_session(
     return proposed_session, None
 
 
-def _candidate_session_to_continue_from_proposal(
-    proposed_session: ProposedSession | None,
-) -> SessionMetadata | None:
-    if proposed_session is None:
-        return None
-    if _proposal_resumes_source_session(proposed_session):
-        source_session = proposed_session.source_session
-        if source_session is None or not _recovery_cwd_is_usable(
-            source_session.cwd.strip()
-        ):
-            return None
-        return source_session
-    if _is_tool_protocol_ag_proposal(proposed_session):
-        return None
-    if proposed_session.candidate_session is None:
-        return None
-    candidate_session = proposed_session.candidate_session
-    if not candidate_session.cwd:
-        return None
-    project = _project_for_proposed_session(proposed_session)
-    if project is not None and candidate_session.cwd == project.repo_path:
-        return None
-    return candidate_session
-
-
 def _approved_snapshot_for_proposal(
     proposed_session: ProposedSession | None,
 ) -> str:
@@ -353,7 +263,10 @@ def _release_approved_snapshot_ref(proposed_session: ProposedSession) -> None:
 def _cleanup_hidden_ag_candidate_worktree(
     proposed_session: ProposedSession,
 ) -> None:
-    if not _is_tool_protocol_ag_proposal(proposed_session):
+    if (
+        not _is_tool_protocol_ag_proposal(proposed_session)
+        and _legacy_ag_candidate_for_snapshot(proposed_session) is None
+    ):
         return
     candidate = proposed_session.candidate_session
     if candidate is None or not candidate.cwd:
@@ -367,7 +280,7 @@ def _cleanup_hidden_ag_candidate_worktree(
         )
 
 
-def _tool_protocol_ag_proposal_requires_snapshot(
+def _ag_proposal_requires_snapshot(
     proposed_session: ProposedSession,
 ) -> bool:
     metadata = proposed_session.outcome_metadata
@@ -379,91 +292,20 @@ def _tool_protocol_ag_proposal_requires_snapshot(
     )
 
 
-def _accept_proposed_session_for_session(
-    proposed_session: ProposedSession | None, session_metadata: SessionMetadata
-) -> bool:
-    """Record acceptance of ``proposed_session`` into ``session_metadata``.
-
-    Returns whether this call won the one-way transition. ``False`` means the
-    proposal was already resolved (e.g. a concurrent inbox reject/dismiss), so
-    callers that adopt the candidate worktree must abort rather than present it.
-    """
-    if proposed_session is None:
-        return False
-    outcome_metadata = _proposal_outcome_metadata(
-        proposed_session,
-        {
-            "accepted_by": "user",
-            "resolved_by": "user",
-            "accepted_session_id": session_metadata.pk,
-            "accepted_thread_id": session_metadata.thread_id,
-        },
-    )
-    # Gate the accept on the proposal still being undecided, mirroring the
-    # conditional UPDATE in update_proposed_session_outcome, so exactly one
-    # transition wins across both endpoints. In a stale-tab race where the inbox
-    # endpoint rejects/dismisses this proposal (cleaning up the candidate
-    # worktree) while new_session is accepting it, an unconditional save here
-    # would overwrite the resolved status and leave accepted_session pointing at
-    # a removed worktree. The loser of the race updates nothing.
-    applied = ProposedSession.objects.filter(
-        pk=proposed_session.pk,
-        outcome_status=ProposedSession.OUTCOME_UNSET,
-    ).update(
-        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-        accepted_session=session_metadata,
-        outcome_metadata=outcome_metadata,
-        updated_at=timezone.now(),
-    )
-    if not applied:
-        return False
-    proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
-    proposed_session.accepted_session = session_metadata
-    proposed_session.outcome_metadata = outcome_metadata
-    _release_approved_snapshot_ref(proposed_session)
-    return True
-
-
-def _claim_candidate_proposal_start(
-    *,
-    proposed_session: ProposedSession,
-    candidate_session: SessionMetadata,
-    cookie_updates: dict[str, str],
-) -> HttpResponse | None:
-    if _accept_proposed_session_for_session(proposed_session, candidate_session):
+def _legacy_ag_candidate_for_snapshot(
+    proposed_session: ProposedSession | None,
+) -> SessionMetadata | None:
+    if (
+        proposed_session is None
+        or proposed_session.autonomous_goal_id is None
+        or _is_tool_protocol_ag_proposal(proposed_session)
+        or not _ag_proposal_requires_snapshot(proposed_session)
+    ):
         return None
-    response = redirect("inbox")
-    _apply_cookie_updates(response, cookie_updates)
-    return response
-
-
-def _reset_candidate_proposal_start_claim(
-    proposed_session: ProposedSession, candidate_session: SessionMetadata
-) -> None:
-    outcome_metadata = _proposal_outcome_metadata(
-        proposed_session,
-        {
-            "accepted_by": None,
-            "resolved_by": None,
-            "accepted_session_id": None,
-            "accepted_thread_id": None,
-        },
-    )
-    applied = ProposedSession.objects.filter(
-        pk=proposed_session.pk,
-        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-        accepted_session=candidate_session,
-    ).update(
-        outcome_status=ProposedSession.OUTCOME_UNSET,
-        accepted_session=None,
-        outcome_metadata=outcome_metadata,
-        updated_at=timezone.now(),
-    )
-    if not applied:
-        return
-    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
-    proposed_session.accepted_session = None
-    proposed_session.outcome_metadata = outcome_metadata
+    candidate = proposed_session.candidate_session
+    if candidate is None or not candidate.cwd.strip():
+        return None
+    return candidate
 
 
 def _claim_new_session_proposal_start(
@@ -646,290 +488,6 @@ def _posted_model_settings_override(
     return default._replace(model=model, reasoning_effort=effort), None
 
 
-def _candidate_thread_user_message_index(thread_id: str, settings: SettingsValues) -> int:
-    resumed = app_server_pool.run_borrowed_op_with_retry(
-        common.Codex,
-        lambda codex: codex._client.thread_resume(thread_id),
-        enable_memories=settings.enable_memories,
-    )
-    return _count_user_entries(list(_entries_for(resumed.thread)))
-
-
-def _next_user_message_index_for_candidate_thread(thread_id: str, settings: SettingsValues) -> int:
-    latest_instance = (
-        CodexInstance.objects.filter(
-            thread_id=thread_id,
-            user_message_index__isnull=False,
-        )
-        .order_by("-user_message_index", "-pk")
-        .values("status", "user_message_index")
-        .first()
-    )
-    if latest_instance is None:
-        return _candidate_thread_user_message_index(thread_id, settings)
-    if latest_instance["status"] == CodexInstance.STATUS_FAILED:
-        return _candidate_thread_user_message_index(thread_id, settings)
-    latest_index = latest_instance["user_message_index"]
-    if latest_index is None:
-        return _candidate_thread_user_message_index(thread_id, settings)
-    return max(int(latest_index) + 1, 0)
-
-
-def _finish_candidate_proposal_start(
-    *,
-    request: HttpRequest,
-    proposed_session: ProposedSession,
-    candidate_session: SessionMetadata,
-    cwd: str,
-    target: _NewSessionTarget,
-    settings: SettingsValues,
-    cookie_updates: dict[str, str],
-    auto_pr_enabled: bool,
-    auto_qa_enabled: bool,
-) -> HttpResponse:
-    candidate_cwd = candidate_session.cwd
-    session_project = (
-        None
-        if target.project_cleared
-        else candidate_session.project or target.project
-    )
-    if not _proposal_resumes_source_session(proposed_session):
-        common._rename_codex_thread_from_proposal(
-            proposed_session=proposed_session,
-            session_metadata=candidate_session,
-            settings=settings,
-        )
-    SessionMetadata.objects.filter(pk=candidate_session.pk).update(
-        cwd=candidate_cwd,
-        project=session_project,
-        project_cleared=target.project_cleared,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-        is_hidden_system_session=False,
-    )
-    candidate_session.refresh_from_db()
-    return _remember_repo_and_redirect(
-        request, cookie_updates, cwd=cwd, thread_id=candidate_session.thread_id
-    )
-
-
-def _start_candidate_proposal_session(
-    *,
-    request: HttpRequest,
-    proposed_session: ProposedSession,
-    candidate_session: SessionMetadata,
-    prompt: str,
-    plan_mode: bool,
-    pr_now_activation: bool,
-    qa_activation: bool,
-    agent_task_activation: bool,
-    cwd: str,
-    target: _NewSessionTarget,
-    settings: SettingsValues,
-    cookie_updates: dict[str, str],
-    auto_pr_enabled: bool,
-    auto_qa_enabled: bool,
-    web_search_mode: str,
-) -> HttpResponse:
-    """Start a proposal on its existing candidate thread before accepting it."""
-    candidate_cwd = candidate_session.cwd
-    if not candidate_cwd:
-        return HttpResponseBadRequest("candidate session has no cwd")
-    if (
-        not common._is_allowed_session_cwd(candidate_cwd)
-        and not _proposal_has_trusted_source_target(
-            proposed_session,
-            candidate_cwd,
-        )
-    ):
-        return HttpResponseBadRequest(
-            "candidate session cwd is not an allowed repository"
-        )
-    if not _proposal_resumes_source_session(proposed_session):
-        prompt = _candidate_proposal_continuation_prompt(prompt)
-    project = None if target.project_cleared else candidate_session.project or target.project
-    developer_instructions = common._developer_instructions_for_project(settings, project)
-    sandbox_policy = _effective_sandbox_policy_for_cwd(settings, candidate_cwd)
-    approval_mode = _effective_approval_mode_for_session(
-        settings,
-        candidate_session.thread_id,
-        candidate_session,
-    )
-    if agent_task_activation:
-        claim_response = _claim_candidate_proposal_start(
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            cookie_updates=cookie_updates,
-        )
-        if claim_response is not None:
-            return claim_response
-        try:
-            with _recovery_source_lifecycle_for_turn(
-                proposed_session,
-                candidate_session,
-                settings,
-            ):
-                task = (
-                    agent_tasks.publish_pr_task()
-                    if pr_now_activation
-                    else agent_tasks.review_task(
-                        prepare_pull_request=not qa_activation,
-                        pr_title=(
-                            proposed_session.title if not qa_activation else ""
-                        ),
-                    )
-                )
-                if task.requires_pr_watch and not thread_has_dynamic_tool(
-                    candidate_session.thread_id,
-                    namespace="hitch",
-                    name="watch_pr",
-                ):
-                    raise agent_tasks.PrWatchUnavailableError(
-                        "hitch.watch_pr is unavailable for this session; "
-                        "start a new session before publishing a PR"
-                    )
-                task_kwargs: dict[str, Any] = {
-                    "thread_id": candidate_session.thread_id,
-                    "cwd": candidate_cwd,
-                    "prompt": task.prompt,
-                    "sandbox_policy": sandbox_policy or None,
-                    "approval_mode": approval_mode,
-                    "model": settings.model or None,
-                    "reasoning_effort": settings.reasoning_effort or None,
-                    "developer_instructions": developer_instructions or None,
-                    "enable_memories": settings.enable_memories,
-                    "user_message_index": (
-                        _next_user_message_index_for_candidate_thread(
-                            candidate_session.thread_id,
-                            settings,
-                        )
-                    ),
-                    "agent_kind": task.agent_kind,
-                }
-                if web_search_mode:
-                    task_kwargs["web_search_mode"] = web_search_mode
-                codex_pool.spawn_turn(**task_kwargs)
-        except _RecoverySourceBusyError:
-            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-            return HttpResponseBadRequest(_RECOVERY_SOURCE_BUSY_MESSAGE)
-        except agent_tasks.PrWatchUnavailableError as exc:
-            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-            return HttpResponseBadRequest(str(exc))
-        except Exception:
-            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-            raise
-        # Persist the proposal-derived auto-review configuration so subsequent
-        # turns in this session keep honoring it.
-        response = _finish_candidate_proposal_start(
-            request=request,
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            cwd=cwd,
-            target=target,
-            settings=settings,
-            cookie_updates=cookie_updates,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-        )
-        common._stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
-        return response
-
-    input_image_paths, input_image_error = common._save_posted_input_images(request)
-    if input_image_error is not None:
-        return HttpResponseBadRequest(input_image_error)
-    input_images_owned = False
-    claim_response = _claim_candidate_proposal_start(
-        proposed_session=proposed_session,
-        candidate_session=candidate_session,
-        cookie_updates=cookie_updates,
-    )
-    if claim_response is not None:
-        common._cleanup_saved_input_images(input_image_paths)
-        return claim_response
-    try:
-        with _recovery_source_lifecycle_for_turn(
-            proposed_session,
-            candidate_session,
-            settings,
-        ):
-            spawn_kwargs: dict[str, Any] = {
-                "thread_id": candidate_session.thread_id,
-                "cwd": candidate_cwd,
-                "prompt": prompt,
-                "developer_instructions": developer_instructions or None,
-                "model": settings.model or None,
-                "reasoning_effort": (
-                    None if plan_mode else settings.reasoning_effort or None
-                ),
-                "sandbox_policy": sandbox_policy or None,
-                "approval_mode": approval_mode,
-            }
-            if input_image_paths:
-                spawn_kwargs["input_image_paths"] = input_image_paths
-            if web_search_mode:
-                spawn_kwargs["web_search_mode"] = web_search_mode
-            if settings.enable_memories:
-                spawn_kwargs["enable_memories"] = True
-            if plan_mode:
-                spawn_kwargs["plan_mode"] = True
-            if auto_pr_enabled:
-                spawn_kwargs["auto_pr_enabled"] = True
-            if auto_qa_enabled:
-                spawn_kwargs["auto_qa_enabled"] = True
-            if auto_pr_enabled or auto_qa_enabled:
-                spawn_kwargs["stored_model"] = settings.model or None
-                spawn_kwargs["stored_reasoning_effort"] = (
-                    settings.reasoning_effort or None
-                )
-                spawn_kwargs["user_message_index"] = (
-                    _next_user_message_index_for_candidate_thread(
-                        candidate_session.thread_id,
-                        settings,
-                    )
-                )
-            codex_pool.spawn_turn(**spawn_kwargs)
-            input_images_owned = True
-    except _RecoverySourceBusyError:
-        common._cleanup_saved_input_images(input_image_paths)
-        _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-        return HttpResponseBadRequest(_RECOVERY_SOURCE_BUSY_MESSAGE)
-    except codex_pool.InputAttachmentLimitExceededError as exc:
-        common._cleanup_saved_input_images(input_image_paths)
-        _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-        return HttpResponseBadRequest(str(exc))
-    except Exception:
-        if not input_images_owned:
-            common._cleanup_saved_input_images(input_image_paths)
-            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
-        raise
-
-    response = _finish_candidate_proposal_start(
-        request=request,
-        proposed_session=proposed_session,
-        candidate_session=candidate_session,
-        cwd=cwd,
-        target=target,
-        settings=settings,
-        cookie_updates=cookie_updates,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-    )
-    common._stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
-    return response
-
-
-def _candidate_proposal_continuation_prompt(prompt: str) -> str:
-    rebase_instruction = (
-        "First, rebase or otherwise update this worktree onto the current project "
-        "base branch before continuing. Resolve any conflicts, then continue with "
-        "the user's instructions."
-    )
-    prompt = prompt.strip()
-    if not prompt:
-        return rebase_instruction
-    return f"{rebase_instruction}\n\n{prompt}"
-
-
 def _proposed_session_for_new_session_page(
     request: HttpRequest,
     *,
@@ -963,7 +521,13 @@ def _proposed_session_for_new_session_page(
     if (
         proposed_session is None
         or not target_cwd
-        or (target_cwd not in repo_set and not _proposal_has_trusted_source_target(proposed_session, target_cwd))
+        or (
+            target_cwd not in repo_set
+            and not _proposal_has_usable_stored_target(
+                proposed_session,
+                target_cwd,
+            )
+        )
     ):
         raise Http404("proposed session not found")
     _attach_proposed_session_display_state([proposed_session])
@@ -1007,7 +571,14 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     repo_set = set(repos)
     proposed_session = _proposed_session_for_new_session_page(request, repo_set=repo_set)
     proposed_session_cwd = _target_cwd_for_proposed_session(proposed_session)
-    if proposed_session_cwd and proposed_session_cwd not in repo_set:
+    if (
+        proposed_session_cwd
+        and proposed_session_cwd not in repo_set
+        and _proposal_has_usable_stored_target(
+            proposed_session,
+            proposed_session_cwd,
+        )
+    ):
         repos.append(proposed_session_cwd)
         repo_set.add(proposed_session_cwd)
     models_data, resolved_settings = _cached_models_and_settings(request)
@@ -1046,10 +617,6 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
         prefill_bare_repo_cwd=prefill_bare_repo_cwd,
         repos=repos,
     )
-    if proposed_session is not None and _proposal_resumes_source_session(proposed_session):
-        recovery_auto_pr, recovery_auto_qa = _auto_review_settings_for_proposed_session(proposed_session)
-        new_session_context["current_new_session_auto_pr"] = recovery_auto_pr
-        new_session_context["current_new_session_auto_qa"] = recovery_auto_qa
     response = render(
         request,
         "new_session.html",
@@ -1121,8 +688,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     if proposed_session_error is not None:
         return HttpResponseBadRequest(proposed_session_error)
-    if not _recovery_proposal_has_usable_target(proposed_session):
-        return HttpResponseBadRequest(_RECOVERY_TARGET_UNAVAILABLE_MESSAGE)
     cwd = target.cwd
     if not prompt and not has_input_images:
         return HttpResponseBadRequest("prompt is required")
@@ -1131,12 +696,12 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # Raw cwd posts still need discovery validation. Project-id posts use the
     # server-side Project.repo_path, so they do not need a home-directory scan
     # on the hot Start path.
-    trusted_resume_target = _proposal_has_trusted_source_target(
-        proposed_session, target.cwd
-    )
-    if target.requires_discovered_repo and not trusted_resume_target:
+    if target.requires_discovered_repo:
         allowed = {str(p) for p in repos_module.discover_repos()}
-        if cwd not in allowed:
+        if cwd not in allowed and not _proposal_has_usable_stored_target(
+            proposed_session,
+            cwd,
+        ):
             return HttpResponseBadRequest("cwd must be a discovered repository")
 
     # Re-reconcile the cookies against Codex's current model list before
@@ -1191,8 +756,8 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(auto_qa_error)
     if auto_pr_enabled:
         auto_qa_enabled = False
-    if proposed_session is not None and (
-        proposed_session.autonomous_goal is not None or _proposal_resumes_source_session(proposed_session)
+    if proposed_session is not None and _proposal_has_explicit_auto_review_settings(
+        proposed_session
     ):
         auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(proposed_session)
     web_search_mode, web_search_error = _posted_web_search_override(
@@ -1207,52 +772,46 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(
             "image attachments are not supported for review or PR tasks"
         )
+    if not agent_task_activation and not plan_mode:
+        prompt = agent_tasks.with_automatic_review_guidance(
+            prompt,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            pr_title=(proposed_session.title if proposed_session is not None else ""),
+        )
     if (
         not agent_task_activation
         and source_project is not None
         and source_project.auto_pull_enabled
-        and not (proposed_session is not None and _proposal_resumes_source_session(proposed_session))
     ):
         try:
             repos_module.pull_default_branch_from_origin(source_project.repo_path)
         except repos_module.AutoPullError as exc:
             return HttpResponseBadRequest(f"could not update project before session: {exc}")
 
-    candidate_session = _candidate_session_to_continue_from_proposal(proposed_session)
-    if candidate_session is not None:
-        assert proposed_session is not None
-        return _start_candidate_proposal_session(
-            request=request,
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            prompt=prompt,
-            plan_mode=plan_mode,
-            pr_now_activation=pr_now_activation,
-            qa_activation=qa_activation,
-            agent_task_activation=agent_task_activation,
-            cwd=cwd,
-            target=target,
-            settings=settings,
-            cookie_updates=cookie_updates,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-            web_search_mode=web_search_mode,
-        )
-
     session_cwd = cwd
     managed_worktree: ManagedWorktree | None = None
     approved_snapshot = _approved_snapshot_for_proposal(proposed_session)
+    legacy_candidate = _legacy_ag_candidate_for_snapshot(proposed_session)
+    if legacy_candidate is not None:
+        try:
+            approved_snapshot = snapshot_worktree_to_commit(
+                legacy_candidate.cwd,
+                message="Snapshot legacy autonomous-goal proposal",
+            )
+        except WorktreeCreationError as exc:
+            return HttpResponseBadRequest(str(exc))
     if (
         proposed_session is not None
         and _is_tool_protocol_ag_proposal(proposed_session)
-        and not _tool_protocol_ag_proposal_requires_snapshot(proposed_session)
+        and not _ag_proposal_requires_snapshot(proposed_session)
     ):
         approved_snapshot = ""
     if (
         proposed_session is not None
         and _is_tool_protocol_ag_proposal(proposed_session)
         and not approved_snapshot
-        and _tool_protocol_ag_proposal_requires_snapshot(proposed_session)
+        and _ag_proposal_requires_snapshot(proposed_session)
     ):
         return HttpResponseBadRequest(
             "approved autonomous-goal snapshot is missing or invalid"
@@ -1409,10 +968,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
         spawn_kwargs["plan_mode"] = True
-    if auto_pr_enabled:
-        spawn_kwargs["auto_pr_enabled"] = True
-    if auto_qa_enabled:
-        spawn_kwargs["auto_qa_enabled"] = True
+    if auto_pr_enabled and not plan_mode:
+        spawn_kwargs["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
+        spawn_kwargs["user_message_index"] = 0
     input_images_owned = False
     proposal_claimed = False
     if proposed_session is not None:

@@ -176,6 +176,55 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
 
+    def test_legacy_promoted_candidate_worktree_is_preserved(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            promoted_path = self._managed_path(root, "promoted")
+            old_path = self._managed_path(root, "old")
+            promoted = self._session(
+                thread_id="promoted",
+                cwd=promoted_path,
+                hidden_system=True,
+            )
+            CodexInstance.objects.create(
+                pid=0,
+                thread_id=promoted.thread_id,
+                cwd=promoted.cwd,
+                prompt="Analyze the repo.",
+                events_path="/dev/null",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+            ProposedSession.objects.create(
+                title="Accepted legacy proposal",
+                candidate_session=promoted,
+                accepted_session=promoted,
+                outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            )
+            self._session(
+                thread_id="old",
+                cwd=old_path,
+                archived=True,
+                archived_at=(
+                    timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+                ),
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300, 150],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 1)
+        mock_cleanup.assert_called_once_with(old_path)
+
     def test_partition_prefilter_skips_walk_when_under_limit(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
