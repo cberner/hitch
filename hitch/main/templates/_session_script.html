@@ -1016,6 +1016,9 @@
             // user message arrives via the stream, so it doesn't end up
             // double-rendered with the canonical reload.
             const pendingUser = document.querySelector("[data-pending-user]");
+            const acceptedProposalContextTemplate = document.querySelector(
+                "[data-accepted-proposal-context-template]"
+            );
 
             const TOOL_LABELS = {
                 commandExecution: "Command",
@@ -1259,6 +1262,11 @@
                 body.className = "body";
                 body.textContent = userMessageText(item);
                 msg.appendChild(body);
+                if (acceptedProposalContextTemplate) {
+                    msg.appendChild(
+                        acceptedProposalContextTemplate.content.cloneNode(true)
+                    );
+                }
                 wrap.appendChild(header);
                 wrap.appendChild(msg);
                 insertBeforeLive(wrap);

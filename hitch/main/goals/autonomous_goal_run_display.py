@@ -90,6 +90,9 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     }
     latest_workflows = list(workflows_by_thread.values())
     log_urls_by_workflow_id = _autonomous_goal_log_urls(latest_workflows)
+    candidate_log_urls_by_workflow_id = _autonomous_goal_candidate_log_urls(
+        latest_workflows
+    )
     running_tokens_by_workflow_id = _autonomous_goal_running_token_counts(latest_workflows)
     for goal in goals:
         latest_workflow = workflows_by_thread.get(autonomous_goals._autonomous_goal_main_thread_id(goal.pk))
@@ -102,6 +105,11 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         )
         goal.run_log_url = (  # type: ignore[attr-defined]
             log_urls_by_workflow_id.get(latest_workflow.pk) or "" if latest_workflow is not None else ""
+        )
+        goal.run_candidate_log_url = (  # type: ignore[attr-defined]
+            candidate_log_urls_by_workflow_id.get(latest_workflow.pk) or ""
+            if latest_workflow is not None
+            else ""
         )
         run_badge = _autonomous_goal_run_badge(
             goal,
@@ -499,6 +507,45 @@ def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
     return "\n".join(parts)
 
 
+def _accepted_proposal_prompt(
+    proposed_session: ProposedSession,
+    prompt: str,
+    *,
+    approved_snapshot: str,
+) -> str:
+    candidate = proposed_session.candidate_session
+    if proposed_session.autonomous_goal_id is None or candidate is None:
+        return prompt
+    candidate_log_url = reverse(
+        "system_session",
+        kwargs={"session_id": candidate.thread_id},
+    )
+    lines = [
+        "Accepted autonomous-goal proposal context:",
+        f"- Candidate log: {candidate_log_url}",
+    ]
+    if approved_snapshot:
+        lines.extend(
+            [
+                f"- Approved snapshot: {approved_snapshot}",
+                "",
+                "This fresh session starts from the approved snapshot above. "
+                "The candidate transcript is linked for reference and is not "
+                "automatically loaded as conversation context.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "The candidate transcript is linked for reference and is not "
+                "automatically loaded as conversation context.",
+            ]
+        )
+    context = "\n".join(lines)
+    return f"{prompt.rstrip()}\n\n{context}"
+
+
 def _autonomous_goal_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, str]:
     workflow_ids = [workflow.pk for workflow in workflows]
     if not workflow_ids:
@@ -513,6 +560,30 @@ def _autonomous_goal_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, 
         urls.setdefault(
             run.workflow_id,
             reverse("autonomous_goal_run_log", kwargs={"workflow_id": run.workflow_id}),
+        )
+    return urls
+
+
+def _autonomous_goal_candidate_log_urls(
+    workflows: Iterable[SystemWorkflow],
+) -> dict[int, str]:
+    workflow_ids = [workflow.pk for workflow in workflows]
+    if not workflow_ids:
+        return {}
+    proposals = (
+        ProposedSession.objects.filter(
+            source_workflow_id__in=workflow_ids,
+            candidate_session__isnull=False,
+        )
+        .exclude(candidate_session__thread_id="")
+        .order_by("source_workflow_id", "-created_at", "-pk")
+        .values_list("source_workflow_id", "candidate_session__thread_id")
+    )
+    urls: dict[int, str] = {}
+    for workflow_id, thread_id in proposals:
+        urls.setdefault(
+            workflow_id,
+            reverse("system_session", kwargs={"session_id": thread_id}),
         )
     return urls
 

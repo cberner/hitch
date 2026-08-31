@@ -582,6 +582,7 @@
                             data-run-status-title="{{ goal.run_status_title }}"
                             data-run-status-detail="{{ goal.run_status_detail }}"
                             data-run-status-log-url="{{ goal.run_log_url }}"
+                            data-run-status-candidate-log-url="{{ goal.run_candidate_log_url }}"
                             title="{{ goal.run_status_detail }}"
                             aria-label="{{ goal.run_status_title }}"
                         >{{ goal.run_status_label }}</button>
@@ -622,6 +623,7 @@
             <p class="run-status-detail" data-run-status-dialog-detail></p>
             <div class="actions">
                 <a class="button secondary" href="" data-run-status-dialog-log hidden>View log</a>
+                <a class="button secondary" href="" data-run-status-dialog-candidate-log hidden>Candidate log</a>
                 <button type="button" class="button" data-run-status-dialog-close>Close</button>
             </div>
         </form>
@@ -721,6 +723,7 @@
             const runStatusTitle = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-title]");
             const runStatusDetail = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-detail]");
             const runStatusLog = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-log]");
+            const runStatusCandidateLog = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-candidate-log]");
             const runStatusClose = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-close]");
             const pageMenu = document.querySelector("[data-page-menu]");
             {% include "_context_menu_script.html" %}
@@ -775,6 +778,11 @@
                     if (runStatusLog) {
                         runStatusLog.hidden = !logUrl;
                         runStatusLog.href = logUrl;
+                    }
+                    const candidateLogUrl = button.dataset.runStatusCandidateLogUrl || "";
+                    if (runStatusCandidateLog) {
+                        runStatusCandidateLog.hidden = !candidateLogUrl;
+                        runStatusCandidateLog.href = candidateLogUrl;
                     }
                     showDialog(runStatusDialog);
                     if (runStatusClose) runStatusClose.focus();

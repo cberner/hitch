@@ -159,9 +159,13 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
   user-visible thread with the proposed work and prompt. Implementation
   proposals start in a fresh worktree at the approved snapshot; propose-only
   results start in the selected repository. Acceptance never resumes or
-  reveals the hidden candidate thread. Pending implementation proposals from
-  before snapshot-based acceptance are first snapshotted from their candidate
-  checkout so the fresh session preserves their work.
+  promotes the hidden candidate thread into the user-visible session. Pending
+  implementation proposals from before snapshot-based acceptance are first
+  snapshotted from their candidate checkout so the fresh session preserves
+  their work. The generated starting message links the read-only candidate log,
+  identifies the approved snapshot when one seeds the fresh worktree, and
+  states that the candidate transcript is available for reference rather than
+  automatically loaded as conversation context.
 - `AG-proposal-resolution`: Rejecting or dismissing a Proposal records the outcome and stops any
   background continuation tied to that Proposal.
 
@@ -188,6 +192,9 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-state-detail`: State detail explains the next expected action, such as waiting for
   quota recovery, waiting in the background queue, waiting for Inbox action,
   waiting for accepted session completion, or requiring manual retry.
+- `AG-candidate-log-navigation`: When the latest AG run records a candidate
+  session, its status detail keeps a link to that candidate log after the
+  Proposal is accepted, rejected, or dismissed.
 
 ### 4.7 Cleanup and Failure Handling
 

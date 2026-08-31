@@ -659,7 +659,11 @@ class NewSessionViewTests(TestCase):
             project=project,
         )
 
-        new_session_views._finish_new_session_proposal_start_claim(proposal, metadata)
+        new_session_views._finish_new_session_proposal_start_claim(
+            proposal,
+            metadata,
+            approved_snapshot="",
+        )
 
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
@@ -1615,12 +1619,23 @@ class NewSessionViewTests(TestCase):
             self.REPO, base_ref=snapshot
         )
         self.assertEqual(mock_spawn.call_args.kwargs["cwd"], str(worktree.path))
+        spawned_prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn(
+            f"Candidate log: {reverse('system_session', args=[candidate.thread_id])}",
+            spawned_prompt,
+        )
+        self.assertIn(f"Approved snapshot: {snapshot}", spawned_prompt)
+        self.assertIn(
+            "candidate transcript is linked for reference and is not automatically loaded",
+            spawned_prompt,
+        )
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertIsNotNone(proposal.accepted_session)
         assert proposal.accepted_session is not None
         self.assertEqual(proposal.accepted_session.thread_id, "visible-thread")
         self.assertNotEqual(proposal.accepted_session_id, candidate.pk)
+        self.assertEqual(proposal.outcome_metadata["accepted_snapshot_sha"], snapshot)
         mock_cleanup_candidate.assert_called_once_with(candidate.cwd)
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
@@ -1688,16 +1703,24 @@ class NewSessionViewTests(TestCase):
             self.REPO, base_ref=snapshot
         )
         self.assertEqual(mock_spawn.call_args.kwargs["cwd"], str(worktree.path))
+        spawned_prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn(
+            f"Candidate log: {reverse('system_session', args=[hidden_candidate.thread_id])}",
+            spawned_prompt,
+        )
+        self.assertIn(f"Approved snapshot: {snapshot}", spawned_prompt)
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertIsNotNone(proposal.accepted_session)
         assert proposal.accepted_session is not None
         self.assertEqual(proposal.accepted_session.thread_id, "visible-thread")
+        self.assertEqual(proposal.outcome_metadata["accepted_snapshot_sha"], snapshot)
         mock_release_snapshot.assert_called_once_with(self.REPO, snapshot_ref)
         mock_cleanup_candidate.assert_called_once_with(hidden_candidate.cwd)
         hidden_candidate.refresh_from_db()
         self.assertTrue(hidden_candidate.is_hidden_system_session)
 
+    @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch("hitch.main.views.new_session.release_snapshot_commit_ref")
     @patch("hitch.main.views.common.create_worktree_for_session")
     @patch("hitch.main.views.common.Codex")
@@ -1708,6 +1731,7 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_create_worktree: MagicMock,
         mock_release_snapshot: MagicMock,
+        mock_cleanup_candidate: MagicMock,
     ) -> None:
         project = _make_project(repo_path=self.REPO, auto_pull_enabled=False)
         goal = AutonomousGoal.objects.create(
@@ -1716,6 +1740,12 @@ class NewSessionViewTests(TestCase):
             goal="Find a meaningful reliability improvement.",
             autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
         )
+        candidate = SessionMetadata.objects.create(
+            thread_id="propose-only-candidate",
+            cwd="/candidate",
+            project=project,
+            is_hidden_system_session=True,
+        )
         snapshot_ref = (
             "refs/hitch/autonomous-goals/1/"
             "0123456789abcdef0123456789abcdef"
@@ -1723,6 +1753,7 @@ class NewSessionViewTests(TestCase):
         proposal = ProposedSession.objects.create(
             autonomous_goal=goal,
             title="Harden retries",
+            candidate_session=candidate,
             outcome_metadata={
                 "autonomous_goal_tool_protocol": True,
                 "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
@@ -1745,7 +1776,17 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         mock_create_worktree.assert_not_called()
         self.assertEqual(mock_spawn.call_args.kwargs["cwd"], self.REPO)
+        spawned_prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn(
+            f"Candidate log: {reverse('system_session', args=[candidate.thread_id])}",
+            spawned_prompt,
+        )
+        self.assertNotIn("Approved snapshot:", spawned_prompt)
+        self.assertNotIn("starts from the approved snapshot", spawned_prompt)
         mock_release_snapshot.assert_called_once_with(self.REPO, snapshot_ref)
+        mock_cleanup_candidate.assert_called_once_with(candidate.cwd)
+        proposal.refresh_from_db()
+        self.assertNotIn("accepted_snapshot_sha", proposal.outcome_metadata)
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     def test_hidden_ag_candidate_cleanup_failure_is_nonfatal(
