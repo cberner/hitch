@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from typing import cast, override
+from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, TestCase
@@ -292,19 +292,258 @@ class PrWatchToolTests(TestCase):
         )
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
-    def test_standalone_watch_does_not_claim_session_ui_state(
+    def test_ordinary_turn_registers_verified_current_checkout_pr(
         self, mock_watch: MagicMock
     ) -> None:
         mock_watch.return_value = {
             **_observation(),
-            "status": "ready",
-            "feedback_fingerprint": "",
+            "status": "attention",
+            "feedback_fingerprint": "seen",
         }
 
-        response = self._call(agent_kind="")
+        with patch(
+            "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout"
+        ) as validate:
+            response = self._call(agent_kind="")
 
         self.assertTrue(response["success"])
+        validate.assert_called_once_with(cwd=self.cwd, url=_PR_URL)
+        record = SessionPullRequest.objects.get(thread_id="main-thread")
+        self.assertEqual(
+            pr_tracking.pr_handoff_for_record(record)["pr_number"], 42
+        )
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_ordinary_turn_does_not_register_unverified_pr(
+        self, mock_watch: MagicMock
+    ) -> None:
+        with patch(
+            "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout",
+            side_effect=pr_watch.PrWatchError("checkout does not match"),
+        ) as validate:
+            response = self._call(agent_kind="")
+
+        self.assertFalse(response["success"])
+        validate.assert_called_once_with(cwd=self.cwd, url=_PR_URL)
+        mock_watch.assert_not_called()
         self.assertFalse(SessionPullRequest.objects.exists())
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_ordinary_turn_revalidates_historical_pr(
+        self, mock_watch: MagicMock
+    ) -> None:
+        mock_watch.return_value = {
+            **_observation(),
+            "status": "attention",
+            "feedback_fingerprint": "seen",
+        }
+        SessionPullRequest.objects.create(
+            thread_id="main-thread",
+            cwd=self.cwd,
+            state={
+                pr_tracking.PR_HANDOFF_STATE_KEY: _observation()["pr"],
+                SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY: 7,
+            },
+        )
+
+        with patch(
+            "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout"
+        ) as validate:
+            response = self._call(agent_kind="", instance_id=8, message_index=5)
+
+        self.assertTrue(response["success"])
+        validate.assert_called_once_with(cwd=self.cwd, url=_PR_URL)
+        self.assertTrue(
+            SessionPullRequest.objects.get(thread_id="main-thread").is_current
+        )
+
+    def test_ordinary_registration_rechecks_currentness_after_preflight(self) -> None:
+        record = SessionPullRequest.objects.create(
+            thread_id="main-thread",
+            cwd=self.cwd,
+            state={
+                pr_tracking.PR_HANDOFF_STATE_KEY: _observation()["pr"],
+            },
+        )
+        requested_pr = cast(dict[str, Any], _observation()["pr"])
+        preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id="main-thread",
+            requested_pr=requested_pr,
+        )
+        record.state = {
+            **record.state,
+            SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY: 7,
+        }
+        record.save(update_fields=["state", "updated_at"])
+
+        with self.assertRaisesRegex(pr_watch.PrWatchError, "changed.*retry"):
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=8,
+                user_message_index=5,
+                agent_kind="",
+                requested_pr=requested_pr,
+                ordinary_preflight=preflight,
+            )
+
+    def test_ordinary_registration_rejects_invalid_preflight(self) -> None:
+        requested_pr = cast(dict[str, Any], _observation()["pr"])
+        with self.assertRaisesRegex(pr_watch.PrWatchError, "changed.*retry"):
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=8,
+                user_message_index=5,
+                agent_kind="",
+                requested_pr=requested_pr,
+            )
+
+        SessionPullRequest.objects.create(
+            thread_id="main-thread",
+            cwd=self.cwd,
+            state={pr_tracking.PR_HANDOFF_STATE_KEY: requested_pr},
+        )
+        preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id="main-thread",
+            requested_pr=requested_pr,
+        )
+        different_pr = {
+            **requested_pr,
+            "url": "https://github.com/openai/hitch/pull/43",
+            "pr_number": 43,
+        }
+
+        with self.assertRaisesRegex(pr_watch.PrWatchError, "changed.*retry"):
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=8,
+                user_message_index=5,
+                agent_kind="",
+                requested_pr=different_pr,
+                ordinary_preflight=preflight,
+            )
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_ordinary_validation_cannot_replace_newer_registration(
+        self, mock_watch: MagicMock
+    ) -> None:
+        newer_pr = {
+            "url": "https://github.com/openai/hitch/pull/43",
+            "repository_full_name": "openai/hitch",
+            "pr_number": 43,
+        }
+
+        def register_newer_pr(**_kwargs: object) -> None:
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=9,
+                user_message_index=6,
+                agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND,
+                requested_pr=newer_pr,
+            )
+
+        with patch(
+            "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout",
+            side_effect=register_newer_pr,
+        ):
+            response = self._call(agent_kind="")
+
+        self.assertFalse(response["success"])
+        mock_watch.assert_not_called()
+        record = SessionPullRequest.objects.get(thread_id="main-thread")
+        self.assertEqual(pr_tracking.pr_handoff_for_record(record)["pr_number"], 43)
+        self.assertTrue(pr_tracking.watch_registered_by_instance(record, 9))
+
+    def test_older_ordinary_turn_cannot_take_newer_owner(self) -> None:
+        requested_pr = cast(dict[str, Any], _observation()["pr"])
+        newer_preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id="main-thread",
+            requested_pr=requested_pr,
+        )
+        pr_tracking.begin_pr_watch_invocation(
+            thread_id="main-thread",
+            cwd=self.cwd,
+            instance_id=8,
+            user_message_index=5,
+            agent_kind="",
+            requested_pr=requested_pr,
+            ordinary_preflight=newer_preflight,
+        )
+        older_preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id="main-thread",
+            requested_pr=requested_pr,
+        )
+
+        with self.assertRaisesRegex(pr_watch.PrWatchError, "newer session turn"):
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=7,
+                user_message_index=4,
+                agent_kind="",
+                requested_pr=requested_pr,
+                ordinary_preflight=older_preflight,
+            )
+
+        record = SessionPullRequest.objects.get(thread_id="main-thread")
+        self.assertTrue(pr_tracking.watch_registered_by_instance(record, 8))
+
+    def test_absent_preflight_cannot_follow_newer_completed_turn(self) -> None:
+        older = CodexInstance.objects.create(
+            pid=7,
+            thread_id="main-thread",
+            cwd=self.cwd,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        requested_pr = cast(dict[str, Any], _observation()["pr"])
+        preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id="main-thread",
+            requested_pr=requested_pr,
+        )
+        CodexInstance.objects.create(
+            pid=8,
+            thread_id="main-thread",
+            cwd=self.cwd,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with self.assertRaisesRegex(pr_watch.PrWatchError, "newer session turn"):
+            pr_tracking.begin_pr_watch_invocation(
+                thread_id="main-thread",
+                cwd=self.cwd,
+                instance_id=older.pk,
+                user_message_index=4,
+                agent_kind="",
+                requested_pr=requested_pr,
+                ordinary_preflight=preflight,
+            )
+
+        self.assertFalse(SessionPullRequest.objects.exists())
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_ordinary_follow_up_reuses_registered_feedback_fingerprint(
+        self, mock_watch: MagicMock
+    ) -> None:
+        mock_watch.return_value = {
+            **_observation(),
+            "status": "attention",
+            "feedback_fingerprint": "seen",
+        }
+        with patch(
+            "hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout"
+        ) as validate:
+            self._call(agent_kind="")
+            self._call(agent_kind="", instance_id=8, message_index=5)
+
+        validate.assert_called_once_with(cwd=self.cwd, url=_PR_URL)
+        self.assertEqual(
+            mock_watch.call_args.kwargs["previous_feedback_fingerprint"], "seen"
+        )
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_review_only_turn_does_not_claim_session_ui_state(

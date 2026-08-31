@@ -78,8 +78,35 @@ class PrWatchRegistration:
 
 
 @dataclass(frozen=True)
+class OrdinaryPrWatchPreflight:
+    record_id: int | None
+    record_updated_at: datetime | None
+    record_state: dict[str, Any] | None
+    requires_checkout_validation: bool
+
+
+@dataclass(frozen=True)
 class _PrTarget:
     cwd: str
+
+
+def ordinary_pr_watch_preflight(
+    *, thread_id: str, requested_pr: dict[str, Any]
+) -> OrdinaryPrWatchPreflight:
+    record = SessionPullRequest.objects.filter(thread_id=thread_id).first()
+    current_pr = pr_handoff_for_record(record)
+    already_current = bool(
+        record is not None
+        and record.is_current
+        and current_pr
+        and pr_watch.pr_identity_matches(current_pr, requested_pr)
+    )
+    return OrdinaryPrWatchPreflight(
+        record_id=record.pk if record is not None else None,
+        record_updated_at=record.updated_at if record is not None else None,
+        record_state=dict(record.state) if record is not None else None,
+        requires_checkout_validation=not already_current,
+    )
 
 
 def begin_pr_watch_invocation(
@@ -90,17 +117,46 @@ def begin_pr_watch_invocation(
     user_message_index: int | None,
     agent_kind: str,
     requested_pr: dict[str, Any],
+    ordinary_preflight: OrdinaryPrWatchPreflight | None = None,
 ) -> tuple[PrWatchRegistration | None, str]:
-    """Register a task-owned PR before entering the bounded polling loop."""
-    if agent_kind not in PR_AGENT_KINDS:
+    """Register an invocation-owned PR before entering the polling loop."""
+    ordinary_turn = not agent_kind
+    if not ordinary_turn and agent_kind not in PR_AGENT_KINDS:
         return None, ""
     with transaction.atomic():
         record, _created = SessionPullRequest.objects.select_for_update().get_or_create(
             thread_id=thread_id,
             defaults={"cwd": cwd},
         )
+        if _record_has_newer_instance(
+            record, instance_id
+        ) or _newer_user_instance_exists(thread_id, instance_id):
+            raise pr_watch.PrWatchError(
+                "a newer session turn already owns this pull request"
+            )
         current_pr = pr_handoff_for_record(record)
-        if agent_kind != PR_PUBLISH_AGENT_KIND and current_pr:
+        registration_agent_kind = agent_kind
+        if ordinary_turn:
+            if not _ordinary_preflight_matches_record(
+                ordinary_preflight, record, created=_created
+            ):
+                raise pr_watch.PrWatchError(
+                    "session pull request changed before watch registration; retry"
+                )
+            assert ordinary_preflight is not None
+            if ordinary_preflight.requires_checkout_validation:
+                registration_agent_kind = PR_PUBLISH_AGENT_KIND
+            elif (
+                record.is_current
+                and current_pr
+                and pr_watch.pr_identity_matches(current_pr, requested_pr)
+            ):
+                registration_agent_kind = PR_WATCH_AGENT_KIND
+            else:
+                raise pr_watch.PrWatchError(
+                    "session pull request changed before watch registration; retry"
+                )
+        if registration_agent_kind != PR_PUBLISH_AGENT_KIND and current_pr:
             _validate_pr_identity(current_pr, requested_pr)
         previous_fingerprint = _previous_feedback_fingerprint(record)
         identity_changed = bool(current_pr) and not pr_watch.pr_identity_matches(
@@ -136,6 +192,49 @@ def begin_pr_watch_invocation(
             ),
             previous_fingerprint,
         )
+
+
+def _ordinary_preflight_matches_record(
+    preflight: OrdinaryPrWatchPreflight | None,
+    record: SessionPullRequest,
+    *,
+    created: bool,
+) -> bool:
+    if preflight is None:
+        return False
+    if preflight.record_id is None:
+        return created
+    return bool(
+        not created
+        and record.pk == preflight.record_id
+        and record.updated_at == preflight.record_updated_at
+        and record.state == preflight.record_state
+    )
+
+
+def _record_has_newer_instance(
+    record: SessionPullRequest, instance_id: int
+) -> bool:
+    for key in (
+        _WATCH_OWNER_INSTANCE_STATE_KEY,
+        _SUPERSEDED_BY_INSTANCE_STATE_KEY,
+    ):
+        value = record.state.get(key)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > instance_id
+        ):
+            return True
+    return False
+
+
+def _newer_user_instance_exists(thread_id: str, instance_id: int) -> bool:
+    return CodexInstance.objects.filter(
+        thread_id=thread_id,
+        purpose=CodexInstance.PURPOSE_USER,
+        pk__gt=instance_id,
+    ).exists()
 
 
 def record_pr_watch_result(
