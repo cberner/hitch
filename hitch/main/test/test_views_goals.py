@@ -1,6 +1,5 @@
 """Autonomous-goal page and proposal endpoint tests."""
 
-
 import html
 import json
 import tempfile
@@ -14,7 +13,7 @@ from django.test import (
 )
 from django.urls import reverse
 
-from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_run_display
+from hitch.main.goals import autonomous_goal_run_display
 from hitch.main.models import (
     AutonomousGoal,
     CodexInstance,
@@ -60,12 +59,10 @@ class AutonomousGoalViewTests(TestCase):
         )
         SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_goal.pk),
             cwd=repo_path,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": running_goal.pk, "auto_proposal": True},
         )
 
@@ -97,9 +94,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_shows_tappable_run_status_indicators(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_page_shows_tappable_run_status_indicators(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
@@ -194,13 +189,9 @@ class AutonomousGoalViewTests(TestCase):
             main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={
                 "autonomous_goal_id": running_goal.pk,
-                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400_000,
-                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
-                    "running-agent-thread": 100_000,
-                },
             },
         )
         older_running_instance = CodexInstance.objects.create(
@@ -220,6 +211,7 @@ class AutonomousGoalViewTests(TestCase):
             thread_id=older_running_instance.thread_id,
             instance=older_running_instance,
             status=SystemAgentRun.STATUS_RUNNING,
+            output={"tokens_used": 300_000},
         )
         running_instance = CodexInstance.objects.create(
             pid=0,
@@ -241,15 +233,12 @@ class AutonomousGoalViewTests(TestCase):
         )
         no_tokens_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_no_tokens_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_no_tokens_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={
                 "autonomous_goal_id": running_no_tokens_goal.pk,
-                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 700_000,
             },
         )
         no_tokens_instance = CodexInstance.objects.create(
@@ -269,20 +258,16 @@ class AutonomousGoalViewTests(TestCase):
             thread_id=no_tokens_instance.thread_id,
             instance=no_tokens_instance,
             status=SystemAgentRun.STATUS_RUNNING,
+            output={"tokens_used": 700_000},
         )
         unrecorded_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_unrecorded_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_unrecorded_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={
                 "autonomous_goal_id": running_unrecorded_goal.pk,
-                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: [
-                    "not-a-dict"
-                ],
             },
         )
         unrecorded_instance = CodexInstance.objects.create(
@@ -305,9 +290,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                blocked_no_log_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(blocked_no_log_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_BLOCKED,
             step=system_agents.STEP_BLOCKED,
@@ -320,21 +303,17 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-run-status-dialog')
+        self.assertContains(response, "data-run-status-dialog")
         self.assertNotContains(response, "Auto merge")
         self.assertContains(response, 'data-state="blocked"')
-        self.assertContains(
-            response, 'data-run-status-title="Autonomous goal is blocked"'
-        )
+        self.assertContains(response, 'data-run-status-title="Autonomous goal is blocked"')
         self.assertContains(response, "raptorq decoder exhausted repair symbols")
         self.assertContains(
             response,
             f'data-run-status-log-url="{reverse("autonomous_goal_run_log", args=[blocked_workflow.pk])}"',
         )
         self.assertContains(response, 'data-state="running"')
-        self.assertContains(
-            response, 'data-run-status-title="Autonomous goal is running"'
-        )
+        self.assertContains(response, 'data-run-status-title="Autonomous goal is running"')
         self.assertContains(response, "Tokens used: 1,250,000 tokens")
         self.assertContains(response, "Tokens used: 700,000 tokens")
         self.assertContains(response, "Tokens used: 250,000 tokens")
@@ -349,9 +328,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_explains_when_quota_cannot_be_checked(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_page_explains_when_quota_cannot_be_checked(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         self.mock_auto_proposal_quota_status.return_value = "unavailable"
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -411,9 +388,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, ">Ready</button>", html=False)
         self.assertContains(response, ">Manual</button>", html=False)
         self.assertNotContains(response, ">Done</button>", html=False)
-        self.assertContains(
-            response, "The last autonomous goal run created a proposal and stopped."
-        )
+        self.assertContains(response, "The last autonomous goal run created a proposal and stopped.")
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -462,7 +437,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_treats_legacy_stopped_stack_proposal_as_ready(
+    def test_page_treats_legacy_stopped_stack_proposal_as_waiting_for_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         project = _make_project()
@@ -478,9 +453,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         source_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                autonomous_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_COMPLETED,
             step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
@@ -509,9 +482,9 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-state="ready"')
-        self.assertContains(response, ">Ready</button>", html=False)
-        self.assertNotContains(
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
             response,
             "Not running because a proposal from this goal is waiting in the inbox.",
         )
@@ -674,7 +647,7 @@ class AutonomousGoalViewTests(TestCase):
             'class="primary-nav-badge" aria-label="1 inbox message">1</span>',
             nav_html,
         )
-        self.assertContains(response, 'data-visible-projects-open')
+        self.assertContains(response, "data-visible-projects-open")
         self.assertContains(response, "Visible projects")
         main_start = body.index("<main>")
         self.assertLess(body.index('aria-label="Inbox actions"'), main_start)
@@ -687,13 +660,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
-        self.assertContains(response, 'data-proposed-session-do')
+        self.assertContains(response, "data-proposed-session-do")
         self.assertContains(response, f'data-proposed-session-id="{proposal.pk}"')
         self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
-        start_modal_title = (
-            '<h2 id="do-session-title" tabindex="-1" autofocus>'
-            "Continue proposed session</h2>"
-        )
+        start_modal_title = '<h2 id="do-session-title" tabindex="-1" autofocus>Continue proposed session</h2>'
         self.assertContains(response, start_modal_title)
         self.assertContains(response, "if (doHeading) doHeading.focus();")
         self.assertNotContains(response, "doPrompt.focus()")
@@ -707,28 +677,19 @@ class AutonomousGoalViewTests(TestCase):
             response,
             'data-proposed-session-prompt="Go ahead and implement this proposed session.',
         )
-        self.assertContains(
-            response, f'aria-label="Actions for {proposal.title}"'
-        )
+        self.assertContains(response, f'aria-label="Actions for {proposal.title}"')
         self.assertContains(
             response,
             f'action="{reverse("update_proposed_session_outcome", args=[proposal.pk])}"',
         )
         proposal_header_start = body.index('<div class="proposal-header">')
-        proposal_actions_start = body.index(
-            '<div class="proposal-actions">', proposal_header_start
-        )
-        proposal_menu_start = body.index(
-            '<div class="proposal-menu"', proposal_header_start
-        )
+        proposal_actions_start = body.index('<div class="proposal-actions">', proposal_header_start)
+        proposal_menu_start = body.index('<div class="proposal-menu"', proposal_header_start)
         self.assertLess(proposal_menu_start, proposal_actions_start)
-        self.assertContains(
-            response, f'value="{ProposedSession.OUTCOME_DISMISSED}"'
-        )
-        self.assertContains(response, "Judge log")
+        self.assertContains(response, f'value="{ProposedSession.OUTCOME_DISMISSED}"')
+        self.assertContains(response, "Reviewer log")
         self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
-
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
@@ -756,9 +717,7 @@ class AutonomousGoalViewTests(TestCase):
                 "stacked_diff_depth": 3,
                 "stacked_diff_iteration": 2,
                 "proposal_budget_tokens_used": 1250,
-                "stacked_diff_continuation_stopped_reason": (
-                    "candidate_no_proposal"
-                ),
+                "stacked_diff_continuation_stopped_reason": ("candidate_no_proposal"),
             },
         )
 
@@ -787,17 +746,11 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_inbox_recovers_stale_proposal_start_claim(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_inbox_recovers_stale_proposal_start_claim(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        stale_claimed_at = (
-            datetime.now(UTC)
-            - ProposedSession.ACCEPTED_SESSION_START_CLAIM_TTL
-            - timedelta(seconds=1)
-        )
+        stale_claimed_at = datetime.now(UTC) - ProposedSession.ACCEPTED_SESSION_START_CLAIM_TTL - timedelta(seconds=1)
         proposal = ProposedSession.objects.create(
             project=project,
             title="Add parser coverage",
@@ -807,9 +760,7 @@ class AutonomousGoalViewTests(TestCase):
                 "accepted_by": "user",
                 "resolved_by": "user",
                 "accepted_thread_id": "",
-                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
-                    stale_claimed_at.isoformat()
-                ),
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (stale_claimed_at.isoformat()),
             },
         )
 
@@ -842,9 +793,7 @@ class AutonomousGoalViewTests(TestCase):
             outcome_metadata={
                 "accepted_by": "user",
                 "accepted_thread_id": "",
-                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
-                    datetime.now(UTC).isoformat()
-                ),
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (datetime.now(UTC).isoformat()),
             },
         )
 
@@ -862,9 +811,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_inbox_visible_projects_filter_messages(
-        self, mock_codex: MagicMock, _mock_discover: MagicMock
-    ) -> None:
+    def test_inbox_visible_projects_filter_messages(self, mock_codex: MagicMock, _mock_discover: MagicMock) -> None:
         project = _make_project()
         other_project = _make_project(name="Other", repo_path="/other")
         _setup_codex(mock_codex)
@@ -914,9 +861,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Matching proposal")
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
-    def test_update_outcome_rejects_proposal_hidden_by_visible_project_filter(
-        self, mock_cleanup: MagicMock
-    ) -> None:
+    def test_update_outcome_rejects_proposal_hidden_by_visible_project_filter(self, mock_cleanup: MagicMock) -> None:
         visible_project = _make_project()
         hidden_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(
@@ -945,7 +890,6 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         mock_cleanup.assert_not_called()
 
-
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
     def test_new_session_page_prefills_prompt_and_project_from_query(
@@ -953,14 +897,9 @@ class AutonomousGoalViewTests(TestCase):
     ) -> None:
         project = _make_project()
         _setup_codex(mock_codex)
-        prompt = (
-            "Debug and fix the user's issue from session UID thread-1.\n\n"
-            "User issue: "
-        )
+        prompt = "Debug and fix the user's issue from session UID thread-1.\n\nUser issue: "
 
-        response = self.client.get(
-            reverse("new_session"), {"prompt": prompt, "project": str(project.pk)}
-        )
+        response = self.client.get(reverse("new_session"), {"prompt": prompt, "project": str(project.pk)})
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, html.escape(prompt))
@@ -974,9 +913,7 @@ class AutonomousGoalViewTests(TestCase):
         project = _make_project()
         _setup_codex(mock_codex)
 
-        response = self.client.get(
-            reverse("new_session"), {"prompt": "debug this", "project": str(project.pk)}
-        )
+        response = self.client.get(reverse("new_session"), {"prompt": "debug this", "project": str(project.pk)})
 
         self.assertEqual(response.status_code, 404)
 
@@ -988,9 +925,7 @@ class AutonomousGoalViewTests(TestCase):
         project = _make_project()
         _setup_codex(mock_codex)
 
-        response = self.client.get(
-            reverse("new_session"), {"prompt": "debug this", "cwd": "/repo"}
-        )
+        response = self.client.get(reverse("new_session"), {"prompt": "debug this", "cwd": "/repo"})
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "debug this")
@@ -1021,18 +956,14 @@ class AutonomousGoalViewTests(TestCase):
             prompt="Add focused rollout parser tests before changing behavior.",
         )
 
-        response = self.client.get(
-            f"{reverse('new_session')}?proposed_session={proposal.pk}"
-        )
+        response = self.client.get(f"{reverse('new_session')}?proposed_session={proposal.pk}")
 
         self.assertEqual(response.status_code, 404)
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_lists_no_proposal_notice_with_dismiss(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_page_lists_no_proposal_notice_with_dismiss(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
@@ -1057,18 +988,14 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No proposal from Improve tests")
         self.assertContains(response, "From autonomous goal: Improve tests")
-        self.assertContains(
-            response, "No concrete test increment was worth proposing."
-        )
+        self.assertContains(response, "No concrete test increment was worth proposing.")
         self.assertContains(response, "Dismiss")
         self.assertNotContains(response, 'data-proposed-session-id="')
         self.assertNotContains(response, 'data-reject-url="')
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
-    def test_page_shows_create_form_inline_when_no_goals(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_page_shows_create_form_inline_when_no_goals(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
@@ -1076,19 +1003,15 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-autonomous-goal-create-form')
+        self.assertContains(response, "data-autonomous-goal-create-form")
         self.assertContains(response, "data-autonomous-goal-auto-qa")
         self.assertContains(
             response,
             '<input type="checkbox" name="auto_qa" value="true" data-autonomous-goal-auto-qa disabled>',
             html=True,
         )
-        self.assertContains(
-            response, 'value="draft_patch" data-auto-qa-supported="true"'
-        )
-        self.assertContains(
-            response, 'value="draft_pr" data-auto-qa-supported="false"'
-        )
+        self.assertContains(response, 'value="draft_patch" data-auto-qa-supported="true"')
+        self.assertContains(response, 'value="draft_pr" data-auto-qa-supported="false"')
         self.assertContains(response, "Create autonomous goal")
         self.assertNotContains(response, "No autonomous goals yet.")
         self.assertNotContains(
@@ -1465,9 +1388,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.autonomous_goal_id, goal.pk)
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
-    def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(
-        self, mock_cleanup: MagicMock
-    ) -> None:
+    def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(self, mock_cleanup: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -1496,9 +1417,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_not_called()
 
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
-    def test_delete_autonomous_goal_reconciles_terminal_running_workflow(
-        self, mock_interrupt: MagicMock
-    ) -> None:
+    def test_delete_autonomous_goal_stops_terminal_running_workflow(self, mock_interrupt: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -1511,7 +1430,7 @@ class AutonomousGoalViewTests(TestCase):
             main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": goal.pk, "tool_protocol": True},
         )
         instance = CodexInstance.objects.create(
@@ -1543,14 +1462,9 @@ class AutonomousGoalViewTests(TestCase):
         workflow.refresh_from_db()
         self.assertIsNotNone(goal.deleted_at)
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertIn("worker process exited before callback", run.error)
+        self.assertEqual(run.error, system_agents.AUTONOMOUS_GOAL_DELETED_ERROR)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        proposal = ProposedSession.objects.get(source_workflow=workflow)
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
-        self.assertEqual(
-            proposal.outcome_notes,
-            system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
-        )
+        self.assertFalse(ProposedSession.objects.filter(source_workflow=workflow).exists())
 
     @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch("hitch.main.workflows.autonomous_goals.codex_pool.interrupt_instance")
@@ -1569,7 +1483,7 @@ class AutonomousGoalViewTests(TestCase):
             main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": goal.pk, "session_cwd": "/repo-worktree"},
         )
         instance = CodexInstance.objects.create(
@@ -1621,7 +1535,7 @@ class AutonomousGoalViewTests(TestCase):
             main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": goal.pk, "session_cwd": "/repo-worktree"},
         )
         instance = CodexInstance.objects.create(
@@ -1664,12 +1578,8 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNone(goal.deleted_at)
 
-    @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
-    )
-    def test_run_single_always_uses_worktrees(
-        self, mock_start: MagicMock
-    ) -> None:
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle")
+    def test_run_single_always_uses_worktrees(self, mock_start: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(
             self.client,
@@ -1687,12 +1597,8 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
-    )
-    def test_run_single_skips_goal_blocked_by_accepted_session(
-        self, mock_start: MagicMock
-    ) -> None:
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle")
+    def test_run_single_skips_goal_blocked_by_accepted_session(self, mock_start: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -1734,12 +1640,10 @@ class AutonomousGoalViewTests(TestCase):
         )
         SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_goal.pk),
             cwd=project.repo_path,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": running_goal.pk},
         )
 
@@ -1750,9 +1654,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            SystemWorkflow.objects.filter(
-                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
-            ).count(),
+            SystemWorkflow.objects.filter(kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND).count(),
             1,
         )
         self.assertContains(
@@ -1760,12 +1662,8 @@ class AutonomousGoalViewTests(TestCase):
             "Another autonomous goal is already running. Try again when it finishes.",
         )
 
-    @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
-    )
-    def test_run_single_is_scoped_to_selected_project(
-        self, mock_start: MagicMock
-    ) -> None:
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle")
+    def test_run_single_is_scoped_to_selected_project(self, mock_start: MagicMock) -> None:
         project = _make_project()
         other_project = _make_project(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -1780,12 +1678,8 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         mock_start.assert_not_called()
 
-    @patch(
-        "hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle"
-    )
-    def test_run_all_skips_goals_with_accepted_or_pending_proposal(
-        self, mock_start: MagicMock
-    ) -> None:
+    @patch("hitch.main.workflows.autonomous_goals.start_autonomous_goal_workflow_if_queue_idle")
+    def test_run_all_skips_goals_with_accepted_or_pending_proposal(self, mock_start: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         accepted_goal = AutonomousGoal.objects.create(
@@ -1849,12 +1743,10 @@ class AutonomousGoalViewTests(TestCase):
         )
         SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
-                running_goal.pk
-            ),
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(running_goal.pk),
             cwd=project.repo_path,
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_RUNNING,
             state={"autonomous_goal_id": running_goal.pk},
         )
 
@@ -1862,9 +1754,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            SystemWorkflow.objects.filter(
-                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
-            ).count(),
+            SystemWorkflow.objects.filter(kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND).count(),
             1,
         )
         self.assertContains(
@@ -1873,9 +1763,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
-    def test_reject_proposed_session_requires_reason(
-        self, mock_cleanup: MagicMock
-    ) -> None:
+    def test_reject_proposed_session_requires_reason(self, mock_cleanup: MagicMock) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -1922,9 +1810,7 @@ class AutonomousGoalViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.content, b"proposal must be started before acceptance"
-        )
+        self.assertEqual(response.content, b"proposal must be started before acceptance")
         proposal.refresh_from_db()
         candidate.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
@@ -1961,20 +1847,16 @@ class AutonomousGoalViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.content, b"proposal must be started before acceptance"
-        )
+        self.assertEqual(response.content, b"proposal must be started before acceptance")
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
         candidate.refresh_from_db()
         self.assertTrue(candidate.is_hidden_system_session)
 
-
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.views.common.goal_workflows."
-        "stop_running_autonomous_goal_stack_after_proposal_resolution",
+        "hitch.main.views.common.goal_workflows.stop_running_autonomous_goal_stack_after_proposal_resolution",
         return_value=False,
     )
     def test_reject_visible_stack_proposal_keeps_worktree_when_stop_fails(
@@ -2060,10 +1942,7 @@ class AutonomousGoalViewTests(TestCase):
             autonomous_goal=goal,
             title="Add parser coverage",
             outcome_metadata={
-                "approved_snapshot_ref": (
-                    "refs/hitch/autonomous-goals/1/"
-                    "0123456789abcdef0123456789abcdef"
-                )
+                "approved_snapshot_ref": ("refs/hitch/autonomous-goals/1/0123456789abcdef0123456789abcdef")
             },
             candidate_session=SessionMetadata.objects.create(
                 thread_id="candidate-thread",
@@ -2089,9 +1968,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
-    def test_update_outcome_rejects_already_resolved_proposal(
-        self, mock_cleanup: MagicMock
-    ) -> None:
+    def test_update_outcome_rejects_already_resolved_proposal(self, mock_cleanup: MagicMock) -> None:
         # A stale inbox tab can still post a dismiss/reject for an already
         # accepted legacy proposal. Re-deciding it must be refused so the
         # recorded outcome is not corrupted.
@@ -2126,13 +2003,9 @@ class AutonomousGoalViewTests(TestCase):
                 )
 
                 self.assertEqual(response.status_code, 400)
-                self.assertEqual(
-                    response.content, b"proposed session has already been resolved"
-                )
+                self.assertEqual(response.content, b"proposed session has already been resolved")
                 proposal.refresh_from_db()
-                self.assertEqual(
-                    proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED
-                )
+                self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
                 self.assertEqual(proposal.accepted_session, candidate)
         # Resolving an already accepted proposal never removes its worktree.
         mock_cleanup.assert_not_called()

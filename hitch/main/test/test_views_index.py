@@ -870,7 +870,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(system_response.status_code, 200)
         self.assertContains(system_response, "Hidden autonomous goal")
         self.assertContains(system_response, "autonomous goal run")
-        self.assertContains(system_response, "completed")
+        self.assertContains(system_response, "failed")
         self.assertContains(
             system_response,
             reverse(

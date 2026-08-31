@@ -35,11 +35,11 @@ _RENAME_SESSION_TOOL = "rename_session"
 _WATCH_PR_TOOL = "watch_pr"
 _GET_GOAL_TOOL = "get_goal"
 _LIST_GOAL_SESSIONS_TOOL = "list_goal_sessions"
-_JUDGE_TOOL = "judge"
+_REVIEW_TOOL = "review"
 _NO_PROPOSAL_TOOL = "no_proposal"
 _APPROVE_TOOL = "approve"
 _DENY_TOOL = "deny"
-_AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
+_AUTONOMOUS_GOAL_REVIEW_AGENT_KIND = "autonomous_goal_reviewer"
 
 
 def _not_cancelled() -> bool:
@@ -84,6 +84,7 @@ def registered_dynamic_tool_specs(
     agent_kind: str = "",
 ) -> list[dict[str, Any]]:
     role = _tool_role(purpose=purpose, agent_kind=agent_kind)
+    tools = [*_TOOLS.values(), _AUTONOMOUS_GOAL_PROPOSE_SESSION_TOOL]
     return [
         {
             "namespace": tool.namespace,
@@ -92,14 +93,12 @@ def registered_dynamic_tool_specs(
             "inputSchema": tool.input_schema,
             "deferLoading": False,
         }
-        for tool in _TOOLS.values()
+        for tool in tools
         if role in tool.roles
     ]
 
 
-def handle_dynamic_tool_call(
-    params: dict[str, Any] | None, context: ToolContext
-) -> dict[str, Any]:
+def handle_dynamic_tool_call(params: dict[str, Any] | None, context: ToolContext) -> dict[str, Any]:
     if not isinstance(params, dict):
         return _tool_response("tool call params are required", success=False)
     namespace = params.get("namespace")
@@ -108,10 +107,15 @@ def handle_dynamic_tool_call(
         namespace = _HITCH_NAMESPACE
     if not isinstance(namespace, str) or not isinstance(tool_name, str):
         return _tool_response("tool namespace and name are required", success=False)
-    tool = _TOOLS.get((namespace, tool_name))
+    role = _tool_role(purpose=context.purpose, agent_kind=context.agent_kind)
+    tool = (
+        _AUTONOMOUS_GOAL_PROPOSE_SESSION_TOOL
+        if role == "ag_candidate" and (namespace, tool_name) == (_HITCH_NAMESPACE, _PROPOSE_SESSION_TOOL)
+        else _TOOLS.get((namespace, tool_name))
+    )
     if tool is None:
         return _tool_response(f"unknown Hitch tool: {namespace}.{tool_name}", success=False)
-    if _tool_role(purpose=context.purpose, agent_kind=context.agent_kind) not in tool.roles:
+    if role not in tool.roles:
         return _tool_response(
             f"Hitch tool {namespace}.{tool_name} is unavailable in this session",
             success=False,
@@ -137,9 +141,7 @@ def handle_dynamic_tool_call(
         # radius to this one call (e.g. a transient DB error past the busy
         # timeout).
         logger.exception("Hitch tool %s.%s failed", namespace, tool_name)
-        return _tool_response(
-            f"Hitch tool {namespace}.{tool_name} failed internally", success=False
-        )
+        return _tool_response(f"Hitch tool {namespace}.{tool_name} failed internally", success=False)
     return _tool_response(message, success=True)
 
 
@@ -173,9 +175,7 @@ def _handle_propose_session(arguments: dict[str, Any], context: ToolContext) -> 
             prompt=prompt,
             cwd=context.cwd,
             relevant_files=relevant_files,
-            confidence=_string_arg(
-                arguments, "confidence", default=AutonomousGoal.CONFIDENCE_MEDIUM
-            ),
+            confidence=_string_arg(arguments, "confidence", default=AutonomousGoal.CONFIDENCE_MEDIUM),
             source_thread_id=context.thread_id,
         )
     )
@@ -212,9 +212,7 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
         cwd=context.cwd,
         url=_string_arg(arguments, "url"),
     )
-    requested_pr = _compact_pr_handoff(
-        _pr_handoff_from_github_url(url, source_tool="hitch_watch_pr")
-    )
+    requested_pr = _compact_pr_handoff(_pr_handoff_from_github_url(url, source_tool="hitch_watch_pr"))
     ordinary_preflight = None
     if context.agent_kind == PR_PUBLISH_AGENT_KIND:
         pr_watch.validate_published_pr_checkout(cwd=context.cwd, url=url)
@@ -246,45 +244,35 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
 
 def _handle_get_goal(arguments: dict[str, Any], context: ToolContext) -> str:
     _require_no_arguments(arguments)
-    return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().candidate_goal_data(context)
-    )
+    return _handle_autonomous_goal_tool(lambda: _autonomous_goals().candidate_goal_data(context))
 
 
-def _handle_list_goal_sessions(
-    arguments: dict[str, Any], context: ToolContext
-) -> str:
+def _handle_list_goal_sessions(arguments: dict[str, Any], context: ToolContext) -> str:
     _require_no_arguments(arguments)
-    return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().candidate_goal_sessions(context)
-    )
+    return _handle_autonomous_goal_tool(lambda: _autonomous_goals().candidate_goal_sessions(context))
 
 
-def _handle_judge(arguments: dict[str, Any], context: ToolContext) -> str:
-    return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().candidate_request_judgment(arguments, context)
-    )
+def _handle_review(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(lambda: _autonomous_goals().candidate_request_review(arguments, context))
+
+
+def _handle_autonomous_goal_propose_session(arguments: dict[str, Any], context: ToolContext) -> str:
+    return _handle_autonomous_goal_tool(lambda: _autonomous_goals().candidate_submit_proposal(arguments, context))
 
 
 def _handle_no_proposal(arguments: dict[str, Any], context: ToolContext) -> str:
-    return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().candidate_decline_proposal(arguments, context)
-    )
+    return _handle_autonomous_goal_tool(lambda: _autonomous_goals().candidate_decline_proposal(arguments, context))
 
 
 def _handle_approve(arguments: dict[str, Any], context: ToolContext) -> str:
     return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().judge_record_verdict(
-            arguments, context, approved=True
-        )
+        lambda: _autonomous_goals().reviewer_record_verdict(arguments, context, approved=True)
     )
 
 
 def _handle_deny(arguments: dict[str, Any], context: ToolContext) -> str:
     return _handle_autonomous_goal_tool(
-        lambda: _autonomous_goals().judge_record_verdict(
-            arguments, context, approved=False
-        )
+        lambda: _autonomous_goals().reviewer_record_verdict(arguments, context, approved=False)
     )
 
 
@@ -315,8 +303,8 @@ def _tool_role(*, purpose: str, agent_kind: str) -> str:
         return "none"
     if agent_kind == SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN:
         return "ag_candidate"
-    if agent_kind == _AUTONOMOUS_GOAL_JUDGE_AGENT_KIND:
-        return "ag_judge"
+    if agent_kind == _AUTONOMOUS_GOAL_REVIEW_AGENT_KIND:
+        return "ag_reviewer"
     return "none"
 
 
@@ -340,9 +328,7 @@ def _optional_string_arg(arguments: dict[str, Any], name: str) -> str | None:
     return value
 
 
-def _relevant_files_arg(
-    arguments: dict[str, Any], *, default: list[str] | None
-) -> list[str] | None:
+def _relevant_files_arg(arguments: dict[str, Any], *, default: list[str] | None) -> list[str] | None:
     relevant_files = arguments.get("relevant_files", default)
     if relevant_files is None:
         return None
@@ -383,10 +369,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "properties": {
                 "proposal_id": {
                     "type": "integer",
-                    "description": (
-                        "Existing proposal id to edit. Omit this field to create a "
-                        "new proposal."
-                    ),
+                    "description": ("Existing proposal id to edit. Omit this field to create a new proposal."),
                 },
                 "title": {
                     "type": "string",
@@ -485,7 +468,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
         name=_GET_GOAL_TOOL,
         description=(
             "Return the autonomous goal, limits, current stack state, and prior "
-            "judge feedback for this candidate session."
+            "review feedback for this candidate session."
         ),
         input_schema={
             "type": "object",
@@ -510,13 +493,13 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
         handler=_handle_list_goal_sessions,
         roles=frozenset({"ag_candidate"}),
     ),
-    (_HITCH_NAMESPACE, _JUDGE_TOOL): HitchTool(
+    (_HITCH_NAMESPACE, _REVIEW_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
-        name=_JUDGE_TOOL,
+        name=_REVIEW_TOOL,
         description=(
-            "Submit the current candidate and checkout to the autonomous-goal "
-            "judge. You may call this at most twice. A denial returns feedback "
-            "that you should address before the final call."
+            "Run an isolated, read-only review of the current candidate and "
+            "checkout. You may call this at most twice. Address a denial before "
+            "the final review, then call hitch.propose_session after approval."
         ),
         input_schema={
             "type": "object",
@@ -547,7 +530,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             ],
             "additionalProperties": False,
         },
-        handler=_handle_judge,
+        handler=_handle_review,
         roles=frozenset({"ag_candidate"}),
     ),
     (_HITCH_NAMESPACE, _NO_PROPOSAL_TOOL): HitchTool(
@@ -572,8 +555,7 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
         namespace=_HITCH_NAMESPACE,
         name=_APPROVE_TOOL,
         description=(
-            "Approve the candidate if it meets the autonomous goal's confidence "
-            "threshold. Feedback is optional."
+            "Approve the candidate if it meets the autonomous goal's confidence threshold. Feedback is optional."
         ),
         input_schema={
             "type": "object",
@@ -588,14 +570,13 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_approve,
-        roles=frozenset({"ag_judge"}),
+        roles=frozenset({"ag_reviewer"}),
     ),
     (_HITCH_NAMESPACE, _DENY_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
         name=_DENY_TOOL,
         description=(
-            "Deny the candidate and optionally give concrete feedback for the "
-            "candidate's next and final attempt."
+            "Deny the candidate and optionally give concrete feedback for the candidate's next and final attempt."
         ),
         input_schema={
             "type": "object",
@@ -610,6 +591,23 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_deny,
-        roles=frozenset({"ag_judge"}),
+        roles=frozenset({"ag_reviewer"}),
     ),
 }
+
+
+_AUTONOMOUS_GOAL_PROPOSE_SESSION_TOOL = HitchTool(
+    namespace=_HITCH_NAMESPACE,
+    name=_PROPOSE_SESSION_TOOL,
+    description=(
+        "Publish the candidate most recently approved by hitch.review to the "
+        "Hitch inbox. This tool accepts no arguments."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    handler=_handle_autonomous_goal_propose_session,
+    roles=frozenset({"ag_candidate"}),
+)

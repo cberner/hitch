@@ -564,7 +564,7 @@ class CodexInstance(models.Model):
 
 
 class SystemWorkflow(models.Model):
-    """Durable state for Hitch-managed system-agent workflows."""
+    """Migration-stable durable ledger for one autonomous-goal run."""
 
     KIND_AUTONOMOUS_GOAL_RUN = "autonomous_goal_run"
 
@@ -581,12 +581,8 @@ class SystemWorkflow(models.Model):
         (STATUS_FAILED, "failed"),
         (STATUS_MAX_ITERATIONS_REACHED, "max iterations reached"),
     )
-    # Single source of truth for "this workflow is still doing work (and so pins
-    # its worktree)". Only RUNNING is active: BLOCKED/FAILED/MAX_ITERATIONS_REACHED
-    # are terminal failure states and COMPLETED is success -- none of them keep a
-    # worktree alive. Disk cleanup and the workflow layer both read this so they
-    # cannot disagree about which workflows count as active (see commit 09c1dd8,
-    # where a drifted "RUNNING or BLOCKED" cleanup set pinned failed worktrees).
+    # Older rows retain the broader status vocabulary. New AG runs use RUNNING,
+    # COMPLETED, FAILED, and BLOCKED; only RUNNING pins resources.
     ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_RUNNING,)
 
     kind = models.CharField(max_length=64)
@@ -626,7 +622,7 @@ class SystemWorkflow(models.Model):
 
 
 class SystemAgentRun(models.Model):
-    """One hidden Hitch system-agent turn inside a workflow."""
+    """One hidden candidate or reviewer turn in an autonomous-goal run."""
 
     STATUS_STARTING = "starting"
     STATUS_RUNNING = "running"

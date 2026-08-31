@@ -26,13 +26,16 @@ tools for that role.
 - `SESSIONTOOLS-role-registration`: A new thread's dynamic tools are selected
   from its purpose and agent kind when the thread is created. Ordinary hidden
   system sessions receive no tools, AG candidates receive only candidate AG
-  tools, and AG judges receive only judge AG tools.
+  tools, and AG reviewers receive only reviewer AG tools.
 - `SESSIONTOOLS-role-authorization`: Tool handlers repeat the purpose, agent
-  kind, workflow, invoking thread, current workflow step, and terminal-state
-  checks. A registered tool is not authorization by itself.
+  kind, workflow, invoking thread, active-run, and terminal-state checks. A
+  registered tool is not authorization by itself.
 - `SESSIONTOOLS-ag-candidate`: AG candidate tools are `hitch.get_goal`,
-  `hitch.list_goal_sessions`, `hitch.judge`, and `hitch.no_proposal`.
-- `SESSIONTOOLS-ag-judge`: AG judge tools are `hitch.approve` and `hitch.deny`.
+  `hitch.list_goal_sessions`, `hitch.review`, `hitch.propose_session`, and
+  `hitch.no_proposal`. The candidate form of `hitch.propose_session` accepts no
+  arguments and publishes only the candidate approved by `hitch.review`.
+- `SESSIONTOOLS-ag-reviewer`: AG reviewer tools are `hitch.approve` and
+  `hitch.deny`.
 - `SESSIONTOOLS-ag-scope`: AG tool inputs never select another workflow, goal,
   or session. Scope comes exclusively from the invoking worker context.
 
@@ -42,6 +45,6 @@ tools for that role.
   name changes the invoking session's persisted and cached names.
 - `SESSIONTOOLS-rename-validation`: Invalid names fail without attempting a
   rename.
-- `SESSIONTOOLS-role-isolation-success`: A candidate cannot invoke judge or
-  visible-session tools, a judge cannot invoke candidate or visible-session
+- `SESSIONTOOLS-role-isolation-success`: A candidate cannot invoke reviewer or
+  visible-session tools, a reviewer cannot invoke candidate or visible-session
   tools, and a visible session cannot invoke AG workflow tools.

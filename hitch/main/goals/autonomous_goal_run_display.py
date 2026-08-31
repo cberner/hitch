@@ -18,12 +18,10 @@ from django.urls import reverse
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.models import (
     AutonomousGoal,
-    CodexInstance,
     ProposedSession,
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.runtime.sdk_values import is_nonbool_int
 from hitch.main.sessions import token_usage
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
@@ -61,35 +59,22 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     goal_ids = [goal.pk for goal in goals]
     if not goal_ids:
         return
-    pending_proposal_state = autonomous_goal_proposal_stack._autonomous_goal_pending_proposal_state(
-        goals
-    )
-    pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
+    pending_proposal_goal_ids = autonomous_goal_proposal_stack._autonomous_goal_pending_proposal_blocking_ids(goals)
     unresolved_failure_notice_goal_ids = _autonomous_goal_failure_notice_ids(goal_ids)
     autonomous_goal_queue_busy = autonomous_goals.autonomous_goal_queue_busy()
-    accepted_session_blocking_goal_ids = (
-        autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
-            goals
-        )
+    accepted_session_blocking_goal_ids = autonomous_goal_proposal_stack._autonomous_goal_accepted_session_blocking_ids(
+        goals
     )
-    no_change_goal_ids = _autonomous_goal_no_change_ids(
-        goals,
-        continuable_stack_goal_ids=pending_proposal_state.continuable_stack_goal_ids,
-    )
+    no_change_goal_ids = _autonomous_goal_no_change_ids(goals)
     auto_proposal_quota_status: autonomous_goals.AutoProposalQuotaStatus = "available"
     if any(goal.auto_proposal_enabled for goal in goals):
-        auto_proposal_quota_status = (
-            autonomous_goals._auto_proposal_quota_status_throttled()
-        )
+        auto_proposal_quota_status = autonomous_goals._auto_proposal_quota_status_throttled()
     # Only the newest workflow per goal is displayed, but auto-proposal
     # creates a workflow per scheduler run and nothing prunes terminal rows
     # -- materializing the full history (each row carrying a multi-KB state
     # blob) made this page slower with every passing week. Resolve the
     # newest ids first, then fetch just those rows.
-    main_thread_ids = [
-        autonomous_goals._autonomous_goal_main_thread_id(goal_id)
-        for goal_id in goal_ids
-    ]
+    main_thread_ids = [autonomous_goals._autonomous_goal_main_thread_id(goal_id) for goal_id in goal_ids]
     latest_workflow_ids = (
         SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
@@ -105,33 +90,23 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     }
     latest_workflows = list(workflows_by_thread.values())
     log_urls_by_workflow_id = _autonomous_goal_log_urls(latest_workflows)
-    running_tokens_by_workflow_id = _autonomous_goal_running_token_counts(
-        latest_workflows
-    )
+    running_tokens_by_workflow_id = _autonomous_goal_running_token_counts(latest_workflows)
     for goal in goals:
-        latest_workflow = workflows_by_thread.get(
-            autonomous_goals._autonomous_goal_main_thread_id(goal.pk)
-        )
+        latest_workflow = workflows_by_thread.get(autonomous_goals._autonomous_goal_main_thread_id(goal.pk))
         goal.run_running = (  # type: ignore[attr-defined]
-            latest_workflow is not None
-            and latest_workflow.is_active
+            latest_workflow is not None and latest_workflow.is_active
         )
         goal.run_tokens_used_display = _autonomous_goal_run_tokens_used_display(  # type: ignore[attr-defined]
             latest_workflow,
             running_tokens_by_workflow_id,
         )
         goal.run_log_url = (  # type: ignore[attr-defined]
-            log_urls_by_workflow_id.get(latest_workflow.pk) or ""
-            if latest_workflow is not None
-            else ""
+            log_urls_by_workflow_id.get(latest_workflow.pk) or "" if latest_workflow is not None else ""
         )
         run_badge = _autonomous_goal_run_badge(
             goal,
             latest_workflow,
             pending_proposal_goal_ids=pending_proposal_goal_ids,
-            continuable_stack_goal_ids=(
-                pending_proposal_state.continuable_stack_goal_ids
-            ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
             accepted_session_blocking_goal_ids=accepted_session_blocking_goal_ids,
             autonomous_goal_queue_busy=autonomous_goal_queue_busy,
@@ -157,17 +132,11 @@ def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
     }
 
 
-def _autonomous_goal_no_change_ids(
-    goals: list[AutonomousGoal], *, continuable_stack_goal_ids: set[int]
-) -> set[int]:
+def _autonomous_goal_no_change_ids(goals: list[AutonomousGoal]) -> set[int]:
     no_change_goal_ids: set[int] = set()
     for goal in goals:
         last_no_proposal_sha = goal.auto_proposal_last_no_proposal_sha.strip()
-        if (
-            not goal.auto_proposal_enabled
-            or goal.pk in continuable_stack_goal_ids
-            or not last_no_proposal_sha
-        ):
+        if not goal.auto_proposal_enabled or not last_no_proposal_sha:
             continue
         current_sha = autonomous_goals._autonomous_goal_auto_proposal_base_sha(goal)
         if current_sha == last_no_proposal_sha:
@@ -180,7 +149,6 @@ def _autonomous_goal_run_badge(
     workflow: SystemWorkflow | None,
     *,
     pending_proposal_goal_ids: set[int],
-    continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
     accepted_session_blocking_goal_ids: set[int],
     autonomous_goal_queue_busy: bool,
@@ -192,10 +160,7 @@ def _autonomous_goal_run_badge(
             state="waiting",
             label="Waiting",
             title="Autonomous goal is waiting for an accepted session",
-            detail=(
-                "Not running because an accepted session from this goal is not "
-                "Done or archived yet."
-            ),
+            detail=("Not running because an accepted session from this goal is not Done or archived yet."),
         )
     if workflow is not None:
         if workflow.is_active:
@@ -288,13 +253,6 @@ def _autonomous_goal_run_badge(
             title="Autonomous goal is queued",
             detail="Not running because another autonomous goal is already running.",
         )
-    if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
-        return AutonomousGoalRunBadge(
-            state="ready",
-            label="Ready",
-            title="Autonomous goal is ready",
-            detail="Auto-proposal is enabled. This goal will start when the scheduler runs and quota allows.",
-        )
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
         completed_badge = _completed_autonomous_goal_run_badge(workflow)
         if completed_badge is not None:
@@ -334,64 +292,30 @@ def _completed_autonomous_goal_run_badge(
 def _autonomous_goal_running_token_counts(
     workflows: Iterable[SystemWorkflow],
 ) -> dict[int, int]:
-    workflows_by_id = {
-        workflow.pk: workflow
-        for workflow in workflows
-        if workflow.is_active
-    }
+    workflows_by_id = {workflow.pk: workflow for workflow in workflows if workflow.is_active}
     if not workflows_by_id:
         return {}
     runs = (
         SystemAgentRun.objects.select_related("instance")
-        .filter(
-            workflow_id__in=list(workflows_by_id),
-            status__in=(
-                SystemAgentRun.STATUS_STARTING,
-                SystemAgentRun.STATUS_RUNNING,
-            ),
-        )
-        .exclude(thread_id="")
-        .order_by("workflow_id", "-created_at", "-pk")
+        .filter(workflow_id__in=list(workflows_by_id))
+        .order_by("workflow_id", "created_at", "pk")
     )
-    tokens_by_workflow_id: dict[int, int] = {}
+    tokens_by_workflow_id = dict.fromkeys(workflows_by_id, 0)
     for run in runs:
-        if run.workflow_id in tokens_by_workflow_id:
+        output = run.output if isinstance(run.output, dict) else {}
+        recorded = output.get("tokens_used")
+        if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded > 0:
+            tokens_by_workflow_id[run.workflow_id] += recorded
             continue
-        workflow = workflows_by_id.get(run.workflow_id)
-        if workflow is not None:
-            tokens_by_workflow_id[run.workflow_id] = (
-                _autonomous_goal_running_token_count(workflow, run.instance)
-            )
+        if run.status not in (
+            SystemAgentRun.STATUS_STARTING,
+            SystemAgentRun.STATUS_RUNNING,
+        ):
+            continue
+        current = autonomous_goals._autonomous_goal_instance_tokens_used(run.instance)
+        if current is not None and current > 0:
+            tokens_by_workflow_id[run.workflow_id] += current
     return tokens_by_workflow_id
-
-
-def _autonomous_goal_running_token_count(
-    workflow: SystemWorkflow, instance: CodexInstance
-) -> int:
-    persisted_tokens = _workflow_state_int(
-        workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
-    )
-    current_tokens = autonomous_goals._autonomous_goal_instance_tokens_used(instance)
-    if current_tokens is None:
-        return persisted_tokens
-    previous_tokens = _autonomous_goal_recorded_thread_tokens(workflow, instance)
-    return persisted_tokens + max(current_tokens - previous_tokens, 0)
-
-
-def _autonomous_goal_recorded_thread_tokens(
-    workflow: SystemWorkflow, instance: CodexInstance
-) -> int:
-    token_totals = workflow.state.get(
-        autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
-    )
-    if not isinstance(token_totals, dict):
-        return 0
-    value = token_totals.get(instance.thread_id)
-    return (
-        value
-        if is_nonbool_int(value) and value > 0
-        else 0
-    )
 
 
 def _autonomous_goal_run_tokens_used_display(
@@ -401,9 +325,7 @@ def _autonomous_goal_run_tokens_used_display(
         return ""
     tokens = running_tokens_by_workflow_id.get(
         workflow.pk,
-        _workflow_state_int(
-            workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
-        ),
+        _workflow_state_int(workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY),
     )
     return f"{token_usage._format_token_count(tokens)} tokens"
 
@@ -418,10 +340,7 @@ def _autonomous_goal_latest_run_detail(workflow: SystemWorkflow | None) -> str:
             return _autonomous_goal_proposed_detail(workflow)
         return "The last autonomous goal run completed."
     if workflow.status == SystemWorkflow.STATUS_FAILED:
-        return (
-            _workflow_state_string(workflow, "error")
-            or "The last autonomous goal run failed."
-        )
+        return _workflow_state_string(workflow, "error") or "The last autonomous goal run failed."
     if workflow.status == SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED:
         return "The last autonomous goal run stopped after reaching its iteration limit."
     return ""
@@ -442,23 +361,14 @@ def _autonomous_goal_skipped_detail(workflow: SystemWorkflow) -> str:
 
 
 def _autonomous_goal_proposed_detail(workflow: SystemWorkflow) -> str:
-    stopped_reason = _workflow_state_string(workflow, "stacked_diff_stopped_reason")
+    stopped_reason = _workflow_state_string(workflow, "result_reason")
     if stopped_reason == "candidate_no_proposal":
         return (
             "The last autonomous goal run published the current stacked proposal "
             "because the next candidate produced no proposal."
         )
-    if stopped_reason == "stacked_diff_continuation_failed":
-        error = _workflow_state_string(workflow, "stacked_diff_continuation_error")
-        if error:
-            return (
-                "The last autonomous goal run published the current stacked proposal "
-                f"after the next candidate failed: {error}"
-            )
-        return (
-            "The last autonomous goal run published the current stacked proposal "
-            "after the next candidate failed."
-        )
+    if stopped_reason in {"candidate_failed", "continuation_failed"}:
+        return "The last autonomous goal run published the current stacked proposal after the next candidate failed."
     return "The last autonomous goal run created a proposal and stopped."
 
 
@@ -473,9 +383,7 @@ def _attach_proposed_session_display_state(
     for proposed_session in proposed_sessions:
         files = proposed_session.relevant_files
         proposed_session.display_files = (  # type: ignore[attr-defined]
-            [item for item in files if isinstance(item, str) and item.strip()]
-            if isinstance(files, list)
-            else []
+            [item for item in files if isinstance(item, str) and item.strip()] if isinstance(files, list) else []
         )
         if proposed_session.candidate_session is not None:
             proposed_session.candidate_log_url = reverse(  # type: ignore[attr-defined]
@@ -497,16 +405,12 @@ def _attach_proposed_session_display_state(
         project = _project_for_proposed_session(proposed_session)
         target_cwd = _target_cwd_for_proposed_session(proposed_session)
         proposed_session.accept_project_id = (  # type: ignore[attr-defined]
-            project.pk
-            if project is not None
-            else _BARE_REPO_PROJECT_VALUE if target_cwd else ""
+            project.pk if project is not None else _BARE_REPO_PROJECT_VALUE if target_cwd else ""
         )
         proposed_session.accept_cwd = (  # type: ignore[attr-defined]
             "" if project is not None else target_cwd
         )
-        auto_pr_enabled, auto_qa_enabled = (
-            _auto_review_settings_for_proposed_session(proposed_session)
-        )
+        auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(proposed_session)
         proposed_session.accept_auto_pr = auto_pr_enabled  # type: ignore[attr-defined]
         proposed_session.accept_auto_qa = auto_qa_enabled  # type: ignore[attr-defined]
         metadata = _proposal_metadata(proposed_session)
@@ -528,11 +432,7 @@ def _attach_proposed_session_display_state(
 
 
 def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
-    metadata = (
-        proposed_session.outcome_metadata
-        if isinstance(proposed_session.outcome_metadata, dict)
-        else {}
-    )
+    metadata = proposed_session.outcome_metadata if isinstance(proposed_session.outcome_metadata, dict) else {}
     metadata_depth = metadata.get("stacked_diff_depth")
     metadata_iteration = metadata.get("stacked_diff_iteration")
     if (
@@ -572,9 +472,7 @@ _STACK_STOP_REASON_DISPLAY = {
 
 def _proposed_session_stack_stopped_display(proposed_session: ProposedSession) -> str:
     metadata = _proposal_metadata(proposed_session)
-    reason = metadata.get(
-        autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
-    )
+    reason = metadata.get(autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY)
     if not isinstance(reason, str) or not reason:
         return ""
     return _STACK_STOP_REASON_DISPLAY.get(reason, reason.replace("_", " "))
@@ -590,13 +488,8 @@ def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
         if proposed_session.autonomous_goal is not None
         else "Source: Coding agent proposal",
     ]
-    if (
-        proposed_session.autonomous_goal is not None
-        and proposed_session.autonomous_goal.goal
-    ):
-        parts.extend(
-            ["", f"Autonomous goal objective:\n{proposed_session.autonomous_goal.goal}"]
-        )
+    if proposed_session.autonomous_goal is not None and proposed_session.autonomous_goal.goal:
+        parts.extend(["", f"Autonomous goal objective:\n{proposed_session.autonomous_goal.goal}"])
     parts.extend(["", f"Proposed session: {proposed_session.title}"])
     if proposed_session.summary:
         parts.extend(["", f"Summary:\n{proposed_session.summary}"])
@@ -624,21 +517,16 @@ def _autonomous_goal_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, 
     return urls
 
 
-def _autonomous_goal_workflow_for_log(
-    request: HttpRequest, workflow_id: int
-) -> SystemWorkflow:
+def _autonomous_goal_workflow_for_log(request: HttpRequest, workflow_id: int) -> SystemWorkflow:
     if workflow_id < 1 or workflow_id > _MAX_BIGAUTOFIELD:
         raise Http404("autonomous goal run log not found")
     project = _active_project_from_request(request)
     if project is None:
         raise Http404("autonomous goal run log not found")
-    workflow = (
-        SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-        )
-        .first()
-    )
+    workflow = SystemWorkflow.objects.filter(
+        pk=workflow_id,
+        kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+    ).first()
     if workflow is None:
         raise Http404("autonomous goal run log not found")
     autonomous_goal_id = _workflow_state_int(workflow, "autonomous_goal_id")
@@ -680,8 +568,4 @@ def _auto_review_settings_for_proposed_session(
 
 
 def _proposal_metadata(proposed_session: ProposedSession) -> dict[str, object]:
-    return (
-        proposed_session.outcome_metadata
-        if isinstance(proposed_session.outcome_metadata, dict)
-        else {}
-    )
+    return proposed_session.outcome_metadata if isinstance(proposed_session.outcome_metadata, dict) else {}
