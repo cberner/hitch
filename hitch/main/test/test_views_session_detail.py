@@ -961,14 +961,14 @@ class SessionDetailFastPathTests(TestCase):
             ),
         )
 
-    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
+    @patch("hitch.main.workflows.gh_cli._gh_pr_view_payload")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
-    def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
+    def test_inactive_session_detail_does_not_refresh_registered_pr(
         self,
         mock_codex: MagicMock,
         _start_models_refresh: MagicMock,
-        mock_gh_pr_view: MagicMock,
+        mock_gh_pr_view_payload: MagicMock,
     ) -> None:
         pr_url = "https://github.com/cberner/hitch/pull/344"
         rollout_path = _make_rollout(
@@ -1009,25 +1009,8 @@ class SessionDetailFastPathTests(TestCase):
                     "pr_number": 344,
                     "state": "open",
                 },
-                "hitch_pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 344,
-                },
             },
         )
-        mock_gh_pr_view.return_value = {
-            "url": pr_url,
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 344,
-            "state": "closed",
-            "merged": True,
-            "merged_at": "2026-06-02T08:26:51Z",
-        }
-
-        # First load serves the last-known (open) PR stage with the refreshing
-        # highlight and runs the gh refresh off-request (synchronous under
-        # TESTING), which persists the terminal state onto the registered PR.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
         )
@@ -1035,32 +1018,30 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
+            '<span class="stage-badge" data-tone="active">PR</span>',
         )
         registered_pr.refresh_from_db()
-        self.assertTrue(registered_pr.state["pr_handoff"]["merged"])
-        mock_gh_pr_view.assert_called_once()
+        self.assertEqual(registered_pr.state["pr_handoff"]["state"], "open")
+        mock_gh_pr_view_payload.assert_not_called()
         mock_codex.assert_not_called()
 
-        # The next load reflects the refreshed terminal stage without hitting gh
-        # again -- the same PR is debounced.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
         )
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response, '<span class="stage-badge" data-tone="active">PR</span>'
         )
-        mock_gh_pr_view.assert_called_once()
+        mock_gh_pr_view_payload.assert_not_called()
 
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
-    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
+    @patch("hitch.main.workflows.gh_cli._gh_pr_view_payload")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
     def test_paginated_detail_prefers_registered_pr_to_cached_stage(
         self,
         mock_codex: MagicMock,
         _start_models_refresh: MagicMock,
-        mock_gh_pr_view: MagicMock,
+        mock_gh_pr_view_payload: MagicMock,
     ) -> None:
         pr_url = "https://github.com/cberner/hitch/pull/94"
         rollout_path = _make_rollout(
@@ -1120,26 +1101,8 @@ class SessionDetailFastPathTests(TestCase):
                     "pr_number": 94,
                     "state": "open",
                 },
-                "hitch_pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 94,
-                },
             },
         )
-        mock_gh_pr_view.return_value = {
-            "url": pr_url,
-            "repository_full_name": "cberner/hitch",
-            "pr_number": 94,
-            "state": "closed",
-            "merged": True,
-            "merged_at": "2026-06-02T08:26:51Z",
-        }
-
-        # First load serves the durable open PR stage with the refreshing
-        # highlight and runs the gh refresh off-request, persisting the terminal
-        # state onto the registered PR. The stale rollout cache cannot override
-        # that durable state.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
         )
@@ -1147,24 +1110,22 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
+            '<span class="stage-badge" data-tone="active">PR</span>',
         )
         registered_pr.refresh_from_db()
-        self.assertTrue(registered_pr.state["pr_handoff"]["merged"])
+        self.assertEqual(registered_pr.state["pr_handoff"]["state"], "open")
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "pr")
-        mock_gh_pr_view.assert_called_once()
+        mock_gh_pr_view_payload.assert_not_called()
         mock_codex.assert_not_called()
 
-        # The next load surfaces the durable terminal stage without hitting gh
-        # again, even though the rollout cache still says PR.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
         )
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response, '<span class="stage-badge" data-tone="active">PR</span>'
         )
-        mock_gh_pr_view.assert_called_once()
+        mock_gh_pr_view_payload.assert_not_called()
 
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")
@@ -1257,11 +1218,6 @@ class SessionDetailFastPathTests(TestCase):
                     "pr_number": 100,
                     "state": "open",
                     "source_tool": "fetch_pr",
-                },
-                "hitch_pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 100,
                 },
             },
         )

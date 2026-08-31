@@ -9,7 +9,6 @@ import time
 from django.db import close_old_connections
 
 from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
-from hitch.main.workflows import pr_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +19,6 @@ _DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
 # mean never, and a backlogged first sweep is already bounded per pass.
 _ROW_RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
 _ROW_RETENTION_STARTUP_DELAY_SECONDS = 15 * 60
-# Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
-# view timeout, so an unbounded sweep over dozens of stale sessions would delay
-# the next reconcile by minutes. Leftover rows converge on later ticks and on
-# demand from the request path.
-_PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
 _scheduler = server_lifecycle.SchedulerHandle(
@@ -81,17 +75,6 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
 
 def _workflow_maintenance_tick() -> None:
     reconciliation.reconcile_dead()
-    # Converge GitHub-backed PR stages in the background. This scheduler
-    # runs under production server commands (gunicorn et al.), whereas the
-    # auto-proposal scheduler does not, so without this the per-session
-    # `gh pr view` stage refresh only ever fires from the session-list
-    # request path (capped at one row per render) -- dominating dashboard
-    # latency once a session's 5-minute refresh window elapses.
-    pr_stages = pr_tracking.refresh_unarchived_session_pr_stages(
-        limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
-    )
-    if pr_stages:
-        logger.info("refreshed %s session PR stage(s)", pr_stages)
 
 
 def _run_due_disk_usage_cleanup(

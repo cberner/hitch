@@ -208,15 +208,10 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
     @patch(
         "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
-    @patch(
-        "hitch.main.workflows.workflow_maintenance.pr_tracking.refresh_unarchived_session_pr_stages",
-        return_value=1,
-    )
     @patch("hitch.main.workflows.workflow_maintenance.reconciliation.reconcile_dead")
-    def test_scheduler_tick_reconciles_and_refreshes_pr_stages(
+    def test_scheduler_tick_only_reconciles_dead_workers(
         self,
         mock_reconcile_dead: MagicMock,
-        mock_refresh_pr_stages: MagicMock,
         mock_disk_cleanup: MagicMock,
     ) -> None:
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
@@ -225,26 +220,15 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         # Disk cleanup runs only on the separate 10-minute cadence, never as
         # part of the 60-second maintenance tick.
         mock_disk_cleanup.assert_not_called()
-        # The maintenance scheduler runs under production server commands, so it
-        # owns background PR-stage convergence to keep gh out of the request
-        # path -- bounded per tick so it can't starve the reconcile sweep.
-        mock_refresh_pr_stages.assert_called_once_with(
-            limit=workflow_maintenance._PR_STAGE_REFRESH_LIMIT_PER_TICK
-        )
 
 
 class UnarchivedSessionStateRefreshTests(TestCase):
-    @patch(
-        "hitch.main.goals.auto_proposals.pr_tracking.refresh_unarchived_session_pr_stages",
-        return_value=2,
-    )
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
     @patch("hitch.main.goals.auto_proposals.Codex")
-    def test_refresh_updates_active_codex_metadata_and_pr_stages(
+    def test_refresh_updates_active_codex_metadata(
         self,
         mock_codex: MagicMock,
         mock_config: MagicMock,
-        mock_refresh_pr_stages: MagicMock,
     ) -> None:
         config = object()
         mock_config.return_value = config
@@ -269,25 +253,16 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
         self.assertEqual(result.synced, 1)
         self.assertFalse(result.failed)
-        self.assertEqual(result.pr_stages_refreshed, 2)
         mock_codex.assert_called_once_with(config=config)
-        mock_refresh_pr_stages.assert_called_once_with(
-            limit=auto_proposals._PR_STAGE_REFRESH_LIMIT_PER_TICK
-        )
         metadata = SessionMetadata.objects.get(thread_id="thread-1")
         self.assertEqual(metadata.codex_display_title, "Renamed session")
         self.assertEqual(metadata.codex_updated_at, datetime.fromtimestamp(10, UTC))
 
     @patch("hitch.main.goals.auto_proposals.logger.exception")
-    @patch(
-        "hitch.main.goals.auto_proposals.pr_tracking.refresh_unarchived_session_pr_stages",
-        return_value=1,
-    )
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
-    def test_refresh_still_updates_pr_stages_when_codex_metadata_fails(
+    def test_refresh_reports_codex_metadata_failure(
         self,
         mock_config: MagicMock,
-        mock_refresh_pr_stages: MagicMock,
         mock_log_exception: MagicMock,
     ) -> None:
         mock_config.side_effect = RuntimeError("codex unavailable")
@@ -296,10 +271,6 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
         self.assertEqual(result.synced, 0)
         self.assertTrue(result.failed)
-        self.assertEqual(result.pr_stages_refreshed, 1)
-        mock_refresh_pr_stages.assert_called_once_with(
-            limit=auto_proposals._PR_STAGE_REFRESH_LIMIT_PER_TICK
-        )
         mock_log_exception.assert_called_once_with(
             "failed to refresh active Codex session metadata"
         )
@@ -319,10 +290,10 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         mock_start.side_effect = [first_codex, second_codex]
         mock_refresh.side_effect = [
             auto_proposals.SessionStateRefreshResult(
-                synced=0, failed=True, pr_stages_refreshed=0
+                synced=0, failed=True
             ),
             auto_proposals.SessionStateRefreshResult(
-                synced=0, failed=False, pr_stages_refreshed=0
+                synced=0, failed=False
             ),
         ]
         holder = auto_proposals._SchedulerCodex()

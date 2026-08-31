@@ -1,21 +1,11 @@
-"""Session-list PR-stage refresh scheduling and per-row stage derivation.
-
-This module owns the session-list page's background PR-stage refresh scheduling
-(the off-request ``gh`` refresh and its in-flight de-duplication), the
-awaiting-input and active-instance lookups the list render needs, and the
-per-row stage-cache derivation that serves the last-known stage immediately.
-"""
+"""Session-list stage derivation and cached-stage persistence."""
 
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
-
-from django.conf import settings as django_settings
-from django.db import close_old_connections
 
 from hitch.main.models import (
     ApprovalRequest,
@@ -35,63 +25,6 @@ from hitch.main.workflows import pr_stage, pr_tracking
 
 logger = logging.getLogger(__name__)
 
-_SESSION_LIST_PR_STAGE_REFRESH_LIMIT = 1
-# Sessions whose gh-backed PR stage is being refreshed in a background thread,
-# so concurrent renders in this process do not spawn duplicate workers. The
-# per-PR global floor lives in the DB via ``rate_limit``; this set only avoids
-# redundant threads within one process.
-_PR_STAGE_REFRESH_INFLIGHT_LOCK = threading.Lock()
-_PR_STAGE_REFRESH_INFLIGHT: set[str] = set()
-
-
-def _schedule_pr_stage_refresh(session_id: str) -> None:
-    """Refresh a session's gh-backed PR stage off the request path.
-
-    The render serves the last-known stage immediately and flags it as
-    refreshing; this performs the actual ``gh`` call and persists the result so a
-    later render (nudged by the refreshing flag) shows it. Runs synchronously
-    under TESTING for deterministic tests. De-duplicated per session within the
-    process by an in-flight set, and per PR across the whole app by the
-    ``rate_limit`` claim inside the system-agent refreshers.
-    """
-    if getattr(django_settings, "TESTING", False):
-        _refresh_session_pr_stage(session_id)
-        return
-    with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
-        if session_id in _PR_STAGE_REFRESH_INFLIGHT:
-            return
-        _PR_STAGE_REFRESH_INFLIGHT.add(session_id)
-    try:
-        threading.Thread(
-            target=_pr_stage_refresh_worker,
-            args=(session_id,),
-            name="pr-stage-refresh",
-            daemon=True,
-        ).start()
-    except Exception:
-        with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
-            _PR_STAGE_REFRESH_INFLIGHT.discard(session_id)
-        logger.exception("failed to start PR stage refresh thread")
-
-
-def _pr_stage_refresh_worker(session_id: str) -> None:
-    close_old_connections()
-    try:
-        _refresh_session_pr_stage(session_id)
-    except Exception:
-        logger.exception("background PR stage refresh failed for %s", session_id)
-    finally:
-        close_old_connections()
-        with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
-            _PR_STAGE_REFRESH_INFLIGHT.discard(session_id)
-
-
-def _refresh_session_pr_stage(session_id: str) -> None:
-    """Refresh one session's durable PR state when it is still current."""
-    stored_pr = pr_tracking.stored_record_for_thread(session_id)
-    if stored_pr is not None and pr_tracking.record_is_current(stored_pr):
-        pr_tracking.refreshed_pr_handoff_for_stage(stored_pr)
-
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     thread_ids = [
@@ -100,7 +33,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     registered_prs_by_thread_id = pr_tracking.records_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
     waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
-    pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
     for session in sessions:
         session_id = session.get("id")
         if not isinstance(session_id, str):
@@ -138,34 +70,11 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         entries = _session_stage_data_for_rollout_path(rollout_path)
         if not entries and session.get("has_activity"):
             entries = [{"kind": "user"}]
-        # Serve the last-known PR stage now; when a gh refresh is due, flag the
-        # badge as refreshing and do the actual refresh off-request so the page
-        # is not blocked on a ``gh`` call (the result lands on a later render).
         pr_snapshot = (
             {}
             if publishing_before_registration
             else pr_tracking.pr_handoff_for_record(registered_pr)
         )
-        # Only the PR stage gets the refreshing badge: an active worker or a
-        # waiting-for-input row shows its own stage, and flagging that refreshing
-        # would schedule a needless worker and reload.
-        pr_stage_displayed = active_instance is None and not awaiting_user_input
-        refresh_due = (
-            pr_stage_displayed
-            and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
-        )
-        # Flag the badge refreshing only when a refresh actually runs this
-        # render. A row whose refresh is due but falls outside the per-render
-        # budget must not keep data-refreshing set, or _stage_refresh_script
-        # reloads every 7s for a result that never lands; the reload still fires
-        # while a scheduled refresh is pending, so budget-deferred rows are
-        # picked up on a later render. ``refresh_due`` (independent of the
-        # budget) still gates the cache write below.
-        badge_refreshing = False
-        if refresh_due and pr_stage_refreshes_remaining > 0:
-            _schedule_pr_stage_refresh(session_id)
-            pr_stage_refreshes_remaining -= 1
-            badge_refreshing = True
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
@@ -178,7 +87,6 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         session["stage"] = _session_list_stage_context(
             stage,
             pr_snapshot=pr_snapshot,
-            refreshing=badge_refreshing,
             executing=stage_executing,
         )
         # The stage cache is keyed only on the rollout file's mtime, so it may
@@ -188,15 +96,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
-        # Skip whenever a refresh is due -- even if the budget deferred it this
-        # render -- because the snapshot is known-stale: caching its derived
-        # stage (possibly a stale terminal PR stage) under the rollout mtime
-        # would let the cached fast path serve it without ever rechecking.
-        if (
-            active_instance is None
-            and not awaiting_user_input
-            and not refresh_due
-        ):
+        if active_instance is None and not awaiting_user_input:
             pr_stage._update_cached_stage_best_effort(
                 session_id,
                 stage,
@@ -208,7 +108,6 @@ def _session_list_stage_context(
     stage: session_stage.SessionStage,
     *,
     pr_snapshot: Mapping[str, Any] | None = None,
-    refreshing: bool = False,
     executing: bool = False,
 ) -> dict[str, Any]:
     context: dict[str, Any] = dict(stage.as_context())
@@ -217,8 +116,6 @@ def _session_list_stage_context(
             context["executing"] = True
         else:
             context["tone"] = "idle"
-    if refreshing:
-        context["refreshing"] = True
     if stage.key != session_stage.PR.key:
         return context
     pr_number = _pr_number_from_snapshot(pr_snapshot)

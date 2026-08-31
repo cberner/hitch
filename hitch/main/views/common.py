@@ -130,7 +130,6 @@ from hitch.main.sessions.session_settings import (
     _supported_effort_values,
 )
 from hitch.main.sessions.session_stage_refresh import (
-    _schedule_pr_stage_refresh,
     _thread_ids_awaiting_input,
 )
 from hitch.main.sessions.settings_cookies import (
@@ -628,27 +627,11 @@ def _render_session_detail(
     stage_context: dict[str, Any] | None = None
     if not read_only:
         awaiting_user_input = session_id in _thread_ids_awaiting_input([session_id])
-        # Serve the last-known PR stage now and refresh off-request when due.
-        # A synchronous ``gh pr view`` here shelled out on every detail render
-        # (up to a 5s timeout) and dominated page latency; instead the badge is
-        # flagged as refreshing and the actual gh call runs in the background,
-        # persisting the result for a later render to read back.
         pr_snapshot = (
             {}
             if publishing_before_registration
             else pr_tracking.pr_handoff_for_record(registered_pr)
         )
-        # Only flag refreshing when the PR stage is the one actually displayed.
-        # An active worker or a waiting-for-input session shows its own stage, so
-        # marking that live badge refreshing would let the reload script tear
-        # down the running EventSource transcript.
-        pr_stage_displayed = active_instance is None and not awaiting_user_input
-        stage_refreshing = (
-            pr_stage_displayed
-            and pr_tracking.pr_handoff_stage_refresh_due(registered_pr)
-        )
-        if stage_refreshing:
-            _schedule_pr_stage_refresh(session_id)
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
@@ -666,7 +649,6 @@ def _render_session_detail(
             cached_stage = session_stage.stage_for_key(metadata.derived_stage)
             if cached_stage is not None:
                 stage = cached_stage
-                stage_refreshing = False
         # Only persist a rollout-derived stage; see _attach_session_stage_context
         # for why active-instance-forced stages must not enter the
         # mtime-keyed cache. Active turns and pending input remain transient and
@@ -674,7 +656,6 @@ def _render_session_detail(
         if (
             active_instance is None
             and not awaiting_user_input
-            and not stage_refreshing
             and not history_paginated
         ):
             # Best-effort like the session-list path: this runs while rendering
@@ -682,8 +663,6 @@ def _render_session_detail(
             # cache refresh rather than 500 the page (the next render retries).
             pr_stage._update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
         stage_context = dict(stage.as_context())
-        if stage_refreshing:
-            stage_context["refreshing"] = True
     # While a worker is running, drop the entries that belong to its
     # in-progress turn when SSE has claimed that turn. A worker kept alive
     # across a deploy can lack the user item in its event log even while its

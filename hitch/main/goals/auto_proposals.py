@@ -12,16 +12,11 @@ from openai_codex import Codex
 from hitch.main.models import Project
 from hitch.main.runtime import app_server_pool, codex_pool, reconciliation, server_lifecycle
 from hitch.main.sessions import session_index
-from hitch.main.workflows import autonomous_goals, pr_tracking
+from hitch.main.workflows import autonomous_goals
 
 logger = logging.getLogger(__name__)
 
 _AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS = 60
-# Cap GitHub-backed PR-stage refreshes per tick: each due session shells out to
-# `gh pr view` (seconds each), so an unbounded sweep would let one tick run for
-# minutes and stall the rest of the scheduler. Leftover rows converge on later
-# 60s ticks, matching the workflow-maintenance scheduler's PR-stage cap.
-_PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 # Pages of the active session list refreshed per tick. The scheduler resumes
 # from its own cursor each tick, so the whole list is still covered
 # incrementally -- this only bounds the per-tick work so a busy instance with
@@ -38,7 +33,6 @@ _scheduler = server_lifecycle.SchedulerHandle(
 class SessionStateRefreshResult(NamedTuple):
     synced: int
     failed: bool
-    pr_stages_refreshed: int
     # Cursor to resume the incremental active-index scan from on the next tick;
     # empty means the list was fully traversed (restart from the front).
     active_next_cursor: str = ""
@@ -163,7 +157,7 @@ def refresh_unarchived_session_state(
     start_cursor: str = "",
     max_pages: int = _SESSION_STATE_REFRESH_MAX_PAGES,
 ) -> SessionStateRefreshResult:
-    """Refresh active Codex session metadata and GitHub-derived PR stages.
+    """Refresh active Codex session metadata.
 
     ``codex`` lets the scheduler pass a long-lived app-server it reuses across
     ticks; when omitted a short-lived one is opened just for this call. The
@@ -198,12 +192,8 @@ def refresh_unarchived_session_state(
     except Exception:
         codex_failed = True
         logger.exception("failed to refresh active Codex session metadata")
-    pr_stages_refreshed = pr_tracking.refresh_unarchived_session_pr_stages(
-        limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
-    )
     return SessionStateRefreshResult(
         synced=codex_synced,
         failed=codex_failed,
-        pr_stages_refreshed=pr_stages_refreshed,
         active_next_cursor=active_next_cursor,
     )

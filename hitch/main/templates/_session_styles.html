@@ -210,33 +210,6 @@
             color: var(--status-warn-fg);
             background: var(--status-warn-bg);
         }
-        /* A moving highlight sweeps the badge while the stage is refreshing off
-           a stale value; the page is nudged to reload once the refresh lands. */
-        .stage-badge[data-refreshing="true"] {
-            position: relative;
-            overflow: hidden;
-        }
-        .stage-badge[data-refreshing="true"]::after {
-            content: "";
-            position: absolute;
-            inset: 0;
-            border-radius: inherit;
-            background: linear-gradient(
-                100deg,
-                transparent 30%,
-                color-mix(in srgb, var(--accent) 35%, transparent) 50%,
-                transparent 70%
-            );
-            transform: translateX(-100%);
-            animation: stage-badge-sweep 1.4s ease-in-out infinite;
-            pointer-events: none;
-        }
-        @keyframes stage-badge-sweep {
-            to { transform: translateX(100%); }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            .stage-badge[data-refreshing="true"]::after { animation: none; }
-        }
         .meta code {
             background: var(--surface-2);
             color: var(--text);
