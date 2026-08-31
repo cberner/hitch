@@ -4,26 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from hitch.main.models import AutonomousGoal, SystemWorkflow
-from hitch.main.workflows.workflow_state import _state_int, _state_string
+from hitch.main.models import AutonomousGoal
 
 _AUTONOMOUS_GOAL_TITLE_MAX_LEN = 200
-_AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY = "stacked_diff_depth"
-_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY = "stacked_diff_iteration"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY = "proposal_budget"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY = "proposal_budget_tokens_used"
-_AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY = "proposal_budget_failed_attempts"
-_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY = "proposal_budget_last_failure"
-_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY = (
-    "proposal_budget_no_progress_retries"
-)
 
 
 def _autonomous_goal_proposed_session_prompt(
     autonomous_goal: AutonomousGoal,
     candidate: dict[str, Any],
-    judgment: dict[str, str],
+    review: dict[str, str],
 ) -> str:
     suggested = candidate.get("suggested_continuation")
     if isinstance(suggested, str) and suggested.strip():
@@ -41,14 +33,12 @@ def _autonomous_goal_proposed_session_prompt(
     summary = str(candidate.get("summary") or "").strip()
     if summary:
         parts.extend(["", f"Summary:\n{summary}"])
-    judge_feedback = judgment.get("feedback", "").strip()
-    if judge_feedback:
-        parts.extend(["", f"Judge feedback:\n{judge_feedback}"])
+    review_feedback = review.get("feedback", "").strip()
+    if review_feedback:
+        parts.extend(["", f"Reviewer feedback:\n{review_feedback}"])
     implementation_direction = candidate.get("implementation_direction")
     if isinstance(implementation_direction, str) and implementation_direction.strip():
-        parts.extend(
-            ["", f"Implementation guidance:\n{implementation_direction.strip()}"]
-        )
+        parts.extend(["", f"Implementation guidance:\n{implementation_direction.strip()}"])
     for label, key in (
         ("Implemented so far", "implemented_changes"),
         ("Impact", "impact"),
@@ -64,13 +54,11 @@ def _autonomous_goal_proposed_session_prompt(
     return "\n".join(parts)
 
 
-def _autonomous_goal_proposal_summary(
-    candidate: dict[str, Any], judgment: dict[str, str]
-) -> str:
+def _autonomous_goal_proposal_summary(candidate: dict[str, Any], review: dict[str, str]) -> str:
     parts = []
     for label, value in (
         ("Summary", candidate.get("summary")),
-        ("Judge feedback", judgment.get("feedback", "")),
+        ("Reviewer feedback", review.get("feedback", "")),
         ("Implemented", candidate.get("implemented_changes")),
         ("Impact", candidate.get("impact")),
         ("Verification", candidate.get("verification")),
@@ -79,61 +67,6 @@ def _autonomous_goal_proposal_summary(
         if isinstance(value, str) and value.strip():
             parts.append(f"{label}: {value.strip()}")
     return "\n\n".join(parts)
-
-
-def _autonomous_goal_workflow_proposal_budget(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY)
-
-
-def _autonomous_goal_proposal_budget_tokens_used(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY)
-
-
-def _autonomous_goal_failed_attempts(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY)
-
-
-def _autonomous_goal_no_progress_budget_retries(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY)
-
-
-def _autonomous_goal_proposal_budget_metadata(
-    workflow: SystemWorkflow,
-) -> dict[str, object]:
-    budget = _autonomous_goal_workflow_proposal_budget(workflow)
-    if budget <= 0:
-        return {}
-    return {
-        "proposal_budget": budget,
-        "proposal_budget_tokens_used": _autonomous_goal_proposal_budget_tokens_used(
-            workflow
-        ),
-        "proposal_budget_failed_attempts": _autonomous_goal_failed_attempts(workflow),
-    }
-
-
-def _autonomous_goal_workflow_stacked_diff_depth(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> int:
-    depth = _state_int(workflow, _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY)
-    if not depth:
-        depth = autonomous_goal.effective_stacked_diff_depth
-    return min(
-        max(depth, AutonomousGoal.STACKED_DIFF_DEPTH_MIN),
-        AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
-    )
-
-
-def _autonomous_goal_stack_iteration(workflow: SystemWorkflow) -> int:
-    return max(_state_int(workflow, _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY), 1)
-
-
-def _autonomous_goal_session_cwd(workflow: SystemWorkflow) -> str:
-    return _state_string(workflow, _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY) or workflow.cwd
-
-
-def _autonomous_goal_candidate_allows_code_changes(workflow: SystemWorkflow) -> bool:
-    return _autonomous_goal_session_cwd(workflow) != workflow.cwd
 
 
 def _string_list(value: Any) -> list[str]:

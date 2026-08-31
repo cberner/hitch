@@ -65,8 +65,8 @@ acknowledge notices from Hitch background systems.
 - `INBOX-nav-count`: The primary navigation shows the count of visible unresolved
   Inbox items.
 - `INBOX-source-metadata`: Inbox items preserve source metadata such as project,
-  source session, source workflow, source automation, candidate session, judge
-  session, outcome metadata, and relevant files when available.
+  source session, source workflow, source automation, candidate session,
+  reviewer session, outcome metadata, and relevant files when available.
 
 ### 4.2 Proposals
 
@@ -76,11 +76,11 @@ acknowledge notices from Hitch background systems.
   confidence, project, and relevant files when available.
 - `INBOX-proposal-display`: The Inbox displays Proposal source, confidence,
   relevant files, stack labels, token usage, stack-stop reason, and candidate or
-  judge logs when available.
+  reviewer logs when available.
 - `INBOX-proposal-accept`: Accepting a Proposal starts a fresh normal
   user-visible session using the Proposal prompt and source context.
 - `INBOX-proposal-candidate`: An AG Proposal starts its fresh visible session
-  and worktree from the approved candidate snapshot. Hidden candidate and judge
+  and worktree from the approved candidate snapshot. Hidden candidate and reviewer
   threads remain hidden and are never promoted into user-visible sessions.
   Pending implementation proposals created before snapshot-based acceptance
   snapshot their candidate checkout when starting the fresh visible session.
@@ -98,7 +98,7 @@ acknowledge notices from Hitch background systems.
   items.
 - `INBOX-notice-system-cleanup`: System cleanup may also resolve Notice items
   when their source automation is deleted or otherwise cleaned up.
-- `INBOX-notice-logs`: Notices may link to candidate or judge logs when those
+- `INBOX-notice-logs`: Notices may link to candidate or reviewer logs when those
   logs help explain the automation result.
 
 ### 4.4 Codex-Created Proposals

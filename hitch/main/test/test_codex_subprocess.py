@@ -700,6 +700,48 @@ class SpawnFailureTests(TestCase):
         metadata.refresh_from_db()
         self.assertEqual(metadata.codex_updated_at, instance.ended_at)
 
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    def test_durable_binding_runs_before_worker_launch(self, mock_launch: MagicMock) -> None:
+        bound_instance_ids: list[int] = []
+
+        def launch(**kwargs: object) -> SimpleNamespace:
+            self.assertEqual(bound_instance_ids, [kwargs["instance_id"]])
+            return SimpleNamespace(pid=1234)
+
+        mock_launch.side_effect = launch
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="bound-thread",
+                cwd="/repo",
+                prompt="hi",
+                before_worker_launch=lambda created: bound_instance_ids.append(created.pk),
+            )
+
+        self.assertEqual(bound_instance_ids, [instance.pk])
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    def test_failed_durable_binding_prevents_worker_launch(self, mock_launch: MagicMock) -> None:
+        def fail_binding(_instance: CodexInstance) -> None:
+            raise RuntimeError("binding failed")
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+            self.assertRaisesRegex(RuntimeError, "binding failed"),
+        ):
+            codex_pool.spawn_turn(
+                thread_id="unbound-thread",
+                cwd="/repo",
+                prompt="hi",
+                before_worker_launch=fail_binding,
+            )
+
+        mock_launch.assert_not_called()
+        self.assertFalse(CodexInstance.objects.filter(thread_id="unbound-thread").exists())
+
 
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")

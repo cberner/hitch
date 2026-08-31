@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -349,6 +350,7 @@ def spawn_turn(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
+    before_worker_launch: Callable[[CodexInstance], None] | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt.
 
@@ -383,6 +385,7 @@ def spawn_turn(
         display_author=display_author,
         output_schema=output_schema,
         user_message_index=user_message_index,
+        before_worker_launch=before_worker_launch,
     )
 
 
@@ -1625,6 +1628,7 @@ def _spawn_worker(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
+    before_worker_launch: Callable[[CodexInstance], None] | None = None,
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1675,6 +1679,8 @@ def _spawn_worker(
         )
         instance.events_path = str(target_dir / f"{instance.pk}.jsonl")
         instance.save(update_fields=["events_path"])
+        if before_worker_launch is not None:
+            before_worker_launch(instance)
 
     # A submitted prompt is session activity even if the detached worker is
     # killed before its own completion hook can run.
