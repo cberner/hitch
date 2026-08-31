@@ -236,6 +236,9 @@ class PrWatchToolTests(TestCase):
         self.assertEqual(
             record.state[pr_watch.PR_WATCH_RESULT_TURN_INDEX_STATE_KEY], 4
         )
+        self.assertTrue(
+            {"hitch_pr_handoff", "pr_stage_refresh"}.isdisjoint(record.state)
+        )
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_follow_up_watch_reuses_feedback_fingerprint(
@@ -652,102 +655,6 @@ class PrWatchToolTests(TestCase):
         self.assertNotIn(pr_watch.PR_WATCH_RESULT_STATE_KEY, record.state)
         mock_auto_pull.assert_not_called()
 
-    def test_stage_refresh_cannot_overwrite_new_publication_registration(self) -> None:
-        old_pr = {
-            "url": _PR_URL,
-            "repository_full_name": "openai/hitch",
-            "pr_number": 42,
-            "state": "open",
-        }
-        record = SessionPullRequest.objects.create(
-            thread_id="main-thread",
-            cwd=self.cwd,
-            state={
-                pr_tracking.PR_HANDOFF_STATE_KEY: old_pr,
-                "hitch_pr_handoff": {
-                    key: old_pr[key]
-                    for key in ("url", "repository_full_name", "pr_number")
-                },
-            },
-        )
-        new_pr = {
-            "url": "https://github.com/openai/hitch/pull/43",
-            "repository_full_name": "openai/hitch",
-            "pr_number": 43,
-            "state": "open",
-        }
-
-        def register_new_pr(*_args: object, **_kwargs: object) -> dict[str, object]:
-            registration, _fingerprint = pr_tracking.begin_pr_watch_invocation(
-                thread_id="main-thread",
-                cwd=self.cwd,
-                instance_id=8,
-                user_message_index=5,
-                agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND,
-                requested_pr=new_pr,
-            )
-            assert registration is not None
-            return {**old_pr, "state": "merged", "merged": True}
-
-        with patch(
-            "hitch.main.workflows.pr_tracking._gh_pr_view",
-            side_effect=register_new_pr,
-        ):
-            refreshed = pr_tracking.refreshed_pr_handoff_for_stage(
-                record, force=True
-            )
-
-        self.assertEqual(refreshed["pr_number"], 43)
-        record.refresh_from_db()
-        self.assertEqual(
-            pr_tracking.pr_handoff_for_record(record)["pr_number"], 43
-        )
-        self.assertTrue(pr_tracking.watch_registered_by_instance(record, 8))
-
-    def test_stage_refresh_cannot_update_a_pr_superseded_during_observation(
-        self,
-    ) -> None:
-        handoff = {
-            "url": _PR_URL,
-            "repository_full_name": "openai/hitch",
-            "pr_number": 42,
-            "state": "open",
-        }
-        record = SessionPullRequest.objects.create(
-            thread_id="main-thread",
-            cwd=self.cwd,
-            state={
-                pr_tracking.PR_HANDOFF_STATE_KEY: handoff,
-                "hitch_pr_handoff": {
-                    key: handoff[key]
-                    for key in ("url", "repository_full_name", "pr_number")
-                },
-            },
-        )
-
-        def supersede_pr(*_args: object, **_kwargs: object) -> dict[str, object]:
-            current = SessionPullRequest.objects.get(pk=record.pk)
-            current.state = {
-                **current.state,
-                SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY: 9,
-            }
-            current.save(update_fields=["state", "updated_at"])
-            return {**handoff, "state": "merged", "merged": True}
-
-        with patch(
-            "hitch.main.workflows.pr_tracking._gh_pr_view",
-            side_effect=supersede_pr,
-        ):
-            refreshed = pr_tracking.refreshed_pr_handoff_for_stage(
-                record, force=True
-            )
-
-        self.assertEqual(refreshed, {})
-        record.refresh_from_db()
-        self.assertEqual(
-            pr_tracking.pr_handoff_for_record(record)["state"], "open"
-        )
-
     def _merged_registration(
         self,
         *,
@@ -946,7 +853,7 @@ class PrWatchToolTests(TestCase):
 
         self.assertIsNone(pr_tracking.record_for_thread("main-thread"))
         record = SessionPullRequest.objects.get(thread_id="main-thread")
-        self.assertFalse(pr_tracking.pr_handoff_stage_refresh_due(record))
+        self.assertFalse(pr_tracking.record_is_current(record))
 
         replacement_turn = CodexInstance.objects.create(
             pid=4,

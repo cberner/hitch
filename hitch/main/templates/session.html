@@ -93,7 +93,7 @@
             </div>
             {% endif %}
             <p class="meta">
-                {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}"{% if session_stage.refreshing %} data-refreshing="true"{% endif %}>{{ session_stage.label }}</span></span>{% endif %}
+                {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}">{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
                 <span class="meta-item"><span class="meta-label">model</span><code>{{ session_model }}</code></span>
                 <span class="meta-item"><span class="meta-label">reasoning</span><code>{{ session_reasoning }}</code></span>
@@ -392,5 +392,4 @@
     <script src="{% static 'vendor/katex/contrib/auto-render.min.js' %}"></script>
     <script src="{% static 'session_math.js' %}"></script>
     {% include "_session_script.html" %}
-    {% include "_stage_refresh_script.html" %}
 {% endblock %}

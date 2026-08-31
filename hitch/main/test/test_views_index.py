@@ -1,4 +1,4 @@
-"""Session index, project views, and PR-stage refresh scheduling tests."""
+"""Session index and project view tests."""
 
 import base64
 import html
@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast, override
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from django.db import connection
@@ -40,7 +40,6 @@ from hitch.main.models import (
 )
 from hitch.main.sessions import (
     session_index,
-    session_stage_refresh,
     settings_cookies,
     token_usage,
 )
@@ -66,7 +65,7 @@ from hitch.main.test.views_helpers import (
     _token_count_line,
 )
 from hitch.main.views import common as common_views
-from hitch.main.workflows import gh_cli, system_agents
+from hitch.main.workflows import system_agents
 
 
 class IndexViewTests(TestCase):
@@ -405,16 +404,14 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
 
-    @patch("hitch.main.workflows.pr_tracking.logger")
-    @patch("hitch.main.workflows.pr_tracking._gh_pr_view")
+    @patch("hitch.main.workflows.gh_cli._gh_pr_view_payload")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
-    def test_cached_session_list_backs_off_failed_ready_pr_refresh(
+    def test_cached_session_list_does_not_refresh_registered_pr(
         self,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
-        mock_gh_pr_view: MagicMock,
-        mock_logger: MagicMock,
+        mock_gh_pr_view_payload: MagicMock,
     ) -> None:
         client = _setup_codex(mock_codex)
         client.thread_list.side_effect = CodexError("thread list unavailable")
@@ -454,11 +451,6 @@ class IndexViewTests(TestCase):
                     "pr_number": 344,
                     "state": "open",
                 },
-                "hitch_pr_handoff": {
-                    "url": pr_url,
-                    "repository_full_name": "cberner/hitch",
-                    "pr_number": 344,
-                },
             },
         )
         SessionMetadata.objects.create(
@@ -471,17 +463,20 @@ class IndexViewTests(TestCase):
             codex_updated_at=now,
             codex_last_synced_at=now,
         )
-        mock_gh_pr_view.side_effect = gh_cli._GhPrOpenError("gh unavailable")
-
         first_response = self.client.get(reverse("index"))
         second_response = self.client.get(reverse("index"))
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
+        self.assertContains(
+            first_response,
+            '<span class="stage-badge" data-tone="active">PR #344</span>',
+        )
+        self.assertNotContains(first_response, 'data-refreshing="true"')
         registered_pr.refresh_from_db()
-        self.assertIn("pr_stage_refresh", registered_pr.state)
-        mock_gh_pr_view.assert_called_once()
-        mock_logger.exception.assert_called_once()
+        self.assertEqual(registered_pr.state["pr_handoff"]["state"], "open")
+        self.assertNotIn("pr_stage_refresh", registered_pr.state)
+        mock_gh_pr_view_payload.assert_not_called()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
@@ -2323,28 +2318,6 @@ class ProjectViewTests(TestCase):
             with self.subTest(message=message):
                 response = self.client.post(reverse("new_project"), data=data)
                 self.assertContains(response, message, status_code=400)
-
-
-class PrStageRefreshSchedulingTests(TestCase):
-    @override
-    def tearDown(self) -> None:
-        # The threaded path adds to a module-level in-flight set; keep tests
-        # isolated by clearing it.
-        with session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT_LOCK:
-            session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT.clear()
-
-    @patch("hitch.main.sessions.session_stage_refresh._refresh_session_pr_stage")
-    @patch("hitch.main.sessions.session_stage_refresh.threading.Thread")
-    def test_schedule_spawns_one_thread_per_session_off_request(
-        self, mock_thread: MagicMock, _mock_refresh: MagicMock
-    ) -> None:
-        with self.settings(TESTING=False):
-            session_stage_refresh._schedule_pr_stage_refresh("sess-x")
-            # A concurrent render for the same session does not spawn a duplicate.
-            session_stage_refresh._schedule_pr_stage_refresh("sess-x")
-        mock_thread.assert_called_once()
-        mock_thread.return_value.start.assert_called_once()
-
 
 
 class ArchiveUndoToastTests(TestCase):

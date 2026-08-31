@@ -1,7 +1,5 @@
 """Cached session-stage persistence helpers."""
 
-from django.utils import timezone
-
 from hitch.main.models import SessionMetadata
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.sessions import session_stage
@@ -25,13 +23,4 @@ def _update_cached_stage_best_effort(
     run_ignoring_database_locks(
         lambda: _update_cached_stage(session_id, stage, source_mtime_ns),
         description="session stage cache update",
-    )
-
-
-def _mark_cached_pr_stage_refresh_attempt(session_id: str) -> None:
-    run_ignoring_database_locks(
-        lambda: SessionMetadata.objects.filter(thread_id=session_id).update(
-            derived_stage_pr_refresh_attempted_at=timezone.now()
-        ),
-        description="PR stage refresh backoff",
     )

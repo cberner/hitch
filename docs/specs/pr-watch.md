@@ -7,7 +7,7 @@ Status: Draft
 ### 1.1 Purpose
 
 Define the agent-invoked pull-request watch tool and the minimal durable state
-that lets Hitch display and refresh a session's registered PR.
+that lets Hitch display a session's registered PR.
 
 ### 1.2 Definitions
 
@@ -28,8 +28,8 @@ that lets Hitch display and refresh a session's registered PR.
   to respond to watch results.
 - Keep GitHub polling inside a bounded tool call and return structured evidence
   to the invoking agent.
-- Retain only the durable PR identity, gate/result snapshot, ownership, stage
-  refresh, and post-merge Auto-pull state that the UI needs.
+- Retain only the durable PR identity, gate/result snapshot, ownership, and
+  post-merge Auto-pull state that the UI needs.
 - Preserve ordinary steering, stopping, and session settings without a PR/QA
   state machine.
 
@@ -120,12 +120,12 @@ that lets Hitch display and refresh a session's registered PR.
 - `PRWATCH-user-control`: Steering and Stop use normal visible-turn behavior;
   no durable framework steering queue is created.
 
-### 3.4 Durable Display and Refresh
+### 3.4 Durable Display
 
 - `PRWATCH-session-record`: Hitch stores at most one `SessionPullRequest` row
   per thread. It contains the registered handoff, latest gates/result,
-  ownership, stage-refresh bookkeeping, and optional Auto-pull result rather
-  than executable workflow state.
+  ownership, and optional Auto-pull result rather than executable workflow
+  state.
 - `PRWATCH-display-source`: The current URL and PR stage come only from the
   current `SessionPullRequest`; Hitch does not infer them from rollout text or
   historical MCP calls.
@@ -133,15 +133,16 @@ that lets Hitch display and refresh a session's registered PR.
   historical so it no longer controls the current URL or stage. A PR watch
   follow-up preserves it, and a later successful task registration makes its
   validated identity current again.
-- `PRWATCH-stage`: A registered open PR displays the PR stage. A refreshed or
-  observed merged/closed PR displays Done: Merged or Done: Closed. An active
-  tagged turn takes precedence as the QA or PR stage.
-- `PRWATCH-stage-refresh`: Hitch may perform bounded, rate-limited, off-request
-  `gh` reads to refresh a registered open PR's display state. Refreshes preserve
-  PR identity and cannot introduce a different PR.
+- `PRWATCH-stage`: A registered open PR displays the PR stage. A watch-observed
+  merged/closed PR displays Done: Merged or Done: Closed. An active tagged turn
+  takes precedence as the QA or PR stage.
+- `PRWATCH-stage-authority`: The displayed PR state changes only through an
+  eligible `hitch.watch_pr` invocation. Hitch does not independently issue
+  background or request-triggered `gh` reads to refresh a registered PR, so an
+  unrelated stale observation cannot overwrite the latest watch result.
 - `PRWATCH-neutral-turn-end`: Finishing a visible task without a ready or
   terminal result does not claim that deterministic gates passed; the durable
-  snapshot and later stage refresh remain authoritative.
+  snapshot and later watch observations remain authoritative.
 - `PRWATCH-auto-pull`: If the tool observes a merged PR, an enabled project may
   run post-merge Auto-pull against its separately verified default repository
   checkout. Failure or skip is recorded without altering the PR result.
@@ -172,5 +173,8 @@ that lets Hitch display and refresh a session's registered PR.
   session record; review-guidance calls and stale results cannot overwrite it,
   and an ordinary coding turn cannot establish a PR without validating the
   publishing checkout.
+- `PRWATCH-accept-stage-authority`: Rendering sessions and running background
+  maintenance never poll GitHub for PR display state; only eligible watch
+  invocations update the durable stage snapshot.
 - `PRWATCH-accept-no-wrapper`: Review and PR shortcuts create ordinary turns and
   no `pr_qa` workflow or framework steering row.

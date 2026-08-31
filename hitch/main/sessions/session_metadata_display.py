@@ -235,7 +235,6 @@ def _session_row_for_metadata(
                 "stage_main_updated_at": metadata.codex_updated_at,
                 "stage_cache_key": metadata.derived_stage,
                 "stage_cache_mtime_ns": metadata.derived_stage_source_mtime_ns,
-                "stage_pr_refresh_attempted_at": (metadata.derived_stage_pr_refresh_attempted_at),
             }
         )
     if system_only:
