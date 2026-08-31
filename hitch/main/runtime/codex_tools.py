@@ -212,11 +212,19 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
         cwd=context.cwd,
         url=_string_arg(arguments, "url"),
     )
-    if context.agent_kind == PR_PUBLISH_AGENT_KIND:
-        pr_watch.validate_published_pr_checkout(cwd=context.cwd, url=url)
     requested_pr = _compact_pr_handoff(
         _pr_handoff_from_github_url(url, source_tool="hitch_watch_pr")
     )
+    ordinary_preflight = None
+    if context.agent_kind == PR_PUBLISH_AGENT_KIND:
+        pr_watch.validate_published_pr_checkout(cwd=context.cwd, url=url)
+    elif not context.agent_kind:
+        ordinary_preflight = pr_tracking.ordinary_pr_watch_preflight(
+            thread_id=context.thread_id,
+            requested_pr=requested_pr,
+        )
+        if ordinary_preflight.requires_checkout_validation:
+            pr_watch.validate_published_pr_checkout(cwd=context.cwd, url=url)
     registration, previous_fingerprint = pr_tracking.begin_pr_watch_invocation(
         thread_id=context.thread_id,
         cwd=context.cwd,
@@ -224,6 +232,7 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
         user_message_index=context.user_message_index,
         agent_kind=context.agent_kind,
         requested_pr=requested_pr,
+        ordinary_preflight=ordinary_preflight,
     )
     result = pr_watch.watch_pr(
         cwd=context.cwd,

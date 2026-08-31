@@ -15,7 +15,7 @@ that lets Hitch display and refresh a session's registered PR.
 - Watch invocation: One bounded, read-only observation loop run by Hitch when
   the coding agent invokes the tool.
 - Registered PR: The PR identity and latest observation stored for a session by
-  an eligible PR task's watch invocation.
+  an eligible watch invocation.
 - Actionable result: A watch result that reports a merge conflict, requested
   review change, failed CI check, or newly observed review/PR feedback.
 - Ready result: A watch result whose mergeability, review, and CI gates pass.
@@ -74,20 +74,29 @@ that lets Hitch display and refresh a session's registered PR.
 
 ### 3.2 Registration and Ownership
 
-- `PRWATCH-task-registration`: Only turns tagged as a PR publication or PR watch
-  task may register durable UI state. Calls from ordinary or review-guidance
-  turns still return observations but do not claim or alter the session's
-  registered PR.
-- `PRWATCH-publication-validation`: A publication turn verifies that the PR is
-  open and that its head repository, branch, and commit match the publishing
-  checkout, including configured SSH host aliases, before registration.
+- `PRWATCH-task-registration`: PR publication and PR watch tasks register
+  durable UI state. An ordinary visible coding turn may also register when the
+  requested PR is already the session's current registration or passes
+  publication validation. Calls from review-guidance turns still return
+  observations without claiming or altering the session's registered PR.
+- `PRWATCH-publication-validation`: A publication task, or an ordinary coding
+  turn establishing, replacing, or reviving a historical registered PR,
+  verifies that the PR is open and that its head repository, branch, and commit
+  match the publishing checkout, including configured SSH host aliases, before
+  registration.
+- `PRWATCH-validation-snapshot`: An ordinary coding turn binds publication
+  validation to the exact registration snapshot observed before validation. If
+  another invocation changes that record, or a newer visible turn is recorded
+  after an absent-record snapshot, the older call fails safely and asks the
+  agent to retry instead of replacing newer state.
 - `PRWATCH-follow-up-identity`: A PR watch/fix turn may update only the PR
-  already registered to its session. A publication turn may replace an older
-  identity after passing checkout validation.
+  already registered to its session. A publication turn or validated ordinary
+  coding turn may replace an older identity after passing checkout validation.
 - `PRWATCH-register-before-poll`: The eligible invocation atomically records
   the PR URL and number for the Hitch UI before entering the polling loop.
 - `PRWATCH-exact-owner`: Each registration records the invoking instance and
-  message index. A late result is discarded if a newer invocation has taken
+  message index. An older instance cannot displace a newer owner or superseding
+  turn, and a late result is discarded if a newer invocation has taken
   ownership, so stale polling cannot overwrite a newer PR or result.
 - `PRWATCH-publishing-display`: While a new publication turn is active, Hitch
   hides an older registered PR from that session's current UI until that exact
@@ -156,7 +165,9 @@ that lets Hitch display and refresh a session's registered PR.
   return `timed_out` after the bounded watch window.
 - `PRWATCH-accept-agent-fix`: Actionable evidence returns to the invoking agent,
   which can fix, test, publish, and invoke the tool again in the same turn.
-- `PRWATCH-accept-safe-state`: Only the exact owning task invocation updates its
-  session record; standalone calls and stale results cannot overwrite it.
+- `PRWATCH-accept-safe-state`: Only the exact owning invocation updates its
+  session record; review-guidance calls and stale results cannot overwrite it,
+  and an ordinary coding turn cannot establish a PR without validating the
+  publishing checkout.
 - `PRWATCH-accept-no-wrapper`: Review and PR shortcuts create ordinary turns and
   no `pr_qa` workflow or framework steering row.
