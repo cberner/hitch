@@ -17,6 +17,9 @@ per-item layout stays identical in both contexts.
         {% else %}
         <div class="body">{{ entry.text }}</div>
         {% endif %}
+        {% if entry.accepted_proposal_context %}
+        {% include "_accepted_proposal_context.html" with accepted_proposal_context=entry.accepted_proposal_context %}
+        {% endif %}
         {% if entry.memory_citation %}
         <details class="memory-citation">
             <summary>Memories used: {{ entry.memory_citation.count }}</summary>

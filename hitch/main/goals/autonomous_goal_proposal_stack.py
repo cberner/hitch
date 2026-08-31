@@ -20,6 +20,7 @@ from hitch.main.sequences import unique_nonempty
 AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY = "autonomous_goal_tool_protocol"
 AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY = "approved_snapshot_sha"
 AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY = "approved_snapshot_ref"
+AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY = "accepted_snapshot_sha"
 _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = "stacked_diff_continuation_stopped_reason"
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
 

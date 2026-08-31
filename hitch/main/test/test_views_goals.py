@@ -351,6 +351,80 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.common.Codex")
+    def test_page_keeps_accepted_proposal_candidate_log_link(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = _make_project()
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Find and fix a serious reliability problem.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
+            cwd=project.repo_path,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={"autonomous_goal_id": goal.pk},
+        )
+        reviewer = CodexInstance.objects.create(
+            pid=0,
+            thread_id="reviewer-thread",
+            cwd="/repo-worktree",
+            prompt="Review the candidate.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=reviewer.thread_id,
+            instance=reviewer,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/repo-accepted-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            source_workflow=workflow,
+            title="Fix a reliability problem",
+            candidate_session=candidate,
+            accepted_session=accepted,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, ">Waiting</button>", html=False)
+        self.assertContains(
+            response,
+            f'data-run-status-log-url="{reverse("autonomous_goal_run_log", args=[workflow.pk])}"',
+        )
+        self.assertContains(
+            response,
+            f'data-run-status-candidate-log-url="{reverse("system_session", args=[candidate.thread_id])}"',
+        )
+        self.assertContains(response, ">Candidate log</a>", html=False)
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.common.Codex")
     def test_page_treats_completed_auto_proposal_as_ready_not_done(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -677,6 +751,7 @@ class AutonomousGoalViewTests(TestCase):
             response,
             'data-proposed-session-prompt="Go ahead and implement this proposed session.',
         )
+        self.assertNotContains(response, "Accepted autonomous-goal proposal context:")
         self.assertContains(response, f'aria-label="Actions for {proposal.title}"')
         self.assertContains(
             response,

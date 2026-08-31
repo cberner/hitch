@@ -18,7 +18,9 @@ from django.urls import reverse
 from openai_codex.errors import InternalRpcError, InvalidRequestError
 
 from hitch.main.models import (
+    AutonomousGoal,
     CodexInstance,
+    ProposedSession,
     SessionMetadata,
     SessionPullRequest,
 )
@@ -32,6 +34,7 @@ from hitch.main.sessions import (
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.test.support import (
+    _make_project,
     _rollout_line,
     _seed_cookies,
     _setup_codex,
@@ -48,6 +51,134 @@ from hitch.main.views import common as common_views
 
 
 class SessionDetailFastPathTests(TestCase):
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_accepted_ag_initial_message_links_candidate_log(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        project = _make_project()
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve reliability",
+            goal="Fix a meaningful reliability problem.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/candidate",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        candidate_url = reverse("system_session", args=[candidate.thread_id])
+        snapshot = "a" * 40
+        prompt = (
+            "Continue the approved work.\n\n"
+            "Accepted autonomous-goal proposal context:\n"
+            f"- Candidate log: {candidate_url}\n"
+            f"- Approved snapshot: {snapshot}\n\n"
+            "This fresh session starts from the approved snapshot above. "
+            "The candidate transcript is linked for reference and is not "
+            "automatically loaded as conversation context."
+        )
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines(prompt, "Implemented the proposal."),
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/accepted",
+            project=project,
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Harden retries",
+            candidate_session=candidate,
+            accepted_session=accepted,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "autonomous_goal_tool_protocol": True,
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+                "approved_snapshot_sha": snapshot,
+            },
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": accepted.thread_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f"Approved snapshot: {snapshot}")
+        self.assertContains(
+            response,
+            f'<a href="{candidate_url}">Open candidate log</a>',
+            html=True,
+        )
+        self.assertContains(response, f"<code>{snapshot}</code>", html=True)
+        self.assertContains(response, "This fresh session started from that snapshot.")
+        self.assertContains(
+            response,
+            "candidate transcript is linked for reference and is not automatically loaded",
+        )
+        mock_codex.assert_not_called()
+
+    @patch(
+        "hitch.main.views.session_detail._accepted_proposal_context",
+        return_value={
+            "candidate_log_url": "/system-sessions/candidate-thread/",
+            "approved_snapshot": "a" * 40,
+        },
+    )
+    @patch("hitch.main.views.session_detail.rollout.session_history_page")
+    def test_oldest_history_page_links_accepted_ag_candidate(
+        self,
+        mock_history_page: MagicMock,
+        _mock_context: MagicMock,
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Accepted prompt", "Accepted answer"),
+        )
+        SessionMetadata.objects.create(
+            thread_id="accepted-paged-thread",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+        )
+        mock_history_page.return_value = rollout_module.SessionHistoryPage(
+            flat_entries=(
+                {
+                    "kind": "user",
+                    "text": "Accepted prompt",
+                    "timestamp": 1,
+                },
+                {
+                    "kind": "agent",
+                    "text": "Accepted answer",
+                    "timestamp": 1,
+                    "phase": "final_answer",
+                },
+            ),
+            start_offset=0,
+            has_older=False,
+            leading_user_text="Accepted prompt",
+        )
+
+        response = self.client.get(
+            reverse(
+                "session_history",
+                kwargs={"session_id": "accepted-paged-thread"},
+            ),
+            {"before": "100"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<a href="/system-sessions/candidate-thread/">Open candidate log</a>',
+            html=True,
+        )
+
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")

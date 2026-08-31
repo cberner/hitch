@@ -154,7 +154,11 @@ acknowledge notices from Hitch background systems.
 - `INBOX-visible-projects`: Users can adjust visible project filtering from the
   Inbox.
 - `INBOX-do-it-dialog`: Starting a Proposal lets the user review or edit the
-  starting message before creating the session.
+  starting message before creating the session. When an AG Proposal is
+  accepted, Hitch appends final server-selected provenance to that starting
+  message: its candidate log, its approved snapshot when applicable, and the
+  distinction between linked transcript history and conversation context
+  loaded into the fresh session.
 - `INBOX-reject-dialog`: Rejecting a Proposal asks for a reason before resolving
   it.
 - `INBOX-item-actions`: Proposal and Notice actions must match their item kind so

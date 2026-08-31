@@ -22,10 +22,12 @@ from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_entry_display import (
+    _accepted_proposal_context,
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
     _apply_system_authors,
+    _attach_accepted_proposal_context,
     _trim_in_progress_turn,
 )
 from hitch.main.sessions.session_resume import (
@@ -104,6 +106,10 @@ def session_history(request: HttpRequest, session_id: str) -> HttpResponse:
         active_turn_unresolved=page.active_turn_unresolved,
         active_stream_owns_turn=active_stream_owns_turn,
     )
+    if not page.has_older:
+        accepted_proposal_context = _accepted_proposal_context(session_id)
+        if accepted_proposal_context is not None:
+            _attach_accepted_proposal_context(entries, accepted_proposal_context)
     response = render(
         request,
         "_session_history_page.html",

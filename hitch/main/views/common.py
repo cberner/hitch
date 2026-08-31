@@ -82,11 +82,13 @@ from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_entry_display import (
+    _accepted_proposal_context,
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
     _active_worker_status_text,
     _apply_system_authors,
+    _attach_accepted_proposal_context,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
@@ -706,6 +708,16 @@ def _render_session_detail(
         active_turn_unresolved=active_turn_unresolved,
         active_stream_owns_turn=active_stream_owns_turn,
     )
+    accepted_proposal_context = _accepted_proposal_context(session_id)
+    if accepted_proposal_context is not None and (
+        history_page is None or not history_page.has_older
+    ):
+        _attach_accepted_proposal_context(entries, accepted_proposal_context)
+    active_accepted_proposal_context = (
+        accepted_proposal_context
+        if active_instance is not None and active_instance.user_message_index == 0
+        else None
+    )
     plan_mode_state = _thread_plan_mode_state(
         session_id,
         thread,
@@ -895,6 +907,12 @@ def _render_session_detail(
             ),
             "pending_user_author": _pending_user_author(active_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance),
+            "pending_accepted_proposal_context": (
+                active_accepted_proposal_context
+                if not rollout_owns_active_turn
+                else None
+            ),
+            "live_accepted_proposal_context": active_accepted_proposal_context,
             "token_usage": session_token_usage,
             "session_model": session_model,
             "session_reasoning": session_reasoning,

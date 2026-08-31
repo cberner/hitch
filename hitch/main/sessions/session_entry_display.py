@@ -15,10 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from django.db.models.functions import Coalesce
+from django.urls import reverse
 from django.utils import timezone
 
+from hitch.main.goals.autonomous_goal_proposal_stack import (
+    AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY,
+    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY,
+    AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
+)
 from hitch.main.models import (
+    AutonomousGoal,
     CodexInstance,
+    ProposedSession,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout
 from hitch.main.sessions import session_index
@@ -33,6 +41,58 @@ logger = logging.getLogger(__name__)
 # generate its own thread summaries, so for unnamed threads `Thread.preview`
 # (the full first user message) is what we get; that is often paragraphs
 # long and would overflow the list rows without a clip.
+
+
+def _accepted_proposal_context(session_id: str) -> dict[str, str] | None:
+    proposal = (
+        ProposedSession.objects.select_related("candidate_session")
+        .filter(
+            accepted_session__thread_id=session_id,
+            autonomous_goal_id__isnull=False,
+            candidate_session__isnull=False,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        .order_by("-updated_at", "-pk")
+        .first()
+    )
+    if proposal is None or proposal.candidate_session is None:
+        return None
+    context = {
+        "candidate_log_url": reverse(
+            "system_session",
+            kwargs={"session_id": proposal.candidate_session.thread_id},
+        )
+    }
+    metadata = (
+        proposal.outcome_metadata
+        if isinstance(proposal.outcome_metadata, dict)
+        else {}
+    )
+    snapshot = metadata.get(AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY)
+    if not isinstance(snapshot, str) and (
+        metadata.get(AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY) is True
+    ):
+        # Accepted tool-protocol proposals created before final-snapshot
+        # provenance was persisted used their pre-created approved snapshot.
+        snapshot = metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY)
+    snapshot_text = snapshot.strip() if isinstance(snapshot, str) else ""
+    if (
+        metadata.get("autonomous_goal_autonomy")
+        != AutonomousGoal.AUTONOMY_PROPOSE_ONLY
+        and 40 <= len(snapshot_text) <= 64
+        and all(character in "0123456789abcdef" for character in snapshot_text)
+    ):
+        context["approved_snapshot"] = snapshot_text
+    return context
+
+
+def _attach_accepted_proposal_context(
+    entries: list[dict[str, Any]], context: dict[str, str]
+) -> None:
+    for entry in entries:
+        if entry.get("kind") == "user":
+            entry["accepted_proposal_context"] = context
+            return
 
 
 def _active_instance_for(session_id: str) -> CodexInstance | None:

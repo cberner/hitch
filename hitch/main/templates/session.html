@@ -160,8 +160,16 @@
                 </div>
                 <div class="message user pending" data-copyable-message>
                     <div class="body">{{ pending_user_prompt }}</div>
+                    {% if pending_accepted_proposal_context %}
+                    {% include "_accepted_proposal_context.html" with accepted_proposal_context=pending_accepted_proposal_context %}
+                    {% endif %}
                 </div>
             </div>
+            {% endif %}
+            {% if live_accepted_proposal_context %}
+            <template data-accepted-proposal-context-template>
+                {% include "_accepted_proposal_context.html" with accepted_proposal_context=live_accepted_proposal_context %}
+            </template>
             {% endif %}
             {% if active_worker %}
             <div class="entry"

@@ -17,12 +17,14 @@ from django.views.decorators.http import require_http_methods
 from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.goals.autonomous_goal_proposal_stack import (
+    AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY,
     AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY,
     AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY,
     AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
     _proposal_outcome_metadata,
 )
 from hitch.main.goals.autonomous_goal_run_display import (
+    _accepted_proposal_prompt,
     _attach_proposed_session_display_state,
     _auto_review_settings_for_proposed_session,
     _proposed_session_prompt,
@@ -376,23 +378,28 @@ def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -
 
 
 def _finish_new_session_proposal_start_claim(
-    proposed_session: ProposedSession | None, session_metadata: SessionMetadata
+    proposed_session: ProposedSession | None,
+    session_metadata: SessionMetadata,
+    *,
+    approved_snapshot: str,
 ) -> None:
     if proposed_session is None:
         return
     claim_filter = common._new_session_proposal_start_claim_filter(proposed_session)
     if claim_filter is None:
         return
-    outcome_metadata = _proposal_outcome_metadata(
-        proposed_session,
-        {
-            "accepted_by": "user",
-            "resolved_by": "user",
-            "accepted_session_id": session_metadata.pk,
-            "accepted_thread_id": session_metadata.thread_id,
-            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
-        },
-    )
+    updates: dict[str, object] = {
+        "accepted_by": "user",
+        "resolved_by": "user",
+        "accepted_session_id": session_metadata.pk,
+        "accepted_thread_id": session_metadata.thread_id,
+        ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
+    }
+    if proposed_session.autonomous_goal_id is not None:
+        updates[AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY] = (
+            approved_snapshot or None
+        )
+    outcome_metadata = _proposal_outcome_metadata(proposed_session, updates)
     applied = ProposedSession.objects.filter(
         pk=proposed_session.pk,
         outcome_status=ProposedSession.OUTCOME_ACCEPTED,
@@ -824,6 +831,12 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         except WorktreeCreationError as exc:
             return HttpResponseBadRequest(str(exc))
         session_cwd = str(managed_worktree.path)
+    if proposed_session is not None:
+        prompt = _accepted_proposal_prompt(
+            proposed_session,
+            prompt,
+            approved_snapshot=approved_snapshot,
+        )
     sandbox_policy = _effective_sandbox_policy_for_cwd(
         settings,
         session_cwd,
@@ -892,7 +905,13 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         task_kwargs: dict[str, Any] = {
             "thread_id": thread_id,
             "cwd": session_cwd,
-            "prompt": task.prompt,
+            "prompt": _accepted_proposal_prompt(
+                proposed_session,
+                task.prompt,
+                approved_snapshot=approved_snapshot,
+            )
+            if proposed_session is not None
+            else task.prompt,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
@@ -923,7 +942,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             auto_pr_enabled=session_auto_pr_enabled,
             auto_qa_enabled=session_auto_qa_enabled,
         )
-        _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
+        _finish_new_session_proposal_start_claim(
+            proposed_session,
+            session_metadata,
+            approved_snapshot=approved_snapshot,
+        )
         return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
 
     if use_worktrees and managed_worktree is None:
@@ -1005,7 +1028,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         auto_qa_enabled=auto_qa_enabled,
         codex_path=codex_pool.thread_path_for_instance(instance),
     )
-    _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
+    _finish_new_session_proposal_start_claim(
+        proposed_session,
+        session_metadata,
+        approved_snapshot=approved_snapshot,
+    )
     return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=instance.thread_id)
 
 

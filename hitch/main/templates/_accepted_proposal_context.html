@@ -1,0 +1,14 @@
+<div class="accepted-proposal-context">
+    <div>
+        <span>Accepted proposal context:</span>
+        <a href="{{ accepted_proposal_context.candidate_log_url }}">Open candidate log</a>
+        {% if accepted_proposal_context.approved_snapshot %}
+        <span aria-hidden="true">·</span>
+        <span>Approved snapshot:</span>
+        <code>{{ accepted_proposal_context.approved_snapshot }}</code>
+        {% endif %}
+    </div>
+    <div class="accepted-proposal-context-note">
+        {% if accepted_proposal_context.approved_snapshot %}This fresh session started from that snapshot. {% endif %}The candidate transcript is linked for reference and was not automatically loaded as conversation context.
+    </div>
+</div>
