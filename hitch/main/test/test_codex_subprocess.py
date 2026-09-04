@@ -4,6 +4,7 @@ the CodexInstance row in sync with the OS process.
 """
 
 import dataclasses
+import importlib.metadata
 import json
 import os
 import signal
@@ -312,6 +313,57 @@ class SpawnNewSessionTests(TestCase):
                 config = codex_pool.app_server_config()
 
                 self.assertIsNone(config.codex_bin)
+
+    @patch(
+        "hitch.main.runtime.codex_pool.importlib.metadata.version",
+        return_value="0.144.4",
+    )
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
+    @patch(
+        "hitch.main.runtime.codex_pool.shutil.which",
+        return_value="/usr/local/bin/codex",
+    )
+    def test_app_server_ignores_unusable_system_codex(
+        self,
+        _mock_which: MagicMock,
+        mock_run: MagicMock,
+        _mock_package_version: MagicMock,
+    ) -> None:
+        for result in (
+            OSError("cannot execute"),
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="unknown version\n", stderr=""
+            ),
+        ):
+            with self.subTest(result=result):
+                codex_pool._newer_system_codex_bin.cache_clear()
+                mock_run.side_effect = result if isinstance(result, OSError) else None
+                mock_run.return_value = None if isinstance(result, OSError) else result
+
+                self.assertIsNone(codex_pool.app_server_config().codex_bin)
+
+    @patch(
+        "hitch.main.runtime.codex_pool.importlib.metadata.version",
+        side_effect=importlib.metadata.PackageNotFoundError,
+    )
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
+    @patch(
+        "hitch.main.runtime.codex_pool.shutil.which",
+        return_value="/usr/local/bin/codex",
+    )
+    def test_app_server_accepts_astra_system_codex_without_bundle_metadata(
+        self,
+        _mock_which: MagicMock,
+        mock_run: MagicMock,
+        _mock_package_version: MagicMock,
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="codex-cli 0.153.3\n", stderr=""
+        )
+
+        self.assertEqual(
+            codex_pool.app_server_config().codex_bin, "/usr/local/bin/codex"
+        )
 
     def test_stamps_deployment_marker_for_nuke_scoping(self) -> None:
         config = codex_pool.app_server_config()
