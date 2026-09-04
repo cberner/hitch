@@ -77,7 +77,10 @@ Prerequisites:
 
 Codex and Node/npm do not need to be installed separately. `uv sync` installs
 the runtime bundled with the pinned `openai-codex` package, keeping the Python
-SDK and Codex executable on the same version.
+SDK and Codex executable on the same version. When a newer Astra-capable
+`codex` executable is already on `PATH`, Hitch prefers it over the bundle so
+new rollout-only models are available without waiting for the next Python SDK
+release.
 
 What the recipe does:
 

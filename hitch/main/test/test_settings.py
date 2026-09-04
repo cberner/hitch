@@ -81,6 +81,7 @@ def _model(
     model_id: str,
     *,
     is_default: bool = False,
+    hidden: bool = False,
     default_effort: str = "medium",
     display_name: str | None = None,
     supported_efforts: list[str] | None = None,
@@ -96,6 +97,7 @@ def _model(
     return SimpleNamespace(
         id=model_id,
         display_name=display_name or model_id,
+        hidden=hidden,
         is_default=is_default,
         default_reasoning_effort=SimpleNamespace(value=default_effort),
         supported_reasoning_efforts=[
@@ -289,6 +291,39 @@ class UsageModelCacheTests(SimpleTestCase):
             self.assertIn(False, caches._MODELS_CACHE_FETCHED_AT)
             self.assertNotIn(False, caches._MODELS_REFRESH_IN_FLIGHT)
         self.assertFalse(caches._models_refresh_needed(enable_memories=False))
+
+    def test_raw_catalog_includes_astra_but_not_other_hidden_models(self) -> None:
+        codex = MagicMock()
+        codex._client._request_raw.return_value = {
+            "data": [
+                {"id": "gpt-6-astra", "displayName": "GPT-6 Astra", "hidden": True},
+                {"id": "retired-model", "hidden": True},
+                {"id": "current-model", "hidden": False},
+            ]
+        }
+
+        models = caches._models_data_from_codex(codex)
+
+        self.assertEqual([model.id for model in models], ["gpt-6-astra", "current-model"])
+        self.assertEqual(models[0].display_name, "GPT-6 Astra")
+        codex._client._request_raw.assert_called_once_with(
+            "model/list", {"includeHidden": True}
+        )
+        codex.models.assert_not_called()
+
+    def test_typed_catalog_fallback_applies_hidden_model_allowlist(self) -> None:
+        codex = MagicMock()
+        codex._client._request_raw.side_effect = ValueError("unsupported raw request")
+        codex.models.return_value.data = [
+            _model("gpt-6-astra", hidden=True),
+            _model("retired-model", hidden=True),
+            _model("current-model"),
+        ]
+
+        models = caches._models_data_from_codex(codex)
+
+        self.assertEqual([model.id for model in models], ["gpt-6-astra", "current-model"])
+        codex.models.assert_called_once_with(include_hidden=True)
 
 
 class UsageRateLimitCacheTests(SimpleTestCase):
