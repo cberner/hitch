@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -73,6 +75,8 @@ _THREAD_START_APPROVAL_SETTINGS = {
     ),
     "deny_all": (AskForApprovalValue.never.value, None),
 }
+_ASTRA_MIN_CODEX_VERSION = (0, 153, 1)
+_CODEX_VERSION_PATTERN = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)")
 _MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE = 16
 _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
 # How long a freshly spawned row may sit with pid=0 before reconcile_dead
@@ -1396,6 +1400,47 @@ def codex_home_dir() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
+def _codex_version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = _CODEX_VERSION_PATTERN.search(value)
+    if match is None:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
+@functools.cache
+def _newer_system_codex_bin() -> str | None:
+    """Prefer a PATH runtime only when it adds Astra support over the bundle."""
+    codex_bin = shutil.which("codex")
+    if codex_bin is None:
+        return None
+    try:
+        result = subprocess.run(
+            [codex_bin, "--version"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    system_version = _codex_version_tuple(f"{result.stdout}\n{result.stderr}")
+    try:
+        bundled_version = _codex_version_tuple(
+            importlib.metadata.version("openai-codex-cli-bin")
+        )
+    except importlib.metadata.PackageNotFoundError:
+        bundled_version = None
+    if (
+        result.returncode != 0
+        or system_version is None
+        or system_version < _ASTRA_MIN_CODEX_VERSION
+        or (bundled_version is not None and system_version <= bundled_version)
+    ):
+        return None
+    return codex_bin
+
+
 def app_server_config(
     *,
     enable_memories: bool = False,
@@ -1419,6 +1464,7 @@ def app_server_config(
     if resolved_home is not None:
         env[_CODEX_SQLITE_HOME_ENV] = os.fspath(resolved_home)
     return CodexConfig(
+        codex_bin=_newer_system_codex_bin(),
         config_overrides=tuple(overrides),
         env=env,
     )

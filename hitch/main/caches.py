@@ -45,6 +45,9 @@ _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
+# These models are intentionally omitted from Codex's default picker but are
+# supported for explicit selection.
+_SELECTABLE_HIDDEN_MODEL_IDS = frozenset({"gpt-6-astra"})
 
 
 class _RateLimitsUsageState(NamedTuple):
@@ -116,6 +119,7 @@ def _raw_model(raw: Any) -> SimpleNamespace | None:
     return SimpleNamespace(
         id=model_id,
         display_name=display_name,
+        hidden=bool(raw.get("hidden")),
         is_default=bool(raw.get("isDefault") or raw.get("is_default")),
         default_reasoning_effort=SimpleNamespace(value=default_effort),
         supported_reasoning_efforts=supported_efforts,
@@ -131,16 +135,27 @@ def _models_data_from_raw_response(raw: Any) -> list[Any]:
     return [model for model in (_raw_model(item) for item in data) if model is not None]
 
 
+def _selectable_models(models_data: list[Any]) -> list[Any]:
+    return [
+        model
+        for model in models_data
+        if not getattr(model, "hidden", False)
+        or model.id in _SELECTABLE_HIDDEN_MODEL_IDS
+    ]
+
+
 def _models_data_from_codex(codex: Any) -> list[Any]:
     raw_request = getattr(getattr(codex, "_client", None), "_request_raw", None)
     if callable(raw_request):
         try:
-            return _models_data_from_raw_response(
-                raw_request("model/list", {"includeHidden": False})
+            return _selectable_models(
+                _models_data_from_raw_response(
+                    raw_request("model/list", {"includeHidden": True})
+                )
             )
         except Exception:
             pass
-    return list(codex.models().data)
+    return _selectable_models(list(codex.models(include_hidden=True).data))
 
 
 def _fetch_models_data(*, enable_memories: bool, codex_cls: Any = None) -> list[Any]:
