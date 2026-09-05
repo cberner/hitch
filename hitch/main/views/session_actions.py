@@ -37,6 +37,10 @@ _ARCHIVE_ACTIVE_WORK_MESSAGE = (
     "Stop the active turn before archiving this session."
 )
 _ARCHIVE_BUSY_MESSAGE = "This session is changing. Try archiving again."
+_ARCHIVE_WRITER_MESSAGE = (
+    "Another Codex process has this session open. Close the session in that "
+    "process, then try again."
+)
 
 
 def _archive_conflict_response(
@@ -173,14 +177,20 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             metadata_exists = SessionMetadata.objects.filter(
                 thread_id=session_id
             ).exists()
-            if not metadata_exists and is_archived:
-                thread_for_metadata = codex._client.thread_read(session_id).thread
-            if is_archived:
-                codex.thread_archive(session_id)
-            else:
-                codex.thread_unarchive(session_id)
-                if not metadata_exists:
+            try:
+                if not metadata_exists and is_archived:
                     thread_for_metadata = codex._client.thread_read(session_id).thread
+                if is_archived:
+                    codex.thread_archive(session_id)
+                else:
+                    thread_for_metadata = codex._client.thread_unarchive(session_id).thread
+            except InvalidRequestError as exc:
+                # CLI sessions can own a writer lease without a Hitch worker row.
+                if "already has an active writer" not in exc.message:
+                    raise
+                return _archive_conflict_response(
+                    request, session_id, _ARCHIVE_WRITER_MESSAGE
+                )
             rollout_path = _stored_rollout_path_for_thread(
                 session_id, archived=is_archived
             )

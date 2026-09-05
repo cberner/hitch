@@ -975,6 +975,13 @@
                 }, 5000);
             }
 
+            function showArchiveRequestError(error, fallback) {
+                const message = error instanceof Error ? error.message : "";
+                showArchiveError(
+                    message && message !== "archive request failed" ? message : fallback
+                );
+            }
+
             function finalizeArchive(row) {
                 const pending = pendingArchives.get(row);
                 if (pending) window.clearTimeout(pending);
@@ -997,12 +1004,7 @@
                 }).catch((error) => {
                     row.dataset.pendingArchive = "false";
                     row.classList.remove("pending-archive");
-                    const message = error instanceof Error ? error.message : "";
-                    showArchiveError(
-                        message && message !== "archive request failed"
-                            ? message
-                            : "Couldn't archive session"
-                    );
+                    showArchiveRequestError(error, "Couldn't archive session");
                 });
             }
 
@@ -1020,10 +1022,11 @@
                     row.dataset.pendingArchive = "false";
                     row.classList.remove("pending-archive");
                     setRowArchived(row, false);
-                }).catch(() => {
-                    const retryTimeout = window.setTimeout(() => finalizeArchive(row), 5000);
-                    pendingArchives.set(row, retryTimeout);
+                }).catch((error) => {
+                    // Recovery may require closing another process; keep Undo
+                    // available until the user can retry.
                     showArchiveToast(row);
+                    showArchiveRequestError(error, "Couldn't unarchive session");
                 });
             }
 
@@ -1172,10 +1175,10 @@
                         }
                         postArchiveState(row, false).then(() => {
                             setRowArchived(row, false);
-                        }).catch(() => {
+                        }).catch((error) => {
                             // The row stays archived (matching the server);
                             // surface the failure instead of silently no-opping.
-                            showArchiveError("Couldn't unarchive session");
+                            showArchiveRequestError(error, "Couldn't unarchive session");
                         });
                     });
                 }

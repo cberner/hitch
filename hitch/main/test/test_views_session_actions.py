@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from django.contrib.messages import get_messages
 from django.test import (
     TestCase,
 )
@@ -458,6 +459,112 @@ class SetSessionApprovalModeViewTests(TestCase):
         self.assertEqual(running.approval_mode, "prompt_user")
 
 class SetSessionArchivedViewTests(TestCase):
+    @patch("hitch.main.views.common.Codex")
+    def test_first_archive_handles_writer_conflict_during_metadata_read(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.side_effect = InvalidRequestError(
+            code=-32600, message="thread abc already has an active writer"
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertContains(response, "Another Codex process", status_code=409)
+        self.assertFalse(SessionMetadata.objects.filter(thread_id="abc").exists())
+        client.thread_archive.assert_not_called()
+        client._client.thread_unarchive.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
+    def test_writer_conflict_preserves_state_and_allows_retry(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc", codex_path="/stored/rollout.jsonl"
+        )
+        usage = ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        for archived in (True, False):
+            with self.subTest(archived=archived):
+                self.client = self.client_class()
+                metadata.codex_archived = not archived
+                metadata.save()
+                before = SessionMetadata.objects.values().get(pk=metadata.pk)
+                operation = client.thread_archive if archived else client._client.thread_unarchive
+                operation.side_effect = InvalidRequestError(
+                    code=-32600, message="thread abc already has an active writer"
+                )
+                data = {"archived": str(archived).lower()}
+                response = self.client.post(
+                    url, data=data, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+                )
+                self.assertContains(response, "Another Codex process", status_code=409)
+                response = self.client.post(url, data=data)
+                self.assertRedirects(
+                    response,
+                    reverse("session", kwargs={"session_id": "abc"}),
+                    fetch_redirect_response=False,
+                )
+                self.assertEqual(
+                    [str(message) for message in get_messages(response.wsgi_request)],
+                    ["Another Codex process has this session open. Close the session "
+                     "in that process, then try again."],
+                )
+                self.assertEqual(SessionMetadata.objects.values().get(pk=metadata.pk), before)
+                self.assertTrue(ArchivedSessionTokenUsage.objects.filter(pk=usage.pk).exists())
+                operation.side_effect = None
+                with patch(
+                    "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+                    return_value=None,
+                ):
+                    response = self.client.post(
+                        url, data=data, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+                    )
+                self.assertEqual(response.status_code, 204)
+                metadata.refresh_from_db()
+                self.assertEqual(metadata.codex_archived, archived)
+
+    @patch(
+        "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+        return_value=Path("/active/rollout-abc.jsonl"),
+    )
+    @patch("hitch.main.views.common.Codex")
+    def test_first_unarchive_uses_rpc_metadata_without_a_second_read(
+        self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_unarchive.return_value = SimpleNamespace(
+            thread=SimpleNamespace(
+                cwd="/repo", name="CLI session", preview="Implement the parser",
+                created_at=1, updated_at=2, thread_source="cli",
+            )
+        )
+        client._client.thread_read.side_effect = InvalidRequestError(
+            code=-32600, message="thread abc already has an active writer"
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "false"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertFalse(metadata.codex_archived)
+        self.assertEqual(metadata.cwd, "/repo")
+        self.assertEqual(metadata.codex_name, "CLI session")
+        self.assertEqual(metadata.codex_preview, "Implement the parser")
+        self.assertEqual(metadata.codex_thread_source, "cli")
+        self.assertEqual(metadata.codex_path, "/active/rollout-abc.jsonl")
+        client._client.thread_unarchive.assert_called_once_with("abc")
+        client._client.thread_read.assert_not_called()
+
     @patch(
         "hitch.main.views.session_actions._stored_rollout_path_for_thread",
         return_value=Path("/archived/rollout-abc.jsonl"),
@@ -552,7 +659,7 @@ class SetSessionArchivedViewTests(TestCase):
                     defaults={"cwd": "/repo", "codex_path": "/stale/rollout.jsonl"},
                 )
                 client.thread_archive.reset_mock()
-                client.thread_unarchive.reset_mock()
+                client._client.thread_unarchive.reset_mock()
                 if seed_cache:
                     ArchivedSessionTokenUsage.objects.create(
                         thread_id="abc",
@@ -580,9 +687,9 @@ class SetSessionArchivedViewTests(TestCase):
                     self.assertEqual(response.headers["Location"], location)
                 if expected_call == "thread_archive":
                     client.thread_archive.assert_called_once_with("abc")
-                    client.thread_unarchive.assert_not_called()
+                    client._client.thread_unarchive.assert_not_called()
                 else:
-                    client.thread_unarchive.assert_called_once_with("abc")
+                    client._client.thread_unarchive.assert_called_once_with("abc")
                     client.thread_archive.assert_not_called()
                 self.assertEqual(
                     SessionMetadata.objects.get(thread_id="abc").codex_path,
@@ -695,7 +802,7 @@ class SetSessionArchivedViewTests(TestCase):
         metadata = SessionMetadata.objects.get(thread_id="abc")
         self.assertTrue(metadata.codex_archived)
         self.assertEqual(metadata.codex_path, "/archived/rollout.jsonl")
-        client.thread_unarchive.assert_called_once_with("abc")
+        client._client.thread_unarchive.assert_called_once_with("abc")
         client.thread_archive.assert_called_once_with("abc")
 
     @patch(
