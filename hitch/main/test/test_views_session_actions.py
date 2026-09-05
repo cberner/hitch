@@ -22,6 +22,7 @@ from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
 )
+from hitch.main.sessions import session_index
 from hitch.main.test.support import (
     _seed_cookies,
 )
@@ -459,6 +460,114 @@ class SetSessionApprovalModeViewTests(TestCase):
         self.assertEqual(running.approval_mode, "prompt_user")
 
 class SetSessionArchivedViewTests(TestCase):
+    @patch("hitch.main.views.common.Codex")
+    def test_missing_rollout_archive_and_undo_survive_index_refresh(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc", cwd="/repo", codex_preview="Saved prompt",
+            codex_path="/missing/rollout.jsonl",
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="abc", pid=0, cwd="/repo", prompt="Saved prompt",
+            events_path="/missing/events.jsonl", status=CodexInstance.STATUS_FAILED,
+            error="no rollout found for thread id abc",
+        )
+        usage = ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+        client.thread_archive.side_effect = InvalidRequestError(
+            -32600, "no rollout found for thread id abc"
+        )
+        client._client.thread_unarchive.side_effect = InvalidRequestError(
+            -32600, "no archived rollout found for thread id abc"
+        )
+        for archived in (True, False):
+            for ajax in (True, False):
+                with self.subTest(archived=archived, ajax=ajax):
+                    headers = {"X-Requested-With": "XMLHttpRequest"} if ajax else {}
+                    response = self.client.post(
+                        url, data={"archived": str(archived).lower()}, headers=headers
+                    )
+                    self.assertEqual(response.status_code, 204 if ajax else 302)
+                    if not ajax:
+                        self.assertEqual(
+                            response.headers["Location"],
+                            reverse("index") if archived else reverse(
+                                "session", kwargs={"session_id": "abc"}
+                            ),
+                        )
+                    session_index.upsert_thread(
+                        SimpleNamespace(id="abc", archived=not archived), projects=[]
+                    )
+                    session_index._invalidate_absent_source_rows(
+                        archived=archived, seen_thread_ids=set()
+                    )
+                    metadata.refresh_from_db()
+                    self.assertEqual(metadata.codex_archived, archived)
+                    self.assertEqual(metadata.codex_archived_at is not None, archived)
+                    self.assertTrue(metadata.archive_local_only)
+                    self.assertIsNotNone(metadata.codex_updated_at)
+                    self.assertEqual(metadata.codex_preview, "Saved prompt")
+                    self.assertEqual(metadata.codex_path, "/missing/rollout.jsonl")
+                    self.assertTrue(ArchivedSessionTokenUsage.objects.filter(pk=usage.pk).exists())
+                    instance.refresh_from_db()
+                    self.assertEqual(instance.error, "no rollout found for thread id abc")
+        client.thread_archive.side_effect = None
+        self.assertEqual(self.client.post(url, data={"archived": "true"}).status_code, 302)
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.archive_local_only)
+        session_index.upsert_thread(SimpleNamespace(id="abc", archived=False), projects=[])
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.codex_archived)
+
+    @patch("hitch.main.views.common.Codex")
+    def test_missing_rollout_fallback_requires_saved_session_and_absent_file(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        missing = InvalidRequestError(-32600, "no rollout found for thread id abc")
+        client._client.thread_read.side_effect = missing
+        client.thread_archive.side_effect = missing
+        url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+        with self.assertRaises(InvalidRequestError):
+            self.client.post(url, data={"archived": "true"})
+        self.assertFalse(SessionMetadata.objects.filter(thread_id="abc").exists())
+        with tempfile.NamedTemporaryFile() as rollout:
+            metadata = SessionMetadata.objects.create(thread_id="abc", codex_path=rollout.name)
+            for cached in (True, False):
+                with self.subTest(cached=cached), patch(
+                    "hitch.main.views.session_actions._stored_rollout_path_for_thread",
+                    return_value=None if cached else Path(rollout.name),
+                ):
+                    metadata.codex_path = rollout.name if cached else ""
+                    metadata.save()
+                    with self.assertRaises(InvalidRequestError):
+                        self.client.post(url, data={"archived": "true"})
+                    metadata.refresh_from_db()
+                    self.assertFalse(metadata.codex_archived)
+                    self.assertFalse(metadata.archive_local_only)
+
+    @patch("hitch.main.views.common.Codex")
+    def test_local_archive_bookkeeping_failure_does_not_call_codex_undo(
+        self, mock_codex: MagicMock
+    ) -> None:
+        metadata = SessionMetadata.objects.create(thread_id="abc")
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_archive.side_effect = InvalidRequestError(
+            -32600, "no rollout found for thread id abc"
+        )
+        with patch.object(
+            session_index, "update_cached_archived", side_effect=RuntimeError("database unavailable")
+        ), self.assertRaisesMessage(RuntimeError, "database unavailable"):
+            self.client.post(
+                reverse("set_session_archived", kwargs={"session_id": "abc"}),
+                data={"archived": "true"},
+            )
+        client.thread_unarchive.assert_not_called()
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.codex_archived)
+
     @patch("hitch.main.views.common.Codex")
     def test_first_archive_handles_writer_conflict_during_metadata_read(
         self, mock_codex: MagicMock

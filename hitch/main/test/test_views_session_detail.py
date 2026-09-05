@@ -1815,6 +1815,22 @@ class SessionDetailFastPathTests(TestCase):
                 self.assertEqual(
                     response.context["pending_user_timestamp"], int(instance.started_at.timestamp())
                 )
+        SessionMetadata.objects.create(thread_id="failed-start", cwd="/repo")
+        client.thread_archive.side_effect = InvalidRequestError(
+            -32600, "no rollout found for thread id failed-start"
+        )
+        client._client.thread_unarchive.side_effect = InvalidRequestError(
+            -32600, "no archived rollout found for thread id failed-start"
+        )
+        for archived in (True, False):
+            response = self.client.post(
+                reverse("set_session_archived", kwargs={"session_id": "failed-start"}),
+                data={"archived": str(archived).lower()},
+            )
+            self.assertEqual(response.status_code, 302)
+            response = self.client.get(reverse("session", kwargs={"session_id": "failed-start"}))
+            self.assertEqual(response.context["is_archived"], archived)
+            self.assertContains(response, 'role="menuitem">Unarchive' if archived else 'role="menuitem">Archive')
         client._client.thread_resume.assert_not_called()
 
 
