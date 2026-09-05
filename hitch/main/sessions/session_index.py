@@ -251,6 +251,10 @@ def _upsert_thread_locked(
     cwd = _thread_cwd(thread) or ""
     archived = _thread_is_archived(thread)
     existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
+    # Missing-rollout sessions have only Hitch state; Codex's orphan index row
+    # cannot supersede it until a successful archive/unarchive clears the flag.
+    if existing is not None and existing.archive_local_only:
+        return existing
     if (
         observed_at is not None
         and existing is not None
@@ -340,13 +344,15 @@ def update_cached_name(thread_id: str, name: str) -> None:
 
 
 def update_cached_archived(
-    thread_id: str, *, archived: bool, thread: Any | None = None
+    thread_id: str, *, archived: bool, thread: Any | None = None,
+    local_only: bool = False,
 ) -> None:
     now = timezone.now()
     archived_at = now if archived else None
     existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
     defaults: dict[str, Any] = {
         "codex_archived": archived,
+        "archive_local_only": local_only,
         "codex_archived_at": archived_at,
         "codex_updated_at": now,
         "codex_last_synced_at": now,
@@ -542,6 +548,7 @@ def _invalidate_absent_source_rows(*, archived: bool, seen_thread_ids: set[str])
     SessionMetadata.objects.exclude(thread_id__in=seen_thread_ids).filter(
         codex_updated_at__isnull=False,
         codex_archived=archived,
+        archive_local_only=False,
     ).update(codex_updated_at=None, codex_last_synced_at=timezone.now())
 
 

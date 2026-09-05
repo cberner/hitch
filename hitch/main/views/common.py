@@ -601,7 +601,11 @@ def _render_session_detail(
         latest = codex_pool.latest_for_thread(session_id)
         if latest is not None and latest.status == CodexInstance.STATUS_FAILED:
             unstarted_instance = latest
-    is_archived = _thread_is_archived(thread)
+    is_archived = (
+        metadata.codex_archived
+        if metadata is not None and metadata.archive_local_only
+        else _thread_is_archived(thread)
+    )
     history_paginated = history_page is not None
     if history_paginated:
         entries = raw_entries

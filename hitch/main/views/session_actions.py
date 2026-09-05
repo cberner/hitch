@@ -1,5 +1,7 @@
 """Per-session action endpoints: rename, archive, project, and approval mode."""
 
+from pathlib import Path
+
 from django.contrib import messages
 from django.db import transaction
 from django.http import (
@@ -170,15 +172,16 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
         settings = _stored_settings(request)
         is_archived = archived == "true"
+        local_only = False
         thread_for_metadata = None
         with app_server_pool.borrow_codex(
             common.Codex, enable_memories=settings.enable_memories
         ) as codex:
-            metadata_exists = SessionMetadata.objects.filter(
+            metadata = SessionMetadata.objects.filter(
                 thread_id=session_id
-            ).exists()
+            ).first()
             try:
-                if not metadata_exists and is_archived:
+                if metadata is None and is_archived:
                     thread_for_metadata = codex._client.thread_read(session_id).thread
                 if is_archived:
                     codex.thread_archive(session_id)
@@ -186,13 +189,26 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                     thread_for_metadata = codex._client.thread_unarchive(session_id).thread
             except InvalidRequestError as exc:
                 # CLI sessions can own a writer lease without a Hitch worker row.
-                if "already has an active writer" not in exc.message:
+                if "already has an active writer" in exc.message:
+                    return _archive_conflict_response(
+                        request, session_id, _ARCHIVE_WRITER_MESSAGE
+                    )
+                missing_rollout = exc.message in {
+                    f"no rollout found for thread id {session_id}",
+                    f"no archived rollout found for thread id {session_id}",
+                }
+                if (
+                    not missing_rollout
+                    or metadata is None
+                    or (metadata.codex_path and Path(metadata.codex_path).is_file())
+                    or _stored_rollout_path_for_thread(session_id) is not None
+                ):
                     raise
-                return _archive_conflict_response(
-                    request, session_id, _ARCHIVE_WRITER_MESSAGE
+                local_only = True
+            rollout_path = (
+                None if local_only else _stored_rollout_path_for_thread(
+                    session_id, archived=is_archived
                 )
-            rollout_path = _stored_rollout_path_for_thread(
-                session_id, archived=is_archived
             )
             try:
                 with transaction.atomic():
@@ -200,11 +216,15 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                         session_id,
                         archived=is_archived,
                         thread=thread_for_metadata,
+                        local_only=local_only,
                     )
-                    SessionMetadata.objects.filter(thread_id=session_id).update(
-                        codex_path=str(rollout_path) if rollout_path is not None else ""
-                    )
+                    if not local_only:
+                        SessionMetadata.objects.filter(thread_id=session_id).update(
+                            codex_path=str(rollout_path) if rollout_path is not None else ""
+                        )
             except Exception:
+                if local_only:
+                    raise
                 # Keep Codex and local metadata on the same side when a
                 # transient database failure follows the RPC.
                 try:

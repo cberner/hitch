@@ -21,6 +21,12 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-startup-failure`: A tracked session whose worker failed before creating
   readable history still displays its saved prompt and failure instead of
   returning a server error.
+- `ST-archive-missing-history`: A saved session without a rollout can be
+  archived and restored in Hitch when Codex reports that its rollout is missing.
+  Preserve its saved details and usage, and retain the local archive state
+  across index refreshes. A successful Codex archive or unarchive returns
+  authority to Codex. Unknown sessions and sessions with an existing rollout
+  do not use this fallback; active-work and writer-conflict checks still apply.
 - `ST-thinking-visible`: Thinking messages are always rendered as normal,
   top-level transcript entries and are never hidden by an activity toggle.
 - `ST-activity-runs`: Each consecutive run of two or more Reasoning, Command,
