@@ -415,13 +415,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertIsNone(payload["model"])
         self.assertEqual(payload["dynamicTools"][0]["namespace"], "hitch")
         self.assertEqual(payload["dynamicTools"][0]["name"], "propose_session")
-        # ``thread/start`` defers writing the rollout file to disk, so the
-        # cross-process ``thread/resume`` the worker and the session view both
-        # rely on would fail with "no rollout found" without an explicit
-        # metadata write to materialise the rollout. ``thread/set-name`` is the
-        # cheapest such write; it must happen inside the same Codex context as
-        # ``thread/start`` so the in-memory thread is still loaded.
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "hi")
+        codex._client.thread_read.assert_called_once_with("thread-abc", include_turns=True)
         # Worker subprocess only receives the row id and (when set) the
         # reasoning effort, sandbox policy, and approval mode; the prompt is
         # read from the row to avoid argparse misinterpreting prompts that
@@ -534,6 +529,21 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(payload["dynamicTools"][0]["namespace"], "hitch")
         self.assertEqual(payload["dynamicTools"][0]["name"], "propose_session")
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "QA")
+        codex._client.thread_read.assert_called_once_with("thread-abc", include_turns=True)
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
+    def test_persistence_failure_does_not_launch_worker(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex)
+        codex._client.thread_read.side_effect = RuntimeError("rollout unavailable")
+
+        with self.assertRaisesMessage(RuntimeError, "rollout unavailable"):
+            codex_pool.spawn_new_session(cwd="/repo", prompt="hi")
+
+        mock_launch.assert_not_called()
+        self.assertFalse(CodexInstance.objects.exists())
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     @patch("hitch.main.runtime.codex_pool.Codex")

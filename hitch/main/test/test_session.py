@@ -147,7 +147,7 @@ def _write_rollout_tempfile(lines: list[str], *, binary: bytes | None = None) ->
 
 def _patch_thread(test: TestCase, mock_codex: MagicMock, thread: SimpleNamespace) -> None:
     client = mock_codex.return_value.__enter__.return_value
-    client._client.thread_resume.return_value.thread = thread
+    client._client.thread_read.return_value.thread = thread
 
 
 def _clear_models_cache() -> None:
@@ -316,7 +316,7 @@ class SessionViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(self, mock_codex: MagicMock) -> None:
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_thread([_turn([_user_message("hi")])]),
             reasoning_effort=SimpleNamespace(value="medium"),
         )

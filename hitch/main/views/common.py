@@ -446,6 +446,7 @@ def _render_session_detail(
     reconciliation.reconcile_dead_if_due()
     initial_settings = _stored_settings(request)
     active_instance = _active_instance_for(session_id)
+    unstarted_instance: CodexInstance | None = None
     metadata = _session_detail_metadata(session_id)
     # Capture the rollout mtime *before* any entries are read (the resume helper
     # below reads them off disk), so a concurrent append surfaces as a cache
@@ -511,28 +512,29 @@ def _render_session_detail(
         plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
     else:
 
-        def _resume_for_detail(codex: Codex) -> tuple[Any, Any, list[Any], Any, Any]:
-            # ``thread/read`` only works for threads already loaded into the
-            # app-server's in-memory map. A cold open spawns a fresh app-server
-            # subprocess, so newly-created threads (or any thread persisted by a
-            # different worker) need ``thread/resume`` to read them off disk.
-            # The resume response already carries the full thread including turns,
-            # so a follow-up ``thread/read`` would just be a redundant round-trip.
+        def _read_for_detail(codex: Codex) -> tuple[Any, Any, list[Any], Any, Any]:
+            nonlocal unstarted_instance
+            # Display reads must not resume the thread: newer Codex runtimes
+            # grant resume an exclusive writer lease needed by the worker.
             try:
-                resumed = codex._client.thread_resume(session_id)
+                resumed = codex._client.thread_read(session_id, include_turns=True)
             except (InternalRpcError, InvalidRequestError) as exc:
                 if (
                     not require_system_agent_thread
-                    and _thread_resume_temporarily_unavailable(exc)
+                    and _thread_read_temporarily_unavailable(exc)
                 ):
+                    if active_instance is None:
+                        latest = codex_pool.latest_for_thread(session_id)
+                        if latest is not None and latest.status == CodexInstance.STATUS_FAILED:
+                            unstarted_instance = latest
                     pending_resume = _pending_resume_for_active_session(
                         session_id,
                         metadata,
-                        active_instance=active_instance,
+                        active_instance=active_instance or unstarted_instance,
                     )
                     if pending_resume is not None:
                         logger.warning(
-                            "rendering pending session detail while resume is temporarily "
+                            "rendering saved session detail while history is temporarily "
                             "unavailable: %s",
                             session_id,
                         )
@@ -553,7 +555,7 @@ def _render_session_detail(
                 if (
                     require_system_agent_thread
                     and isinstance(exc, InvalidRequestError)
-                    and _thread_resume_missing_or_invalid(exc)
+                    and _thread_read_missing_or_invalid(exc)
                 ):
                     raise Http404("system session not found") from None
                 raise
@@ -569,18 +571,11 @@ def _render_session_detail(
             )
             return resumed, thread, models_data, resolved_settings, plan_model
 
-        # Prefer a warm pooled app-server: cold-opening here re-runs the
-        # CODEX_HOME init write that contends on the state-DB writer lock, which
-        # is what surfaced "failed to initialize sqlite state runtime ...
-        # database is locked" on this page while a worker held the lock. A warm
-        # server is already initialized, so the resume does no init write; only
-        # an empty pool falls back to a retrying cold open. ``thread_resume``
-        # lazily migrates a foreign thread's rows and is idempotent, so a retry
-        # (or the warm->cold fallback re-running it) is safe.
+        # Reuse a warm reader without retaining a thread writer in the pool.
         resumed, thread, models_data, resolved_settings, plan_model = (
             app_server_pool.run_borrowed_op_with_retry(
                 Codex,
-                _resume_for_detail,
+                _read_for_detail,
                 enable_memories=initial_settings.enable_memories,
             )
         )
@@ -602,6 +597,10 @@ def _render_session_detail(
             ),
         )
         rollout_data = None
+    if not raw_entries and active_instance is None and not require_system_agent_thread:
+        latest = codex_pool.latest_for_thread(session_id)
+        if latest is not None and latest.status == CodexInstance.STATUS_FAILED:
+            unstarted_instance = latest
     is_archived = _thread_is_archived(thread)
     history_paginated = history_page is not None
     if history_paginated:
@@ -903,10 +902,10 @@ def _render_session_detail(
             "pending_user_prompt": (
                 ""
                 if rollout_owns_active_turn
-                else _pending_user_prompt(active_instance)
+                else _pending_user_prompt(active_instance or unstarted_instance)
             ),
-            "pending_user_author": _pending_user_author(active_instance),
-            "pending_user_timestamp": _pending_user_timestamp(active_instance),
+            "pending_user_author": _pending_user_author(active_instance or unstarted_instance),
+            "pending_user_timestamp": _pending_user_timestamp(active_instance or unstarted_instance),
             "pending_accepted_proposal_context": (
                 active_accepted_proposal_context
                 if not rollout_owns_active_turn
@@ -968,11 +967,12 @@ def _session_history_url(
         urlencode(params),
     )
 
-def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
+def _thread_read_missing_or_invalid(exc: InvalidRequestError) -> bool:
     message = exc.message.lower()
     return (
         "invalid thread id" in message
         or "invalid session id" in message
+        or "thread not loaded:" in message
         or bool(
             re.search(
                 r"\bthread(?:\s+id)?(?:\s+\S+)?\s+not found\b",
@@ -981,12 +981,17 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
         )
     )
 
-def _thread_resume_temporarily_unavailable(
+def _thread_read_temporarily_unavailable(
     exc: InternalRpcError | InvalidRequestError,
 ) -> bool:
     message = exc.message.lower()
     return (
         "no rollout found for thread id" in message
+        or "thread not loaded:" in message
+        or (
+            "invalid paginated history lineage for " in message
+            and "missing source rollout" in message
+        )
         or "already has an active writer" in message
         or (
             "failed to read thread" in message

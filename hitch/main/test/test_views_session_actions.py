@@ -467,7 +467,7 @@ class SetSessionArchivedViewTests(TestCase):
         self, mock_codex: MagicMock, _mock_rollout_path: MagicMock
     ) -> None:
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=SimpleNamespace(
                 cwd="/repo",
                 name="CLI session",

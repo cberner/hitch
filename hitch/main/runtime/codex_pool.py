@@ -184,23 +184,10 @@ def spawn_new_session(
     def _create_and_persist(codex: Codex) -> tuple[str, str | None]:
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
-        # ``thread/start`` only creates the thread in the app-server's
-        # in-memory map; the rollout file on disk is not written until
-        # something triggers a metadata persist. Without this step, the
-        # worker subprocess and the session view both fail with "no rollout
-        # found for thread id" the moment we exit the Codex context here
-        # (which tears down the app-server holding the in-memory thread).
-        # ``thread/set-name`` is the cheapest write that goes through
-        # ``live_thread_for_persistence``, so it blocks until the rollout
-        # file exists on disk. The first line of the prompt mirrors the
-        # title the session list would otherwise compute from ``preview``
-        # once the first turn streams in, so this is usually invisible in
-        # the UI. Callers can pass ``thread_name`` when the prompt starts
-        # with generic instructions and a better task title is known.
-        codex._client.thread_set_name(thread.id, _initial_thread_name(name_source))
+        _persist_new_thread(codex, thread.id, name_source)
         return thread.id, _thread_path_value(thread)
 
-    # ``thread_set_name`` triggers the CODEX_HOME state-DB persist, whose
+    # Persisting the thread triggers the CODEX_HOME state-DB write, whose
     # one-time migration path has no SQLITE_BUSY retry; a lock there kills the
     # app-server mid-operation as a ``TransportClosedError`` that ``open_codex``
     # (construction-only retry) never sees. Retrying the whole open+create here
@@ -291,16 +278,23 @@ def create_session_thread_with_path(
     def _create_and_persist(codex: Codex) -> tuple[str, str]:
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
-        codex._client.thread_set_name(thread.id, _initial_thread_name(name))
+        _persist_new_thread(codex, thread.id, name)
         return thread.id, _thread_path_value(thread)
 
-    # See ``spawn_new_session``: retry the open+create when the ``thread_set_name``
+    # See ``spawn_new_session``: retry the open+create when the thread
     # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
     # non-idempotent ``thread_start`` because a locked persist exits the
     # app-server before anything reaches disk.
     return app_server_pool.run_codex_op_with_retry(
         lambda: Codex(config=config), _create_and_persist
     )
+
+
+def _persist_new_thread(codex: Codex, thread_id: str, name: str) -> None:
+    codex._client.thread_set_name(thread_id, _initial_thread_name(name))
+    # Newer runtimes buffer names without writing a rollout. Reading history
+    # materializes it before this app-server exits and another process resumes it.
+    codex._client.thread_read(thread_id, include_turns=True)
 
 
 # Upper bound for the auto-derived thread name. Matches the

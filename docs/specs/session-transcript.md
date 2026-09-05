@@ -9,6 +9,12 @@ space used by repetitive reasoning, command, and web-search activity.
 
 ## Requirements
 
+- `ST-reader-isolation`: Displaying a session or refreshing its metadata must
+  not acquire a Codex thread writer lease. Browser reads remain available
+  before, during, and after a detached worker turn.
+- `ST-startup-failure`: A tracked session whose worker failed before creating
+  readable history still displays its saved prompt and failure instead of
+  returning a server error.
 - `ST-thinking-visible`: Thinking messages are always rendered as normal,
   top-level transcript entries and are never hidden by an activity toggle.
 - `ST-activity-runs`: Each consecutive run of two or more Reasoning, Command,

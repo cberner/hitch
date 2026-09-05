@@ -60,23 +60,18 @@ def _apply_live_session_approval_mode(
     )
 
 
-def _resumed_thread_cwd(request: HttpRequest, session_id: str) -> str | None:
-    """Resolve a session's cwd via thread_resume; None for archived/unknown.
-
-    The app-server raises InvalidRequestError for archived and nonexistent
-    threads -- expected states the rest of the codebase handles, so these
-    endpoints must answer 400 instead of 500ing on it.
-    """
+def _read_thread_cwd(request: HttpRequest, session_id: str) -> str | None:
+    """Read a session's cwd without taking its writer lease; None if unavailable."""
     settings = _stored_settings(request)
     try:
-        resumed = app_server_pool.run_borrowed_op_with_retry(
+        snapshot = app_server_pool.run_borrowed_op_with_retry(
             common.Codex,
-            lambda codex: codex._client.thread_resume(session_id),
+            lambda codex: codex._client.thread_read(session_id),
             enable_memories=settings.enable_memories,
         )
     except InvalidRequestError:
         return None
-    return common._thread_cwd(resumed.thread) or ""
+    return common._thread_cwd(snapshot.thread) or ""
 
 @require_http_methods(["POST"])
 def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -86,10 +81,10 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
-        resumed_cwd = _resumed_thread_cwd(request, session_id)
-        if resumed_cwd is None:
+        stored_cwd = _read_thread_cwd(request, session_id)
+        if stored_cwd is None:
             return HttpResponseBadRequest("session is archived or unknown")
-        cwd = resumed_cwd
+        cwd = stored_cwd
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -108,10 +103,10 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
-        resumed_cwd = _resumed_thread_cwd(request, session_id)
-        if resumed_cwd is None:
+        stored_cwd = _read_thread_cwd(request, session_id)
+        if stored_cwd is None:
             return HttpResponseBadRequest("session is archived or unknown")
-        cwd = resumed_cwd
+        cwd = stored_cwd
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -179,13 +174,13 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                 thread_id=session_id
             ).exists()
             if not metadata_exists and is_archived:
-                thread_for_metadata = codex._client.thread_resume(session_id).thread
+                thread_for_metadata = codex._client.thread_read(session_id).thread
             if is_archived:
                 codex.thread_archive(session_id)
             else:
                 codex.thread_unarchive(session_id)
                 if not metadata_exists:
-                    thread_for_metadata = codex._client.thread_resume(session_id).thread
+                    thread_for_metadata = codex._client.thread_read(session_id).thread
             rollout_path = _stored_rollout_path_for_thread(
                 session_id, archived=is_archived
             )
