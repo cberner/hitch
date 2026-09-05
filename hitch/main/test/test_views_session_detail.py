@@ -488,7 +488,7 @@ class SessionDetailFastPathTests(TestCase):
             codex_updated_at=now,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_session(session_id)
         )
 
@@ -497,7 +497,7 @@ class SessionDetailFastPathTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
-        client._client.thread_resume.assert_called_once_with(session_id)
+        client._client.thread_read.assert_called_once_with(session_id, include_turns=True)
 
     @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
@@ -777,7 +777,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         resumed_thread = _session("schema-drift", path=str(rollout_path))
         codex = mock_codex.return_value.__enter__.return_value
-        codex._client.thread_resume.return_value = SimpleNamespace(thread=resumed_thread)
+        codex._client.thread_read.return_value = SimpleNamespace(thread=resumed_thread)
         sdk_entries = [
             {"kind": "user", "text": "SDK user"},
             {"kind": "agent", "text": "SDK answer"},
@@ -800,7 +800,7 @@ class SessionDetailFastPathTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "SDK answer")
-        codex._client.thread_resume.assert_called_once_with("schema-drift")
+        codex._client.thread_read.assert_called_once_with("schema-drift", include_turns=True)
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -997,7 +997,7 @@ class SessionDetailFastPathTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_session("active-sdk-fallback")
         )
         sdk_entries = [
@@ -1506,7 +1506,7 @@ class SessionDetailFastPathTests(TestCase):
             codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_session("indexed-empty", name="Resumed session")
         )
 
@@ -1516,21 +1516,21 @@ class SessionDetailFastPathTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Resumed session")
-        client._client.thread_resume.assert_called_once_with("indexed-empty")
+        client._client.thread_read.assert_called_once_with("indexed-empty", include_turns=True)
 
     @patch("hitch.main.views.common.Codex")
     def test_session_detail_falls_back_when_metadata_missing(
         self, mock_codex: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_session("missing", name="Missing metadata")
         )
 
         response = self.client.get(reverse("session", kwargs={"session_id": "missing"}))
 
         self.assertEqual(response.status_code, 200)
-        client._client.thread_resume.assert_called_once_with("missing")
+        client._client.thread_read.assert_called_once_with("missing", include_turns=True)
 
     @patch("hitch.main.views.common.Codex")
     def test_session_detail_falls_back_for_active_session(
@@ -1574,7 +1574,7 @@ class SessionDetailFastPathTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             model=None,
             reasoning_effort=None,
             thread=_session("active", name="Active session"),
@@ -1597,8 +1597,8 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
         self.assertEqual(response.context["session_reasoning"], "high")
 
-        client._client.thread_resume.return_value.model = "gpt-5.7"
-        client._client.thread_resume.return_value.reasoning_effort = "xhigh"
+        client._client.thread_read.return_value.model = "gpt-5.7"
+        client._client.thread_read.return_value.reasoning_effort = "xhigh"
         with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "active"})
@@ -1612,7 +1612,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.context["session_reasoning"], "high")
         self.assertEqual(next_message["model"], "gpt-5.7")
         self.assertEqual(next_message["reasoning"], "high")
-        self.assertEqual(client._client.thread_resume.call_count, 3)
+        self.assertEqual(client._client.thread_read.call_count, 3)
 
     @patch("hitch.main.views.common.Codex")
     def test_active_plan_config_does_not_inherit_older_rollout_effort(
@@ -1644,7 +1644,7 @@ class SessionDetailFastPathTests(TestCase):
             plan_mode=True,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             model=None,
             reasoning_effort=None,
             thread=_session("active-plan", name="Active plan"),
@@ -1658,7 +1658,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["session_model"], "gpt-5.6-sol")
         self.assertEqual(response.context["session_reasoning"], "medium")
-        client._client.thread_resume.assert_called_once_with("active-plan")
+        client._client.thread_read.assert_called_once_with("active-plan", include_turns=True)
 
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
@@ -1762,7 +1762,7 @@ class SessionDetailFastPathTests(TestCase):
         with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
             for error in errors:
                 with self.subTest(error=error.message):
-                    client._client.thread_resume.side_effect = error
+                    client._client.thread_read.side_effect = error
                     response = self.client.get(
                         reverse("session", kwargs={"session_id": "pending-rollout"})
                     )
@@ -1783,7 +1783,39 @@ class SessionDetailFastPathTests(TestCase):
                         '<span class="usage-value">30</span>',
                     )
                     self.assertContains(response, "data-live-root")
-        self.assertEqual(client._client.thread_resume.call_count, len(errors))
+        self.assertEqual(client._client.thread_read.call_count, len(errors))
+
+    @patch("hitch.main.views.common.Codex")
+    def test_failed_start_without_rollout_displays_saved_prompt_and_error(
+        self, mock_codex: MagicMock
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            thread_id="failed-start",
+            pid=0,
+            cwd="/repo",
+            prompt="Continue the Chen proof",
+            events_path="/tmp/missing-events.jsonl",
+            status=CodexInstance.STATUS_FAILED,
+            error="no rollout found for thread id failed-start",
+        )
+        client = _setup_codex(mock_codex)
+        for message in (
+            "no rollout found for thread id failed-start",
+            "thread not loaded: failed-start",
+            "invalid paginated history lineage for failed-start: missing source rollout",
+        ):
+            with self.subTest(message=message):
+                client._client.thread_read.side_effect = InvalidRequestError(-32600, message, None)
+                response = self.client.get(reverse("session", kwargs={"session_id": "failed-start"}))
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Continue the Chen proof")
+                self.assertContains(response, "no rollout found for thread id failed-start")
+                self.assertFalse(response.context["active_worker"])
+                self.assertEqual(
+                    response.context["pending_user_timestamp"], int(instance.started_at.timestamp())
+                )
+        client._client.thread_resume.assert_not_called()
 
 
 class PendingSessionResumeTests(SimpleTestCase):
@@ -2189,7 +2221,7 @@ class SessionViewApprovalContextTests(TestCase):
         self, _mock_worker_alive: MagicMock, mock_codex: MagicMock
     ) -> None:
         ctx: MagicMock = mock_codex.return_value.__enter__.return_value
-        ctx._client.thread_resume.return_value = SimpleNamespace(
+        ctx._client.thread_read.return_value = SimpleNamespace(
             thread=SimpleNamespace(
                 id="thread-1",
                 cwd="/repo",

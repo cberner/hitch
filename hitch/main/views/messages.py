@@ -290,7 +290,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # rollout file from disk: the detached worker resumes the thread itself
         # moments later, so a live ``thread_resume`` here only duplicates that
         # rollout read (and its lazy state-DB migration) on the request path.
-        # Fall back to a live resume for active or uncached-cwd threads.
+        # A fallback resume owns a private app-server that closes before spawning
+        # the worker, releasing its exclusive thread writer lease.
         hold_lifecycle_lock()
         metadata = _session_detail_metadata(session_id)
 
@@ -356,8 +357,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             )
         else:
             used_disk_resume = False
-            with app_server_pool.borrow_codex(
-                common.Codex, enable_memories=settings.enable_memories
+            with app_server_pool.open_codex(
+                lambda: common.Codex(
+                    config=codex_pool.app_server_config(
+                        enable_memories=settings.enable_memories
+                    )
+                )
             ) as codex:
                 try:
                     resumed = codex._client.thread_resume(session_id)
@@ -432,8 +437,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             )
             and not string_value(getattr(resumed, "model", None))
         ):
-            with app_server_pool.borrow_codex(
-                common.Codex, enable_memories=settings.enable_memories
+            with app_server_pool.open_codex(
+                lambda: common.Codex(
+                    config=codex_pool.app_server_config(
+                        enable_memories=settings.enable_memories
+                    )
+                )
             ) as codex:
                 resumed = codex._client.thread_resume(session_id)
                 models_data = common._models_for_plan_mode_fallback(codex)

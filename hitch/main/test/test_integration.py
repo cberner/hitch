@@ -1,8 +1,8 @@
 """End-to-end coverage against a real `codex app-server` subprocess.
 
-Requires a local ollama instance with `qwen2.5-coder:0.5b` pulled; the SDK
-supplies its matching Codex runtime. Tests run with a fresh CODEX_HOME so the
-listing and rollout state are deterministic.
+Persistence tests run without a model, credentials, or network access. Tests
+with the integration tag require local Ollama with `qwen2.5-coder:0.5b` pulled.
+All tests use a fresh CODEX_HOME; Hitch selects the bundled or newer PATH runtime.
 """
 
 import os
@@ -40,6 +40,66 @@ def _fresh_codex_home() -> Iterator[None]:
 
 def _start_codex() -> Codex:
     return Codex(config=CodexConfig())
+
+
+class CodexPersistenceTests(TestCase):
+    def test_session_page_does_not_claim_worker_writer(self) -> None:
+        with (
+            _fresh_codex_home(),
+            patch(
+                "hitch.main.runtime.codex_pool._launch_worker_process",
+                return_value=SimpleNamespace(pid=1),
+            ),
+            patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True),
+            patch("hitch.main.views.common._models_for_plan_mode_fallback", return_value=[]),
+        ):
+            instance = codex_pool.spawn_new_session(cwd=os.getcwd(), prompt="Hi")
+            url = reverse("session", kwargs={"session_id": instance.thread_id})
+            with (
+                Codex(config=codex_pool.app_server_config()) as reader,
+                patch(
+                    "hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry",
+                    side_effect=lambda _factory, operation, **_kwargs: operation(reader),
+                ),
+            ):
+                self.assertEqual(self.client.get(url).status_code, 200)
+                with Codex(config=codex_pool.app_server_config()) as worker:
+                    worker._client.thread_resume(instance.thread_id)
+                    self.assertEqual(self.client.get(url).status_code, 200)
+                instance.status = CodexInstance.STATUS_FAILED
+                instance.error = "Startup failed"
+                instance.save(update_fields=["status", "error"])
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Startup failed")
+                self.assertEqual(response.context["pending_user_prompt"], "Hi")
+
+    def test_new_threads_resume_in_another_process_before_first_turn(self) -> None:
+        # This needs a real runtime but no model, credentials, or network access.
+        for spawn_worker in (False, True):
+            with (
+                self.subTest(spawn_worker=spawn_worker),
+                _fresh_codex_home(),
+                patch(
+                    "hitch.main.runtime.codex_pool._launch_worker_process",
+                    return_value=SimpleNamespace(pid=1),
+                ),
+            ):
+                if spawn_worker:
+                    instance = codex_pool.spawn_new_session(cwd=os.getcwd(), prompt="Hi")
+                    thread_id = instance.thread_id
+                    thread_path = codex_pool.thread_path_for_instance(instance)
+                else:
+                    thread_id, thread_path = codex_pool.create_session_thread_with_path(
+                        cwd=os.getcwd(), name="Hi"
+                    )
+
+                self.assertTrue(thread_path)
+                self.assertTrue(Path(thread_path).is_file())
+                with Codex(config=codex_pool.app_server_config()) as codex:
+                    resumed = codex._client.thread_resume(thread_id)
+                    self.assertEqual(resumed.thread.id, thread_id)
+                    self.assertEqual(resumed.thread.turns, [])
 
 
 @tag("integration")

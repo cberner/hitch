@@ -769,14 +769,14 @@ def _refresh_missing_usage_metadata_path(
 ) -> str | None:
     observed_at = timezone.now()
     try:
-        resumed = codex._client.thread_resume(thread_id)
+        snapshot = codex._client.thread_read(thread_id)
     except (CodexError, InvalidRequestError):
         logger.warning("failed to refresh usage metadata for %s", thread_id)
         return None
     except Exception:
         logger.exception("failed to refresh usage metadata for %s", thread_id)
         return None
-    thread = getattr(resumed, "thread", None)
+    thread = getattr(snapshot, "thread", None)
     metadata = session_index.upsert_thread(
         thread,
         projects=projects,

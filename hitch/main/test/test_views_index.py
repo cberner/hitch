@@ -835,7 +835,7 @@ class IndexViewTests(TestCase):
         hidden = _session("autonomous-goal-thread", preview="Hidden autonomous goal")
         hidden.turns = []
         client = _setup_codex(mock_codex, threads=[visible, hidden])
-        client._client.thread_resume.return_value = SimpleNamespace(thread=hidden)
+        client._client.thread_read.return_value = SimpleNamespace(thread=hidden)
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
@@ -964,7 +964,7 @@ class IndexViewTests(TestCase):
     def test_untracked_system_session_non_thread_invalid_request_is_not_404(self, mock_codex: MagicMock) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = InvalidRequestError(-32600, "model provider not found")
+        client._client.thread_read.side_effect = InvalidRequestError(-32600, "model provider not found")
 
         with self.assertRaises(InvalidRequestError):
             self.client.get(reverse("system_session", kwargs={"session_id": session_id}))
@@ -1868,7 +1868,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Refreshing session token usage...")
         metadata = SessionMetadata.objects.get(thread_id="local-session")
         self.assertEqual(metadata.codex_path, "")
-        client._client.thread_resume.assert_not_called()
+        client._client.thread_read.assert_not_called()
         client.thread_list.assert_not_called()
         start_refresh.assert_called_once()
         refresh_items = start_refresh.call_args.args[0]
@@ -1876,7 +1876,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].thread_id, "local-session")
         self.assertEqual(refresh_items[0].codex_path, "")
 
-        client._client.thread_resume.return_value = SimpleNamespace(
+        client._client.thread_read.return_value = SimpleNamespace(
             thread=_session("local-session", path=str(rollout_path), cwd="/repo")
         )
         token_usage._refresh_usage_token_cache_best_effort(refresh_items)
@@ -1890,7 +1890,7 @@ class IndexViewTests(TestCase):
     def test_usage_refresh_caches_zero_when_missing_path_cannot_be_repaired(self, mock_codex: MagicMock) -> None:
         _seed_usage_metadata("missing-path")
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = CodexError("resume failed")
+        client._client.thread_read.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort([token_usage._UsageTokenRefreshItem("missing-path", "")])
 
@@ -1919,7 +1919,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = CodexError("resume failed")
+        client._client.thread_read.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing-path", missing_path)]
@@ -1936,7 +1936,7 @@ class IndexViewTests(TestCase):
     @patch("hitch.main.sessions.token_usage.Codex")
     def test_usage_refresh_missing_metadata_path_handles_unexpected_resume_error(self, mock_codex: MagicMock) -> None:
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = RuntimeError("boom")
+        client._client.thread_read.side_effect = RuntimeError("boom")
 
         refreshed_path = token_usage._refresh_missing_usage_metadata_path(client, "missing-path", projects=[])
 
@@ -2004,7 +2004,7 @@ class IndexViewTests(TestCase):
             usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         client = _setup_codex(mock_codex)
-        client._client.thread_resume.side_effect = CodexError("resume failed")
+        client._client.thread_read.side_effect = CodexError("resume failed")
 
         token_usage._refresh_usage_token_cache_best_effort(
             [token_usage._UsageTokenRefreshItem("missing", "/nonexistent/rollout.jsonl")]
