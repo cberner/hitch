@@ -2530,29 +2530,52 @@ class UnarchiveFailureTests(TestCase):
             try:
                 page = browser.new_page()
                 page.set_content(page_html, wait_until="load")
-                # The unarchive POST fails (non-OK response).
-                page.evaluate("() => { window.fetch = () => Promise.resolve({ ok: false }); }")
-                # Submitting an archived row's form takes the unarchive branch.
-                page.evaluate(
-                    "() => document.querySelector("
-                    "\"[data-session-archive-url*='arch-1'] "
-                    '[data-session-archive-form]").requestSubmit()'
+                submit = """() => document.querySelector(
+                    "[data-session-archive-url*='arch-1'] [data-session-archive-form]"
+                ).requestSubmit()"""
+                conflict = (
+                    "Another Codex process has this session open. Close the session "
+                    "in that process, then try again."
                 )
-                page.wait_for_function(
-                    "() => { const t = document.querySelector("
-                    "'[data-archive-error-toast]');"
-                    " return t && !t.hidden && document.querySelector("
-                    "'[data-archive-error-text]').textContent"
-                    ".includes('Couldn'); }"
-                )
-                # No successful-archive notice, and the row stays archived.
-                self.assertTrue(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
-                self.assertEqual(
-                    page.evaluate(
-                        "() => document.querySelector(\"[data-session-archive-url*='arch-1']\").dataset.sessionArchived"
-                    ),
-                    "true",
-                )
+                fail_request = """message => {
+                    window.fetch = () => Promise.resolve({
+                        ok: false, status: message ? 409 : 500,
+                        text: () => Promise.resolve(message),
+                    });
+                }"""
+                error_visible = """message => {
+                    return !document.querySelector('[data-archive-error-toast]').hidden
+                        && document.querySelector('[data-archive-error-text]').textContent === message;
+                }"""
+                row_archived = """() => document.querySelector(
+                    "[data-session-archive-url*='arch-1']").dataset.sessionArchived"""
+                for message in ("", conflict):
+                    page.evaluate(fail_request, message)
+                    page.evaluate(submit)
+                    page.wait_for_function(error_visible, arg=message or "Couldn't unarchive session")
+                    self.assertTrue(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
+                    self.assertEqual(page.evaluate(row_archived), "true")
+
+                # Successful unarchive and archive make Undo available.
+                page.clock.install()
+                page.evaluate("() => { window.fetch = () => Promise.resolve({ ok: true }); }")
+                page.evaluate(submit)
+                page.wait_for_function("() => (" + row_archived + ")() === 'false'")
+                page.evaluate(submit)
+                page.wait_for_function("() => !document.querySelector('[data-archive-toast]').hidden")
+                page.evaluate("() => { document.querySelector('[data-archive-error-toast]').hidden = true; }")
+                page.evaluate(fail_request, conflict)
+                page.evaluate("() => document.querySelector('[data-archive-undo]').click()")
+                page.wait_for_function(error_visible, arg=conflict)
+                page.clock.fast_forward(6000)
+                pending_archive = "document.querySelector('[data-session-row]').classList.contains('pending-archive')"
+                self.assertTrue(page.evaluate("() => " + pending_archive))
+                self.assertFalse(page.evaluate("() => document.querySelector('[data-archive-toast]').hidden"))
+                # A failed Undo can still be retried after the writer releases.
+                page.evaluate("() => { window.fetch = () => Promise.resolve({ ok: true }); }")
+                page.evaluate("() => document.querySelector('[data-archive-undo]').click()")
+                page.wait_for_function("() => !" + pending_archive)
+                self.assertEqual(page.evaluate(row_archived), "false")
             finally:
                 browser.close()
 class UsageTileAccessibilityTests(TestCase):

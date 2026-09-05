@@ -12,6 +12,12 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.
+- `ST-archive-writer-conflict`: If another Codex process holds the session's
+  writer lease, archiving or unarchiving preserves local state and asks the user
+  to close the session in that process and retry. AJAX requests return 409;
+  form submissions redirect to the session with an error message. Retrying
+  after the writer releases the session applies the requested archive state.
+  A failed Undo keeps its retry action available beyond the normal grace period.
 - `ST-startup-failure`: A tracked session whose worker failed before creating
   readable history still displays its saved prompt and failure instead of
   returning a server error.
