@@ -51,6 +51,109 @@ from hitch.main.views import common as common_views
 
 
 class SessionDetailFastPathTests(TestCase):
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common._active_stream_owns_turn", return_value=True)
+    def test_oversized_image_snapshot_is_owned_by_active_stream(self, *_mocks: MagicMock) -> None:
+        active = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-image-snapshot",
+            cwd="/repo",
+            prompt="",
+            input_image_paths=["/private/image.png"],
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        active.started_at = datetime(2025, 1, 5, 12, 0, 0, 500000, tzinfo=UTC)
+        active.save(update_fields=["started_at"])
+        lines = [
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "client_id": client_id,
+                        "content": [{"type": "image", "url": "data:image/png;base64," + "a" * 70000}],
+                    },
+                },
+                timestamp=active.started_at.isoformat(),
+            )
+            for client_id in ("another-client", f"hitch-instance-{active.pk}")
+        ]
+        lines.append(
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "content": [{"type": "Text", "text": "Active reply"}],
+                    },
+                },
+            )
+        )
+        path = _make_rollout(self, lines)
+        SessionMetadata.objects.create(thread_id=active.thread_id, codex_path=str(path))
+
+        for query in ({}, {"history": "all"}):
+            with self.subTest(query=query):
+                response = self.client.get(reverse("session", args=[active.thread_id]), query)
+                self.assertContains(response, "data-live-root")
+                self.assertNotContains(response, "Active reply")
+                self.assertTrue(response.context["show_active_worker_transcript"])
+                self.assertEqual(len(response.context["entries"]), 1)
+                self.assertFalse(response.context["entries"][0]["_hitch_active_user"])
+
+    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.views.common.Codex")
+    def test_completed_messages_in_preview_older_page_and_full_history(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        lines: list[str] = []
+        for index in range(45):
+            for role, text in (("User", f"Prompt {index}"), ("Agent", "Same reply")):
+                payload: dict[str, Any] = {
+                    "type": "item_completed",
+                    "item": {
+                        "type": f"{role}Message",
+                        "content": [{"type": "text" if role == "User" else "Text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                }
+                if index < 10:
+                    payload = {"type": f"{role.lower()}_message", "message": text, "phase": "final_answer"}
+                lines.append(_rollout_line("event_msg", payload))
+                lines.append(
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "user" if role == "User" else "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                            "phase": "final_answer",
+                        },
+                    )
+                )
+        path = _make_rollout(self, lines)
+        metadata = SessionMetadata.objects.create(thread_id="completed-messages", codex_path=str(path))
+        url = reverse("session", args=[metadata.thread_id])
+        response = self.client.get(url)
+        older = self.client.get(response.context["history_next_url"])
+        full = self.client.get(url, {"history": "all"})
+
+        self.assertContains(response, "Prompt 44")
+        self.assertNotContains(response, "Prompt 0")
+        self.assertNotContains(response, "No messages in this session yet.")
+        self.assertContains(older, "Prompt 24")
+        self.assertContains(full, "Prompt 0")
+        self.assertEqual(
+            [entry["text"] for entry in full.context["entries"]],
+            [text for index in range(45) for text in (f"Prompt {index}", "Same reply")],
+        )
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.common.Codex")
     def test_accepted_ag_initial_message_links_candidate_log(

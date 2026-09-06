@@ -76,6 +76,7 @@ class SessionHistoryUserIdentity:
     text: str
     prompt: str
     started_at: float
+    client_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,8 @@ _HISTORY_SCAN_MAX_RECORDS = 10_000
 _HISTORY_RECORD_TYPES_RE = re.compile(rb'"type"\s*:\s*"([^"]+)"')
 _HISTORY_TIMESTAMP_RE = re.compile(rb'"timestamp"\s*:\s*"([^"]+)"')
 _HISTORY_MESSAGE_FIELD_RE = re.compile(rb'(?<!\\)"message"\s*:\s*"')
+_HISTORY_TEXT_FIELD_RE = re.compile(rb'(?<!\\)"text"\s*:\s*"')
+_HISTORY_CLIENT_ID_RE = re.compile(rb'(?<!\\)"client_id"\s*:\s*"([^"]*)"')
 _HISTORY_PHASE_RE = re.compile(
     rb'(?<!\\)"phase"\s*:\s*"(commentary|final_answer)"'
 )
@@ -338,6 +341,7 @@ def _history_message_record(
             return None
         if not isinstance(entry, dict) or entry.get("type") != "event_msg":
             return None
+        entry = _normalize_completed_message(entry)
         payload = entry.get("payload")
         if not isinstance(payload, dict) or payload.get("type") not in {
             "user_message",
@@ -346,10 +350,16 @@ def _history_message_record(
             return None
         if payload.get("type") == "user_message" and active_user_identity is not None:
             event_timestamp = _iso_to_unix_timestamp(entry.get("timestamp"))
+            client_id = payload.get("client_id")
+            matches_user = (
+                client_id == active_user_identity.client_id
+                if isinstance(client_id, str) and active_user_identity.client_id
+                else _user_message_text(payload) == active_user_identity.text
+            )
             payload[_HISTORY_ACTIVE_USER_KEY] = (
                 event_timestamp is not None
                 and event_timestamp >= active_user_identity.started_at
-                and _user_message_text(payload) == active_user_identity.text
+                and matches_user
             )
         return entry
 
@@ -357,6 +367,13 @@ def _history_message_record(
     if len(record_types) < 2 or record_types[0] != b"event_msg":
         return None
     payload_type = record_types[1]
+    completed_message = payload_type == b"item_completed"
+    if completed_message:
+        item_type = record_types[2] if len(record_types) > 2 else b""
+        payload_type = {
+            b"UserMessage": b"user_message",
+            b"AgentMessage": b"agent_message",
+        }.get(item_type, b"")
     if payload_type == b"user_message":
         payload = {
             "type": "user_message",
@@ -372,6 +389,8 @@ def _history_message_record(
                     contents=contents,
                     record_offset=record_offset,
                     encoded_prompts=(encoded_active_prompt,),
+                    completed_message=completed_message,
+                    client_id=active_user_identity.client_id,
                 )
             )
     elif payload_type == b"agent_message":
@@ -404,10 +423,17 @@ def _oversized_user_matches_prompt(
     contents: mmap.mmap | None,
     record_offset: int,
     encoded_prompts: tuple[bytes, ...],
+    completed_message: bool = False,
+    client_id: str = "",
 ) -> bool:
+    if completed_message and client_id:
+        match = _HISTORY_CLIENT_ID_RE.search(raw)
+        if match is not None:
+            return match.group(1) == client_id.encode()
     if contents is None or not encoded_prompts:
         return False
-    match = _HISTORY_MESSAGE_FIELD_RE.search(raw)
+    field_re = _HISTORY_TEXT_FIELD_RE if completed_message else _HISTORY_MESSAGE_FIELD_RE
+    match = field_re.search(raw)
     if match is None:
         return False
     value_offset = record_offset + match.end() - 1
@@ -796,7 +822,53 @@ _MEMORY_CITATION_OPEN_TAG = "<oai-mem-citation>"
 _MEMORY_CITATION_CLOSE_TAG = "</oai-mem-citation>"
 
 
+def _normalize_completed_message(entry: dict[str, Any]) -> dict[str, Any]:
+    """Give persisted message snapshots the same semantics as legacy events."""
+    payload = entry.get("payload")
+    if (
+        entry.get("type") != "event_msg"
+        or not isinstance(payload, dict)
+        or payload.get("type") != "item_completed"
+    ):
+        return entry
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") not in {
+        "UserMessage",
+        "AgentMessage",
+    }:
+        return entry
+    content = item.get("content")
+    if not isinstance(content, list):
+        return entry
+    is_user = item["type"] == "UserMessage"
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in {"text", "Text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        elif is_user and part.get("type") in {"image", "localImage", "local_image"}:
+            parts.append("[image]")
+        elif is_user and part.get("type") in {"mention", "skill"}:
+            name = part.get("name")
+            if isinstance(name, str) and name:
+                prefix = "@" if part["type"] == "mention" else "/"
+                parts.append(prefix + name)
+    return {
+        **entry,
+        "payload": {
+            "type": "user_message" if is_user else "agent_message",
+            "message": ("\n" if is_user else "").join(parts),
+            "phase": item.get("phase"),
+            "client_id": item.get("client_id"),
+        },
+    }
+
+
 def _entries_from_lines(lines: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    lines = [_normalize_completed_message(entry) for entry in lines]
     # Index function_call_output by call_id so each command entry can show
     # whether the call actually succeeded without a second file pass.
     outputs: dict[str, dict[str, Any]] = {}
@@ -890,6 +962,9 @@ def _entry_from_event(
             "text": _user_message_text(payload),
             "timestamp": timestamp,
         }
+        client_id = payload.get("client_id")
+        if isinstance(client_id, str):
+            user_entry["client_id"] = client_id
         active_user = payload.get(_HISTORY_ACTIVE_USER_KEY)
         if isinstance(active_user, bool):
             user_entry[_HISTORY_ACTIVE_USER_KEY] = active_user
@@ -1044,7 +1119,15 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
     if entry.get("type") != "event_msg":
         return False
     payload = entry.get("payload") or {}
-    return payload.get("type") == "user_message"
+    if payload.get("type") == "user_message":
+        return True
+    item = payload.get("item")
+    return (
+        payload.get("type") == "item_completed"
+        and isinstance(item, dict)
+        and item.get("type") == "UserMessage"
+        and isinstance(item.get("content"), list)
+    )
 
 
 def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:

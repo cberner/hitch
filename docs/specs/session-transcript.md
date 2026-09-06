@@ -61,6 +61,11 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-history-preview`: Large sessions initially render a bounded preview of
   recent persisted user and agent messages, including read-only system and
   autonomous-goal logs. Scrolling upward loads older preview pages.
+- `ST-message-records`: Preview and full-history readers support both legacy
+  message events and completed `UserMessage`/`AgentMessage` snapshots. Preserve
+  user turn boundaries, image markers, and agent phases, and render assistant
+  responses only once when also persisted as response items. Oversized snapshots
+  use the same bounded preview placeholders as legacy messages.
 - `ST-history-active-fallback`: If an active large-session worker's event log
   has not claimed its original user item, persisted messages remain visible in
   both preview and full-history renders. The rollout owns transcript rendering
