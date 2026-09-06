@@ -6,17 +6,15 @@ Status: Draft
 
 ### 1.1 Purpose
 
-Define Hitch's native Codex reviewer role and the ordinary visible-agent turns
-used by QA and pull-request shortcuts.
+Define the ordinary visible-agent turns used by QA and pull-request shortcuts
+and their optional delegation through Codex's native subagents.
 
 ### 1.2 Definitions
 
-- Reviewer role: The native Codex subagent role named `hitch_reviewer` that
-  Hitch registers for visible coding workers.
-- Review run: A native Codex subagent spawned by the coding agent with the
-  reviewer role.
-- Review-guidance turn: An ordinary visible coding turn that recommends the
-  reviewer role without requiring its use.
+- Review run: An inspection of the current changes by the coding agent or a
+  native Codex subagent it chooses to involve.
+- Review-guidance turn: An ordinary visible coding turn that asks the coding
+  agent to review changes and delegate review as it sees fit.
 - Review trigger: `/qa`, `/pr`, Auto-QA, or Auto-PR.
 
 ## 2. Goals and Non-Goals
@@ -35,22 +33,18 @@ used by QA and pull-request shortcuts.
 - Hitch does not run a hidden verdict, repair, retry, or review workflow.
 - Hitch does not build a second app-server or tool protocol around native
   subagents.
+- Hitch does not maintain a custom reviewer role or review rubric.
 
 ## 3. Requirements
 
-### 3.1 Native Reviewer Availability
+### 3.1 Native Review Delegation
 
-- `REVIEW-role-registration`: Every visible coding worker registers
-  `hitch_reviewer` in that worker's app-server configuration and enables
-  Codex's native multi-agent feature. Hidden system-agent workers do not receive
-  the role.
-- `REVIEW-resume-availability`: Registration is process-scoped rather than
-  persisted in a rollout. The role is available on new, resumed, pre-upgrade,
-  promoted, and visible system-feedback coding threads without modifying the
-  stored thread.
-- `REVIEW-agent-controlled`: The coding agent decides whether to spawn the role
-  when the user or task prompt authorizes native subagent use. A reviewer may be
-  used more than once.
+- `REVIEW-native-configuration`: New and resumed workers use Codex's native
+  agent configuration. Hitch does not register a reviewer role or override
+  multi-agent feature settings for review.
+- `REVIEW-agent-controlled`: Review guidance authorizes the coding agent to
+  delegate review to Codex subagents as it sees fit. The coding agent decides
+  whether to delegate, which agents to use, and whether another pass is useful.
 - `REVIEW-native-lifecycle`: Codex owns reviewer creation, execution, event
   routing, model inheritance, interruption, and cleanup. Hitch does not start a
   nested app-server or expose a fallback review tool.
@@ -58,28 +52,24 @@ used by QA and pull-request shortcuts.
   advisory output. The coding agent assesses them; Hitch does not parse a
   verdict.
 
-### 3.2 Reviewer Behavior
+### 3.2 Review Behavior
 
-- `REVIEW-complete-change-set`: The reviewer inspects the complete current
+- `REVIEW-complete-change-set`: The coding agent reviews the complete current
   change set relative to an appropriate merge base, including committed,
   staged, unstaged, and untracked changes plus relevant surrounding code and
   tests.
-- `REVIEW-read-only`: The role overlays `sandbox_mode = "read-only"` and
-  `approval_policy = "never"`, and instructs the reviewer not to mutate files
-  or external state.
-- `REVIEW-setting-inheritance`: The role does not override model or reasoning
-  effort, so the native subagent inherits the effective parent settings. Other
-  capabilities follow Codex's native subagent inheritance rules.
-- `REVIEW-comprehensive-result`: The reviewer returns all concrete actionable
-  findings in one pass, ordered by severity with precise file locations, or
-  clearly states that it found none.
+- `REVIEW-native-settings`: Delegated agents follow Codex's native configuration
+  and inheritance rules. Hitch supplies no review-specific model, reasoning,
+  sandbox, approval, or developer-instruction overrides.
+- `REVIEW-assess-and-fix`: The coding agent assesses delegated findings, fixes
+  valid issues, and runs relevant tests before finishing.
 
 ### 3.3 Ordinary Review and PR Turns
 
 - `REVIEW-trigger-guidance`: `/qa` starts one ordinary visible review-guidance
-  turn on the selected session checkout. The turn recommends, but does not
-  require, `hitch_reviewer` and asks the coding agent to assess findings, fix
-  valid issues, and run relevant tests.
+  turn on the selected session checkout. The turn leaves delegation to the
+  coding agent and asks it to assess findings, fix valid issues, and run
+  relevant tests.
 - `REVIEW-pr-guidance`: `/pr` starts one ordinary visible turn that combines
   optional review guidance with PR preparation, Codex-owned publication, and
   the agent-invoked `hitch.watch_pr` cycle.
@@ -112,9 +102,9 @@ used by QA and pull-request shortcuts.
 
 ## 4. Success Criteria
 
-- `REVIEW-accept-available`: New, resumed, promoted, and visible
-  system-feedback coding turns expose `hitch_reviewer`; hidden system agents do
-  not.
+- `REVIEW-accept-native-configuration`: New, resumed, promoted, and visible
+  system-feedback coding workers start without Hitch reviewer-role or
+  multi-agent feature overrides.
 - `REVIEW-accept-native`: Delegating review uses Codex's native `spawn_agent`
   path and returns findings to the coding agent without Hitch review-runtime
   processes or callbacks.

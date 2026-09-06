@@ -1440,14 +1440,12 @@ def app_server_config(
     enable_memories: bool = False,
     web_search_mode: str | None = None,
     sqlite_home: str | os.PathLike[str] | None = None,
-    additional_config_overrides: tuple[str, ...] = (),
 ) -> CodexConfig:
     memory_value = "true" if enable_memories else "false"
     overrides = [f"features.memories={memory_value}"]
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     if web_search_mode:
         overrides.append(f"web_search={json.dumps(web_search_mode)}")
-    overrides.extend(additional_config_overrides)
     # Stamp every app-server we spawn with this deployment's id (merged onto the
     # inherited environment by the SDK). The profile "nuke" sweep scopes its
     # SIGKILLs to this marker so a second checkout sharing the resolved codex

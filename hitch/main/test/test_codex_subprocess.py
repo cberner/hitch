@@ -69,7 +69,6 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
-from hitch.main.runtime.codex_review import REVIEWER_AGENT_NAME
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -4719,7 +4718,7 @@ class CodexWorkerCommandTests(TestCase):
 
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_visible_system_feedback_worker_registers_native_reviewer(
+    def test_visible_system_feedback_worker_uses_native_agent_configuration(
         self, mock_codex: MagicMock
     ) -> None:
         codex_ctx = mock_codex.return_value.__enter__.return_value
@@ -4742,13 +4741,7 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx._client.request.assert_not_called()
         codex_ctx.thread_resume.assert_called_once_with("thread-1")
         config = mock_codex.call_args.kwargs["config"]
-        self.assertIn("features.multi_agent=true", config.config_overrides)
-        self.assertTrue(
-            any(
-                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.config_file=")
-                for value in config.config_overrides
-            )
-        )
+        self.assertEqual(config.config_overrides, ("features.memories=false",))
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_diff_updates_are_not_persisted(self, mock_codex: MagicMock) -> None:
@@ -4956,12 +4949,7 @@ class CodexWorkerCommandTests(TestCase):
             developer_instructions="Prefer small, typed changes.",
         )
         config = mock_codex.call_args.kwargs["config"]
-        self.assertTrue(
-            any(
-                value.startswith(f"agents.{REVIEWER_AGENT_NAME}.description=")
-                for value in config.config_overrides
-            )
-        )
+        self.assertEqual(config.config_overrides, ("features.memories=false",))
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_terminal_worker_cleans_images_when_archive_requested(
