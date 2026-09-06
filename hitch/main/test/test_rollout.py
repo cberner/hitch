@@ -40,6 +40,106 @@ def _write_rollout(lines: list[str]) -> Path:
 
 
 class SessionHistoryPageTests(TestCase):
+    def test_completed_multimodal_user_and_agent_phases(self) -> None:
+        items = [
+            {
+                "type": "UserMessage",
+                "content": [
+                    {"type": "text", "text": "Look"},
+                    {"type": "image", "url": "private-image"},
+                    {"type": "local_image", "path": "/private/image.png"},
+                    {"type": "mention", "name": "app", "path": "/private/app"},
+                    {"type": "skill", "name": "review", "path": "/private/skill"},
+                ],
+            },
+            {
+                "type": "AgentMessage",
+                "phase": "commentary",
+                "content": [
+                    {"type": "Text", "text": "Looking"},
+                    {"type": "Text", "text": " now"},
+                ],
+            },
+            {
+                "type": "AgentMessage",
+                "phase": "final_answer",
+                "content": [
+                    {"type": "Text", "text": "Done"},
+                ],
+            },
+            {"type": "AgentMessage", "content": None},
+            {"type": "AgentMessage", "content": [None, {"type": "Text", "text": 1}]},
+        ]
+        path = _write_rollout([
+            _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+            *[_line("event_msg", {"type": "item_completed", "item": item}) for item in items],
+        ])
+        self.addCleanup(path.unlink, missing_ok=True)
+        prompt = "Look\n[image]\n[image]\n@app\n/review"
+        page = rollout.session_history_page(
+            path,
+            active_user_identity=rollout.SessionHistoryUserIdentity(
+                text=prompt,
+                prompt="Look",
+                started_at=1736078400,
+            ),
+        )
+        assert page is not None
+        self.assertEqual([entry["text"] for entry in page.flat_entries], [prompt, "Looking now", "Done"])
+        self.assertTrue(page.flat_entries[0]["_hitch_active_user"])
+        self.assertEqual([entry.get("phase") for entry in page.flat_entries], [None, "commentary", "final_answer"])
+        full = list(rollout.iter_entries(path))
+        self.assertEqual([entry["text"] for entry in full], [prompt, "Looking now", "Done"])
+        detail = rollout.session_detail_data(path)
+        assert detail is not None
+        self.assertEqual(detail.latest_collaboration_mode, "plan")
+
+    def test_oversized_completed_messages_preserve_active_boundary_and_phase(self) -> None:
+        prompt = "Large prompt " * 6000
+        lines = [
+            _line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [{"type": "text", "text": prompt}],
+                    },
+                },
+                timestamp=timestamp,
+            )
+            for timestamp in ("2025-01-05T11:59:59Z", "2025-01-05T12:00:01Z")
+        ]
+        lines.append(
+            _line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "content": [{"type": "Text", "text": "x" * 70000}],
+                        "phase": "commentary",
+                    },
+                },
+            )
+        )
+        path = _write_rollout(lines)
+        self.addCleanup(path.unlink, missing_ok=True)
+        page = rollout.session_history_page(
+            path,
+            active_user_identity=rollout.SessionHistoryUserIdentity(
+                text=prompt,
+                prompt=prompt,
+                started_at=1736078400,
+            ),
+        )
+        assert page is not None
+        self.assertEqual(len(page.flat_entries), 3)
+        self.assertEqual([entry["_hitch_active_user"] for entry in page.flat_entries[:2]], [False, True])
+        self.assertEqual(page.flat_entries[-1]["phase"], "commentary")
+        self.assertTrue(all(entry["text"] == rollout._HISTORY_OMITTED_MESSAGE for entry in page.flat_entries))
+        self.assertEqual(list(rollout.iter_entries(path))[-1]["text"], "x" * 70000)
+
     def test_detects_persisted_namespaced_dynamic_tool(self) -> None:
         path = _write_rollout(
             [

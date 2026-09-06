@@ -168,12 +168,16 @@ def _entries_include_active_turn(entries: list[dict[str, Any]], active: CodexIns
 
 
 def _mark_active_history_user_entries(entries: list[dict[str, Any]], active: CodexInstance | None) -> None:
-    """Mark the current active user boundary using prompt and timestamp."""
+    """Match client IDs, falling back to the legacy prompt and timestamp."""
     identity = _active_history_user_identity(active)
     if identity is None:
         return
     for entry in entries:
         if entry.get("kind") != "user":
+            continue
+        client_id = entry.get("client_id")
+        if isinstance(client_id, str):
+            entry["_hitch_active_user"] = client_id == identity.client_id
             continue
         timestamp = entry.get("timestamp")
         entry["_hitch_active_user"] = bool(
@@ -303,6 +307,7 @@ def _active_history_user_identity(
         text=_active_user_message_text(active),
         prompt=active.prompt,
         started_at=active.started_at.timestamp(),
+        client_id=f"hitch-instance-{active.pk}",
     )
 
 
