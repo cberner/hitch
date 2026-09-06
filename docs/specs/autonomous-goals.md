@@ -58,8 +58,8 @@ far. Proposals appear in the Inbox for the user to accept, reject, or dismiss.
 - `AG-config`: Each AG stores goal text, autonomy, ambition, confidence threshold,
   web search, auto-QA, auto-proposal, stack depth, and optional token budget.
 - `AG-auto-qa-guidance`: When an accepted AG session has Auto-QA enabled, its
-  initial implementation turn receives guidance recommending the optional
-  native `hitch_reviewer` subagent after implementation. It does not require
+  initial implementation turn receives guidance allowing the coding agent to
+  delegate review to Codex subagents as it sees fit. It does not require
   delegation or start a separate QA verdict-and-repair turn.
 - `AG-stack-default`: If stack depth is unset, the effective stack depth is `1`.
 - `AG-stack-depth-range`: Supported stack depth values are integers from `1`

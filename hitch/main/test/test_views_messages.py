@@ -441,6 +441,17 @@ class SendMessageViewTests(TestCase):
                 self.assertEqual(kwargs["thread_id"], "abc")
                 self.assertEqual(kwargs["cwd"], "/repo")
                 self.assertEqual(kwargs["prompt"], task.prompt)
+                if prompt != "/PR-NOW":
+                    self.assertIn("merge base", kwargs["prompt"])
+                    self.assertIn(
+                        "committed, staged, unstaged, and untracked",
+                        kwargs["prompt"],
+                    )
+                    self.assertIn(
+                        "Delegate review to Codex subagents as you see fit",
+                        kwargs["prompt"],
+                    )
+                    self.assertNotIn("agent_type", kwargs["prompt"])
                 self.assertEqual(kwargs["agent_kind"], task.agent_kind)
                 self.assertEqual(kwargs["model"], "gpt-5.4")
                 self.assertEqual(kwargs["reasoning_effort"], "high")

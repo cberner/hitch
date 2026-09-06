@@ -27,7 +27,7 @@ the top level:
 
 - `runtime/` -- the Codex worker/app-server runtime: `codex_pool` (worker
   spawning, app-server pooling, reconciliation), `codex_tools` (dynamic Hitch
-  tools), `codex_review` (native reviewer-role registration), `streaming` (SSE),
+  tools), `streaming` (SSE),
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
   `disk_cleanup`, `health`, and process/host infrastructure.
 - `workflows/` -- the workflow engine: `system_agents` (the optional-review and
