@@ -328,6 +328,16 @@ class ProposedSession(models.Model):
         )
 
 
+class RecentPrompt(models.Model):
+    """Submitted user text, before worker instructions are appended."""
+
+    prompt = models.TextField()
+
+    @override
+    def __str__(self) -> str:
+        return f"RecentPrompt(id={self.pk})"
+
+
 class SessionMetadata(models.Model):
     """Local metadata for a Codex thread that Hitch does not own on disk."""
 
