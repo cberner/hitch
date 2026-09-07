@@ -23,6 +23,16 @@
         Extra developer prompt
         <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional developer instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
     </label>
+    <label>
+        Hitch extra instructions
+        <textarea class="extra-system-prompt" name="hitch_extra_instructions" maxlength="{{ hitch_extra_instructions_max_len }}" autocomplete="off" aria-describedby="hitch-extra-instructions-help">{{ current_hitch_extra_instructions }}</textarea>
+        <span id="hitch-extra-instructions-help">Separate developer instructions for Hitch workflows. Clearing disables them. Changes apply to the next started turn.</span>
+    </label>
+    <div class="settings-link-row">
+        <button type="button" class="button secondary" data-hitch-instructions-reset>Reset to defaults</button>
+    </div>
+    {{ default_hitch_extra_instructions|json_script:"hitch-extra-instructions-default" }}
+    {% include "_settings_instructions_reset_script.html" %}
     <label class="checkbox-label">
         <span>Use worktrees</span>
         <input type="checkbox" name="use_worktrees" value="true" {% if current_use_worktrees %}checked{% endif %}>

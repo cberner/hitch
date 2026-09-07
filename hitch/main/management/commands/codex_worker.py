@@ -110,6 +110,7 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     is_dynamic_tool_call,
 )
+from hitch.main.sessions.hitch_instructions import combined_developer_instructions
 from hitch.main.sessions.session_settings import _PLAN_MODE_REASONING_EFFORT
 
 logger = logging.getLogger(__name__)
@@ -555,8 +556,11 @@ def _run_turn(
     notification_sequencer: _NotificationSequencer | None = None
     control_path = control_path_for(instance)
     resume_kwargs: dict[str, Any] = {}
-    if instance.developer_instructions:
-        resume_kwargs["developer_instructions"] = instance.developer_instructions
+    if instance.hitch_extra_instructions is not None or instance.developer_instructions:
+        # An explicit empty value clears guidance persisted by an earlier turn.
+        resume_kwargs["developer_instructions"] = combined_developer_instructions(
+            instance.developer_instructions, instance.hitch_extra_instructions,
+        )
     def _configure(codex: Codex) -> None:
         # Runs once per app-server open attempt (``open_codex_resumed`` retries
         # the whole open+configure+resume when the resume races the CODEX_HOME

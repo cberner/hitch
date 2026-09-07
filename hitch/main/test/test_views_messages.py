@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,12 @@ from hitch.main.models import (
 from hitch.main.runtime import codex_pool
 from hitch.main.runtime import rollout as rollout_module
 from hitch.main.sessions import agent_tasks
-from hitch.main.sessions.settings_cookies import SettingsValues
+from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
+from hitch.main.sessions.settings_cookies import (
+    _HITCH_EXTRA_INSTRUCTIONS_COOKIE,
+    SettingsValues,
+    _encode_hitch_extra_instructions_cookie,
+)
 from hitch.main.test.support import (
     _encode_extra_system_prompt,
     _make_model,
@@ -261,6 +267,9 @@ class SendMessageViewTests(TestCase):
             "thread_id": "abc",
             "cwd": cwd,
             "prompt": prompt,
+            "hitch_extra_instructions": hitch_instructions_for_turn(
+                None, plan_mode=overrides.get("plan_mode", False)
+            ),
             "sandbox_policy": None,
             "approval_mode": "auto_review",
         }
@@ -425,8 +434,12 @@ class SendMessageViewTests(TestCase):
             ("/PR-NOW", agent_tasks.publish_pr_task()),
         )
 
-        for prompt, task in cases:
-            with self.subTest(prompt=prompt):
+        for (prompt, task), override in product(cases, (None, "Use my Hitch workflow.", "")):
+            with self.subTest(prompt=prompt, override=override):
+                _seed_cookies(
+                    self.client,
+                    **{_HITCH_EXTRA_INSTRUCTIONS_COOKIE: _encode_hitch_extra_instructions_cookie(override)},
+                )
                 self._patch_codex(
                     mock_codex,
                     model="gpt-5.4",
@@ -444,6 +457,7 @@ class SendMessageViewTests(TestCase):
                 self.assertEqual(kwargs["thread_id"], "abc")
                 self.assertEqual(kwargs["cwd"], "/repo")
                 self.assertEqual(kwargs["prompt"], task.prompt)
+                self.assertEqual(kwargs["hitch_extra_instructions"], hitch_instructions_for_turn(override))
                 if prompt != "/PR-NOW":
                     self.assertIn("merge base", kwargs["prompt"])
                     self.assertIn(
@@ -1099,8 +1113,113 @@ class SendMessageViewTests(TestCase):
                     thread_id="abc",
                     cwd="/repo",
                     prompt="follow-up",
+                    hitch_extra_instructions=hitch_instructions_for_turn(None),
                     **expected_options,
                 )
+
+    @patch("hitch.main.views.messages.thread_has_dynamic_tool", return_value=True)
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_hitch_instructions_are_separate_from_follow_up_prompts(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_has_watch_tool: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        project = _make_project(extra_system_prompt="Use project fixtures.")
+        metadata = SessionMetadata.objects.create(thread_id="abc", cwd="/repo", project=project)
+        cases = (
+            (False, False, False, False),
+            (False, True, False, False),
+            (True, False, False, False),
+            (True, False, True, False),
+            (True, False, False, True),
+            (True, False, True, True),
+        )
+        for override, (auto_pr, auto_qa, plan_mode, image_only) in product(
+            (None, "Use my Hitch workflow.\nKeep explanations brief.", ""), cases
+        ):
+            with (
+                self.subTest(override=override, auto_pr=auto_pr, auto_qa=auto_qa, plan=plan_mode, image=image_only),
+                tempfile.TemporaryDirectory() as raw,
+                override_settings(CODEX_EVENTS_DIR=Path(raw)),
+            ):
+                metadata.auto_pr_enabled = auto_pr
+                metadata.auto_qa_enabled = auto_qa
+                metadata.save(update_fields=["auto_pr_enabled", "auto_qa_enabled"])
+                _seed_cookies(
+                    self.client,
+                    **{
+                        _HITCH_EXTRA_INSTRUCTIONS_COOKIE: _encode_hitch_extra_instructions_cookie(override),
+                        _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt("Use personal conventions."),
+                    },
+                )
+                mock_spawn.reset_mock()
+                prompt = "" if image_only else "Continue this.\n\nKeep this user text intact."
+                data: dict[str, Any] = {"prompt": prompt, "plan_mode": str(plan_mode).lower()}
+                if image_only:
+                    data["input_images"] = SimpleUploadedFile("screen.png", _PNG_BYTES, content_type="image/png")
+
+                response = self.client.post(reverse("send_message", kwargs={"session_id": "abc"}), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                expected: dict[str, Any] = {
+                    "developer_instructions": "Use personal conventions.\n\nUse project fixtures.",
+                    "hitch_extra_instructions": hitch_instructions_for_turn(
+                        override, auto_pr_enabled=auto_pr, auto_qa_enabled=auto_qa, plan_mode=plan_mode
+                    ),
+                }
+                if plan_mode:
+                    expected.update(plan_mode=True, model="gpt-5")
+                if auto_pr and not plan_mode and override != "":
+                    expected.update(agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND, user_message_index=0)
+                if image_only:
+                    image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+                    self.assertEqual(len(image_paths), 1)
+                    self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+                    expected["input_image_paths"] = image_paths
+                self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
+
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_follow_up_uses_current_hitch_instructions_instead_of_previous_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        previous = CodexInstance.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            pid=123,
+            status=CodexInstance.STATUS_COMPLETED,
+            developer_instructions="Keep personal instructions.",
+            hitch_extra_instructions="Stale Hitch guidance.",
+        )
+        for override in ("Updated Hitch guidance.", "", None):
+            with self.subTest(override=override):
+                _seed_cookies(
+                    self.client,
+                    **{_HITCH_EXTRA_INSTRUCTIONS_COOKIE: _encode_hitch_extra_instructions_cookie(override)},
+                )
+                mock_spawn.reset_mock()
+
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}), data={"prompt": "follow-up"}
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self._assert_follow_up_spawn(
+                    mock_spawn, hitch_extra_instructions=hitch_instructions_for_turn(override)
+                )
+                previous.refresh_from_db()
+                self.assertEqual(previous.developer_instructions, "Keep personal instructions.")
+                self.assertEqual(previous.hitch_extra_instructions, "Stale Hitch guidance.")
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -1130,6 +1249,7 @@ class SendMessageViewTests(TestCase):
             thread_id="abc",
             cwd="/repo",
             prompt="follow-up",
+            hitch_extra_instructions=hitch_instructions_for_turn(None),
             sandbox_policy=None,
             approval_mode="deny_all",
         )
@@ -1334,8 +1454,9 @@ class SendMessageViewTests(TestCase):
                 "gpt-5.4",
                 True,
                 {
-                    "prompt": agent_tasks.with_automatic_review_guidance(
-                        "Implement the plan.",
+                    "prompt": "Implement the plan.",
+                    "hitch_extra_instructions": hitch_instructions_for_turn(
+                        None,
                         auto_pr_enabled=True,
                         auto_qa_enabled=False,
                     ),

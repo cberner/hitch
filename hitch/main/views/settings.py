@@ -24,6 +24,7 @@ from hitch.main.models import (
 )
 from hitch.main.repos import same_repo_or_worktree
 from hitch.main.runtime import app_server_pool
+from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
@@ -44,6 +45,7 @@ from hitch.main.sessions.session_settings import (
 from hitch.main.sessions.settings_cookies import (
     _DEFAULT_APPROVAL_MODE,
     _EXTRA_SYSTEM_PROMPT_MAX_LEN,
+    _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN,
     _MODEL_MAX_LEN,
     _REASONING_EFFORT_MAX_LEN,
     _VALID_APPROVAL_MODES,
@@ -52,6 +54,7 @@ from hitch.main.sessions.settings_cookies import (
     SettingsValues,
     _apply_cookie_updates,
     _extra_system_prompt_cookie_fits,
+    _hitch_extra_instructions_cookie_fits,
     _settings_cookie_updates,
     _visible_session_project_ids_cookie_fits,
 )
@@ -196,6 +199,13 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
+    posted_hitch_extra_instructions = request.POST.get("hitch_extra_instructions")
+    hitch_extra_instructions = posted_hitch_extra_instructions
+    if hitch_extra_instructions is not None:
+        # Browsers submit textarea line endings as CRLF.
+        hitch_extra_instructions = hitch_extra_instructions.replace("\r\n", "\n")
+        if hitch_extra_instructions == DEFAULT_HITCH_EXTRA_INSTRUCTIONS:
+            hitch_extra_instructions = None
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
     auto_qa = request.POST.get("auto_qa", "").strip()
@@ -221,6 +231,11 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid reasoning effort")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
         return HttpResponseBadRequest("extra system prompt is too long")
+    if hitch_extra_instructions is not None and (
+        len(hitch_extra_instructions) > _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN
+        or (user is None and not _hitch_extra_instructions_cookie_fits(hitch_extra_instructions))
+    ):
+        return HttpResponseBadRequest("Hitch extra instructions are too long")
     # The character cap above does not bound the encoded cookie size, so a
     # multibyte prompt can still overflow the browser cookie limit and be
     # silently dropped. For anonymous users the cookie is the only store, so
@@ -330,6 +345,11 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         visible_session_project_ids=stored.visible_session_project_ids,
         show_no_project_sessions=stored.show_no_project_sessions,
         enable_memories=enable_memories == "true",
+        hitch_extra_instructions=(
+            stored.hitch_extra_instructions
+            if posted_hitch_extra_instructions is None
+            else hitch_extra_instructions
+        ),
     )
     values = _settings_with_visible_selected_project(
         values, selected_project, cookie_required=user is None

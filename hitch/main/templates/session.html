@@ -126,8 +126,18 @@
         </div>
 
         <div class="session-body">
-        {% if system_prompt or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
+        {% if system_prompt or instruction_instance or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
         <section class="thread" data-thread id="history-start">
+            {% if instruction_instance %}
+            <details class="system-prompt" data-session-instructions>
+                <summary>Instructions for the latest turn</summary>
+                <p>These are the saved instructions supplied alongside your message.</p>
+                <strong>Personal and project instructions</strong>
+                <div class="system-prompt-body">{% if instruction_instance.developer_instructions %}{{ instruction_instance.developer_instructions }}{% elif instruction_instance.hitch_extra_instructions == None %}Not recorded{% else %}None{% endif %}</div>
+                <strong>Hitch extra instructions</strong>
+                <div class="system-prompt-body">{% if instruction_instance.hitch_extra_instructions == None %}No separate Hitch instructions were recorded for this turn. Imported sessions keep their existing Codex instructions when those instructions cannot be recovered.{% elif instruction_instance.hitch_extra_instructions %}{{ instruction_instance.hitch_extra_instructions }}{% else %}Disabled{% endif %}</div>
+            </details>
+            {% endif %}
             {% if system_prompt %}
             <details class="system-prompt">
                 <summary>System prompt</summary>

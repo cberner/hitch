@@ -690,6 +690,8 @@ class SessionDetailFastPathTests(TestCase):
             thread_id="managed",
             cwd=worktree,
             prompt="done",
+            developer_instructions="Personal and project guidance",
+            hitch_extra_instructions="Recorded Hitch guidance <script>alert(1)</script>",
             events_path="/tmp/events.jsonl",
             status=CodexInstance.STATUS_COMPLETED,
         )
@@ -703,6 +705,10 @@ class SessionDetailFastPathTests(TestCase):
             for item in response.context["next_message_config"]
         }
         self.assertEqual(config["sandbox"], "Workspace write")
+        self.assertContains(response, "Instructions for the latest turn")
+        self.assertContains(response, "Personal and project guidance")
+        self.assertContains(response, "Recorded Hitch guidance &lt;script&gt;")
+        self.assertNotContains(response, "<script>alert(1)</script>")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.caches._start_models_refresh_thread")

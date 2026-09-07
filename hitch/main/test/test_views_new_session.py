@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -37,7 +38,12 @@ from hitch.main.sessions import (
     agent_tasks,
     session_settings,
 )
+from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.prompt_history import remember_prompt
+from hitch.main.sessions.settings_cookies import (
+    _HITCH_EXTRA_INSTRUCTIONS_COOKIE,
+    _encode_hitch_extra_instructions_cookie,
+)
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
@@ -99,6 +105,9 @@ class NewSessionViewTests(TestCase):
         expected = {
             "cwd": cwd,
             "prompt": prompt,
+            "hitch_extra_instructions": hitch_instructions_for_turn(
+                None, plan_mode=overrides.get("plan_mode", False)
+            ),
             "developer_instructions": None,
             "model": None,
             "reasoning_effort": None,
@@ -534,6 +543,7 @@ class NewSessionViewTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["thread_id"], "pr-now-thread")
         self.assertEqual(kwargs["prompt"], agent_tasks.publish_pr_task().prompt)
+        self.assertEqual(kwargs["hitch_extra_instructions"], hitch_instructions_for_turn(None))
         self.assertEqual(kwargs["agent_kind"], agent_tasks.PR_PUBLISH_AGENT_KIND)
         self.assertNotIn("workflow_id", kwargs)
 
@@ -758,8 +768,9 @@ class NewSessionViewTests(TestCase):
         )
         self._assert_new_session_spawn(
             mock_spawn,
-            prompt=agent_tasks.with_automatic_review_guidance(
-                prompt,
+            prompt=prompt,
+            hitch_extra_instructions=hitch_instructions_for_turn(
+                None,
                 auto_pr_enabled=False,
                 auto_qa_enabled=True,
             ),
@@ -819,8 +830,9 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.accepted_session, accepted)
         self._assert_new_session_spawn(
             mock_spawn,
-            prompt=agent_tasks.with_automatic_review_guidance(
-                proposal.prompt,
+            prompt=proposal.prompt,
+            hitch_extra_instructions=hitch_instructions_for_turn(
+                None,
                 auto_pr_enabled=True,
                 auto_qa_enabled=False,
                 pr_title=proposal.title,
@@ -1028,8 +1040,9 @@ class NewSessionViewTests(TestCase):
                 self.assertEqual(metadata.auto_pr_enabled, case["expected"])
                 expected_spawn: dict[str, Any] = {
                     "cwd": repo,
-                    "prompt": agent_tasks.with_automatic_review_guidance(
-                        "do thing",
+                    "prompt": "do thing",
+                    "hitch_extra_instructions": hitch_instructions_for_turn(
+                        None,
                         auto_pr_enabled=case["expected"],
                         auto_qa_enabled=False,
                     ),
@@ -1110,6 +1123,79 @@ class NewSessionViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self._assert_new_session_spawn(mock_spawn, **expected)
+
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_new_session")
+    @patch("hitch.main.repos.discover_repos")
+    def test_hitch_instructions_are_separate_from_new_session_prompts(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[_make_model("gpt-default", is_default=True)])
+        project = _make_project(repo_path=self.REPO, extra_system_prompt="Use project fixtures.")
+        cases = (
+            (False, False, False, False),
+            (False, True, False, False),
+            (True, False, False, False),
+            (True, False, True, False),
+            (True, False, False, True),
+            (True, False, True, True),
+        )
+        for index, (guidance_override, (auto_pr, auto_qa, plan_mode, image_only)) in enumerate(
+            product((None, "Use my Hitch workflow.\nKeep explanations brief.", ""), cases)
+        ):
+            with (
+                self.subTest(
+                    guidance=guidance_override, auto_pr=auto_pr, auto_qa=auto_qa, plan=plan_mode, image=image_only
+                ),
+                tempfile.TemporaryDirectory() as raw,
+                override_settings(CODEX_EVENTS_DIR=Path(raw)),
+            ):
+                client = Client()
+                _seed_cookies(
+                    client,
+                    **{
+                        _HITCH_EXTRA_INSTRUCTIONS_COOKIE: _encode_hitch_extra_instructions_cookie(guidance_override),
+                        _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt("Use personal conventions."),
+                    },
+                )
+                mock_spawn.reset_mock()
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"guidance-{index}")
+                prompt = "" if image_only else "Implement this.\n\nKeep this user text intact."
+                data: dict[str, Any] = {
+                    "prompt": prompt,
+                    "project": str(project.pk),
+                    "auto_pr": str(auto_pr).lower(),
+                    "auto_qa": str(auto_qa).lower(),
+                    "plan_mode": str(plan_mode).lower(),
+                }
+                if image_only:
+                    data["input_images"] = SimpleUploadedFile("screen.png", _PNG_BYTES, content_type="image/png")
+
+                response = client.post(reverse("new_session"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                expected: dict[str, Any] = {
+                    "developer_instructions": "Use personal conventions.\n\nUse project fixtures.",
+                    "hitch_extra_instructions": hitch_instructions_for_turn(
+                        guidance_override, auto_pr_enabled=auto_pr, auto_qa_enabled=auto_qa, plan_mode=plan_mode
+                    ),
+                    "model": "gpt-default",
+                    "reasoning_effort": None if plan_mode else "high",
+                }
+                if plan_mode:
+                    expected["plan_mode"] = True
+                if auto_pr and not plan_mode and guidance_override != "":
+                    expected.update(agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND, user_message_index=0)
+                if image_only:
+                    image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+                    self.assertEqual(len(image_paths), 1)
+                    self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+                    expected["input_image_paths"] = image_paths
+                self._assert_new_session_spawn(mock_spawn, prompt=prompt, **expected)
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
@@ -1279,14 +1365,10 @@ class NewSessionViewTests(TestCase):
             ),
         ]
 
-        for index, (
-            label,
-            data,
-            cookies,
-            thread_kwargs,
-            task_settings,
-        ) in enumerate(cases):
-            with self.subTest(label=label):
+        for index, ((label, data, cookies, thread_kwargs, task_settings), guidance_override) in enumerate(
+            product(cases, (None, "Use my Hitch workflow.", ""))
+        ):
+            with self.subTest(label=label, guidance_override=guidance_override):
                 self._clear_models_cache()
                 client = Client()
                 codex.models.return_value.data = (
@@ -1296,8 +1378,11 @@ class NewSessionViewTests(TestCase):
                 mock_create_thread.reset_mock()
                 mock_create_worktree.reset_mock()
                 mock_turn.reset_mock()
-                if cookies:
-                    _seed_cookies(client, **cookies)
+                _seed_cookies(
+                    client,
+                    **cookies,
+                    **{_HITCH_EXTRA_INSTRUCTIONS_COOKIE: _encode_hitch_extra_instructions_cookie(guidance_override)},
+                )
 
                 response = client.post(reverse("new_session"), data=data)
 
@@ -1315,6 +1400,8 @@ class NewSessionViewTests(TestCase):
                     thread_id=f"thread-{index}",
                     cwd=self.REPO,
                     prompt=task.prompt,
+                    hitch_extra_instructions=hitch_instructions_for_turn(guidance_override),
+                    new_thread=True,
                     sandbox_policy=None,
                     approval_mode="auto_review",
                     enable_memories=False,

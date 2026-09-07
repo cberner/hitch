@@ -50,7 +50,9 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
+from hitch.main.runtime.instruction_baseline import configured_developer_instructions, recorded_developer_instructions
 from hitch.main.sessions import session_index
+from hitch.main.sessions.hitch_instructions import combined_developer_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,7 @@ def spawn_new_session(
     input_image_paths: list[str] | None = None,
     thread_name: str | None = None,
     developer_instructions: str | None = None,
+    hitch_extra_instructions: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
@@ -159,7 +162,10 @@ def spawn_new_session(
     )
     start_kwargs: dict[str, Any] = {
         "cwd": cwd,
-        "developerInstructions": developer_instructions,
+        "developerInstructions": (
+            combined_developer_instructions(developer_instructions or "", hitch_extra_instructions)
+            if hitch_extra_instructions is not None else developer_instructions
+        ),
         "model": model,
     }
     if reasoning_effort:
@@ -182,6 +188,12 @@ def spawn_new_session(
     )
 
     def _create_and_persist(codex: Codex) -> tuple[str, str | None]:
+        nonlocal developer_instructions
+        if developer_instructions is None and hitch_extra_instructions is not None:
+            developer_instructions = configured_developer_instructions(codex, cwd)
+            start_kwargs["developerInstructions"] = combined_developer_instructions(
+                developer_instructions, hitch_extra_instructions,
+            )
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
         _persist_new_thread(codex, thread.id, name_source)
@@ -203,6 +215,7 @@ def spawn_new_session(
         prompt=prompt,
         input_image_paths=input_image_paths,
         developer_instructions=developer_instructions,
+        hitch_extra_instructions=hitch_extra_instructions,
         model=model,
         stored_model=model,
         reasoning_effort=reasoning_effort,
@@ -342,6 +355,8 @@ def spawn_turn(
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     developer_instructions: str | None = None,
+    hitch_extra_instructions: str | None = None,
+    new_thread: bool = False,
     purpose: str = CodexInstance.PURPOSE_USER,
     workflow_id: int | None = None,
     agent_kind: str = "",
@@ -356,17 +371,41 @@ def spawn_turn(
     text is copied from prior rows; omitted tool/config values mean Codex
     default for this turn, not "inherit the last worker row."
     """
+    previous = latest_for_thread(thread_id)
     if developer_instructions is None:
-        previous = latest_for_thread(thread_id)
         developer_instructions = (
             previous.developer_instructions if previous is not None else None
         )
+    if hitch_extra_instructions is not None and not developer_instructions and (
+        previous is None or previous.hitch_extra_instructions is None
+    ):
+        if new_thread:
+            with app_server_pool.borrow_codex(
+                Codex, enable_memories=enable_memories, web_search_mode=web_search_mode,
+            ) as codex:
+                developer_instructions = configured_developer_instructions(codex, cwd)
+        else:
+            from hitch.main.sessions.session_resume import _session_detail_metadata, _stored_rollout_path_for_thread
+
+            metadata = _session_detail_metadata(thread_id)
+            path = (
+                Path(metadata.codex_path)
+                if metadata is not None and metadata.codex_path
+                else _stored_rollout_path_for_thread(thread_id)
+            )
+            developer_instructions = recorded_developer_instructions(path)
+            if developer_instructions is None:
+                logger.warning(
+                    "Hitch instructions not applied to %s: existing developer instructions are unknown", thread_id,
+                )
+                hitch_extra_instructions = None
     return _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
         input_image_paths=input_image_paths,
         developer_instructions=developer_instructions or None,
+        hitch_extra_instructions=hitch_extra_instructions,
         model=model,
         stored_model=stored_model,
         reasoning_effort=reasoning_effort,
@@ -1650,6 +1689,7 @@ def _spawn_worker(
     prompt: str,
     input_image_paths: list[str] | None = None,
     developer_instructions: str | None = None,
+    hitch_extra_instructions: str | None = None,
     model: str | None = None,
     stored_model: str | None = None,
     reasoning_effort: str | None = None,
@@ -1690,6 +1730,7 @@ def _spawn_worker(
             input_image_paths=normalized_input_image_paths,
             input_attachment_paths=normalized_input_image_paths,
             developer_instructions=developer_instructions or "",
+            hitch_extra_instructions=hitch_extra_instructions,
             enable_memories=enable_memories,
             model=(stored_model if stored_model is not None else model) or "",
             reasoning_effort=(

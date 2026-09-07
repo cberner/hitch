@@ -71,6 +71,7 @@ from hitch.main.runtime.sdk_values import (
     string_value,
 )
 from hitch.main.sessions import agent_tasks, session_index, session_stage, token_usage
+from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 from hitch.main.sessions.message_intent import (
     _FIX_PR_SLASH_COMMAND,
 )
@@ -137,6 +138,7 @@ from hitch.main.sessions.session_stage_refresh import (
 from hitch.main.sessions.settings_cookies import (
     _APPROVAL_MODE_OPTIONS,
     _EXTRA_SYSTEM_PROMPT_MAX_LEN,
+    _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN,
     _LIVE_HANDLER_APPROVAL_MODES,
     _LIVE_PENDING_APPROVAL_DECISIONS_BY_MODE,
     _SANDBOX_POLICY_OPTIONS,
@@ -301,6 +303,13 @@ def _settings_context(
         "current_approval": current_settings.approval_mode,
         "current_extra_system_prompt": current_settings.extra_system_prompt,
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
+        "current_hitch_extra_instructions": (
+            DEFAULT_HITCH_EXTRA_INSTRUCTIONS
+            if current_settings.hitch_extra_instructions is None
+            else current_settings.hitch_extra_instructions
+        ),
+        "default_hitch_extra_instructions": DEFAULT_HITCH_EXTRA_INSTRUCTIONS,
+        "hitch_extra_instructions_max_len": _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
         "current_auto_qa": current_settings.auto_qa_enabled,
@@ -833,6 +842,10 @@ def _render_session_detail(
         rollout_config=rollout_model_config,
         stored_config=stored_model_config,
     )
+    instruction_instance = (
+        active_instance or codex_pool.latest_for_thread(session_id)
+        if not read_only else None
+    )
     response = render(
         request,
         "session.html",
@@ -857,6 +870,7 @@ def _render_session_detail(
             "display_title": display_title or _display_title(thread),
             "read_only": read_only,
             "system_prompt": system_prompt,
+            "instruction_instance": instruction_instance,
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,

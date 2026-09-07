@@ -29,6 +29,11 @@ space used by repetitive reasoning, command, and web-search activity.
   do not use this fallback; active-work and writer-conflict checks still apply.
 - `ST-thinking-visible`: Thinking messages are always rendered as normal,
   top-level transcript entries and are never hidden by an activity toggle.
+- `ST-instructions-visible`: Visible session pages expose the saved personal/
+  project and Hitch developer instructions for the active or latest turn in
+  a collapsible section. Legacy turns without separate Hitch instructions
+  say none were recorded. User messages render their stored contents without
+  stripping historical automatic instructions or other recognized text.
 - `ST-activity-runs`: Each consecutive run of two or more Reasoning, Command,
   and Web search messages is rendered as one collapsible group. Thinking
   messages and every other transcript entry end the current group.

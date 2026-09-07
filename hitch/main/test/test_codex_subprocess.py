@@ -565,6 +565,7 @@ class SpawnNewSessionTests(TestCase):
                 cwd="/repo",
                 prompt="hi",
                 developer_instructions="Prefer small, typed changes.",
+                hitch_extra_instructions="Review before finishing.",
                 model="gpt-5.6-sol",
                 reasoning_effort="max",
                 sandbox_policy="workspaceWrite",
@@ -574,7 +575,7 @@ class SpawnNewSessionTests(TestCase):
         payload = _thread_start_payload(codex)
         self.assertEqual(payload["cwd"], "/repo")
         self.assertEqual(
-            payload["developerInstructions"], "Prefer small, typed changes."
+            payload["developerInstructions"], "Prefer small, typed changes.\n\nReview before finishing."
         )
         self.assertEqual(payload["model"], "gpt-5.6-sol")
         self.assertEqual(payload["config"], {"model_reasoning_effort": "max"})
@@ -582,6 +583,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(payload["approvalPolicy"], "on-request")
         self.assertEqual(payload["approvalsReviewer"], "auto_review")
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
+        self.assertEqual(instance.hitch_extra_instructions, "Review before finishing.")
+        self.assertEqual(instance.prompt, "hi")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             model="gpt-5.6-sol",
@@ -869,6 +872,57 @@ class SpawnFailureTests(TestCase):
         self.assertFalse(CodexInstance.objects.filter(thread_id="unbound-thread").exists())
 
 
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process", return_value=SimpleNamespace(pid=0))
+    @patch("hitch.main.runtime.codex_pool.Codex")
+    def test_hitch_guidance_preserves_configured_developer_instructions(
+        self, mock_codex: MagicMock, _launch: MagicMock,
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex)
+        codex._client.request.return_value = SimpleNamespace(
+            config=SimpleNamespace(developer_instructions="Codex project instructions"),
+        )
+        with _events_dir() as root, override_settings(CODEX_EVENTS_DIR=Path(root)):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo", prompt="hi", hitch_extra_instructions="Hitch guidance",
+            )
+            self.assertEqual(instance.developer_instructions, "Codex project instructions")
+            self.assertEqual(
+                _thread_start_payload(codex)["developerInstructions"], "Codex project instructions\n\nHitch guidance",
+            )
+            with patch("hitch.main.runtime.app_server_pool.borrow_codex") as borrowed:
+                borrowed.return_value.__enter__.return_value = codex
+                manual = codex_pool.spawn_turn(
+                    thread_id="new-manual", cwd="/repo", prompt="Review", new_thread=True,
+                    hitch_extra_instructions="Hitch guidance",
+                )
+            self.assertEqual(manual.developer_instructions, "Codex project instructions")
+
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process", return_value=SimpleNamespace(pid=0))
+    def test_imported_instruction_baseline_is_saved_and_reused(self, _launch: MagicMock) -> None:
+        with _events_dir() as root, override_settings(CODEX_EVENTS_DIR=Path(root)):
+            path = Path(root) / "rollout.jsonl"
+            for index, baseline in enumerate(("Imported instructions", "", None)):
+                thread_id = f"imported-{index}"
+                path.write_text(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "developer", "content": [{"type": "input_text", "text": baseline}],
+                    "internal_chat_message_metadata_passthrough": {
+                        "content_item_kinds": ["generic.developer_instructions"],
+                    },
+                }}) + "\n")
+                SessionMetadata.objects.create(thread_id=thread_id, cwd="/repo", codex_path=str(path))
+                instance = codex_pool.spawn_turn(
+                    thread_id=thread_id, cwd="/repo", prompt="Follow up", hitch_extra_instructions="Hitch guidance",
+                )
+                self.assertEqual(instance.developer_instructions, baseline or "")
+                self.assertEqual(instance.hitch_extra_instructions, None if baseline is None else "Hitch guidance")
+                if baseline is not None:
+                    path.write_text("history no longer needed")
+                    cleared = codex_pool.spawn_turn(
+                        thread_id=thread_id, cwd="/repo", prompt="Follow up", hitch_extra_instructions="",
+                    )
+                    self.assertEqual(cleared.developer_instructions, baseline)
+                    self.assertEqual(cleared.hitch_extra_instructions, "")
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_marks_only_user_reviewer_approval_modes_live_editable(
@@ -4950,6 +5004,27 @@ class CodexWorkerCommandTests(TestCase):
         )
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(config.config_overrides, ("features.memories=false",))
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_separate_hitch_instructions_are_replaced_or_cleared_on_resume(
+        self, mock_codex: MagicMock,
+    ) -> None:
+        codex = mock_codex.return_value.__enter__.return_value
+        for personal, hitch, expected in (
+            ("Personal", "Custom Hitch", "Personal\n\nCustom Hitch"),
+            ("Personal", "", "Personal"),
+            ("", "", ""),
+        ):
+            with self.subTest(personal=personal, hitch=hitch), tempfile.TemporaryDirectory() as raw:
+                codex.thread_resume.reset_mock()
+                codex.thread_resume.return_value = _stub_thread_resume([
+                    _completed_event("turn-1", TurnStatus.completed),
+                ])
+                instance = self._make_instance(Path(raw), developer_instructions=personal)
+                instance.hitch_extra_instructions = hitch
+                instance.save(update_fields=["hitch_extra_instructions"])
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+                codex.thread_resume.assert_called_once_with("thread-1", developer_instructions=expected)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_terminal_worker_cleans_images_when_archive_requested(

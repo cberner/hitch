@@ -41,6 +41,7 @@ from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
 )
 from hitch.main.sessions import agent_tasks, session_index
+from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.message_intent import (
     _message_intent,
 )
@@ -785,13 +786,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(
             "image attachments are not supported for review or PR tasks"
         )
-    if not agent_task_activation and not plan_mode:
-        prompt = agent_tasks.with_automatic_review_guidance(
-            prompt,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-            pr_title=(proposed_session.title if proposed_session is not None else ""),
-        )
     if (
         not agent_task_activation
         and source_project is not None
@@ -925,6 +919,8 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "developer_instructions": source_developer_instructions or None,
             "enable_memories": settings.enable_memories,
             "user_message_index": 0,
+            "hitch_extra_instructions": hitch_instructions_for_turn(settings.hitch_extra_instructions),
+            "new_thread": True,
             "agent_kind": task.agent_kind,
         }
         if web_search_mode:
@@ -982,6 +978,13 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "cwd": session_cwd,
         "prompt": prompt,
         "developer_instructions": developer_instructions or None,
+        "hitch_extra_instructions": hitch_instructions_for_turn(
+            settings.hitch_extra_instructions,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            plan_mode=plan_mode,
+            pr_title=proposed_session.title if proposed_session is not None else "",
+        ),
         "model": settings.model or None,
         "reasoning_effort": None if plan_mode else settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
@@ -997,7 +1000,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
         spawn_kwargs["plan_mode"] = True
-    if auto_pr_enabled and not plan_mode:
+    if auto_pr_enabled and not plan_mode and spawn_kwargs["hitch_extra_instructions"]:
         spawn_kwargs["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
         spawn_kwargs["user_message_index"] = 0
     input_images_owned = False
