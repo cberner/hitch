@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth import get_user_model
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError
 from django.http import HttpResponse
 from django.test import (
     Client,
@@ -24,8 +25,10 @@ from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main.models import (
     AutonomousGoal,
+    CodexInstance,
     Project,
     ProposedSession,
+    RecentPrompt,
     SessionMetadata,
     UserSettings,
 )
@@ -34,6 +37,7 @@ from hitch.main.sessions import (
     agent_tasks,
     session_settings,
 )
+from hitch.main.sessions.prompt_history import remember_prompt
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
@@ -744,6 +748,7 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
         self.assertTrue(metadata.auto_qa_enabled)
+        self.assertEqual(RecentPrompt.objects.get().prompt, prompt)
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, metadata)
@@ -2041,3 +2046,91 @@ class NewSessionViewTests(TestCase):
         self.assertContains(response, 'class="new-session-close"')
         self.assertContains(response, 'aria-label="Cancel new session"')
         self.assertContains(response, ">Cancel</a>", count=1)
+        self.assertContains(response, "No recent prompts yet.")
+        self.assertEqual(response.context["recent_prompts"], [])
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_recent_prompts_store_only_new_submissions_and_keep_latest_twenty(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex)
+        CodexInstance.objects.create(
+            pid=0, thread_id="existing", cwd=self.REPO, prompt="Old worker prompt",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        response = self.client.get(reverse("new_session"))
+        self.assertEqual(response.context["recent_prompts"], [])
+
+        prompts = [f"Prompt {index}" for index in range(22)]
+        prompts[-1] = 'Full prompt\n<script>alert("unsafe")</script> & quotes'
+        for prompt in prompts:
+            remember_prompt(prompt)
+        remember_prompt("")
+        remember_prompt(" \n\t ")
+        response = self.client.get(reverse("new_session"))
+
+        self.assertEqual(response.context["recent_prompts"], list(reversed(prompts[2:])))
+        self.assertContains(response, 'data-recent-prompt="', count=20)
+        self.assertNotContains(response, '<script>alert("unsafe")</script>')
+        self.assertNotContains(response, "Old worker prompt")
+
+        remember_prompt("A new submitted prompt")
+        self.assertEqual(RecentPrompt.objects.count(), 20)
+        self.assertEqual(RecentPrompt.objects.latest("pk").prompt, "A new submitted prompt")
+        self.assertFalse(RecentPrompt.objects.filter(prompt=prompts[2]).exists())
+        with (
+            patch.object(RecentPrompt.objects, "create", side_effect=DatabaseError("locked")),
+            self.assertLogs("hitch.main.sessions.prompt_history", level="ERROR"),
+        ):
+            remember_prompt("Already accepted by worker")
+        self.assertEqual(RecentPrompt.objects.count(), 20)
+
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    @patch("hitch.main.views.common.Codex")
+    def test_recent_prompt_picker_browser(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock,
+    ) -> None:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+
+        _setup_codex(mock_codex)
+        prompt = 'First line\n<script>alert("unsafe")</script> & "quoted"\n' + "long text " * 100
+        remember_prompt(prompt)
+        response = self.client.get(reverse("new_session"), {"prompt": "Existing draft"})
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page(viewport={"width": 375, "height": 812})
+                page.set_content(response.content.decode())
+                history = page.locator("[data-prompt-history]")
+                trigger = history.locator("summary")
+                textarea = page.locator("#new-session-prompt")
+                trigger.focus()
+                page.keyboard.press("Enter")
+                self.assertTrue(history.evaluate("element => element.open"))
+                page.keyboard.press("Escape")
+                self.assertFalse(history.evaluate("element => element.open"))
+                self.assertTrue(trigger.evaluate("element => element === document.activeElement"))
+                self.assertEqual(textarea.input_value(), "Existing draft")
+                trigger.click()
+                page.locator("#new-session-title").click()
+                self.assertFalse(history.evaluate("element => element.open"))
+                trigger.click()
+                bounds = history.locator(".prompt-history-panel").bounding_box()
+                assert bounds is not None
+                self.assertGreaterEqual(bounds["x"], 0)
+                self.assertLessEqual(bounds["x"] + bounds["width"], 375)
+                textarea.evaluate("element => element.setCustomValidity('Enter a prompt')")
+                page.keyboard.press("Tab")
+                page.keyboard.press("Enter")
+                self.assertEqual(textarea.input_value(), prompt)
+                self.assertEqual(textarea.evaluate("element => element.validationMessage"), "")
+                self.assertTrue(textarea.evaluate("element => element === document.activeElement"))
+                self.assertFalse(history.evaluate("element => element.open"))
+                self.assertEqual(page.url, "about:blank")
+            finally:
+                browser.close()

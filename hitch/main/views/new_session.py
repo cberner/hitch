@@ -33,6 +33,7 @@ from hitch.main.models import (
     AutonomousGoal,
     Project,
     ProposedSession,
+    RecentPrompt,
     SessionMetadata,
 )
 from hitch.main.runtime import codex_pool, reconciliation
@@ -47,6 +48,7 @@ from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
+from hitch.main.sessions.prompt_history import remember_prompt
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
     _PLAN_MODE_REASONING_EFFORT,
@@ -631,6 +633,9 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "plan_mode_reasoning_effort": _PLAN_MODE_REASONING_EFFORT.value,
+            "recent_prompts": list(
+                RecentPrompt.objects.order_by("-pk").values_list("prompt", flat=True)[:20]
+            ),
             **settings_context,
             **new_session_context,
         },
@@ -667,6 +672,7 @@ def _remember_repo_and_redirect(
         cookie_updates = _settings_cookie_updates(remembered_values)
     else:
         cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
+    remember_prompt(request.POST.get("prompt", ""))
     response = redirect("session", session_id=thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response
