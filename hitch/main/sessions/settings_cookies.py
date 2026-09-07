@@ -8,6 +8,7 @@ from django.core import signing
 from django.http import HttpRequest, HttpResponse
 
 from hitch.main.models import ApprovalRequest, AutonomousGoal, Project
+from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
 # ``DEFAULT_AUTO_FIELD = BigAutoField``, which is a signed 64-bit
@@ -33,6 +34,7 @@ class SettingsValues(NamedTuple):
     visible_session_project_ids: tuple[int, ...] | None
     show_no_project_sessions: bool
     enable_memories: bool
+    hitch_extra_instructions: str | None = None
 
 
 class SessionProjectVisibility(NamedTuple):
@@ -99,6 +101,7 @@ _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
+_HITCH_EXTRA_INSTRUCTIONS_COOKIE = "hitch_extra_instructions"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _AUTO_QA_COOKIE = "hitch_auto_qa"
@@ -130,6 +133,7 @@ _REASONING_EFFORT_MAX_LEN = 32
 # past the browser limit. ``_extra_system_prompt_cookie_fits`` enforces the byte
 # budget below; both checks run on save.
 _EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
+_HITCH_EXTRA_INSTRUCTIONS_MAX_LEN = max(2500, len(DEFAULT_HITCH_EXTRA_INSTRUCTIONS))
 
 # RFC 6265 only guarantees ~4096 bytes per cookie (name + value + attributes).
 # When a signed cookie crosses that line the browser silently drops it, so a
@@ -315,6 +319,37 @@ def _import_extra_system_prompt(raw: str) -> Any:
     return decoded if len(decoded) <= _EXTRA_SYSTEM_PROMPT_MAX_LEN else _SKIP_IMPORT
 
 
+def _encode_hitch_extra_instructions_cookie(value: str | None) -> str:
+    # Missing/empty cookies mean defaults; the tag preserves an explicit blank.
+    if value is None:
+        return ""
+    return "v1:" + base64.urlsafe_b64encode(value.encode()).decode("ascii")
+
+
+def _import_hitch_extra_instructions(raw: str) -> Any:
+    if raw == "":
+        return None
+    if not raw.startswith("v1:") or not _signed_cookie_fits(
+        _HITCH_EXTRA_INSTRUCTIONS_COOKIE, raw
+    ):
+        return _SKIP_IMPORT
+    try:
+        value = base64.b64decode(raw[3:], altchars=b"-_", validate=True).decode()
+    except (binascii.Error, UnicodeError, ValueError):
+        return _SKIP_IMPORT
+    if (
+        len(value) > _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN
+        or _encode_hitch_extra_instructions_cookie(value) != raw
+    ):
+        return _SKIP_IMPORT
+    return None if value == DEFAULT_HITCH_EXTRA_INSTRUCTIONS else value
+
+
+def _decode_hitch_extra_instructions_cookie(raw: str) -> str | None:
+    value = _import_hitch_extra_instructions(raw)
+    return value if isinstance(value, str) else None
+
+
 def _import_visible_session_project_ids(raw: str) -> Any:
     valid = _valid_visible_session_project_ids(
         _decode_visible_session_project_ids_cookie(raw)
@@ -406,6 +441,13 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
         default_true=True,
     ),
     _bool_spec("enable_memories", _ENABLE_MEMORIES_COOKIE),
+    _SettingSpec(
+        "hitch_extra_instructions",
+        _HITCH_EXTRA_INSTRUCTIONS_COOKIE,
+        to_cookie=_encode_hitch_extra_instructions_cookie,
+        from_cookie=_decode_hitch_extra_instructions_cookie,
+        import_value=_import_hitch_extra_instructions,
+    ),
 )
 
 # Completeness guarantee: every SettingsValues field has exactly one spec.
@@ -435,6 +477,12 @@ def _extra_system_prompt_cookie_fits(value: str) -> bool:
     )
 
 
+def _hitch_extra_instructions_cookie_fits(value: str | None) -> bool:
+    return _signed_cookie_fits(
+        _HITCH_EXTRA_INSTRUCTIONS_COOKIE, _encode_hitch_extra_instructions_cookie(value)
+    )
+
+
 def _visible_session_project_ids_cookie_fits(values: tuple[int, ...]) -> bool:
     return _signed_cookie_fits(
         _VISIBLE_SESSION_PROJECTS_COOKIE,
@@ -444,6 +492,10 @@ def _visible_session_project_ids_cookie_fits(values: tuple[int, ...]) -> bool:
 
 def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> None:
     for name, value in updates.items():
+        # Account values can exceed the guest budget; remove any stale mirror.
+        if name == _HITCH_EXTRA_INSTRUCTIONS_COOKIE and not _signed_cookie_fits(name, value):
+            response.delete_cookie(name, samesite="Lax")
+            continue
         response.set_signed_cookie(
             name, value, max_age=_COOKIE_MAX_AGE, samesite="Lax"
         )

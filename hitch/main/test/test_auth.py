@@ -8,6 +8,8 @@ from django.test import TestCase
 from django.urls import reverse
 
 from hitch.main.models import UserSettings
+from hitch.main.sessions import settings_cookies
+from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.test.support import (
     _cookie_value,
     _decode_extra_system_prompt,
@@ -38,6 +40,23 @@ def _make_user(username: str = "dev@example.com", password: str = "StrongPass123
 
 
 class AuthViewTests(TestCase):
+    def test_hitch_instructions_login_import_and_logout_mirror(self) -> None:
+        cookie = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_COOKIE
+        encode = settings_cookies._encode_hitch_extra_instructions_cookie
+        for index, value in enumerate((None, "", "Custom Hitch instructions")):
+            with self.subTest(value=value):
+                username = f"instructions-{index}@example.com"
+                user = _make_user(username)
+                _seed_cookies(self.client, **{cookie: encode(value)})
+                response = self.client.post(reverse("login"), {
+                    "username": username, "password": "StrongPass123!",
+                })
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(UserSettings.objects.get(user=user).hitch_extra_instructions, value)
+                self.assertEqual(_cookie_value(response, cookie), encode(value))
+                response = self.client.post(reverse("logout"))
+                self.assertEqual(_cookie_value(response, cookie), encode(value))
+
     def test_register_accepts_email_shaped_username_and_logs_user_in(self) -> None:
         response = self.client.post(
             reverse("register"),
@@ -437,6 +456,7 @@ class AuthenticatedSettingsTests(TestCase):
             thread_id="abc",
             cwd="/repo",
             prompt="follow-up",
+            hitch_extra_instructions=hitch_instructions_for_turn(None),
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
             enable_memories=True,

@@ -1,0 +1,12 @@
+<script>
+    (function () {
+        const button = document.querySelector("[data-hitch-instructions-reset]");
+        const textarea = button.form.elements.namedItem("hitch_extra_instructions");
+        const defaults = JSON.parse(document.getElementById("hitch-extra-instructions-default").textContent);
+        button.addEventListener("click", function () {
+            textarea.value = defaults;
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            textarea.focus();
+        });
+    })();
+</script>

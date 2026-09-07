@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 import subprocess
 from types import SimpleNamespace
@@ -6,15 +7,18 @@ from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, SimpleTestCase, TestCase, override_settings
+from django.template.loader import render_to_string
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import caches, context_processors
 from hitch.main.models import GlobalSettings, UserSettings
 from hitch.main.sessions import settings_cookies
+from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 from hitch.main.test.support import (
     _cookie_value,
     _make_project,
@@ -1086,6 +1090,171 @@ class UpdateSettingsViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(GlobalSettings.objects.exists())
+
+
+class HitchExtraInstructionsSettingsTests(TestCase):
+    @patch("hitch.main.caches._schedule_models_refresh")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
+    def test_default_custom_blank_reset_and_absent_post(
+        self, _discover: MagicMock, _refresh: MagicMock
+    ) -> None:
+        user = get_user_model().objects.create_user("instructions@example.com")
+        cookie = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_COOKIE
+        for authenticated in (False, True):
+            with self.subTest(authenticated=authenticated):
+                client = Client()
+                if authenticated:
+                    client.force_login(user)
+                response = client.get(reverse("update_settings"))
+                self.assertEqual(
+                    response.context["current_hitch_extra_instructions"],
+                    DEFAULT_HITCH_EXTRA_INSTRUCTIONS,
+                )
+                for posted, expected in (
+                    ("  Custom instructions\n日本語  ", "  Custom instructions\n日本語  "),
+                    (None, "  Custom instructions\n日本語  "),
+                    ("", ""),
+                    (None, ""),
+                    (DEFAULT_HITCH_EXTRA_INSTRUCTIONS.replace("\n", "\r\n"), None),
+                    (None, None),
+                ):
+                    with self.subTest(posted=posted):
+                        data = {} if posted is None else {"hitch_extra_instructions": posted}
+                        response = client.post(reverse("update_settings"), data)
+                        self.assertEqual(response.status_code, 302)
+                        self.assertEqual(
+                            settings_cookies._decode_hitch_extra_instructions_cookie(
+                                _cookie_value(response, cookie)
+                            ),
+                            expected,
+                        )
+                        if authenticated:
+                            self.assertEqual(
+                                UserSettings.objects.get(user=user).hitch_extra_instructions,
+                                expected,
+                            )
+                        response = client.get(reverse("update_settings"))
+                        resolved = DEFAULT_HITCH_EXTRA_INSTRUCTIONS if expected is None else expected
+                        self.assertEqual(response.context["current_hitch_extra_instructions"], resolved)
+                        self.assertContains(response, f'>{escape(resolved)}</textarea>')
+
+    def test_character_and_guest_cookie_limits(self) -> None:
+        user = get_user_model().objects.create_user("limits@example.com")
+        cookie = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_COOKIE
+        limit = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_MAX_LEN
+        unicode_value = "😀" * limit
+        for authenticated in (False, True):
+            client = Client()
+            if authenticated:
+                client.force_login(user)
+            for value, accepted in (("x" * limit, True), ("x" * (limit + 1), False), (unicode_value, authenticated)):
+                with self.subTest(authenticated=authenticated, length=len(value)):
+                    response = client.post(reverse("update_settings"), {"hitch_extra_instructions": value})
+                    self.assertEqual(response.status_code, 302 if accepted else 400)
+                    if not accepted:
+                        self.assertNotIn(cookie, response.cookies)
+                    elif value == unicode_value:
+                        self.assertEqual(response.cookies[cookie]["max-age"], 0)
+                    if authenticated:
+                        self.assertEqual(
+                            UserSettings.objects.get(user=user).hitch_extra_instructions,
+                            value if accepted else "x" * limit,
+                        )
+            if authenticated:
+                for data, expected in (
+                    ({}, unicode_value),
+                    ({"hitch_extra_instructions": ""}, ""),
+                    ({"hitch_extra_instructions": DEFAULT_HITCH_EXTRA_INSTRUCTIONS}, None),
+                    ({"hitch_extra_instructions": unicode_value}, unicode_value),
+                ):
+                    response = client.post(reverse("update_settings"), data)
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(UserSettings.objects.get(user=user).hitch_extra_instructions, expected)
+                    if expected == unicode_value:
+                        self.assertEqual(response.cookies[cookie]["max-age"], 0)
+                    else:
+                        self.assertEqual(
+                            _cookie_value(response, cookie),
+                            settings_cookies._encode_hitch_extra_instructions_cookie(expected),
+                        )
+                response = client.post(reverse("logout"))
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.cookies[cookie]["max-age"], 0)
+                self.assertEqual(UserSettings.objects.get(user=user).hitch_extra_instructions, unicode_value)
+
+    def test_cookie_import_rejects_malformed_and_oversized_values(self) -> None:
+        cookie = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_COOKIE
+        encode = settings_cookies._encode_hitch_extra_instructions_cookie
+        cases = [
+            ("", None), (encode(""), ""), (encode("custom\n日本語"), "custom\n日本語"),
+            (encode(DEFAULT_HITCH_EXTRA_INSTRUCTIONS), None),
+            ("raw text", settings_cookies._SKIP_IMPORT),
+            ("v2:", settings_cookies._SKIP_IMPORT),
+            ("v1:!!!!", settings_cookies._SKIP_IMPORT),
+            ("v1:Zg", settings_cookies._SKIP_IMPORT),
+            ("v1:Zh==", settings_cookies._SKIP_IMPORT),
+            ("v1:_w==", settings_cookies._SKIP_IMPORT),
+            ("v1:日本語", settings_cookies._SKIP_IMPORT),
+            (encode("x" * (settings_cookies._HITCH_EXTRA_INSTRUCTIONS_MAX_LEN + 1)), settings_cookies._SKIP_IMPORT),
+            (encode("あ" * 2400), settings_cookies._SKIP_IMPORT),
+        ]
+        request = RequestFactory().get("/")
+        self.assertEqual(settings_cookies._valid_cookie_setting_updates(request), {})
+        for raw, expected in cases:
+            with self.subTest(raw=raw[:30]):
+                client = Client()
+                _seed_cookies(client, **{cookie: raw})
+                request.COOKIES = {cookie: client.cookies[cookie].value}
+                updates = settings_cookies._valid_cookie_setting_updates(request)
+                self.assertEqual(
+                    updates,
+                    {} if expected is settings_cookies._SKIP_IMPORT else {"hitch_extra_instructions": expected},
+                )
+                self.assertEqual(
+                    settings_cookies._decode_hitch_extra_instructions_cookie(raw),
+                    None if expected is settings_cookies._SKIP_IMPORT else expected,
+                )
+        request.COOKIES[cookie] += "tampered"
+        self.assertEqual(settings_cookies._valid_cookie_setting_updates(request), {})
+
+    def test_reset_uses_safe_json_and_does_not_submit(self) -> None:
+        defaults = '</script><script>window.unsafe = true</script>\n"日本語" & <'
+        html = render_to_string("_settings_form.html", {
+            "current_hitch_extra_instructions": "custom",
+            "default_hitch_extra_instructions": defaults,
+            "hitch_extra_instructions_max_len": settings_cookies._HITCH_EXTRA_INSTRUCTIONS_MAX_LEN,
+        })
+        self.assertNotIn(defaults, html)
+        match = re.search(r'<script id="hitch-extra-instructions-default" type="application/json">(.*?)</script>', html)
+        assert match is not None
+        self.assertEqual(json.loads(match.group(1)), defaults)
+        self.assertIn('type="button" class="button secondary" data-hitch-instructions-reset', html)
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.set_content(html)
+                page.evaluate("""() => {
+                    window.submitted = false;
+                    document.querySelector('form').addEventListener('submit', (event) => {
+                        event.preventDefault();
+                        window.submitted = true;
+                    });
+                }""")
+                page.locator('[data-hitch-instructions-reset]').click()
+                self.assertEqual(page.locator('[name="hitch_extra_instructions"]').input_value(), defaults)
+                self.assertFalse(page.evaluate("window.submitted"))
+                self.assertIsNone(page.evaluate("window.unsafe"))
+            finally:
+                browser.close()
 
 
 class AuthenticatedWebSearchSettingsTests(TestCase):

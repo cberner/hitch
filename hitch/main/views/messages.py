@@ -32,6 +32,7 @@ from hitch.main.runtime.sdk_values import (
 )
 from hitch.main.sessions import agent_tasks
 from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.message_intent import (
     _message_intent,
     _MessageIntent,
@@ -549,6 +550,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 "model": task_model or None,
                 "reasoning_effort": task_reasoning_effort or None,
                 "developer_instructions": developer_instructions or None,
+                "hitch_extra_instructions": hitch_instructions_for_turn(settings.hitch_extra_instructions),
                 "enable_memories": settings.enable_memories,
                 "user_message_index": _count_user_entries(thread_entries),
                 "agent_kind": task.agent_kind,
@@ -568,20 +570,20 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 name="watch_pr",
             )
         )
-        if not plan_mode:
-            prompt = agent_tasks.with_automatic_review_guidance(
-                prompt,
-                auto_pr_enabled=automatic_pr_available,
-                auto_qa_enabled=auto_qa_enabled,
-            )
         spawn_kwargs: dict[str, Any] = {
             "thread_id": session_id,
             "cwd": cwd,
             "prompt": prompt,
+            "hitch_extra_instructions": hitch_instructions_for_turn(
+                settings.hitch_extra_instructions,
+                auto_pr_enabled=automatic_pr_available,
+                auto_qa_enabled=auto_qa_enabled,
+                plan_mode=plan_mode,
+            ),
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": approval_mode,
         }
-        if automatic_pr_available:
+        if automatic_pr_available and spawn_kwargs["hitch_extra_instructions"]:
             spawn_kwargs["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
             spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
         if input_image_paths:

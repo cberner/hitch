@@ -522,6 +522,8 @@ class CodexInstance(models.Model):
     # app-server in-memory state from the request process that created the
     # thread.
     developer_instructions = models.TextField(blank=True, default="")
+    # A string snapshot, or null for turns predating separate Hitch guidance.
+    hitch_extra_instructions = models.JSONField(blank=True, null=True, default=None)
     enable_memories = models.BooleanField(default=False)
     model = models.CharField(max_length=256, blank=True, default="")
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
@@ -834,6 +836,8 @@ class UserSettings(models.Model):
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
     extra_system_prompt = models.TextField(blank=True, default="")
+    # Null uses the built-in defaults; an empty string explicitly disables them.
+    hitch_extra_instructions = models.JSONField(blank=True, null=True, default=None)
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)

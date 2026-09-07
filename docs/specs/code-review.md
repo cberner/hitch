@@ -79,9 +79,13 @@ and their optional delegation through Codex's native subagents.
   PR currently registered to the session. It does not infer or create a PR when
   no registered identity exists.
 - `REVIEW-auto-guidance`: Auto-QA or Auto-PR adds the corresponding review or
-  publication/watch instruction to the original non-Plan coding turn. The
-  coding agent completes it in that turn; Hitch does not launch a follow-up
-  turn or track a framework trigger.
+  publication/watch context through the editable Hitch extra instructions in
+  the original coding turn's developer instructions. The default guidance
+  completes the selected workflow in that turn and suppresses automatic work
+  in Plan mode. Clearing the setting disables added Hitch instructions.
+  Submitted user messages are not augmented. Hitch does not launch a follow-up
+  turn or track a framework trigger. Explicit review/PR shortcuts remain user
+  requests independently of this setting.
 - `REVIEW-trigger-settings`: Manual review/PR turns retain the session's model,
   reasoning effort, developer instructions, sandbox, approval, memory,
   web-search, and message-index settings. Automatic guidance runs under the
