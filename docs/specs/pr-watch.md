@@ -65,6 +65,12 @@ that lets Hitch display a session's registered PR.
 - `PRWATCH-return-conditions`: An invocation returns when the PR is terminal,
   all deterministic gates pass, an actionable gate is blocked, new feedback
   needs assessment, the watch times out, or a GitHub command fails.
+- `PRWATCH-timeout-diagnostics`: A timeout summary identifies the watch time
+  limit and explains the gates still pending in the last complete observation,
+  or states that no complete observation was available. Missing CI results
+  remain pending, but are not described as running jobs unless pending jobs
+  were observed. Missing review approval remains pending even when the
+  repository has no CI workflows.
 - `PRWATCH-untrusted-input`: PR comments, review bodies, thread text, and CI
   details are identified as untrusted data. The coding agent assesses them
   before acting.

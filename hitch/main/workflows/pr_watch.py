@@ -506,16 +506,32 @@ def _watch_result(
 def _result_from_observation(
     status: str, observation: dict[str, Any]
 ) -> dict[str, Any]:
+    gates = observation.get("gates")
+    safe_gates = gates if isinstance(gates, list) else []
+    summary = string_from_any(observation.get("summary")) or "Hitch checked the PR."
+    if status == "timed_out":
+        if observation:
+            reasons = " ".join(
+                f"{gate['label']}: {gate['summary']}"
+                for gate in safe_gates
+                if gate.get("status") != "passed"
+            )
+            summary = (
+                f"PR watch reached its time limit. Last observation: {summary}"
+                + (f" {reasons}" if reasons else "")
+            )
+        else:
+            summary = (
+                "PR watch reached its time limit before a complete observation "
+                "was available."
+            )
     return {
         "status": status,
-        "summary": string_from_any(observation.get("summary"))
-        or "Hitch checked the PR.",
+        "summary": summary,
         "feedback": string_from_any(observation.get("feedback")),
         "feedback_fingerprint": feedback_fingerprint(observation),
         "pr": _compact_pr_handoff(observation.get("pr")),
-        "gates": observation.get("gates")
-        if isinstance(observation.get("gates"), list)
-        else [],
+        "gates": safe_gates,
         "blockers": observation.get("blockers")
         if isinstance(observation.get("blockers"), list)
         else [],

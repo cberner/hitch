@@ -699,7 +699,12 @@ def _ci_gate(handoff: dict[str, Any]) -> dict[str, Any]:
             actionable=True,
         )
     if status == "pending":
-        return _pr_gate(_PR_GATE_CI, "CI", _PR_GATE_PENDING, "CI is still running.")
+        summary = (
+            "CI is still running."
+            if _pr_list_has_items(handoff.get("pending_jobs"))
+            else "Waiting for CI results; no pending jobs were reported."
+        )
+        return _pr_gate(_PR_GATE_CI, "CI", _PR_GATE_PENDING, summary)
     return _pr_gate(_PR_GATE_CI, "CI", _PR_GATE_PENDING, "Waiting for CI status.")
 
 
