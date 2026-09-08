@@ -17,6 +17,7 @@ from hitch.main.runtime.codex_tools import (
 from hitch.main.sessions import agent_tasks
 from hitch.main.test.support import _make_project
 from hitch.main.workflows import pr_tracking, pr_watch, system_agents
+from hitch.main.workflows.gh_cli import _GhPrOpenError
 from hitch.main.workflows.gh_observations import (
     _evaluate_pr_gates,
     _gh_watch_blockers,
@@ -134,6 +135,87 @@ class PrWatchTests(SimpleTestCase):
             result = pr_watch.watch_pr(cwd=cwd, url=_PR_URL, timeout_seconds=0)
 
         self.assertEqual(result["status"], "timed_out")
+        self.assertIn("before a complete observation", result["summary"])
+        mock_observe.assert_not_called()
+
+    @patch("hitch.main.workflows.pr_watch._gh_pr_status_checks")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_review_threads")
+    @patch("hitch.main.workflows.pr_watch._gh_pr_view_payload")
+    def test_timeout_explains_missing_review_and_ci(
+        self,
+        mock_view: MagicMock,
+        mock_threads: MagicMock,
+        mock_checks: MagicMock,
+    ) -> None:
+        mock_view.return_value = {
+            "url": _PR_URL,
+            "number": 42,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "reviews": [],
+            "reactionGroups": [],
+        }
+        mock_threads.return_value = ([], True)
+        clock = {"elapsed": 0.0}
+        for checks, complete, running in (
+            (None, True, False),
+            ([], True, False),
+            ([{"name": "tests", "status": "IN_PROGRESS"}], True, True),
+            ([{"name": "tests", "conclusion": "SUCCESS"}], False, False),
+        ):
+            with self.subTest(checks=checks, complete=complete):
+                mock_checks.return_value = (checks, complete)
+                clock["elapsed"] = 0.0
+
+                def sleep(seconds: float) -> None:
+                    clock["elapsed"] += seconds
+
+                with tempfile.TemporaryDirectory() as cwd:
+                    result = pr_watch.watch_pr(
+                        cwd=cwd,
+                        url=_PR_URL,
+                        monotonic=lambda: clock["elapsed"],
+                        sleep=sleep,
+                    )
+
+                self.assertEqual(clock["elapsed"], 30 * 60)
+                self.assertEqual(result["status"], "timed_out")
+                self.assertIn("reached its time limit", result["summary"])
+                self.assertIn("Last observation: Pending gates: Review, CI.", result["summary"])
+                self.assertIn("thumbs-up reaction or review approval", result["summary"])
+                self.assertEqual("CI is still running." in result["summary"], running)
+                self.assertEqual("no pending jobs were reported" in result["summary"], not running)
+                self.assertEqual(result["pr"]["url"], _PR_URL)
+                self.assertEqual(result["blockers"], [])
+
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_timeout_during_poll_retains_last_complete_observation(
+        self, mock_observe: MagicMock
+    ) -> None:
+        observation = _observation({"review_signal": ""})
+        elapsed = 0.0
+
+        def observe(**_kwargs: Any) -> dict[str, object]:
+            nonlocal elapsed
+            if mock_observe.call_count == 1:
+                return observation
+            elapsed = 1800.0
+            raise _GhPrOpenError("GitHub command timed out")
+
+        mock_observe.side_effect = observe
+        with tempfile.TemporaryDirectory() as cwd:
+            result = pr_watch.watch_pr(
+                cwd=cwd,
+                url=_PR_URL,
+                poll_seconds=0,
+                monotonic=lambda: elapsed,
+            )
+
+        self.assertEqual(result["status"], "timed_out")
+        self.assertIn("Last observation: Pending gates: Review.", result["summary"])
+        self.assertEqual(result["gates"], observation["gates"])
+        self.assertEqual(result["pr"], observation["pr"])
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_cancellation_interrupts_polling_wait(
