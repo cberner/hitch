@@ -759,6 +759,7 @@ class NewSessionViewTests(TestCase):
         metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
         self.assertTrue(metadata.auto_qa_enabled)
         self.assertEqual(RecentPrompt.objects.get().prompt, prompt)
+        self.assertEqual(RecentPrompt.objects.get().project, project)
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, metadata)
@@ -2133,7 +2134,7 @@ class NewSessionViewTests(TestCase):
         self.assertContains(response, 'class="new-session-close"')
         self.assertContains(response, 'aria-label="Cancel new session"')
         self.assertContains(response, ">Cancel</a>", count=1)
-        self.assertContains(response, "No recent prompts yet.")
+        self.assertContains(response, "No recent prompts yet for this project.")
         self.assertEqual(response.context["recent_prompts"], [])
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
@@ -2157,7 +2158,10 @@ class NewSessionViewTests(TestCase):
         remember_prompt(" \n\t ")
         response = self.client.get(reverse("new_session"))
 
-        self.assertEqual(response.context["recent_prompts"], list(reversed(prompts[2:])))
+        self.assertEqual(
+            response.context["recent_prompts"],
+            [{"prompt": prompt, "project_id": None} for prompt in reversed(prompts[2:])],
+        )
         self.assertContains(response, 'data-recent-prompt="', count=20)
         self.assertNotContains(response, '<script>alert("unsafe")</script>')
         self.assertNotContains(response, "Old worker prompt")
@@ -2173,6 +2177,46 @@ class NewSessionViewTests(TestCase):
             remember_prompt("Already accepted by worker")
         self.assertEqual(RecentPrompt.objects.count(), 20)
 
+    def test_recent_prompts_retain_twenty_per_project(self) -> None:
+        project = _make_project()
+        SessionMetadata.objects.create(thread_id="project-thread", project=project)
+        SessionMetadata.objects.create(
+            thread_id="hidden-thread", project=project, is_hidden_system_session=True,
+        )
+        remember_prompt("Bare repo prompt")
+        for index in range(22):
+            remember_prompt(f"Project prompt {index}", "project-thread")
+        remember_prompt("Hidden prompt", "hidden-thread")
+        self.assertEqual(RecentPrompt.objects.filter(project=project).count(), 20)
+        self.assertEqual(
+            RecentPrompt.objects.filter(project=project).earliest("pk").prompt,
+            "Project prompt 2",
+        )
+        self.assertEqual(RecentPrompt.objects.get(project=None).prompt, "Bare repo prompt")
+        project.delete()
+        self.assertEqual(RecentPrompt.objects.count(), 1)
+
+    def test_recent_prompt_infers_project_unless_explicitly_cleared(self) -> None:
+        project = _make_project()
+        for metadata_fields in (None, {}, {"project_cleared": True}):
+            with self.subTest(metadata=metadata_fields):
+                SessionMetadata.objects.all().delete()
+                if metadata_fields is not None:
+                    SessionMetadata.objects.create(
+                        thread_id="imported", cwd=project.repo_path, **metadata_fields,
+                    )
+                remember_prompt("Follow-up", "imported", cwd=project.repo_path)
+                self.assertEqual(
+                    RecentPrompt.objects.latest("pk").project,
+                    None if metadata_fields else project,
+                )
+        SessionMetadata.objects.all().delete()
+        CodexInstance.objects.create(
+            pid=0, thread_id="active", cwd=project.repo_path, prompt="Initial prompt",
+        )
+        remember_prompt("Steering", "active")
+        self.assertEqual(RecentPrompt.objects.latest("pk").project, project)
+
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
     def test_recent_prompt_picker_browser(
@@ -2183,8 +2227,16 @@ class NewSessionViewTests(TestCase):
 
         _setup_codex(mock_codex)
         prompt = 'First line\n<script>alert("unsafe")</script> & "quoted"\n' + "long text " * 100
-        remember_prompt(prompt)
-        response = self.client.get(reverse("new_session"), {"prompt": "Existing draft"})
+        project = _make_project()
+        empty_project = _make_project(name="Empty project", repo_path="/empty")
+        _mock_discover.return_value = [Path(project.repo_path), Path(empty_project.repo_path)]
+        SessionMetadata.objects.create(thread_id="project-thread", project=project)
+        remember_prompt("Bare repo prompt")
+        remember_prompt(prompt, "project-thread")
+        response = self.client.get(
+            reverse("new_session"),
+            {"prompt": "Existing draft", "project": str(project.pk)},
+        )
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)
@@ -2196,6 +2248,13 @@ class NewSessionViewTests(TestCase):
                 history = page.locator("[data-prompt-history]")
                 trigger = history.locator("summary")
                 textarea = page.locator("#new-session-prompt")
+                project_select = page.locator("[data-new-session-project]")
+                visible_entries = history.locator("[data-recent-prompt]:visible")
+                slash_bounds = page.locator("[data-slash-trigger]").bounding_box()
+                trigger_bounds = trigger.bounding_box()
+                assert slash_bounds is not None and trigger_bounds is not None
+                self.assertEqual(slash_bounds["x"], trigger_bounds["x"])
+                self.assertGreater(trigger_bounds["y"], slash_bounds["y"] + slash_bounds["height"])
                 trigger.focus()
                 page.keyboard.press("Enter")
                 self.assertTrue(history.evaluate("element => element.open"))
@@ -2207,6 +2266,20 @@ class NewSessionViewTests(TestCase):
                 page.locator("#new-session-title").click()
                 self.assertFalse(history.evaluate("element => element.open"))
                 trigger.click()
+                self.assertEqual(visible_entries.count(), 1)
+                self.assertEqual(visible_entries.inner_text(), prompt)
+                project_select.select_option(str(empty_project.pk))
+                self.assertEqual(visible_entries.count(), 0)
+                self.assertTrue(history.locator("[data-prompt-history-empty]").is_visible())
+                bare_value = project_select.locator("option").last.get_attribute("value")
+                assert bare_value is not None
+                project_select.select_option(bare_value)
+                self.assertEqual(visible_entries.inner_text(), "Bare repo prompt")
+                project_select.select_option(str(project.pk))
+                self.assertEqual(visible_entries.inner_text(), prompt)
+                self.assertFalse(history.locator("[data-prompt-history-empty]").is_visible())
+                self.assertEqual(textarea.input_value(), "Existing draft")
+                trigger.focus()
                 bounds = history.locator(".prompt-history-panel").bounding_box()
                 assert bounds is not None
                 self.assertGreaterEqual(bounds["x"], 0)

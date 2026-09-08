@@ -180,18 +180,20 @@
         .new-session-command {
             position: relative;
         }
-        .new-session-prompt-heading {
-            position: relative;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+        .new-session-prompt-tools {
+            display: grid;
+            gap: 0.5rem;
         }
+        .prompt-history { position: relative; }
         .prompt-history summary {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 2rem;
-            height: 2rem;
+            width: 2.6rem;
+            height: 2.6rem;
+            border: 1px solid var(--border-strong);
+            background: var(--surface);
+            color: var(--text-muted);
             border-radius: var(--radius-sm);
             cursor: pointer;
             list-style: none;
@@ -203,10 +205,10 @@
         .prompt-history-list button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
         .prompt-history-panel {
             position: absolute;
-            top: 100%;
-            right: 0;
-            z-index: 10;
-            width: min(32rem, 100%);
+            top: calc(100% + 0.4rem);
+            left: 0;
+            z-index: 35;
+            width: min(32rem, calc(100vw - 5rem));
             max-height: min(24rem, 60vh);
             overflow-y: auto;
             background: var(--surface);
@@ -371,34 +373,33 @@
                 <input type="hidden" name="rendered_model" value="{{ current_model }}">
                 <input type="hidden" name="rendered_reasoning_effort" value="{{ current_effort }}">
                 <div class="new-session-field">
-                    <div class="new-session-prompt-heading">
-                        <label for="new-session-prompt">Prompt</label>
-                        <details class="prompt-history" data-prompt-history>
-                            <summary aria-label="Recent prompts" title="Recent prompts">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                    <path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2" />
-                                </svg>
-                            </summary>
-                            <div class="prompt-history-panel" role="region" aria-label="Recent prompts">
-                                <p>Recent prompts</p>
-                                <ul class="prompt-history-list">
-                                    {% for prompt in recent_prompts %}
-                                    <li><button type="button" data-recent-prompt="{{ forloop.counter0 }}"><span>{{ prompt }}</span></button></li>
-                                    {% empty %}
-                                    <li><p>No recent prompts yet.</p></li>
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                        </details>
-                    </div>
+                    <label for="new-session-prompt">Prompt</label>
                     <div class="new-session-prompt-row">
-                        <div class="new-session-command" data-slash-command>
-                            <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
-                            <div class="slash-menu" role="menu" data-slash-menu hidden>
-                                <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
-                                    <span class="slash-menu-title">Plan mode</span>
-                                </button>
+                        <div class="new-session-prompt-tools">
+                            <div class="new-session-command" data-slash-command>
+                                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
+                                <div class="slash-menu" role="menu" data-slash-menu hidden>
+                                    <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
+                                        <span class="slash-menu-title">Plan mode</span>
+                                    </button>
+                                </div>
                             </div>
+                            <details class="prompt-history" data-prompt-history>
+                                <summary aria-label="Recent prompts" title="Recent prompts">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2" />
+                                    </svg>
+                                </summary>
+                                <div class="prompt-history-panel" role="region" aria-label="Recent prompts">
+                                    <p>Recent prompts</p>
+                                    <ul class="prompt-history-list">
+                                        {% for prompt in recent_prompts %}
+                                        <li data-prompt-project="{{ prompt.project_id|default_if_none:bare_repo_project_value }}"{% if prompt.project_id != current_new_session_project_id %} hidden{% endif %}><button type="button" data-recent-prompt="{{ forloop.counter0 }}"><span>{{ prompt.prompt }}</span></button></li>
+                                        {% endfor %}
+                                        <li data-prompt-history-empty><p>No recent prompts yet for this project.</p></li>
+                                    </ul>
+                                </div>
+                            </details>
                         </div>
                         <textarea id="new-session-prompt" name="prompt" autocomplete="off" placeholder="Describe what you want the agent to do...">{{ initial_new_session_prompt }}</textarea>
                     </div>
@@ -484,7 +485,7 @@
             promptHistory.addEventListener("click", (event) => {
                 const button = event.target.closest("[data-recent-prompt]");
                 if (!button) return;
-                newSessionInput.value = recentPrompts[Number(button.dataset.recentPrompt)];
+                newSessionInput.value = recentPrompts[Number(button.dataset.recentPrompt)].prompt;
                 newSessionInput.dispatchEvent(new Event("input", { bubbles: true }));
                 promptHistory.open = false;
                 newSessionInput.focus();
@@ -531,7 +532,14 @@
             }
             function syncNewSessionProjectFields() {
                 if (!newSessionProjectSelect) return;
-                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
+                const selectedProject = newSessionProjectSelect.value;
+                let hasRecentPrompts = false;
+                promptHistory.querySelectorAll("[data-prompt-project]").forEach((entry) => {
+                    entry.hidden = entry.dataset.promptProject !== selectedProject;
+                    if (!entry.hidden) hasRecentPrompts = true;
+                });
+                promptHistory.querySelector("[data-prompt-history-empty]").hidden = hasRecentPrompts;
+                const bareRepoSelected = selectedProject === bareRepoProjectValue;
                 if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
                 if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
                 if (newSessionAutoPr) {

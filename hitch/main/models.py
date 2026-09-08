@@ -332,6 +332,7 @@ class RecentPrompt(models.Model):
     """Submitted user text, before worker instructions are appended."""
 
     prompt = models.TextField()
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.CASCADE)
 
     @override
     def __str__(self) -> str:

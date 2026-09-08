@@ -285,12 +285,15 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
     ) -> None:
+        project = _make_project()
+        SessionMetadata.objects.create(thread_id="abc", project=project)
         response = self.client.post(
             reverse("send_message", kwargs={"session_id": "abc"}),
             data={"prompt": "  also update docs  ", "active_instance": "42"},
         )
 
         self.assertEqual(RecentPrompt.objects.get().prompt, "  also update docs  ")
+        self.assertEqual(RecentPrompt.objects.get().project, project)
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
@@ -648,6 +651,7 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(RecentPrompt.objects.latest("pk").prompt, "follow-up")
+        self.assertEqual(RecentPrompt.objects.latest("pk").project, project)
         self._assert_follow_up_spawn(
             mock_spawn,
             developer_instructions=(
