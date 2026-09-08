@@ -635,7 +635,7 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "plan_mode_reasoning_effort": _PLAN_MODE_REASONING_EFFORT.value,
             "recent_prompts": list(
-                RecentPrompt.objects.order_by("-pk").values_list("prompt", flat=True)[:20]
+                RecentPrompt.objects.order_by("-pk").values("prompt", "project_id")
             ),
             **settings_context,
             **new_session_context,
@@ -673,7 +673,7 @@ def _remember_repo_and_redirect(
         cookie_updates = _settings_cookie_updates(remembered_values)
     else:
         cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-    remember_prompt(request.POST.get("prompt", ""))
+    remember_prompt(request.POST.get("prompt", ""), thread_id)
     response = redirect("session", session_id=thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response
