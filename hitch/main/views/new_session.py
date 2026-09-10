@@ -1,6 +1,5 @@
 """The new-session page and start flow, including proposal acceptance."""
 
-import re
 from typing import Any, NamedTuple
 
 from django.http import (
@@ -16,26 +15,18 @@ from django.views.decorators.http import require_http_methods
 
 from hitch.main import caches
 from hitch.main import repos as repos_module
-from hitch.main.goals.autonomous_goal_proposal_stack import (
-    AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY,
-    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY,
-    AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY,
-    AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY,
-    _proposal_outcome_metadata,
-)
-from hitch.main.goals.autonomous_goal_run_display import (
-    _accepted_proposal_prompt,
-    _attach_proposed_session_display_state,
-    _auto_review_settings_for_proposed_session,
-    _proposed_session_prompt,
-)
 from hitch.main.models import (
-    AutonomousGoal,
     Project,
     ProposedSession,
     RecentPrompt,
     SessionMetadata,
 )
+from hitch.main.proposals.proposal_display import (
+    _attach_proposed_session_display_state,
+    _auto_review_settings_for_proposed_session,
+    _proposed_session_prompt,
+)
+from hitch.main.proposals.proposed_sessions import _proposal_outcome_metadata
 from hitch.main.runtime import codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
@@ -84,8 +75,6 @@ from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
     WorktreeCreationError,
-    release_snapshot_commit_ref,
-    snapshot_worktree_to_commit,
 )
 
 
@@ -96,7 +85,6 @@ class _NewSessionTarget(NamedTuple):
     requires_discovered_repo: bool
 
 
-_GIT_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40,64}")
 _UPGRADE_RECOVERY_METADATA_KEY = "resume_source_session"
 
 
@@ -129,13 +117,7 @@ def _proposal_has_explicit_auto_review_settings(
     proposed_session: ProposedSession,
 ) -> bool:
     metadata = proposed_session.outcome_metadata
-    return bool(
-        proposed_session.autonomous_goal is not None
-        or (
-            isinstance(metadata, dict)
-            and ("auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata)
-        )
-    )
+    return isinstance(metadata, dict) and ("auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata)
 
 
 def _new_session_post_models_and_settings(
@@ -199,8 +181,6 @@ def _posted_proposed_session_for_new_session(
     proposed_session = (
         ProposedSession.objects.select_related(
             "project",
-            "autonomous_goal__project",
-            "candidate_session",
             "source_session",
         )
         .filter(
@@ -221,96 +201,6 @@ def _posted_proposed_session_for_new_session(
     if not target_matches:
         return None, "proposed session does not match project"
     return proposed_session, None
-
-
-def _approved_snapshot_for_proposal(
-    proposed_session: ProposedSession | None,
-) -> str:
-    if proposed_session is None or proposed_session.autonomous_goal_id is None:
-        return ""
-    metadata = proposed_session.outcome_metadata
-    if not isinstance(metadata, dict):
-        return ""
-    value = metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_METADATA_KEY)
-    if not isinstance(value, str) or _GIT_OBJECT_ID_RE.fullmatch(value) is None:
-        return ""
-    return value
-
-
-def _is_tool_protocol_ag_proposal(proposed_session: ProposedSession) -> bool:
-    return (
-        proposed_session.autonomous_goal_id is not None
-        and isinstance(proposed_session.outcome_metadata, dict)
-        and proposed_session.outcome_metadata.get(
-            AUTONOMOUS_GOAL_TOOL_PROTOCOL_METADATA_KEY
-        )
-        is True
-    )
-
-
-def _release_approved_snapshot_ref(proposed_session: ProposedSession) -> None:
-    metadata = proposed_session.outcome_metadata
-    if not isinstance(metadata, dict):
-        return
-    ref = metadata.get(AUTONOMOUS_GOAL_APPROVED_SNAPSHOT_REF_METADATA_KEY)
-    project = _project_for_proposed_session(proposed_session)
-    if not isinstance(ref, str) or not ref or project is None:
-        return
-    try:
-        release_snapshot_commit_ref(project.repo_path, ref)
-    except WorktreeCleanupError:
-        common.logger.exception(
-            "failed to release snapshot ref for proposed session %s",
-            proposed_session.pk,
-        )
-
-
-def _cleanup_hidden_ag_candidate_worktree(
-    proposed_session: ProposedSession,
-) -> None:
-    if (
-        not _is_tool_protocol_ag_proposal(proposed_session)
-        and _legacy_ag_candidate_for_snapshot(proposed_session) is None
-    ):
-        return
-    candidate = proposed_session.candidate_session
-    if candidate is None or not candidate.cwd:
-        return
-    try:
-        common.cleanup_managed_worktree_path(candidate.cwd)
-    except WorktreeCleanupError:
-        common.logger.exception(
-            "failed to clean up hidden candidate worktree for proposed session %s",
-            proposed_session.pk,
-        )
-
-
-def _ag_proposal_requires_snapshot(
-    proposed_session: ProposedSession,
-) -> bool:
-    metadata = proposed_session.outcome_metadata
-    if not isinstance(metadata, dict):
-        return True
-    return (
-        metadata.get("autonomous_goal_autonomy")
-        != AutonomousGoal.AUTONOMY_PROPOSE_ONLY
-    )
-
-
-def _legacy_ag_candidate_for_snapshot(
-    proposed_session: ProposedSession | None,
-) -> SessionMetadata | None:
-    if (
-        proposed_session is None
-        or proposed_session.autonomous_goal_id is None
-        or _is_tool_protocol_ag_proposal(proposed_session)
-        or not _ag_proposal_requires_snapshot(proposed_session)
-    ):
-        return None
-    candidate = proposed_session.candidate_session
-    if candidate is None or not candidate.cwd.strip():
-        return None
-    return candidate
 
 
 def _claim_new_session_proposal_start(
@@ -383,8 +273,6 @@ def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -
 def _finish_new_session_proposal_start_claim(
     proposed_session: ProposedSession | None,
     session_metadata: SessionMetadata,
-    *,
-    approved_snapshot: str,
 ) -> None:
     if proposed_session is None:
         return
@@ -398,10 +286,6 @@ def _finish_new_session_proposal_start_claim(
         "accepted_thread_id": session_metadata.thread_id,
         ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
     }
-    if proposed_session.autonomous_goal_id is not None:
-        updates[AUTONOMOUS_GOAL_ACCEPTED_SNAPSHOT_METADATA_KEY] = (
-            approved_snapshot or None
-        )
     outcome_metadata = _proposal_outcome_metadata(proposed_session, updates)
     applied = ProposedSession.objects.filter(
         pk=proposed_session.pk,
@@ -417,9 +301,6 @@ def _finish_new_session_proposal_start_claim(
         return
     proposed_session.accepted_session = session_metadata
     proposed_session.outcome_metadata = outcome_metadata
-    common._stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
-    _release_approved_snapshot_ref(proposed_session)
-    _cleanup_hidden_ag_candidate_worktree(proposed_session)
 
 
 def _posted_bool_override(raw: str | None, *, default: bool, error: str) -> tuple[bool, str | None]:
@@ -516,8 +397,6 @@ def _proposed_session_for_new_session_page(
     proposed_session = (
         ProposedSession.objects.select_related(
             "project",
-            "autonomous_goal__project",
-            "candidate_session",
             "source_session",
         )
         .filter(
@@ -798,45 +677,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
 
     session_cwd = cwd
     managed_worktree: ManagedWorktree | None = None
-    approved_snapshot = _approved_snapshot_for_proposal(proposed_session)
-    legacy_candidate = _legacy_ag_candidate_for_snapshot(proposed_session)
-    if legacy_candidate is not None:
-        try:
-            approved_snapshot = snapshot_worktree_to_commit(
-                legacy_candidate.cwd,
-                message="Snapshot legacy autonomous-goal proposal",
-            )
-        except WorktreeCreationError as exc:
-            return HttpResponseBadRequest(str(exc))
-    if (
-        proposed_session is not None
-        and _is_tool_protocol_ag_proposal(proposed_session)
-        and not _ag_proposal_requires_snapshot(proposed_session)
-    ):
-        approved_snapshot = ""
-    if (
-        proposed_session is not None
-        and _is_tool_protocol_ag_proposal(proposed_session)
-        and not approved_snapshot
-        and _ag_proposal_requires_snapshot(proposed_session)
-    ):
-        return HttpResponseBadRequest(
-            "approved autonomous-goal snapshot is missing or invalid"
-        )
-    if approved_snapshot:
-        try:
-            managed_worktree = common.create_worktree_for_session(
-                cwd, base_ref=approved_snapshot
-            )
-        except WorktreeCreationError as exc:
-            return HttpResponseBadRequest(str(exc))
-        session_cwd = str(managed_worktree.path)
-    if proposed_session is not None:
-        prompt = _accepted_proposal_prompt(
-            proposed_session,
-            prompt,
-            approved_snapshot=approved_snapshot,
-        )
     sandbox_policy = _effective_sandbox_policy_for_cwd(
         settings,
         session_cwd,
@@ -905,13 +745,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         task_kwargs: dict[str, Any] = {
             "thread_id": thread_id,
             "cwd": session_cwd,
-            "prompt": _accepted_proposal_prompt(
-                proposed_session,
-                task.prompt,
-                approved_snapshot=approved_snapshot,
-            )
-            if proposed_session is not None
-            else task.prompt,
+            "prompt": task.prompt,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
@@ -947,7 +781,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         _finish_new_session_proposal_start_claim(
             proposed_session,
             session_metadata,
-            approved_snapshot=approved_snapshot,
         )
         return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
 
@@ -1040,7 +873,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     _finish_new_session_proposal_start_claim(
         proposed_session,
         session_metadata,
-        approved_snapshot=approved_snapshot,
     )
     return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=instance.thread_id)
 

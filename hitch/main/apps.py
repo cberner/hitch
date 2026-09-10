@@ -9,7 +9,6 @@ class MainConfig(AppConfig):
 
     @override
     def ready(self) -> None:
-        from hitch.main.goals.auto_proposals import start_auto_proposal_scheduler
         from hitch.main.runtime.app_server_pool import start_codex_pool_keepalive
         from hitch.main.workflows.workflow_maintenance import (
             start_workflow_maintenance_scheduler,
@@ -20,5 +19,4 @@ class MainConfig(AppConfig):
         # scheduler is enabled -- a server that runs maintenance elsewhere still
         # needs its request-path pool kept warm.
         start_workflow_maintenance_scheduler()
-        start_auto_proposal_scheduler()
         start_codex_pool_keepalive()

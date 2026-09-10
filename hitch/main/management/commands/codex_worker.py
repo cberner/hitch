@@ -360,7 +360,7 @@ class Command(BaseCommand):
             _commit_terminal_status(instance)
             if instance.status == CodexInstance.STATUS_FAILED:
                 resolve_dangling_requests_for_instance(instance.pk)
-            _notify_system_agents(instance)
+            _update_completed_turn_pr(instance)
             cleanup_requested_input_images_for(instance)
             disk_cleanup.run_finished_session_disk_cleanup()
             raise
@@ -404,7 +404,7 @@ class Command(BaseCommand):
         _commit_terminal_status(instance)
         if instance.status == CodexInstance.STATUS_FAILED:
             resolve_dangling_requests_for_instance(instance.pk)
-        _notify_system_agents(instance)
+        _update_completed_turn_pr(instance)
         cleanup_requested_input_images_for(instance)
         disk_cleanup.run_finished_session_disk_cleanup()
 
@@ -441,13 +441,13 @@ def _serialized_codex_error_info(error: TurnError | None) -> Any:
     return error.codex_error_info.model_dump(mode="json", by_alias=True)
 
 
-def _notify_system_agents(instance: CodexInstance) -> None:
+def _update_completed_turn_pr(instance: CodexInstance) -> None:
     try:
-        from hitch.main.workflows import system_agents
+        from hitch.main.workflows import pr_tracking
 
-        system_agents.on_codex_instance_finished(instance)
+        pr_tracking.supersede_pr_after_turn(instance)
     except Exception:
-        logger.exception("failed to route completed worker %s to system agents", instance.pk)
+        logger.exception("failed to update PR state for completed worker %s", instance.pk)
 
 
 def _apply_worker_oom_score_adjust(

@@ -30,15 +30,12 @@ the top level:
   tools), `streaming` (SSE),
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
   `disk_cleanup`, `health`, and process/host infrastructure.
-- `workflows/` -- the workflow engine: `system_agents` (the optional-review and
-  agent-driven PR-watch handoffs and autonomous-goal runner state
-  machines), their prompts, `gh` CLI integration, and PR handoff/stage
-  bookkeeping.
+- `workflows/` -- agent-driven PR watch, `gh` CLI integration, PR handoff/stage
+  bookkeeping, and historical system-session identification.
 - `sessions/` -- session-page support: entry/metadata display, settings and
   signed settings cookies, session indexing, stage derivation, and token
   usage.
-- `goals/` -- autonomous goals: goal forms/prompts, proposal lifecycle and
-  stacked-diff continuation, and the auto-proposal scheduler.
+- `proposals/` -- follow-up session proposals and Inbox display helpers.
 - top level -- `views`, `models`, `caches`, `formatting`, and the
   git/repo utilities (`repos`, `worktrees`, `git_support`, `diffs`).
 

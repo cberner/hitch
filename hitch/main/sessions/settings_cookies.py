@@ -7,7 +7,7 @@ from typing import Any, NamedTuple
 from django.core import signing
 from django.http import HttpRequest, HttpResponse
 
-from hitch.main.models import ApprovalRequest, AutonomousGoal, Project
+from hitch.main.models import ApprovalRequest, Project
 from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
@@ -87,7 +87,12 @@ _LIVE_PENDING_APPROVAL_DECISIONS_BY_MODE = {
     _DENY_ALL_MODE: ApprovalRequest.DECISION_DECLINE,
 }
 
-_WEB_SEARCH_MODE_OPTIONS = AutonomousGoal.WEB_SEARCH_CHOICES
+_WEB_SEARCH_MODE_OPTIONS = (
+    ("", "Codex default"),
+    ("disabled", "Disabled"),
+    ("cached", "Cached"),
+    ("live", "Live"),
+)
 _VALID_WEB_SEARCH_MODES = {
     value for value, _label in _WEB_SEARCH_MODE_OPTIONS if value
 }
@@ -456,7 +461,6 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
 assert {spec.field for spec in _SETTING_SPECS} == set(SettingsValues._fields), (
     "settings registry out of sync with SettingsValues"
 )
-
 
 
 def _signed_cookie_fits(name: str, value: str) -> bool:

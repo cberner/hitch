@@ -159,7 +159,7 @@ class DiskCleanupTests(TestCase):
                 cwd=pending_path,
                 hidden_system=True,
             )
-            ProposedSession.objects.create(title="Pending", candidate_session=pending)
+            ProposedSession.objects.create(title="Pending", source_session=pending)
             self._session(
                 thread_id="old",
                 cwd=old_path,
@@ -203,7 +203,6 @@ class DiskCleanupTests(TestCase):
             )
             ProposedSession.objects.create(
                 title="Accepted legacy proposal",
-                candidate_session=promoted,
                 accepted_session=promoted,
                 outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             )
@@ -771,7 +770,7 @@ class DiskCleanupTests(TestCase):
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             )
             SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+                kind="autonomous_goal_run",
                 main_thread_id="system",
                 cwd=system_path,
                 status=SystemWorkflow.STATUS_RUNNING,
@@ -791,69 +790,6 @@ class DiskCleanupTests(TestCase):
 
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
-
-    def test_active_stack_fork_worktree_is_not_finished_for_cleanup(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            fork_path = self._managed_path(root, "fork")
-            self._session(
-                thread_id="candidate",
-                cwd=fork_path,
-                hidden_system=True,
-            )
-            SystemWorkflow.objects.create(
-                kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
-                main_thread_id="autonomous-goal-1",
-                cwd="/repo",
-                status=SystemWorkflow.STATUS_RUNNING,
-                state={"stacked_diff_fork_from_cwd": fork_path},
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 0)
-        mock_cleanup.assert_not_called()
-
-    def test_hidden_stack_proposal_worktree_is_not_finished_for_cleanup(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            patch(
-                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
-                return_value=True,
-            ) as mock_cleanup,
-        ):
-            root = Path(raw)
-            proposal_path = self._managed_path(root, "proposal")
-            proposal_session = self._session(
-                thread_id="proposal",
-                cwd=proposal_path,
-                hidden_system=True,
-            )
-            ProposedSession.objects.create(
-                title="Hidden stack proposal",
-                candidate_session=proposal_session,
-                outcome_status=ProposedSession.OUTCOME_DISMISSED,
-                outcome_metadata={"stacked_diff_hidden_until_complete": True},
-            )
-
-            cleaned = self._run_cleanup(
-                root=root,
-                sizes=[300],
-                mock_cleanup=mock_cleanup,
-            )
-
-        self.assertEqual(cleaned, 0)
-        mock_cleanup.assert_not_called()
 
 
 def _naive_directory_size(path: Path) -> int:

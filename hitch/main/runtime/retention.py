@@ -8,7 +8,7 @@ on the workflow-maintenance scheduler.
 
 Reaping terminal ``SystemWorkflow`` / ``CodexInstance`` rows and their event
 files is intentionally out of scope -- those are read back by the
-autonomous-goals run display, PR-stage rendering, and session resume in ways
+historical system-session logs, PR-stage rendering, and session resume in ways
 that make age alone an unsafe deletion signal -- and is left to a separate,
 more carefully scoped change. Disk-pressure cleanup remains the backstop for
 worktrees.

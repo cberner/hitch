@@ -9,17 +9,18 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
-from hitch.main.goals.proposed_sessions import (
+from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata
+from hitch.main.proposals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
     ProposedSessionUpdateInput,
     create_proposed_session,
     update_proposed_session,
 )
-from hitch.main.models import AutonomousGoal, ProposedSession, SessionMetadata
 from hitch.main.runtime.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
+    registered_dynamic_tool_specs,
 )
 from hitch.main.test.support import _make_project
 
@@ -72,7 +73,7 @@ class ProposedSessionServiceTests(TestCase):
             title="Old title",
             summary="Old summary",
             prompt="Old prompt",
-            confidence=AutonomousGoal.CONFIDENCE_MEDIUM,
+            confidence=ProposedSession.CONFIDENCE_MEDIUM,
             relevant_files=["old.py"],
         )
 
@@ -82,14 +83,14 @@ class ProposedSessionServiceTests(TestCase):
                 title=" New title ",
                 cwd="/repo",
                 relevant_files=["new.py", "", "new.py"],
-                confidence=AutonomousGoal.CONFIDENCE_HIGH,
+                confidence=ProposedSession.CONFIDENCE_HIGH,
             )
         )
 
         self.assertEqual(updated.title, "New title")
         self.assertEqual(updated.summary, "Old summary")
         self.assertEqual(updated.prompt, "Old prompt")
-        self.assertEqual(updated.confidence, AutonomousGoal.CONFIDENCE_HIGH)
+        self.assertEqual(updated.confidence, ProposedSession.CONFIDENCE_HIGH)
         self.assertEqual(updated.relevant_files, ["new.py"])
         self.assertEqual(ProposedSession.objects.count(), 1)
 
@@ -311,7 +312,7 @@ class CodexToolTests(TestCase):
                     "summary": "This would cover the proposal service.",
                     "prompt": "Add tests for proposed sessions.",
                     "relevant_files": ["hitch/main/proposed_sessions.py"],
-                    "confidence": AutonomousGoal.CONFIDENCE_VERY_HIGH,
+                    "confidence": ProposedSession.CONFIDENCE_VERY_HIGH,
                 },
             },
             ToolContext(cwd="/repo", thread_id=source.thread_id),
@@ -321,7 +322,7 @@ class CodexToolTests(TestCase):
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.project, project)
         self.assertEqual(proposal.source_session, source)
-        self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_VERY_HIGH)
+        self.assertEqual(proposal.confidence, ProposedSession.CONFIDENCE_VERY_HIGH)
 
     def test_dynamic_tool_call_updates_proposal(self) -> None:
         project = _make_project()
@@ -330,7 +331,7 @@ class CodexToolTests(TestCase):
             title="Old title",
             summary="Old summary",
             prompt="Old prompt",
-            confidence=AutonomousGoal.CONFIDENCE_VERY_HIGH,
+            confidence=ProposedSession.CONFIDENCE_VERY_HIGH,
             relevant_files=["old.py"],
         )
 
@@ -353,7 +354,7 @@ class CodexToolTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.title, "Old title")
         self.assertEqual(proposal.summary, "New summary")
-        self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_VERY_HIGH)
+        self.assertEqual(proposal.confidence, ProposedSession.CONFIDENCE_VERY_HIGH)
         self.assertEqual(proposal.relevant_files, [])
         self.assertEqual(ProposedSession.objects.count(), 1)
 
@@ -486,3 +487,22 @@ class CodexToolTests(TestCase):
 
                 self.assertFalse(response["success"])
                 self.assertIn(message, response["contentItems"][0]["text"])
+
+
+class RetiredGoalToolsTests(TestCase):
+    def test_retired_roles_receive_no_tools_and_cannot_publish(self) -> None:
+        for kind in ("autonomous_goal_run", "autonomous_goal_reviewer"):
+            with self.subTest(kind=kind):
+                self.assertEqual(registered_dynamic_tool_specs(
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT, agent_kind=kind,
+                ), [])
+                context = ToolContext(
+                    cwd="/repo", thread_id="hidden", agent_kind=kind,
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                )
+                for name in (
+                    "get_goal", "list_goal_sessions", "review", "propose_session", "no_proposal", "approve", "deny",
+                ):
+                    result = handle_dynamic_tool_call({"tool": name, "arguments": {}}, context)
+                    self.assertFalse(result["success"], name)
+        self.assertFalse(ProposedSession.objects.exists())

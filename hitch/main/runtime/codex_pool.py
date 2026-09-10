@@ -1105,11 +1105,10 @@ def _pid_is_our_worker(
 
 
 # Grace after a worker commits its terminal status before the orphan reaper may
-# kill it. ``codex_worker`` runs ``_notify_system_agents`` (which can spawn
-# follow-up turns) and input-image cleanup *after* the terminal commit, so a
+# kill it. ``codex_worker`` runs ``_update_completed_turn_pr`` and input-image cleanup *after* the terminal commit, so a
 # still-live terminal worker inside this window is finishing those hooks rather
-# than leaked. Generous so even a slow hook (e.g. spawning a follow-up workflow)
-# completes; a genuinely leaked worker is still reaped one grace later.
+# than leaked. Slow completion hooks have time to finish; leaked workers are
+# still reaped one grace later.
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
@@ -1591,8 +1590,6 @@ def prune_worker_logs_db(
 
 # (enable_memories, normalized web_search_mode). In practice every web call uses
 # the default web_search_mode, so the live key space is just enable_memories.
-
-
 
 
 # How often the keepalive exercises a warm pooled server. Short relative to any

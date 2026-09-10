@@ -65,7 +65,6 @@ from hitch.main.test.views_helpers import (
     _token_count_line,
 )
 from hitch.main.views import common as common_views
-from hitch.main.workflows import system_agents
 
 
 class IndexViewTests(TestCase):
@@ -124,8 +123,6 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">PR #94</span>',
         )
         mock_codex.assert_not_called()
-
-
 
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
@@ -751,7 +748,7 @@ class IndexViewTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+            kind="autonomous_goal_run",
             main_thread_id="visible",
             cwd="/repo",
         )
@@ -764,12 +761,12 @@ class IndexViewTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
+            agent_kind="autonomous_goal_run",
+            display_author="Autonomous goal agent",
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            agent_kind="autonomous_goal_run",
             thread_id="system-thread",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
@@ -783,12 +780,11 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR)
+        self.assertContains(response, "Autonomous goal agent")
         self.assertContains(response, "completed")
         metadata = SessionMetadata.objects.get(thread_id="system-thread")
         self.assertEqual(metadata.project, project)
         self.assertIsNotNone(metadata.codex_updated_at)
-
 
 
     @patch("hitch.main.repos.discover_repos")
@@ -799,7 +795,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex, threads=[visible, hidden])
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+            kind="autonomous_goal_run",
             main_thread_id="visible",
             cwd="/repo",
         )
@@ -815,7 +811,7 @@ class IndexViewTests(TestCase):
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            agent_kind="autonomous_goal_run",
             thread_id="system-thread",
             instance=instance,
         )
@@ -838,7 +834,7 @@ class IndexViewTests(TestCase):
         client._client.thread_read.return_value = SimpleNamespace(thread=hidden)
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+            kind="autonomous_goal_run",
             main_thread_id="autonomous-goal:1",
             cwd="/repo",
         )
@@ -851,7 +847,7 @@ class IndexViewTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            agent_kind="autonomous_goal_run",
         )
 
         response = self.client.get(reverse("index"))
@@ -894,9 +890,9 @@ class IndexViewTests(TestCase):
         visible = _session("visible", name="Visible")
         candidate = _session(
             "legacy-candidate",
-            name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
+            name=session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
             preview=(
-                f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
+                f"{session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
                 "Analyze the repo.\n\n"
                 "Autonomous goal title: Docs\n\n"
                 "Autonomous goal objective:\nKeep documentation tidy.\n\n"
@@ -905,9 +901,9 @@ class IndexViewTests(TestCase):
         )
         judge = _session(
             "legacy-judge",
-            name=system_agents.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
+            name=session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
             preview=(
-                f"{system_agents.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
+                f"{session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
                 "Judge it.\n\n"
                 "Autonomous goal title: Docs\n\n"
                 "Candidate session JSON:\n{}\n\n"
@@ -996,7 +992,6 @@ class IndexViewTests(TestCase):
         )
         ProposedSession.objects.create(
             title="Accepted proposal",
-            candidate_session=metadata,
             accepted_session=metadata,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
@@ -1008,7 +1003,6 @@ class IndexViewTests(TestCase):
 
         system_response = self.client.get(reverse("system_sessions"))
         self.assertNotContains(system_response, "Accepted candidate")
-
 
 
     @patch("hitch.main.repos.discover_repos")

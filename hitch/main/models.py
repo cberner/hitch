@@ -17,7 +17,7 @@ losing the answer.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar, override
+from typing import ClassVar, override
 
 from django.conf import settings
 from django.db import models
@@ -57,20 +57,8 @@ class Project(models.Model):
         return self.name
 
 
-# Autonomous goals are commonly abbreviated as AGs in short-form UI and notes.
-class AutonomousGoal(models.Model):
-    """A project-scoped recurring goal that can propose Codex sessions."""
-
-    AMBITION_INCREMENTAL = "incremental"
-    AMBITION_MEDIUM = "medium"
-    AMBITION_HIGH = "high"
-    AMBITION_YOLO = "yolo"
-    AMBITION_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
-        (AMBITION_INCREMENTAL, "Incremental"),
-        (AMBITION_MEDIUM, "Medium"),
-        (AMBITION_HIGH, "High"),
-        (AMBITION_YOLO, "YOLO"),
-    )
+class ProposedSession(models.Model):
+    """A project-scoped session proposal awaiting user acceptance."""
 
     CONFIDENCE_MEDIUM = "medium"
     CONFIDENCE_HIGH = "high"
@@ -80,114 +68,6 @@ class AutonomousGoal(models.Model):
         (CONFIDENCE_HIGH, "High"),
         (CONFIDENCE_VERY_HIGH, "Very high"),
     )
-
-    AUTONOMY_PROPOSE_ONLY = "propose_only"
-    AUTONOMY_DRAFT_PATCH = "draft_patch"
-    AUTONOMY_DRAFT_PR = "draft_pr"
-    AUTONOMY_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
-        (AUTONOMY_PROPOSE_ONLY, "Propose only"),
-        (AUTONOMY_DRAFT_PATCH, "Draft patch"),
-        (AUTONOMY_DRAFT_PR, "Draft PR"),
-    )
-    WEB_SEARCH_DEFAULT = ""
-    WEB_SEARCH_DISABLED = "disabled"
-    WEB_SEARCH_CACHED = "cached"
-    WEB_SEARCH_LIVE = "live"
-    WEB_SEARCH_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
-        (WEB_SEARCH_DEFAULT, "Codex default"),
-        (WEB_SEARCH_DISABLED, "Disabled"),
-        (WEB_SEARCH_CACHED, "Cached"),
-        (WEB_SEARCH_LIVE, "Live"),
-    )
-    AUTO_QA_AUTONOMIES: ClassVar[frozenset[str]] = frozenset({AUTONOMY_DRAFT_PATCH})
-    AUTO_QA_REQUIRED_AUTONOMIES: ClassVar[frozenset[str]] = frozenset(
-        {AUTONOMY_DRAFT_PR}
-    )
-    STACKED_DIFF_AUTONOMIES: ClassVar[frozenset[str]] = frozenset(
-        {AUTONOMY_DRAFT_PATCH, AUTONOMY_DRAFT_PR}
-    )
-    STACKED_DIFF_DEPTH_MIN: ClassVar[int] = 1
-    STACKED_DIFF_DEPTH_MAX: ClassVar[int] = 100
-
-    project = models.ForeignKey(
-        Project,
-        on_delete=models.CASCADE,
-        related_name="autonomous_goals",
-    )
-    title = models.CharField(max_length=200)
-    goal = models.TextField()
-    ambition = models.CharField(
-        max_length=32,
-        choices=AMBITION_CHOICES,
-        default=AMBITION_INCREMENTAL,
-    )
-    confidence_threshold = models.CharField(
-        max_length=32,
-        choices=CONFIDENCE_CHOICES,
-        default=CONFIDENCE_HIGH,
-    )
-    autonomy = models.CharField(
-        max_length=32,
-        choices=AUTONOMY_CHOICES,
-        default=AUTONOMY_PROPOSE_ONLY,
-    )
-    auto_qa_enabled = models.BooleanField(default=False)
-    web_search_mode = models.CharField(
-        max_length=16,
-        choices=WEB_SEARCH_CHOICES,
-        blank=True,
-        default=WEB_SEARCH_DEFAULT,
-    )
-    auto_proposal_enabled = models.BooleanField(default=False)
-    auto_proposal_last_no_proposal_sha = models.CharField(
-        max_length=64, blank=True, default=""
-    )
-    stacked_diff_depth = models.PositiveIntegerField(default=STACKED_DIFF_DEPTH_MIN)
-    proposal_budget = models.PositiveBigIntegerField(null=True, blank=True)
-    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["created_at", "id"]
-        indexes = [
-            models.Index(fields=["project", "created_at"]),
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return self.title
-
-    @classmethod
-    def auto_qa_supported_for_autonomy(cls, autonomy: str) -> bool:
-        return autonomy in cls.AUTO_QA_AUTONOMIES
-
-    @classmethod
-    def auto_qa_required_for_autonomy(cls, autonomy: str) -> bool:
-        return autonomy in cls.AUTO_QA_REQUIRED_AUTONOMIES
-
-    @classmethod
-    def stacked_diff_supported_for_autonomy(cls, autonomy: str) -> bool:
-        return autonomy in cls.STACKED_DIFF_AUTONOMIES
-
-    @property
-    def effective_auto_qa_enabled(self) -> bool:
-        if self.auto_qa_required_for_autonomy(self.autonomy):
-            return True
-        return self.auto_qa_supported_for_autonomy(self.autonomy) and self.auto_qa_enabled
-
-    @property
-    def effective_stacked_diff_depth(self) -> int:
-        if not self.stacked_diff_supported_for_autonomy(self.autonomy):
-            return self.STACKED_DIFF_DEPTH_MIN
-        return min(
-            max(self.stacked_diff_depth, self.STACKED_DIFF_DEPTH_MIN),
-            self.STACKED_DIFF_DEPTH_MAX,
-        )
-
-
-class ProposedSession(models.Model):
-    """A project-scoped session proposal awaiting user acceptance."""
 
     INBOX_KIND_PROPOSAL = "proposal"
     INBOX_KIND_NOTICE = "notice"
@@ -219,20 +99,6 @@ class ProposedSession(models.Model):
         null=True,
         blank=True,
     )
-    autonomous_goal = models.ForeignKey(
-        AutonomousGoal,
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-        related_name="proposed_sessions",
-    )
-    source_workflow = models.ForeignKey(
-        "SystemWorkflow",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="proposed_sessions",
-    )
     title = models.CharField(max_length=200)
     inbox_kind = models.CharField(
         max_length=16,
@@ -243,24 +109,10 @@ class ProposedSession(models.Model):
     prompt = models.TextField(blank=True, default="")
     confidence = models.CharField(
         max_length=32,
-        choices=AutonomousGoal.CONFIDENCE_CHOICES,
-        default=AutonomousGoal.CONFIDENCE_MEDIUM,
+        choices=CONFIDENCE_CHOICES,
+        default=CONFIDENCE_MEDIUM,
     )
     relevant_files = models.JSONField(default=list, blank=True)
-    candidate_session = models.ForeignKey(
-        "SessionMetadata",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="autonomous_goal_candidate_proposals",
-    )
-    judge_session = models.ForeignKey(
-        "SessionMetadata",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="autonomous_goal_judge_proposals",
-    )
     source_session = models.ForeignKey(
         "SessionMetadata",
         null=True,
@@ -273,7 +125,7 @@ class ProposedSession(models.Model):
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="accepted_autonomous_goal_proposals",
+        related_name="accepted_proposals",
     )
     outcome_status = models.CharField(
         max_length=32,
@@ -290,21 +142,12 @@ class ProposedSession(models.Model):
         ordering = ["created_at", "id"]
         indexes = [
             models.Index(fields=["project", "created_at"]),
-            models.Index(fields=["autonomous_goal", "created_at"]),
             models.Index(fields=["outcome_status", "created_at"]),
         ]
 
     @override
     def __str__(self) -> str:
         return self.title
-
-    @override
-    def save(self, *args: Any, **kwargs: Any) -> None:
-        if self.project_id is None and self.autonomous_goal_id is not None:
-            self.project_id = AutonomousGoal.objects.values_list(
-                "project_id", flat=True
-            ).get(pk=self.autonomous_goal_id)
-        super().save(*args, **kwargs)
 
     @classmethod
     def accepted_session_start_claim_is_active(
@@ -575,9 +418,7 @@ class CodexInstance(models.Model):
 
 
 class SystemWorkflow(models.Model):
-    """Migration-stable durable ledger for one autonomous-goal run."""
-
-    KIND_AUTONOMOUS_GOAL_RUN = "autonomous_goal_run"
+    """Historical ledger for retired Hitch background workflows."""
 
     STATUS_RUNNING = "running"
     STATUS_BLOCKED = "blocked"
@@ -592,8 +433,6 @@ class SystemWorkflow(models.Model):
         (STATUS_FAILED, "failed"),
         (STATUS_MAX_ITERATIONS_REACHED, "max iterations reached"),
     )
-    # Older rows retain the broader status vocabulary. New AG runs use RUNNING,
-    # COMPLETED, FAILED, and BLOCKED; only RUNNING pins resources.
     ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_RUNNING,)
 
     kind = models.CharField(max_length=64)
@@ -633,7 +472,7 @@ class SystemWorkflow(models.Model):
 
 
 class SystemAgentRun(models.Model):
-    """One hidden candidate or reviewer turn in an autonomous-goal run."""
+    """Historical turn in a Hitch background workflow."""
 
     STATUS_STARTING = "starting"
     STATUS_RUNNING = "running"

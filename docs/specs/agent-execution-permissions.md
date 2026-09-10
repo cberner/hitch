@@ -14,11 +14,9 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Approval mode: How Hitch resolves Codex escalation requests.
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
-- System session: A Hitch-owned background session for workflows such as Autonomous Goals. The visible coding turn that publishes a PR and invokes `hitch.watch_pr` is a user session, not a system session.
-- Role-scoped tool: An immutable dynamic tool registered only on the hidden
-  workflow role that requires it. Registration is paired with handler-side
-  workflow and thread authorization.
-- Separate worktree: A git worktree distinct from the associated user session's active checkout.
+- System session: A historical Hitch-owned background session. The visible coding turn that publishes a PR and invokes `hitch.watch_pr` is a user session, not a system session.
+- Session-scoped tool: An immutable dynamic tool registered on a visible coding
+  session. Handlers verify the invoking session's purpose before dispatch.
 
 ## 2. Goals and Non-Goals
 
@@ -91,26 +89,12 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-stop-quiet-turn`: Stopping an active session requests Codex cancellation without waiting for another stream event, including while a command is running silently; a later Stop may force-kill a turn that does not cancel.
 - `PERM-decision-race-safe`: Concurrent decisions for one request resolve exactly once; later attempts receive already-resolved results.
 
-### 4.5 System Sessions
+### 4.5 Historical System Sessions
 
-- `PERM-system-read-only-preferred`: System sessions use Read only when writes are unnecessary, including AG summarization, evaluation, classification, and synthesis.
-- `PERM-system-inherit-sandbox`: Write-capable system sessions with an associated user session use a sandbox no broader than that user session unless an explicit workflow policy allows more; writes require a separate worktree or equivalent isolation.
-- `PERM-system-sandbox-consent-cap`: Without an explicit workflow policy, system sessions cannot exceed the associated user session's sandbox; they must downgrade, run read-only, or fail closed.
-- `PERM-system-sandbox-fresh-consent`: Delayed system sessions must re-check current sandbox settings and workflow policy immediately before using write-capable or broader sandboxing.
-- `PERM-system-danger-full-access`: System sessions must not inherit Danger - full access by default; full access requires an explicit product requirement and isolation boundary.
-- `PERM-system-inherit-approval-limits`: System sessions may inherit Approve all only through `PERM-system-approve-all-worktree`; Deny all becomes non-interactive denial or fail-closed.
-- `PERM-system-approve-all-fresh-consent`: System sessions may inherit Approve all only after re-checking current approval mode and workflow policy immediately before start.
-- `PERM-system-approve-all-revocation`: If current approval mode and workflow policy no longer permit Approve all, the system session denies escalations or fails closed.
-- `PERM-system-safe-fallback`: Without an associated user session, write-capable system sessions use the narrowest safe sandbox plus isolation, or run read-only/fail closed.
-- `PERM-system-sandbox-inputs`: System-session inputs kept outside the workspace must use private ephemeral storage visible to the selected sandbox and must be reclaimed after completion or a bounded crash-recovery window.
-- `PERM-system-no-associated-full-access`: System sessions without an associated user session cannot use Danger - full access unless an explicit product requirement and isolation boundary allow it.
-- `PERM-system-no-user-escalation`: System sessions never surface execution approval prompts to users.
-- `PERM-system-escalation-denied`: System-session escalations are denied unless covered by `PERM-system-approve-all-worktree`; system sessions must not fall back to server-side Auto review approval.
-- `PERM-system-deny-all-inheritance`: If the associated user session uses Deny all, the system session denies or fails closed unless the Approve all worktree exception applies.
-- `PERM-system-approve-all-worktree`: System sessions may inherit Approve all only when created in a separate worktree before execution and scoped to that worktree or an explicit product exception.
-- `PERM-system-approve-all-no-primary`: System sessions must not inherit Approve all while running in the associated user session's active checkout.
-- `PERM-system-approve-all-outside-denied`: Inherited Approve all must deny effects outside the separate worktree, including host, process, remote, repository-hosting, deployment, and network-side effects, unless an explicit scoped product exception allows them.
-- `PERM-system-visible-failure`: Denied escalations and permission/sandbox fail-closed paths surface as workflow state or Inbox notices; session-visible failure is enough only for user-visible sessions.
+- `PERM-system-retired`: Hitch no longer starts hidden background workflow
+  sessions. Their historical logs and approval audit remain readable.
+- `PERM-system-tools-unavailable`: Hidden system sessions receive no Hitch tools,
+  and tool handlers reject calls from retired hidden roles.
 
 ### 4.6 UX Requirements
 
@@ -119,7 +103,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-danger-confirmation`: Dangerous settings require explicit selection and are never defaults or reset selections.
 - `PERM-approval-events`: Session streams show approval-requested and approval-resolved events for interactive prompts.
 - `PERM-automatic-approval-events`: Automatic approvals, denials, and fail-closed resolutions create audit entries on the session detail page without prompts.
-- `PERM-hidden-automatic-approval-audit`: Hidden system-session automatic approval audit appears on that system session's detail page; workflow state or Inbox notices may link to it.
+- `PERM-hidden-automatic-approval-audit`: Historical system-session approval audit remains on that system session's detail page.
 - `PERM-noninteractive-no-noise`: Non-interactive approvals/denials do not prompt, but denial and fail-closed failures remain diagnosable.
 
 ## 5. Success Criteria
@@ -131,7 +115,4 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-accept-user-decision-validated`: User and automatic decisions must be offered by Codex; unavailable, timed-out, stopped, or racing decisions fail safe.
 - `PERM-accept-stop-quiet-turn`: A user can stop a turn that is blocked in a silent command without waiting for that command to emit output.
 - `PERM-accept-proposal-permissions-reset`: Accepted Proposals re-resolve sandbox and approval as user sessions.
-- `PERM-accept-automatic-approval-audit`: Non-interactive approvals, denials, and fail-closed outcomes are visible on the session detail page; hidden system-session outcomes can be reached from workflow state or Inbox.
-- `PERM-accept-system-read-only`: System sessions are least-privileged: read-only when possible, isolated when write-capable, and never broader than allowed by user state or workflow policy.
-- `PERM-accept-system-denies-escalation`: When a system session cannot auto-approve an escalation, Hitch denies or fails closed; it does not prompt the user or fall back to Auto review approval.
-- `PERM-accept-system-approve-all-worktree`: When a system session inherits Approve all, it must run in a separate worktree; approved effects stay within allowed scope, and active-checkout or network-side effects are denied unless explicitly excepted.
+- `PERM-accept-automatic-approval-audit`: Non-interactive approvals, denials, and fail-closed outcomes are visible on the session detail page; historical system-session outcomes remain readable on their log pages.

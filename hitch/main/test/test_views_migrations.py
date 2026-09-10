@@ -1378,3 +1378,173 @@ class AutoReviewFieldRemovalMigrationTests(TransactionTestCase):
         legacy_worker.refresh_from_db()
         self.assertTrue(legacy_worker.auto_pr_enabled)
         self.assertEqual(legacy_worker.auto_pr_triggered_at, triggered_at)
+
+
+class RemoveAutonomousGoalsMigrationTests(TransactionTestCase):
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor
+
+    def test_retires_goals_preserving_accepted_sessions_and_ordinary_proposals(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        before = [("main", "0079_recentprompt_project")]
+        old = self._migrate(before).loader.project_state(before).apps
+        project = old.get_model("main", "Project").objects.create(name="Repo", repo_path="/repo")
+        goal = old.get_model("main", "AutonomousGoal").objects.create(
+            project=project,
+            title="Goal",
+            goal="Improve tests",
+            auto_proposal_enabled=True,
+        )
+        session = old.get_model("main", "SessionMetadata").objects.create(
+            thread_id="accepted",
+            cwd="/accepted-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal_model = old.get_model("main", "ProposedSession")
+        accepted = proposal_model.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            title="Accepted",
+            outcome_status="accepted",
+            candidate_session=session,
+            accepted_session=session,
+        )
+        pending = proposal_model.objects.create(project=project, autonomous_goal=goal, title="Pending")
+        notice = proposal_model.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            title="Notice",
+            inbox_kind="notice",
+        )
+        claimed = proposal_model.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            title="Claimed",
+            outcome_status="accepted",
+        )
+        ordinary = proposal_model.objects.create(project=project, title="Ordinary")
+        workflow = old.get_model("main", "SystemWorkflow").objects.create(
+            kind="autonomous_goal_run",
+            main_thread_id="goal",
+            cwd="/repo",
+        )
+        instance_model = old.get_model("main", "CodexInstance")
+        instance = instance_model.objects.create(
+            pid=0,
+            thread_id="candidate",
+            cwd="/repo",
+            events_path="/dev/null",
+            purpose="system_agent",
+            workflow_id=workflow.pk,
+            status="running",
+        )
+        user_instance = instance_model.objects.create(
+            pid=0,
+            thread_id=session.thread_id,
+            cwd=session.cwd,
+            events_path="/dev/null",
+            purpose="user",
+            workflow_id=workflow.pk,
+            status="running",
+        )
+        old.get_model("main", "SystemAgentRun").objects.create(
+            workflow=workflow,
+            instance=instance,
+            thread_id="candidate",
+            agent_kind="autonomous_goal_run",
+        )
+        approval = old.get_model("main", "ApprovalRequest").objects.create(instance=instance)
+        user_input = old.get_model("main", "UserInputRequest").objects.create(instance=instance)
+
+        after = [("main", "0080_remove_autonomous_goals")]
+        new = self._migrate(after).loader.project_state(after).apps
+        with self.assertRaises(LookupError):
+            new.get_model("main", "AutonomousGoal")
+        proposal_model = new.get_model("main", "ProposedSession")
+        self.assertEqual(
+            list(
+                proposal_model.objects.filter(pk__in=[pending.pk, notice.pk, claimed.pk]).values_list(
+                    "outcome_status", flat=True
+                )
+            ),
+            ["dismissed"] * 3,
+        )
+        accepted_new = proposal_model.objects.get(pk=accepted.pk)
+        self.assertEqual(accepted_new.accepted_session_id, session.pk)
+        self.assertEqual(accepted_new.source_session_id, session.pk)
+        self.assertEqual(accepted_new.outcome_status, "accepted")
+        self.assertEqual(accepted_new.accepted_session.cwd, "/accepted-worktree")
+        self.assertEqual(proposal_model.objects.get(pk=ordinary.pk).outcome_status, "")
+        self.assertEqual(new.get_model("main", "SystemWorkflow").objects.get(pk=workflow.pk).status, "completed")
+        self.assertEqual(new.get_model("main", "SystemAgentRun").objects.get(instance_id=instance.pk).status, "failed")
+        self.assertEqual(new.get_model("main", "CodexInstance").objects.get(pk=instance.pk).status, "failed")
+        from hitch.main.runtime import reconciliation
+
+        with (
+            patch.object(reconciliation, "_iter_running_worker_pids", return_value=[(999, instance.pk)]),
+            patch.object(reconciliation, "_kill_orphaned_worker", return_value=True) as kill,
+            patch.object(reconciliation, "_finalize_reaped_instance"),
+        ):
+            self.assertEqual(reconciliation.reconcile_orphaned_workers(), 1)
+        kill.assert_called_once_with(999, instance.pk)
+        self.assertEqual(new.get_model("main", "CodexInstance").objects.get(pk=user_instance.pk).status, "running")
+        self.assertEqual(new.get_model("main", "ApprovalRequest").objects.get(pk=approval.pk).decision, "cancel")
+        self.assertEqual(
+            new.get_model("main", "UserInputRequest").objects.get(pk=user_input.pk).response,
+            {"answers": {}},
+        )
+
+    def test_upgrade_releases_only_owned_snapshot_refs_without_running_hooks(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        before = [("main", "0079_recentprompt_project")]
+        old = self._migrate(before).loader.project_state(before).apps
+        with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as stale_repo:
+            repo = Path(raw)
+            git = ["git", "-C", raw]
+            subprocess.run([*git, "init", "--initial-branch=main"], check=True, capture_output=True)
+            subprocess.run(
+                [
+                    *git,
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "Base",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            snapshot = "refs/hitch/autonomous-goals/1/" + "a" * 32
+            orphan_snapshot = "refs/hitch/autonomous-goals/2/" + "b" * 32
+            unrelated = "refs/hitch/autonomous-goals/manual-backup"
+            for ref in (snapshot, orphan_snapshot, unrelated):
+                subprocess.run([*git, "update-ref", ref, "HEAD"], check=True)
+            hook = repo / ".git/hooks/reference-transaction"
+            hook.write_text("#!/bin/sh\nexit 1\n")
+            hook.chmod(0o755)
+            project = old.get_model("main", "Project").objects.create(name="Repo", repo_path=raw)
+            goal = old.get_model("main", "AutonomousGoal").objects.create(project=project, title="Goal", goal="Test")
+            old.get_model("main", "ProposedSession").objects.create(
+                project=project,
+                autonomous_goal=goal,
+                title="Pending",
+                outcome_metadata={"approved_snapshot_ref": snapshot},
+            )
+            stale_project = old.get_model("main", "Project").objects.create(name="Stale", repo_path=stale_repo)
+            old.get_model("main", "AutonomousGoal").objects.create(
+                project=stale_project, title="Retired repo", goal="Test",
+            )
+            with patch.dict(os.environ, {"GIT_DIR": "/nonexistent-repo"}):
+                self._migrate([("main", "0080_remove_autonomous_goals")])
+            refs = subprocess.run(
+                [*git, "for-each-ref", "--format=%(refname)"], check=True, capture_output=True, text=True
+            )
+            self.assertEqual(set(refs.stdout.splitlines()), {"refs/heads/main", unrelated})

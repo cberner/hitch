@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import tempfile
@@ -17,8 +16,6 @@ from hitch.main.worktrees import (
     create_worktree_for_session,
     discover_managed_worktrees,
     is_managed_worktree_path,
-    release_snapshot_commit_ref,
-    snapshot_worktree_to_commit,
 )
 
 
@@ -39,101 +36,6 @@ class ManagedWorktreeTests(SimpleTestCase):
         self.mock_invalidate_disk_usage = invalidation_patcher.start()
         self.addCleanup(invalidation_patcher.stop)
 
-    def test_snapshot_worktree_to_commit_includes_dirty_and_untracked_files(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            repo = Path(raw) / "source"
-            _init_repo(repo)
-            head = _git(repo, "rev-parse", "HEAD")
-            (repo / "README.md").write_text("changed\n")
-            (repo / "staged.txt").write_text("staged\n")
-            _git(repo, "add", "staged.txt")
-            (repo / "untracked.txt").write_text("untracked\n")
-            status_before = _git(repo, "status", "--short")
-
-            with patch.dict(
-                os.environ,
-                {
-                    "PATH": os.environ.get("PATH", ""),
-                    "HOME": str(Path(raw) / "home"),
-                    "XDG_CONFIG_HOME": str(Path(raw) / "xdg"),
-                },
-                clear=True,
-            ):
-                snapshot_ref = (
-                    "refs/hitch/autonomous-goals/1/"
-                    "0123456789abcdef0123456789abcdef"
-                )
-                snapshot = snapshot_worktree_to_commit(
-                    repo, retain_ref=snapshot_ref
-                )
-
-            self.assertEqual(_git(repo, "rev-parse", "HEAD"), head)
-            self.assertEqual(_git(repo, "rev-parse", f"{snapshot}^"), head)
-            self.assertEqual(_git(repo, "show", f"{snapshot}:README.md"), "changed")
-            self.assertEqual(_git(repo, "show", f"{snapshot}:staged.txt"), "staged")
-            self.assertEqual(
-                _git(repo, "show", f"{snapshot}:untracked.txt"), "untracked"
-            )
-            self.assertEqual(_git(repo, "status", "--short"), status_before)
-            self.assertEqual(_git(repo, "rev-parse", snapshot_ref), snapshot)
-            self.assertTrue(release_snapshot_commit_ref(repo, snapshot_ref))
-            self.assertNotEqual(
-                subprocess.run(
-                    ["git", "show-ref", "--verify", snapshot_ref],
-                    cwd=repo,
-                    check=False,
-                    capture_output=True,
-                ).returncode,
-                0,
-            )
-
-    def test_snapshot_ref_helpers_reject_unowned_refs(self) -> None:
-        with self.assertRaisesRegex(WorktreeCreationError, "snapshot ref is invalid"):
-            snapshot_worktree_to_commit(
-                "/unused", retain_ref="refs/heads/do-not-touch"
-            )
-        self.assertFalse(
-            release_snapshot_commit_ref("/unused", "refs/heads/do-not-touch")
-        )
-
-    def test_snapshot_worktree_to_commit_rejects_non_repo_source(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            self.assertRaisesRegex(
-                WorktreeCreationError, "source cwd is not a git repository"
-            ),
-        ):
-            snapshot_worktree_to_commit(raw)
-
-    def test_snapshot_worktree_to_commit_reports_tree_write_failure(self) -> None:
-        git_results = iter(["", "", "", None])
-        with (
-            patch("hitch.main.worktrees._repo_root", return_value=Path("/repo")),
-            patch(
-                "hitch.main.worktrees._git",
-                side_effect=lambda *args, **kwargs: next(git_results),
-            ),
-            self.assertRaisesRegex(
-                WorktreeCreationError, "failed to write worktree snapshot tree"
-            ),
-        ):
-            snapshot_worktree_to_commit("/repo")
-
-    def test_snapshot_worktree_to_commit_reports_commit_failure(self) -> None:
-        git_results = iter(["", "", "", "tree-sha\n", None])
-        with (
-            patch("hitch.main.worktrees._repo_root", return_value=Path("/repo")),
-            patch(
-                "hitch.main.worktrees._git",
-                side_effect=lambda *args, **kwargs: next(git_results),
-            ),
-            self.assertRaisesRegex(
-                WorktreeCreationError, "failed to create worktree snapshot commit"
-            ),
-        ):
-            snapshot_worktree_to_commit("/repo")
 
     def test_creates_branch_and_worktree_under_settings_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
