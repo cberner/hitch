@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 _USAGE_TOKEN_REFRESH_LOCK = threading.Lock()
 _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+_USAGE_TOKEN_REFRESH_FINISHED_AT: datetime | None = None
+_USAGE_TOKEN_REFRESH_THREAD_IDS: frozenset[str] = frozenset()
+_USAGE_TOKEN_REFRESH_FAILED = False
 _USAGE_TOKEN_REFRESH_BATCH_SIZE = 25
 _USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE = 500
 _USAGE_TOKEN_REFRESH_CHECK_INTERVAL = timedelta(seconds=30)
@@ -447,11 +450,14 @@ def _lifetime_token_usage_for_metadata(
     session_by_date: dict[str, dict[str, int]] = {}
     system_by_date: dict[str, dict[str, int]] = {}
     refresh_pending_count = 0
+    partial_count = 0
     for metadata in metadata_rows:
         cache = cached_usage_by_thread_id.get(metadata.thread_id)
         cache_state = _usage_token_cache_state(metadata, cache)
         if cache_state.refresh_pending:
             refresh_pending_count += 1
+        if cache is None or not cache_state.cache_usable or cache.rollout_mtime_ns == 0:
+            partial_count += 1
         if cache is None or not cache_state.cache_usable:
             continue
         daily_usage = _daily_token_usage_from_cache(cache)
@@ -499,6 +505,7 @@ def _lifetime_token_usage_for_metadata(
         }
     lifetime_usage["refresh_pending"] = refresh_pending_count > 0
     lifetime_usage["refresh_pending_count"] = refresh_pending_count
+    lifetime_usage["partial_count"] = partial_count
     return lifetime_usage
 
 
@@ -629,6 +636,8 @@ def _usage_token_refresh_needed(
 
 def _start_usage_token_refresh_thread(items: Iterable[_UsageTokenRefreshWork]) -> None:
     global _USAGE_TOKEN_REFRESH_IN_FLIGHT
+    global _USAGE_TOKEN_REFRESH_FINISHED_AT, _USAGE_TOKEN_REFRESH_FAILED
+    global _USAGE_TOKEN_REFRESH_THREAD_IDS
     with _USAGE_TOKEN_REFRESH_LOCK:
         if _USAGE_TOKEN_REFRESH_IN_FLIGHT:
             return
@@ -648,6 +657,9 @@ def _start_usage_token_refresh_thread(items: Iterable[_UsageTokenRefreshWork]) -
     except Exception:
         with _USAGE_TOKEN_REFRESH_LOCK:
             _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+            _USAGE_TOKEN_REFRESH_FINISHED_AT = timezone.now()
+            _USAGE_TOKEN_REFRESH_FAILED = True
+            _USAGE_TOKEN_REFRESH_THREAD_IDS = frozenset(item.thread_id for item in work_items)
         logger.exception("failed to start usage token refresh thread")
 
 
@@ -655,12 +667,16 @@ def _refresh_usage_token_cache_best_effort(
     items: Iterable[_UsageTokenRefreshWork],
 ) -> None:
     global _USAGE_TOKEN_REFRESH_IN_FLIGHT
+    global _USAGE_TOKEN_REFRESH_FINISHED_AT, _USAGE_TOKEN_REFRESH_FAILED
+    global _USAGE_TOKEN_REFRESH_THREAD_IDS
+    work_items = tuple(items)
+    failed = False
     try:
         close_old_connections()
         with contextlib.ExitStack() as stack:
             codex: Codex | None = None
             projects: list[Project] | None = None
-            for batch in _usage_token_refresh_work_batches(items):
+            for batch in _usage_token_refresh_work_batches(work_items):
                 cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
                     item.thread_id for item in batch
                 )
@@ -700,22 +716,30 @@ def _refresh_usage_token_cache_best_effort(
                                 item.thread_id, _MISSING_TOKEN_USAGE_CACHE
                             ),
                         )
-                        if snapshot is None and _rollout_file_parses_as_jsonl(
-                            rollout_path
-                        ):
-                            _write_zero_token_usage_cache(
-                                item.thread_id, rollout_path, rollout_state.mtime_ns
-                            )
+                        if snapshot is None:
+                            if _rollout_file_parses_as_jsonl(rollout_path):
+                                _write_zero_token_usage_cache(
+                                    item.thread_id, rollout_path, rollout_state.mtime_ns
+                                )
+                            else:
+                                failed = True
                     except Exception:
+                        failed = True
                         logger.exception(
                             "failed to refresh token usage for %s", item.thread_id
                         )
                     finally:
                         _mark_usage_token_refresh_checked(item.thread_id)
+    except Exception:
+        failed = True
+        logger.exception("failed to finish token usage sweep")
     finally:
         close_old_connections()
         with _USAGE_TOKEN_REFRESH_LOCK:
             _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+            _USAGE_TOKEN_REFRESH_FINISHED_AT = timezone.now()
+            _USAGE_TOKEN_REFRESH_THREAD_IDS = frozenset(item.thread_id for item in work_items)
+            _USAGE_TOKEN_REFRESH_FAILED = failed
 
 
 def _usage_token_refresh_work_batches(

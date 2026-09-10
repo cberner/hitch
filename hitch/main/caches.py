@@ -53,6 +53,8 @@ _SELECTABLE_HIDDEN_MODEL_IDS = frozenset({"gpt-6-astra"})
 class _RateLimitsUsageState(NamedTuple):
     rate_limits: dict[str, Any] | None
     refresh_pending: bool
+    fetched_at: datetime | None = None
+    stale: bool = False
 
 
 def _cached_models_data(*, enable_memories: bool) -> list[Any]:
@@ -229,8 +231,12 @@ def _rate_limits_for_usage_context(*, enable_memories: bool) -> _RateLimitsUsage
             rate_limits=(
                 _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
             ),
-            refresh_pending=(
-                not _RATE_LIMITS_CACHE_HAS_VALUE and _RATE_LIMITS_REFRESH_IN_FLIGHT
+            refresh_pending=_RATE_LIMITS_REFRESH_IN_FLIGHT,
+            fetched_at=_RATE_LIMITS_CACHE_FETCHED_AT,
+            stale=(
+                _RATE_LIMITS_CACHE_VALUE is not None
+                and (_RATE_LIMITS_CACHE_FETCHED_AT is None or
+                     timezone.now() - _RATE_LIMITS_CACHE_FETCHED_AT >= _RATE_LIMITS_CACHE_TTL)
             ),
         )
 
@@ -317,14 +323,11 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
             if fetched and (rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE):
                 _RATE_LIMITS_CACHE_VALUE = rate_limits
                 _RATE_LIMITS_CACHE_HAS_VALUE = True
-            # Preserve a usable snapshot through failed refreshes. Record local
-            # backoff only after winning the shared claim; a cold process that
-            # loses the claim must remain eligible to observe when the shared
-            # throttle becomes due.
-            if fetched or _RATE_LIMITS_CACHE_HAS_VALUE:
+            # Snapshot age measures successful observations, independently of
+            # retry backoff. A failed or throttled attempt cannot freshen data.
+            if fetched and rate_limits is not None:
                 _RATE_LIMITS_CACHE_FETCHED_AT = attempted_at
-            if claimed:
-                _RATE_LIMITS_REFRESH_ATTEMPTED_AT = attempted_at
+            _RATE_LIMITS_REFRESH_ATTEMPTED_AT = attempted_at
             _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 

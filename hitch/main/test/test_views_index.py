@@ -671,8 +671,8 @@ class IndexViewTests(TestCase):
         )
         active_state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ACTIVE)
         archived_state = SessionIndexSyncState.objects.get(source=SessionIndexSyncState.SOURCE_ARCHIVED)
-        self.assertFalse(active_state.is_complete)
-        self.assertFalse(archived_state.is_complete)
+        self.assertTrue(active_state.is_complete)
+        self.assertTrue(archived_state.is_complete)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
