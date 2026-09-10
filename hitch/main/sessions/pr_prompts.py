@@ -24,7 +24,7 @@ _LEGACY_HITCH_PUBLISHED_PR_PROMPTS = frozenset(
         "not open a PR; Hitch will open it after this turn completes.",
     }
 )
-PR_SLASH_PROMPT = (
+_LEGACY_SINGLE_WATCH_PR_PROMPT = (
     "Rebase on the default branch, polish it, get it ready, "
     "run the relevant tests, and commit the final changes. Use Codex's built-in "
     "PR publishing tool to push the branch and open or update the pull request "
@@ -33,6 +33,17 @@ PR_SLASH_PROMPT = (
     "reviews. Assess any feedback, fix valid issues, test, commit, and publish "
     "follow-up changes, then call `hitch.watch_pr` again. If there are changes "
     "to publish, do not finish without calling `hitch.watch_pr`."
+)
+PR_WATCH_FOLLOW_UP_INSTRUCTIONS = (
+    "A watch invocation ends when it returns; registration does not keep a "
+    "background watcher running. After `attention` or `action_required`, assess "
+    "the feedback, address valid issues, and call `hitch.watch_pr` again even "
+    "when no code changes are needed. Continue until `ready` or `terminal`; "
+    "report `timed_out`, a tool failure, or a blocker you cannot resolve clearly. "
+    "Do not finish merely because CI is green while review is still pending."
+)
+PR_SLASH_PROMPT = (
+    f"{_LEGACY_SINGLE_WATCH_PR_PROMPT} {PR_WATCH_FOLLOW_UP_INSTRUCTIONS}"
 )
 
 _PR_PROMPT_ALIASES = frozenset(
@@ -43,6 +54,7 @@ _PR_PROMPT_ALIASES = frozenset(
         "Rebase on master, clean it up, and then open a PR",
         "Polish it, get it ready, and open or update the PR.",
         PR_SLASH_PROMPT,
+        _LEGACY_SINGLE_WATCH_PR_PROMPT,
         *_LEGACY_HITCH_PUBLISHED_PR_PROMPTS,
     }
 )

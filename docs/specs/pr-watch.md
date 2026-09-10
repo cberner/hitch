@@ -60,7 +60,8 @@ that lets Hitch display a session's registered PR.
   30 minutes and bounds every individual GitHub command. Normal turn
   cancellation interrupts the polling wait.
 - `PRWATCH-results`: The tool returns structured JSON with `status`, `summary`,
-  `feedback`, `feedback_fingerprint`, `pr`, `gates`, and `blockers`. Status is
+  `feedback`, `feedback_fingerprint`, `pr`, `gates`, `blockers`, and Hitch-authored
+  `next_action` guidance. Status is
   one of `ready`, `terminal`, `action_required`, `attention`, or `timed_out`.
 - `PRWATCH-return-conditions`: An invocation returns when the PR is terminal,
   all deterministic gates pass, an actionable gate is blocked, new feedback
@@ -117,6 +118,13 @@ that lets Hitch display a session's registered PR.
 - `PRWATCH-agent-decisions`: The coding agent decides whether feedback is
   valid, makes warranted changes, runs tests, commits and publishes follow-up
   changes, and chooses when to invoke the tool again.
+- `PRWATCH-continue-after-feedback`: Publication and watch guidance, tool
+  descriptions, and `attention`/`action_required` results explicitly direct the
+  agent to resume watching after assessing feedback, even if no changes are
+  needed. Continue until `ready` or `terminal`, or clearly report a timeout,
+  tool failure, or blocker the agent cannot resolve. Passing CI with a pending
+  review is not completion. Registration does not keep a background watcher
+  running after an invocation returns.
 - `PRWATCH-no-framework-loop`: `/pr`, `/pr-now`, `/fix-pr`, Auto-PR, and
   equivalent tasks do not launch a hidden monitor, parse a monitor verdict,
   schedule framework backoff, or launch a feedback repair turn.
