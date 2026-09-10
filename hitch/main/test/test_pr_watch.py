@@ -77,6 +77,7 @@ class PrWatchTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "action_required")
         self.assertIn("CI", result["summary"])
+        self.assertIn("call hitch.watch_pr again", result["next_action"])
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_new_feedback_interrupts_pending_watch(
@@ -92,6 +93,8 @@ class PrWatchTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "attention")
         self.assertTrue(result["feedback_fingerprint"])
+        self.assertIn("even if no changes were needed", result["next_action"])
+        self.assertIn("no background watcher remains", result["next_action"])
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_seen_feedback_does_not_create_a_hot_loop(
@@ -136,6 +139,7 @@ class PrWatchTests(SimpleTestCase):
 
         self.assertEqual(result["status"], "timed_out")
         self.assertIn("before a complete observation", result["summary"])
+        self.assertIn("Report the timeout", result["next_action"])
         mock_observe.assert_not_called()
 
     @patch("hitch.main.workflows.pr_watch._gh_pr_status_checks")
@@ -288,6 +292,29 @@ class PrWatchToolTests(TestCase):
         watch = next(spec for spec in specs if spec["name"] == "watch_pr")
         self.assertEqual(watch["namespace"], "hitch")
         self.assertEqual(watch["inputSchema"]["required"], ["url"])
+
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_informational_feedback_returns_guidance_and_resumes_watch(
+        self, mock_observe: MagicMock
+    ) -> None:
+        pending = _observation(
+            {"review_signal": "commented"}, feedback="Codecov report updated."
+        )
+        mock_observe.side_effect = [pending, pending, _observation()]
+        with (
+            patch("hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout"),
+            patch("hitch.main.workflows.pr_watch._interruptible_sleep"),
+        ):
+            first = _tool_result(self._call(agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND))
+            second = _tool_result(self._call(agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND))
+
+        self.assertEqual(first["status"], "attention")
+        self.assertEqual(first["blockers"], [])
+        self.assertIn("even if no changes were needed", str(first["next_action"]))
+        self.assertEqual(second["status"], "ready")
+        self.assertEqual(mock_observe.call_count, 3)
+        record = SessionPullRequest.objects.get(thread_id="main-thread")
+        self.assertEqual(record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY], second)
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_tagged_publish_turn_registers_and_records_pr(
