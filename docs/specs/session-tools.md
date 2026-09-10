@@ -10,6 +10,24 @@ tools for that role.
 
 ## 2. Requirements
 
+- `SESSIONTOOLS-quota-registration`: Newly created visible coding sessions
+  register `hitch.get_codex_quota`, with no arguments. Hidden system-agent
+  sessions do not receive it. Existing threads need a new session because
+  dynamic tool registration is immutable.
+- `SESSIONTOOLS-quota-fresh`: Every invocation synchronously requests
+  `account/rateLimits/read` through a separate app-server transport. It must
+  bypass Hitch's quota caches, background refresh, and refresh throttles, and
+  must never fall back to cached data after an error.
+- `SESSIONTOOLS-quota-result`: The tool returns JSON containing `fetched_at`
+  (UTC response receipt time) and `rate_limits` with the account's primary and
+  secondary windows. Each available window includes `used_percent`,
+  `remaining_percent` (clamped to 0–100), `window_duration_mins`, and `resets_at`
+  (Unix seconds). Missing windows and reset times remain null, never inferred
+  as unlimited quota. Missing both windows or a failed request returns an error.
+- `SESSIONTOOLS-quota-stopping`: The tool description tells agents to recheck
+  quota during work governed by a user's quota threshold and stop when that
+  threshold is reached. A failed check leaves quota unknown. This is a polling
+  tool, not an automatic hard cap on usage between checks.
 - `SESSIONTOOLS-rename-registration`: Newly created visible coding sessions
   register `hitch.rename_session`; hidden system-agent sessions do not. Dynamic
   tool registration is immutable, so sessions created before the tool was
@@ -41,6 +59,9 @@ tools for that role.
 
 ## 3. Success Criteria
 
+- `SESSIONTOOLS-quota-success`: Consecutive calls issue separate backend
+  requests and reflect changed quota even when Hitch has cached a different
+  value. A subsequent failed fetch returns an error without the earlier quota.
 - `SESSIONTOOLS-rename-success`: Calling `hitch.rename_session` with a valid
   name changes the invoking session's persisted and cached names.
 - `SESSIONTOOLS-rename-validation`: Invalid names fail without attempting a

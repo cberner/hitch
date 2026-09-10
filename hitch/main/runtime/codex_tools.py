@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.db import connection
+from django.utils import timezone
 from openai_codex import Codex
-from openai_codex.errors import InvalidRequestError
+from openai_codex.errors import CodexError, InvalidRequestError
+from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
 from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
@@ -33,6 +35,7 @@ _HITCH_NAMESPACE = "hitch"
 _PROPOSE_SESSION_TOOL = "propose_session"
 _RENAME_SESSION_TOOL = "rename_session"
 _WATCH_PR_TOOL = "watch_pr"
+_GET_CODEX_QUOTA_TOOL = "get_codex_quota"
 _GET_GOAL_TOOL = "get_goal"
 _LIST_GOAL_SESSIONS_TOOL = "list_goal_sessions"
 _REVIEW_TOOL = "review"
@@ -205,6 +208,40 @@ def _handle_rename_session(arguments: dict[str, Any], context: ToolContext) -> s
         raise HitchToolError("current session is archived or unknown") from exc
     session_index.update_cached_name(context.thread_id, name)
     return f"Renamed current session to: {name}"
+
+
+def _handle_get_codex_quota(arguments: dict[str, Any], context: ToolContext) -> str:
+    _require_no_arguments(arguments)
+
+    from hitch.main.runtime import app_server_pool
+
+    # Borrow a separate transport to avoid re-entering the worker's reader
+    # thread. Every call must request the backend, bypassing Hitch's caches.
+    try:
+        response = app_server_pool.run_borrowed_op_with_retry(
+            Codex,
+            lambda codex: codex._client.request(
+                "account/rateLimits/read",
+                None,
+                response_model=GetAccountRateLimitsResponse,
+            ),
+            enable_memories=context.enable_memories,
+            web_search_mode=context.web_search_mode,
+        )
+    except CodexError as exc:
+        raise HitchToolError(
+            "Could not fetch fresh Codex quota; no cached value was returned. Try again later."
+        ) from exc
+
+    snapshot = response.rate_limits
+    if snapshot.primary is None and snapshot.secondary is None:
+        raise HitchToolError("Codex returned no quota windows; remaining quota is unknown.")
+    data = snapshot.model_dump(mode="json")
+    for name in ("primary", "secondary"):
+        window = data[name]
+        if window is not None:
+            window["remaining_percent"] = max(0, min(100, 100 - window["used_percent"]))
+    return json.dumps({"fetched_at": timezone.now().isoformat(), "rate_limits": data})
 
 
 def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
@@ -436,6 +473,22 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_rename_session,
+        roles=frozenset({"visible"}),
+    ),
+    (_HITCH_NAMESPACE, _GET_CODEX_QUOTA_TOOL): HitchTool(
+        namespace=_HITCH_NAMESPACE,
+        name=_GET_CODEX_QUOTA_TOOL,
+        description=(
+            "Fetch the remaining Codex account quota from the backend on every call, without cached fallback. "
+            "Returns remaining_percent (0-100), used_percent, window_duration_mins, and resets_at "
+            "(Unix seconds) for primary and secondary windows, plus fetched_at (UTC). "
+            "A missing window or reset time is unknown, not unlimited quota. "
+            "Use this to check progress toward a user-specified quota stopping threshold; "
+            "recheck while working and stop when the threshold is reached. "
+            "If the fetch fails, quota is unknown; do not assume it is safe to continue quota-bounded work."
+        ),
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=_handle_get_codex_quota,
         roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _WATCH_PR_TOOL): HitchTool(
