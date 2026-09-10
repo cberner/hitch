@@ -28,6 +28,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase, override_setti
 from django.utils import timezone
 from openai_codex import ApprovalMode, Codex, Sandbox, Thread, TurnHandle
 from openai_codex._message_router import MessageRouter
+from openai_codex.client import CodexClient
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
@@ -45,6 +46,7 @@ from openai_codex.generated.v2_all import (
     TurnError,
     TurnStartedNotification,
     TurnStartParams,
+    TurnStartResponse,
     TurnStatus,
     UserMessageThreadItem,
 )
@@ -4276,6 +4278,43 @@ class _FakeNotificationSource:
 
 
 class GoalNotificationForwarderTests(TestCase):
+    def test_sdk_start_preserves_early_events_and_correlates_goal_execution(self) -> None:
+        events = [
+            _turn_started_event(thread_id="thread-1", turn_id="execution-1"),
+            _submitted_message_event(thread_id="thread-1", turn_id="execution-1", client_message_id="client-1"),
+            _turn_completed_event(thread_id="thread-1", turn_id="execution-1"),
+        ]
+        for approval_mode, collaboration_mode, plan_mode in (
+            (None, None, False), ("approve_all", None, False),
+            (None, "default", False), (None, None, True),
+        ):
+            with self.subTest(approval=approval_mode, collaboration=collaboration_mode, plan=plan_mode):
+                client = CodexClient()
+                codex = cast(Codex, SimpleNamespace(_client=client))
+                sequencer = _install_notification_sequencer(codex)
+                submission = sequencer.begin_submission("thread-1", "client-1")
+
+                def start(
+                    _method: str, params: Any, client: CodexClient = client, **_kwargs: Any,
+                ) -> TurnStartResponse:
+                    self.assertEqual(params["clientUserMessageId"], "client-1")
+                    for event in events:
+                        client._router.route_notification(event)
+                    return TurnStartResponse(turn=Turn(id="submission-1", items=[], status=TurnStatus.in_progress))
+
+                with patch.object(client, "request", side_effect=start):
+                    turn = codex_worker_module._start_turn(
+                        codex, Thread(client, "thread-1"), prompt="hello", input_image_paths=None,
+                        model="gpt-5.4", effort=None, sandbox_policy=None, approval_mode=approval_mode,
+                        collaboration_mode=collaboration_mode, plan_mode=plan_mode,
+                        client_user_message_id="client-1", submission=submission, notification_sequencer=sequencer,
+                    )
+                _bind_submitted_turn_handle(turn, submission, sequencer)
+                sequencer.finish_submission(submission)
+                self.assertEqual(turn.id, "execution-1")
+                self.assertEqual(list(turn.stream()), events)
+                self.assertEqual(client._router._turn_states, {})
+
     def test_forwards_only_goal_notifications_for_current_thread(self) -> None:
         written: list[tuple[str, object]] = []
         discarded: list[Notification] = []
@@ -4376,7 +4415,7 @@ class GoalNotificationForwarderTests(TestCase):
         sequencer = _install_notification_sequencer(cast(Any, codex))
         submission = sequencer.begin_submission("thread-1", "client-1")
         router.register_turn("submission-1")
-        client = SimpleNamespace(_router=router)
+        client = SimpleNamespace(_router=router, _subscribe_turn_notifications=router.subscribe_turn)
         turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
         transport_error = RuntimeError("transport closed while queued")
 
@@ -4477,9 +4516,7 @@ class GoalNotificationForwarderTests(TestCase):
         interrupt.side_effect = observe_interrupt
         client = SimpleNamespace(
             _router=router,
-            register_turn_notifications=router.register_turn,
-            next_turn_notification=router.next_turn_notification,
-            unregister_turn_notifications=router.unregister_turn,
+            _subscribe_turn_notifications=router.subscribe_turn,
             turn_interrupt=interrupt,
         )
         turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
@@ -4566,9 +4603,7 @@ class GoalNotificationForwarderTests(TestCase):
         router.route_notification(completed)
         client = SimpleNamespace(
             _router=router,
-            register_turn_notifications=router.register_turn,
-            next_turn_notification=router.next_turn_notification,
-            unregister_turn_notifications=router.unregister_turn,
+            _subscribe_turn_notifications=router.subscribe_turn,
         )
         turn = TurnHandle(cast(Any, client), "thread-1", "submission-1")
 
@@ -4705,11 +4740,11 @@ class CodexWorkerCommandTests(TestCase):
             sequenced_during_write.append(sequencer._lock.locked())
         )
 
-        def turn_start(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        def turn_start(*_args: Any, **_kwargs: Any) -> tuple[SimpleNamespace, Any]:
             client._write_message({"method": "turn/start"})
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1")), MagicMock()
 
-        client.turn_start.side_effect = turn_start
+        client._start_turn.side_effect = turn_start
 
         handle = codex_worker_module._start_turn(
             codex,
@@ -5165,7 +5200,7 @@ class CodexWorkerCommandTests(TestCase):
     def test_sdk_unknown_reasoning_effort_uses_typed_turn(
         self, mock_codex: MagicMock
     ) -> None:
-        unknown_effort = "ultra"
+        unknown_effort = "future_effort"
         self.assertNotIn(unknown_effort, {item.value for item in ReasoningEffort})
         codex_ctx = mock_codex.return_value.__enter__.return_value
         turn = codex_ctx.thread_resume.return_value.turn.return_value
@@ -5204,14 +5239,15 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
         def _capture_turn_start(
-            _thread_id: str, _input: object, *, params: object
+            _thread_id: str, _input: object, *, params: object, for_handle: bool
         ) -> object:
             captured_params["input"] = _input
             captured_params["params"] = params
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1")), subscription
 
-        codex_ctx._client.turn_start.side_effect = _capture_turn_start
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+        codex_ctx._client._start_turn.side_effect = _capture_turn_start
+        subscription = MagicMock()
+        subscription.next.return_value = _completed_event(
             "turn-1", TurnStatus.completed
         )
         codex_ctx.thread_resume.return_value = SimpleNamespace(
@@ -5282,14 +5318,15 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
         def _capture_turn_start(
-            _thread_id: str, _input: object, *, params: object
+            _thread_id: str, _input: object, *, params: object, for_handle: bool
         ) -> object:
             captured_params["input"] = _input
             captured_params["params"] = params
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1")), subscription
 
-        codex_ctx._client.turn_start.side_effect = _capture_turn_start
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+        codex_ctx._client._start_turn.side_effect = _capture_turn_start
+        subscription = MagicMock()
+        subscription.next.return_value = _completed_event(
             "turn-1", TurnStatus.completed
         )
         codex_ctx.thread_resume.return_value = SimpleNamespace(
@@ -5388,13 +5425,14 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
         def _capture_turn_start(
-            _thread_id: str, _input: object, *, params: object
+            _thread_id: str, _input: object, *, params: object, for_handle: bool
         ) -> object:
             captured_params["params"] = params
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1")), subscription
 
-        codex_ctx._client.turn_start.side_effect = _capture_turn_start
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+        codex_ctx._client._start_turn.side_effect = _capture_turn_start
+        subscription = MagicMock()
+        subscription.next.return_value = _completed_event(
             "turn-1", TurnStatus.completed
         )
         codex_ctx.thread_resume.return_value = SimpleNamespace(
@@ -5802,7 +5840,7 @@ class ApprovalHandlerTests(TestCase):
                 }
             ]
         }
-        response = {"answers": {"trigger_surface": "Management command"}}
+        response = {"answers": {"trigger_surface": {"answers": ["Management command"]}}}
         for approval_mode in ("auto_review", "approve_all"):
             for request_method in (
                 "request_user_input",

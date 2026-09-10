@@ -19,6 +19,7 @@ from django.views.decorators.http import require_http_methods
 from hitch.main.models import ApprovalRequest, UserInputRequest
 from hitch.main.runtime import codex_pool
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
+from hitch.main.sessions.user_input import wire_user_input_response
 
 
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
@@ -142,6 +143,12 @@ def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
         if key:
             answers[key] = value
     response: dict[str, Any] = {"answers": answers}
+    try:
+        wire_user_input_response(response)
+    except ValueError:
+        return HttpResponseBadRequest(
+            "answers must be strings, string lists, or objects containing an answers string list"
+        )
     try:
         input_request = UserInputRequest.objects.get(pk=input_id)
     except UserInputRequest.DoesNotExist:

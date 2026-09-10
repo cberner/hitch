@@ -15,14 +15,9 @@ The events file plus the status transitions on the row are the primary output;
 the parent also redirects stderr to a durable per-worker log for crash
 forensics.
 
-Interactive browser prompts route through ``_make_approval_handler``: when
-the SDK reader thread receives an approval or ``request_user_input`` request,
-the handler creates a durable pending row, emits a synthetic event into the
-events file (so the SSE stream surfaces it), and blocks on a short-poll loop
-until the Django view records the browser response. The cap on that wait is
-intentionally generous (``_APPROVAL_WAIT_SECONDS``) so a user who steps away
-from the laptop doesn't lose the turn; on timeout approvals decline and
-structured input returns empty answers.
+Browser handoffs create durable rows and synthetic SSE events. Questions wait
+on independent handlers so the SDK can keep receiving progress and additional
+questions. Only Codex decides whether an unanswered question blocks generation.
 """
 
 from __future__ import annotations
@@ -33,13 +28,11 @@ import itertools
 import json
 import logging
 import os
-import queue
 import signal
 import sys
 import threading
 import time
 import traceback
-from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any, Protocol, TypedDict, cast, override
@@ -49,7 +42,6 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 from openai_codex import (
     ApprovalMode,
-    Codex,
     Input,
     LocalImageInput,
     Sandbox,
@@ -57,7 +49,8 @@ from openai_codex import (
     Thread,
     TurnHandle,
 )
-from openai_codex._message_router import MessageRouter
+from openai_codex._message_router import MessageRouter, _TurnSubscription
+from openai_codex.api import Codex as CodexApi
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
@@ -110,8 +103,11 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     is_dynamic_tool_call,
 )
+from hitch.main.runtime.question_transport import QuestionClient, is_user_input_request
+from hitch.main.runtime.question_transport import QuestionCodex as Codex
 from hitch.main.sessions.hitch_instructions import combined_developer_instructions
 from hitch.main.sessions.session_settings import _PLAN_MODE_REASONING_EFFORT
+from hitch.main.sessions.user_input import wire_user_input_response as _wire_user_input_response
 
 logger = logging.getLogger(__name__)
 
@@ -123,14 +119,6 @@ _APPROVAL_METHODS = frozenset(
     {
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
-    }
-)
-_USER_INPUT_METHODS = frozenset(
-    {
-        "request_user_input",
-        "requestUserInput",
-        "item/tool/request_user_input",
-        "item/tool/requestUserInput",
     }
 )
 # Send default-mode instructions explicitly so approving a plan replaces the
@@ -500,10 +488,8 @@ def _run_turn(
     normalized_effort = reasoning_effort.strip() if reasoning_effort else None
     effort = ReasoningEffort(normalized_effort) if normalized_effort else None
     policy = _build_sandbox_policy(sandbox_policy)
-    # Serialise writes between the SDK reader thread (which calls the
-    # approval handler) and the main thread (which appends streamed turn
-    # events). Without this lock both threads can interleave partial JSON
-    # lines into the events file.
+    # Serialise approval, question, and streamed-turn writes so concurrent
+    # handlers cannot interleave partial JSON lines into the events file.
     write_lock = threading.Lock()
 
     def _write_event(
@@ -556,7 +542,7 @@ def _run_turn(
         resume_kwargs["developer_instructions"] = combined_developer_instructions(
             instance.developer_instructions, instance.hitch_extra_instructions,
         )
-    def _configure(codex: Codex) -> None:
+    def _configure(codex: CodexApi) -> None:
         # Runs once per app-server open attempt (``open_codex_resumed`` retries
         # the whole open+configure+resume when the resume races the CODEX_HOME
         # state-DB migration). All three steps are safe to redo against a fresh
@@ -578,6 +564,10 @@ def _run_turn(
             instance=instance,
             write_event=_write_event,
             approval_mode=approval_mode,
+            question_cancelled=(
+                codex._client.question_cancelled
+                if isinstance(codex._client, QuestionClient) else lambda: False
+            ),
         )
         goal_forwarder = _start_goal_event_forwarder(
             codex._client,
@@ -1009,7 +999,7 @@ class _ThreadTurnKwargs(TypedDict, total=False):
 
 
 def _start_turn(
-    codex: Codex,
+    codex: CodexApi,
     thread: Thread,
     *,
     prompt: str,
@@ -1034,13 +1024,14 @@ def _start_turn(
     if client_user_message_id is None:
         raise ValueError("ordinary turn start requires a client user message id")
     client = codex._client
-    turn_start = client.turn_start
+    turn_start = client._start_turn
     write_message = client._write_message
 
     def correlated_turn_start(
         thread_id: str,
         input_items: Any,
         params: TurnStartParams | dict[str, Any] | None = None,
+        for_handle: bool = False,
     ) -> Any:
         if isinstance(params, TurnStartParams):
             params = params.model_copy(
@@ -1051,7 +1042,7 @@ def _start_turn(
                 **(params or {}),
                 "clientUserMessageId": client_user_message_id,
             }
-        return turn_start(thread_id, input_items, params=params)
+        return turn_start(thread_id, input_items, params=params, for_handle=for_handle)
 
     def correlated_write_message(payload: JsonObject) -> None:
         if (
@@ -1065,7 +1056,7 @@ def _start_turn(
             return
         write_message(payload)
 
-    client.turn_start = correlated_turn_start  # type: ignore[method-assign]
+    client._start_turn = correlated_turn_start  # type: ignore[method-assign]
     client._write_message = correlated_write_message  # type: ignore[method-assign]
     try:
         return _start_ordinary_turn(
@@ -1081,12 +1072,12 @@ def _start_turn(
             plan_mode=plan_mode,
         )
     finally:
-        client.turn_start = turn_start  # type: ignore[method-assign]
+        client._start_turn = turn_start  # type: ignore[method-assign]
         client._write_message = write_message  # type: ignore[method-assign]
 
 
 def _start_ordinary_turn(
-    codex: Codex,
+    codex: CodexApi,
     thread: Thread,
     *,
     prompt: str,
@@ -1137,8 +1128,8 @@ def _start_ordinary_turn(
         # positional arg; the value in ``params.input`` is overwritten by
         # the normalized form of this argument in the JSON-RPC payload.
         wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
-        response = codex._client.turn_start(thread.id, wire_input, params=params)
-        return TurnHandle(codex._client, thread.id, response.turn.id)
+        response, subscription = codex._client._start_turn(thread.id, wire_input, params=params, for_handle=True)
+        return TurnHandle(codex._client, thread.id, response.turn.id, _subscription=subscription)
 
     turn_kwargs = _ThreadTurnKwargs()
     mode = _build_approval_mode(approval_mode)
@@ -1154,7 +1145,7 @@ def _start_ordinary_turn(
 
 
 def _start_plan_turn(
-    codex: Codex,
+    codex: CodexApi,
     thread: Thread,
     *,
     prompt: str,
@@ -1185,7 +1176,7 @@ def _start_plan_turn(
 
 
 def _start_default_collaboration_turn(
-    codex: Codex,
+    codex: CodexApi,
     thread: Thread,
     *,
     prompt: str,
@@ -1218,7 +1209,7 @@ def _start_default_collaboration_turn(
 
 
 def _start_collaboration_turn(
-    codex: Codex,
+    codex: CodexApi,
     thread: Thread,
     *,
     prompt: str,
@@ -1253,8 +1244,8 @@ def _start_collaboration_turn(
             params["approvalPolicy"] = approval_policy
             if approvals_reviewer is not None:
                 params["approvalsReviewer"] = approvals_reviewer
-    response = codex._client.turn_start(thread.id, wire_input, params=params)
-    return TurnHandle(codex._client, thread.id, response.turn.id)
+    response, subscription = codex._client._start_turn(thread.id, wire_input, params=params, for_handle=True)
+    return TurnHandle(codex._client, thread.id, response.turn.id, _subscription=subscription)
 
 
 def _approval_mode_params(
@@ -1362,6 +1353,7 @@ class _TurnSubmission:
     _turn_id: str | None = None
     _failure: BaseException | None = None
     _returned_turn_id: str | None = None
+    _subscriptions: dict[str, _TurnSubscription] = dataclasses.field(default_factory=dict)
 
     def bind(self, turn_id: str, *, wake: bool = True) -> None:
         with self._lock:
@@ -1442,9 +1434,18 @@ class _NotificationSequencer:
             accepted_submission = self._accept_submission(notification)
             self._observe_submission_terminal(notification)
             self._observe_turn_completed(notification)
+            # Retain events while app-server decides which physical turn will
+            # accept this submission. SDK 0.154 consumers otherwise start at
+            # attachment time and cannot replay an earlier accepting turn.
+            if isinstance(self._router, MessageRouter):
+                turn_id = self._notification_turn_id(notification)
+                thread_id = _notification_thread_id(notification.payload)
+                if turn_id is not None:
+                    for submission in self._submissions.values():
+                        if submission.thread_id == thread_id and turn_id not in submission._subscriptions:
+                            submission._subscriptions[turn_id] = self._router.subscribe_turn(turn_id)
 
-        if not _preserve_early_turn_completed(self._router, notification):
-            self._route_notification(notification)
+        self._route_notification(notification)
 
         if accepted_submission is not None:
             accepted_submission.wake()
@@ -1587,6 +1588,9 @@ class _NotificationSequencer:
 
     def finish_submission(self, submission: _TurnSubmission) -> None:
         with self._lock:
+            for subscription in submission._subscriptions.values():
+                subscription.close()
+            submission._subscriptions.clear()
             if self._submissions.get(submission.client_message_id) is submission:
                 self._submissions.pop(submission.client_message_id)
             returned_turn_id = submission._returned_turn_id
@@ -1606,7 +1610,7 @@ class _NotificationSequencer:
             self._fail_all(exc)
 
 
-def _install_notification_sequencer(codex: Codex) -> _NotificationSequencer:
+def _install_notification_sequencer(codex: CodexApi) -> _NotificationSequencer:
     """Tag SDK notifications in reader-thread arrival order before routing.
 
     The SDK splits notifications into turn-specific and global queues. Hitch
@@ -1636,31 +1640,14 @@ def _bind_submitted_turn_handle(
     """
     if not _supports_submission_binding(turn):
         return
-    router = turn._client._router
-
     returned_turn_id = turn.id
     notification_sequencer.register_returned_turn(submission, returned_turn_id)
     execution_turn_id = submission.wait()
 
-    with router._lock:
-        returned_queue = router._turn_notifications.get(returned_turn_id)
-        execution_queue = router._turn_notifications.get(execution_turn_id)
-        if execution_queue is None:
-            pending = router._pending_turn_notifications.pop(execution_turn_id, None)
-            if pending is None:
-                raise RuntimeError(
-                    f"submitted turn {execution_turn_id!r} has no notification queue"
-                )
-            execution_queue = (
-                returned_queue
-                if returned_queue is not None and returned_queue.empty()
-                else queue.Queue[Any]()
-            )
-            router._turn_notifications[execution_turn_id] = execution_queue
-            for notification in pending:
-                execution_queue.put(notification)
-        if returned_turn_id != execution_turn_id:
-            router._turn_notifications.pop(returned_turn_id, None)
+    with notification_sequencer._lock:
+        subscription = submission._subscriptions.pop(execution_turn_id)
+        turn._subscription.close()
+        turn._subscription = subscription
         turn.id = execution_turn_id
 
 
@@ -1669,28 +1656,6 @@ def _supports_submission_binding(turn: Any) -> bool:
         turn._client._router,
         MessageRouter,
     )
-
-
-def _preserve_early_turn_completed(router: Any, notification: Notification) -> bool:
-    """Work around SDK router versions that drop early ``turn/completed``.
-
-    Fast turns can finish after ``turn/start`` responds but before
-    ``TurnHandle.stream()`` registers its queue. The pinned SDK preserves
-    early in-turn notifications but discards ``turn/completed`` in that
-    window, leaving the worker blocked forever waiting for a completion
-    event that already arrived. Store it with the pending turn notifications
-    so stream registration replays it normally.
-    """
-    if notification.method != "turn/completed":
-        return False
-    turn_id = router._notification_turn_id(notification)
-    if turn_id is None:
-        return False
-    with router._lock:
-        if router._turn_notifications.get(turn_id) is not None:
-            return False
-        router._pending_turn_notifications.setdefault(turn_id, deque()).append(notification)
-    return True
 
 
 def _start_goal_event_forwarder(
@@ -1761,6 +1726,7 @@ def _make_approval_handler(
     instance: CodexInstance,
     write_event: WriteEvent,
     approval_mode: str | None,
+    question_cancelled: Callable[[], bool] = lambda: False,
 ) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
     """Return an approval-handler closure bound to a single CodexInstance.
 
@@ -1775,8 +1741,8 @@ def _make_approval_handler(
     ``CodexInstance.approval_mode`` instead of relying solely on the mode
     captured at worker startup.
 
-    The handler runs on the SDK's reader thread (the same thread that reads
-    JSON-RPC frames off codex's stdout), so it must:
+    The handler runs on the SDK reader thread for approvals and independent
+    transport threads for questions, so it must:
 
     * Be safe to call from a non-Django-request thread — Django's ORM is
       thread-safe but does not auto-cleanup connections; we close after each
@@ -1814,6 +1780,7 @@ def _make_approval_handler(
                 write_event=write_event,
                 method=method,
                 params=params or {},
+                cancelled=question_cancelled,
             )
         if method not in _APPROVAL_METHODS:
             return {}
@@ -1908,10 +1875,7 @@ def _current_approval_mode(
 
 
 def _is_user_input_request_method(method: str) -> bool:
-    return (
-        method in _USER_INPUT_METHODS
-        or method.endswith(("/requestUserInput", "/request_user_input"))
-    )
+    return is_user_input_request(method)
 
 
 def _handle_user_input_request(
@@ -1920,6 +1884,7 @@ def _handle_user_input_request(
     write_event: WriteEvent,
     method: str,
     params: dict[str, Any],
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> dict[str, Any]:
     request_id = _create_pending_user_input(
         instance_id=instance.pk,
@@ -1934,12 +1899,12 @@ def _handle_user_input_request(
             "params": params,
         },
     )
-    response = _wait_for_user_input_response(request_id)
+    response = _wait_for_user_input_response(request_id, cancelled=cancelled)
     write_event(
         "input/resolved",
-        {"id": request_id, "method": method, "response": response},
+        {"id": request_id, "method": method, "response": response, "cancelled": cancelled() or _cancel_requested},
     )
-    return response
+    return _wire_user_input_response(response)
 
 
 def _create_pending_approval(
@@ -1979,12 +1944,12 @@ def _create_pending_user_input(
         connection.close()
 
 
-def _wait_for_user_input_response(request_id: int) -> dict[str, Any]:
-    # Stop on cancellation too: while blocked here the main stream loop can't act
-    # on a SIGTERM, so a Stop click would otherwise hang until SIGKILL. Falling
-    # through records the empty-answer fallback (the conditional UPDATE preserves
-    # a real answer submitted at the boundary) and lets the main loop interrupt.
-    while not _cancel_requested:
+def _wait_for_user_input_response(
+    request_id: int, *, cancelled: Callable[[], bool] = lambda: False,
+) -> dict[str, Any]:
+    # Settle cancelled requests without leaving a pending form behind. The
+    # conditional UPDATE preserves a real answer submitted at the boundary.
+    while not _cancel_requested and not cancelled():
         response = _user_input_response_value(request_id)
         if isinstance(response, dict):
             return response

@@ -1959,10 +1959,8 @@ class ResolveInputRequestViewTests(TestCase):
     def test_records_answer_payloads(self) -> None:
         structured_answers = {
             "scope": ["UI", "CLI"],
-            "details": {"choice": "Other", "notes": ["keep history"]},
-            "confirmed": True,
-            "priority": 2,
-            "optional": None,
+            "details": {"answers": ["Other", "keep history"]},
+            "optional": [],
         }
         cases = [
             (
@@ -2001,7 +1999,12 @@ class ResolveInputRequestViewTests(TestCase):
     def test_rejects_invalid_answers_payload(self) -> None:
         input_request = self._make_input_request()
 
-        for answers in ("not-json", json.dumps(["not", "object"])):
+        invalid_answers = ("not-json", json.dumps(["not", "object"])) + tuple(
+            json.dumps({"scope": "UI", "details": value})
+            for value in (True, 2, None, {}, {"choice": "Other"}, ["UI", 2],
+                          {"answers": "UI"}, {"answers": [True]}, {"answers": ["UI"], "extra": True})
+        )
+        for answers in invalid_answers:
             with self.subTest(answers=answers):
                 response = self.client.post(
                     reverse(
@@ -2010,6 +2013,9 @@ class ResolveInputRequestViewTests(TestCase):
                     data={"answers": answers},
                 )
                 self.assertEqual(response.status_code, 400)
+                input_request.refresh_from_db()
+                self.assertIsNone(input_request.response)
+                self.assertIsNone(input_request.responded_at)
 
     def test_returns_409_when_already_resolved(self) -> None:
         input_request = self._make_input_request(response={"answers": {"scope": "UI"}})

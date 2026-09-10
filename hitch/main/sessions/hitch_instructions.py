@@ -4,10 +4,14 @@ from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.sessions.review_prompts import optional_review_prompt
 
 DEFAULT_HITCH_EXTRA_INSTRUCTIONS = (
-    "When you ask the user a question, wait for their answer before continuing. "
-    "Use the blocking `request_user_input` tool, including in Default mode; "
-    "do not use `request_user_input_async`. If the blocking tool is unavailable, "
-    "end your turn with a concise plain-text question. Unanswered questions "
+    "Ask concise questions to resolve meaningful ambiguity, learn preferences, "
+    "and check direction during longer tasks. Use `request_user_input_async` "
+    "when available if useful independent work can continue while the user "
+    "answers. Keep pending questions in mind and incorporate answers as they "
+    "arrive. Use blocking `request_user_input` when the answer is needed before "
+    "work can continue, including in Default mode. If only the blocking tool "
+    "is available, use it; if neither tool is available, ask in plain text. "
+    "Wait for required answers before dependent work. Unanswered questions "
     "are not permission to proceed.\n\n"
     "Follow the Hitch workflow selected for this turn. In Plan mode, plan only; "
     "do not perform automatic review or publish a pull request. When the "

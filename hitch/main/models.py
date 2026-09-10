@@ -599,12 +599,9 @@ class ApprovalRequest(models.Model):
 class UserInputRequest(models.Model):
     """One row per app-server ``request_user_input`` prompt.
 
-    Plan-mode turns can ask the client to collect structured answers from the
-    human before continuing. The SDK delivers that as a synchronous
-    server-to-client JSON-RPC request, so the worker needs the same durable
-    browser handoff pattern used by approvals: write a pending row, emit an
-    SSE event, block until the browser records a JSON response, then return it
-    to app-server.
+    Each blocking or nonblocking request keeps its own browser response. The
+    worker waits outside the SDK reader so progress and other questions remain
+    available. Codex determines whether generation waits for the answer.
     """
 
     instance = models.ForeignKey(
