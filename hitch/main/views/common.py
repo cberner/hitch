@@ -9,11 +9,13 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
 from django.conf import settings as django_settings
+from django.core import signing
 from django.core.files.uploadedfile import UploadedFile
 from django.db import close_old_connections, transaction
 from django.db.models import QuerySet
@@ -157,6 +159,7 @@ logger = logging.getLogger(__name__)
 _USAGE_SESSION_INDEX_REFRESH_LOCK = threading.Lock()
 
 _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
+_USAGE_SESSION_INDEX_REFRESH_RESULTS: dict[bool, tuple[datetime, bool]] = {}
 
 class UsageContext(NamedTuple):
     template_context: dict[str, Any]
@@ -390,11 +393,18 @@ def _usage_context(request: HttpRequest) -> UsageContext:
     rate_limits_state = caches._rate_limits_for_usage_context(
         enable_memories=current_settings.enable_memories
     )
+    # Observe completion before reading the data it certifies. Otherwise a
+    # worker finishing during aggregation could label older counts as final.
+    with _USAGE_SESSION_INDEX_REFRESH_LOCK:
+        index_results = dict(_USAGE_SESSION_INDEX_REFRESH_RESULTS)
+    with token_usage._USAGE_TOKEN_REFRESH_LOCK:
+        token_result = (
+            token_usage._USAGE_TOKEN_REFRESH_FINISHED_AT,
+            token_usage._USAGE_TOKEN_REFRESH_FAILED,
+            token_usage._USAGE_TOKEN_REFRESH_IN_FLIGHT,
+            token_usage._USAGE_TOKEN_REFRESH_THREAD_IDS,
+        )
     session_index_state = _usage_session_index_state()
-    _schedule_usage_session_index_refresh_if_needed(
-        enable_memories=current_settings.enable_memories,
-        index_state=session_index_state,
-    )
     settings_context = _settings_context(current_settings, models_data)
     current_project = settings_context["current_project"]
     usage_metadata = (
@@ -410,19 +420,112 @@ def _usage_context(request: HttpRequest) -> UsageContext:
         if session_index_state.totals_available
         else None
     )
-    if lifetime_usage is not None and lifetime_usage["refresh_pending"]:
-        token_usage._schedule_usage_token_refresh(usage_metadata)
+    usage_refresh = _usage_refresh_state(
+        request, index_state=session_index_state, lifetime_usage=lifetime_usage,
+        metadata=usage_metadata, enable_memories=current_settings.enable_memories,
+        index_results=index_results, token_result=token_result,
+    )
     return UsageContext(
         template_context={
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "rate_limits": rate_limits_state.rate_limits,
             "rate_limits_refresh_pending": rate_limits_state.refresh_pending,
+            "rate_limits_fetched_at": rate_limits_state.fetched_at,
+            "rate_limits_stale": rate_limits_state.stale,
             "lifetime_usage": lifetime_usage,
+            **usage_refresh,
+            "usage_should_poll": usage_refresh["usage_should_poll"] or rate_limits_state.refresh_pending,
             **settings_context,
         },
         cookie_updates=cookie_updates,
     )
+
+
+def _usage_refresh_state(
+    request: HttpRequest, *, index_state: UsageSessionIndexState,
+    lifetime_usage: dict[str, Any] | None, metadata: list[SessionMetadata],
+    enable_memories: bool,
+    index_results: dict[bool, tuple[datetime, bool]],
+    token_result: tuple[datetime | None, bool, bool, frozenset[str]],
+) -> dict[str, Any]:
+    # A signed page cursor follows one sweep through indexing and token work.
+    # Completion must survive the 30-second freshness window of individual rows.
+    polling = request.resolver_match and request.resolver_match.url_name == "usage_refresh"
+    cursor = request.GET.get("cursor", "") if polling else ""
+    state: dict[str, Any] = {}
+    if cursor:
+        try:
+            state = signing.loads(cursor, salt="usage-refresh", max_age=3600)
+        except signing.SignatureExpired:
+            state = {}
+        except signing.BadSignature:
+            state = {"phase": "done", "status": "failed"}
+    now = timezone.now()
+    phase = state.get("phase", "")
+    since = datetime.fromisoformat(state["since"]) if "since" in state else now
+    if not phase:
+        if index_state.refresh_active or index_state.refresh_archived:
+            phase = "index"
+            state["sources"] = [
+                archived for archived, needed in (
+                    (False, index_state.refresh_active), (True, index_state.refresh_archived)
+                ) if needed
+            ]
+        elif lifetime_usage is not None and lifetime_usage["refresh_pending"]:
+            phase = "tokens"
+        else:
+            phase = "done"
+    if phase == "index":
+        sources = state.get("sources", [False, True])
+        pending = [source for source in sources if source not in index_results or index_results[source][0] < since]
+        if not pending:
+            failed = any(index_results[source][1] for source in sources)
+            if failed or not index_state.totals_available:
+                phase = "done"
+                state["status"] = "failed" if failed else "unavailable"
+            else:
+                phase = "tokens"
+                since = now
+        else:
+            _schedule_session_index_refresh(
+                enable_memories=enable_memories,
+                include_active=False in pending, include_archived=True in pending,
+            )
+    if phase == "tokens":
+        finished, failed, in_flight, thread_ids = token_result
+        if finished is not None and finished >= since:
+            # A joined sweep may predate sessions discovered by indexing.
+            # Follow it with a sweep for omitted rows, even after failure.
+            # Track membership separately from successful row check times.
+            if any(row.thread_id not in thread_ids for row in metadata):
+                since = now
+                token_usage._schedule_usage_token_refresh(metadata)
+            else:
+                phase = "done"
+            if failed:
+                state["status"] = "failed"
+        elif not in_flight and (lifetime_usage is None or not lifetime_usage["refresh_pending"]):
+            phase = "done"
+        else:
+            token_usage._schedule_usage_token_refresh(metadata)
+    partial = bool(lifetime_usage and lifetime_usage.get("partial_count"))
+    if phase == "done":
+        status = state.get("status") or (
+            "unavailable" if lifetime_usage is None else
+            "partial-checked" if partial else "fresh"
+        )
+    else:
+        status = "partial-refreshing" if partial or lifetime_usage is None else "refreshing"
+    return {
+        "usage_status": status,
+        "usage_should_poll": phase != "done",
+        "usage_cursor": signing.dumps(
+            {"phase": phase, "since": since.isoformat(), "sources": state.get("sources", []),
+             "status": status if phase == "done" else ""},
+            salt="usage-refresh",
+        ),
+    }
 
 
 def _render_session_detail(
@@ -1179,7 +1282,8 @@ def _schedule_session_index_refresh(
 
 def _usage_session_index_refresh_needed(*, archived: bool) -> bool:
     return (
-        session_index.has_pending_pages(archived=archived)
+        not session_index.is_complete(archived=archived)
+        or session_index.has_pending_pages(archived=archived)
         or session_index.should_refresh(archived=archived)
     )
 
@@ -1205,12 +1309,14 @@ def _start_usage_session_index_refresh_thread(
     except Exception:
         with _USAGE_SESSION_INDEX_REFRESH_LOCK:
             _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
+            _record_usage_index_refresh_result(include_active, include_archived, failed=True)
         logger.exception("failed to start usage session index refresh thread")
 
 def _refresh_usage_session_index_best_effort(
     *, enable_memories: bool, include_active: bool, include_archived: bool
 ) -> None:
     global _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT
+    failed = False
     try:
         close_old_connections()
         refresh_active = include_active and _usage_session_index_refresh_needed(
@@ -1224,26 +1330,37 @@ def _refresh_usage_session_index_best_effort(
         with app_server_pool.borrow_codex(
             Codex, enable_memories=enable_memories
         ) as codex:
-            # Web-triggered catch-up must not ask Codex to scan rollouts: on a
-            # large CODEX_HOME that backfill can hold Codex's SQLite writer lock
-            # long enough to make detached workers exhaust their startup retry.
-            # Since state-only data may exclude rollout-only sessions, this
-            # warms rows without claiming source coverage is complete.
-            session_index.refresh_from_codex(
+            # Enumerate every state-DB page, as session-list initialization
+            # does, to establish indexed coverage. Filesystem repair remains
+            # an explicit full scan: it can hold Codex's SQLite writer lock.
+            result = session_index.refresh_from_codex(
                 codex,
                 projects=list(Project.objects.all()),
                 include_active=refresh_active,
                 include_archived=refresh_archived,
                 use_state_db_only=True,
                 max_pages=None,
-                allow_completion=False,
+            )
+            failed = result.failed or any(
+                included and not session_index.is_complete(archived=archived)
+                for archived, included in ((False, refresh_active), (True, refresh_archived))
             )
     except Exception:
+        failed = True
         logger.exception("failed to refresh usage session index")
     finally:
         close_old_connections()
         with _USAGE_SESSION_INDEX_REFRESH_LOCK:
             _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
+            _record_usage_index_refresh_result(include_active, include_archived, failed=failed)
+
+
+def _record_usage_index_refresh_result(active: bool, archived: bool, *, failed: bool) -> None:
+    # Called under the refresh lock. Completion of an active-only list refresh
+    # cannot settle a Usage page that is also waiting for archived coverage.
+    for source, included in ((False, active), (True, archived)):
+        if included:
+            _USAGE_SESSION_INDEX_REFRESH_RESULTS[source] = (timezone.now(), failed)
 
 def _next_message_config(
     settings: SettingsValues,

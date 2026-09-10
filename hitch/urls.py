@@ -25,6 +25,7 @@ urlpatterns = [
     path("nuke-codex/", account.nuke_codex, name="nuke_codex"),
     path("health/", account.health_dashboard, name="health_dashboard"),
     path("usage/", session_list.usage, name="usage"),
+    path("usage/refresh/", session_list.usage_refresh, name="usage_refresh"),
     path("inbox/", session_list.inbox, name="inbox"),
     path(
         "inbox/proposed-sessions/<int:proposed_session_id>/outcome/",

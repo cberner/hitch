@@ -331,6 +331,27 @@ class UsageModelCacheTests(SimpleTestCase):
 
 
 class UsageRateLimitCacheTests(SimpleTestCase):
+    def test_unsuccessful_warm_refresh_preserves_snapshot_age(self) -> None:
+        snapshot = {"windows": [], "limit_name": "Codex", "plan_type": "pro"}
+        fetched_at = timezone.now() - caches._RATE_LIMITS_CACHE_TTL
+        for claimed in (True, False):
+            with (
+                self.subTest(claimed=claimed),
+                patch("hitch.main.caches.rate_limit.claim", return_value=claimed),
+                patch("hitch.main.caches.app_server_pool.borrow_codex"),
+                patch.object(caches, "_fetch_rate_limits", return_value=None),
+                patch.object(caches, "_RATE_LIMITS_CACHE_VALUE", snapshot),
+                patch.object(caches, "_RATE_LIMITS_CACHE_HAS_VALUE", True),
+                patch.object(caches, "_RATE_LIMITS_CACHE_FETCHED_AT", fetched_at),
+            ):
+                caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
+                state = caches._rate_limits_for_usage_context(enable_memories=False)
+                self.assertEqual(state.rate_limits, snapshot)
+                self.assertEqual(state.fetched_at, fetched_at)
+                self.assertTrue(state.stale)
+                self.assertFalse(state.refresh_pending)
+                self.assertFalse(caches._rate_limits_refresh_needed())
+
     @override
     def tearDown(self) -> None:
         with caches._RATE_LIMITS_REFRESH_LOCK:

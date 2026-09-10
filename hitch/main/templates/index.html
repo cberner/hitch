@@ -691,63 +691,7 @@
         <div class="session-list-header">
             <p class="section-label">{% if system_session_list %}System sessions{% else %}{{ session_list_title }}{% endif %}</p>
         </div>
-        {% if sessions %}
-        <ul class="session-list">
-            {% for session in sessions %}
-            <li class="session"{% if not system_session_list %} data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}"{% endif %}>
-                {% if not system_session_list %}
-                <div class="session-swipe-action" aria-hidden="true">Archive</div>
-                {% endif %}
-                <div class="session-content">
-                    <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
-                        <div class="session-title" data-session-title>{{ session.display_title }}</div>
-                        <div class="session-meta">
-                            {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}"{% if session.stage.executing %} data-executing="true"{% endif %}>{{ session.stage.label }}</span>{% endif %}
-                            <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
-                            {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
-                            {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}
-                            {% if session.system_status %}<span class="meta-item"><span class="meta-label">status</span>{{ session.system_status }}</span>{% endif %}
-                            <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
-                            {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
-                        </div>
-                    </a>
-                    {% if not system_session_list %}
-                    <div class="session-row-menu" data-session-menu>
-                        <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
-                        <div class="session-menu" role="menu" data-session-menu-panel hidden>
-                            <button type="button" role="menuitem" data-session-rename-open>Rename</button>
-                            <form method="post" action="{% url 'set_session_archived' session_id=session.id %}" role="none" data-session-archive-form>
-                                {% csrf_token %}
-                                <input type="hidden" name="next" value="index">
-                                <input type="hidden" name="archived" value="{% if session.is_archived %}false{% else %}true{% endif %}" data-session-archive-value>
-                                <button type="submit" role="menuitem" data-session-archive-label>{% if session.is_archived %}Unarchive{% else %}Archive{% endif %}</button>
-                            </form>
-                        </div>
-                    </div>
-                    {% endif %}
-                </div>
-                {% if not system_session_list %}
-                <div class="session-rename" data-session-rename hidden>
-                    <form method="post" action="{% url 'set_session_name' session_id=session.id %}" data-session-rename-form>
-                        {% csrf_token %}
-                        <input type="hidden" name="next" value="index">
-                        <input type="text" name="name" value="{{ session.name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
-                        <button type="submit">Save</button>
-                    </form>
-                </div>
-                {% endif %}
-            </li>
-            {% endfor %}
-        </ul>
-        {% if next_sessions_url %}
-        <div class="load-more"><a class="button secondary" href="{{ next_sessions_url }}">Load more</a></div>
-        {% endif %}
-        {% else %}
-        <div class="empty">
-            <p>{% if system_session_list %}No system sessions found.{% else %}No sessions found.{% endif %}</p>
-            {% if not system_session_list %}<p class="hint">Tap “New session” to start your first one.</p>{% endif %}
-        </div>
-        {% endif %}
+        {% include "_session_list_content.html" %}
     </main>
 
     {% if not system_session_list %}
@@ -800,33 +744,25 @@
                 dateStyle: "medium",
                 timeStyle: "short",
             });
-            const updatedTimes = [];
-            for (const el of document.querySelectorAll("time[data-updated-at]")) {
-                const seconds = Number(el.dataset.updatedAt);
-                if (!Number.isFinite(seconds) || seconds <= 0) continue;
-                const date = new Date(seconds * 1000);
-                el.dateTime = date.toISOString();
-                el.title = date.toString();
-                updatedTimes.push({ el, date, absolute: absolute.format(date) });
-            }
             function formatUpdatedTimestamps() {
-                for (const timestamp of updatedTimes) {
-                    timestamp.el.textContent = `${timestamp.absolute} (${window.hitch.relativeFromNow(timestamp.date)})`;
+                for (const el of document.querySelectorAll("time[data-updated-at]")) {
+                    const seconds = Number(el.dataset.updatedAt);
+                    if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                    const date = new Date(seconds * 1000);
+                    el.dateTime = date.toISOString();
+                    el.title = date.toString();
+                    el.textContent = `${absolute.format(date)} (${window.hitch.relativeFromNow(date)})`;
                 }
             }
-            if (updatedTimes.length) {
-                formatUpdatedTimestamps();
-                window.setInterval(formatUpdatedTimestamps, 30_000);
-                document.addEventListener("visibilitychange", () => {
-                    if (!document.hidden) formatUpdatedTimestamps();
-                });
-            }
+            formatUpdatedTimestamps();
             const archiveToast = document.querySelector("[data-archive-toast]");
             const archiveUndo = document.querySelector("[data-archive-undo]");
             const archiveToastText = document.querySelector("[data-archive-toast-text]");
             const archiveErrorToast = document.querySelector("[data-archive-error-toast]");
             const archiveErrorText = document.querySelector("[data-archive-error-text]");
             const pendingArchives = new Map();
+            const rowMutations = new Map();
+            const boundSessionRows = new WeakSet();
             const swipableRows = new WeakSet();
             // Rows whose 5s archive grace period is still open, kept ordered by
             // when the user archived each row (see archiveSequence). A stack (not
@@ -922,6 +858,7 @@
             }
 
             function postArchiveState(row, archived) {
+                rowMutations.set(row, (rowMutations.get(row) || 0) + 1);
                 const body = new URLSearchParams({ archived: archived ? "true" : "false" });
                 return window.hitch.postForm(row.dataset.sessionArchiveUrl, body, { xhr: true }).then((response) => {
                     if (response.ok) return;
@@ -933,6 +870,11 @@
                         });
                     }
                     throw new Error("archive request failed");
+                }).finally(() => {
+                    listInteraction += 1;
+                    const remaining = rowMutations.get(row) - 1;
+                    if (remaining) rowMutations.set(row, remaining);
+                    else rowMutations.delete(row);
                 });
             }
 
@@ -1096,7 +1038,9 @@
                 }, true);
             }
 
-            for (const row of document.querySelectorAll("[data-session-row]")) {
+            function bindSessionRow(row) {
+                if (boundSessionRows.has(row)) return;
+                boundSessionRows.add(row);
                 bindSwipe(row);
                 const menu = row.querySelector("[data-session-menu]");
                 const menuButton = row.querySelector("[data-session-menu-open]");
@@ -1146,6 +1090,8 @@
                         const body = new URLSearchParams(new FormData(renameForm));
                         window.hitch.postForm(renameForm.action, body, { xhr: true }).then((response) => {
                             if (!response.ok) throw new Error("rename request failed");
+                            // Discard list snapshots fetched before this mutation completed.
+                            listInteraction += 1;
                             if (input) input.value = name;
                             // Mirror session_index.display_title_for: the server
                             // stores the title truncated to display_title_max_len,
@@ -1183,6 +1129,110 @@
                     });
                 }
             }
+
+            function bindSessionRows() {
+                document.querySelectorAll("[data-session-row]").forEach(bindSessionRow);
+                formatUpdatedTimestamps();
+            }
+            bindSessionRows();
+
+            let listRefreshTimer = 0;
+            let listRefreshing = false;
+            let listInteraction = 0;
+            for (const eventName of ["pointerdown", "keydown", "submit"]) {
+                document.addEventListener(eventName, () => { listInteraction += 1; }, true);
+            }
+            function sessionRowKey(row) {
+                return row.querySelector(".session-link").getAttribute("href");
+            }
+            function mergeSessionRows(current, next) {
+                let list = current.querySelector(".session-list");
+                const oldRows = Array.from(current.querySelectorAll(".session"));
+                const retained = oldRows.map((row, index) => ({ row, index })).filter(({ row }) =>
+                    rowMutations.has(row) || row.matches(".pending-archive, .rename-open, .menu-open, .swiping, :active")
+                );
+                const retainedKeys = new Set(retained.map(({ row }) => sessionRowKey(row)));
+                const desired = Array.from(next.querySelectorAll(".session")).filter(
+                    (row) => !retainedKeys.has(sessionRowKey(row))
+                );
+                // Pin interacting nodes in their existing slots. Keeping them
+                // attached preserves focus, text selection, and pointer capture.
+                for (const { row, index } of retained) desired.splice(Math.min(index, desired.length), 0, row);
+                if (!desired.length) {
+                    current.replaceChildren(...next.childNodes);
+                    return;
+                }
+                if (!list) {
+                    list = document.createElement("ul");
+                    list.className = "session-list";
+                    current.prepend(list);
+                }
+                for (const row of oldRows) {
+                    if (!retainedKeys.has(sessionRowKey(row))) row.remove();
+                }
+                let position = list.firstElementChild;
+                for (const row of desired) {
+                    if (row === position) position = position.nextElementSibling;
+                    else list.insertBefore(row, position);
+                }
+                for (const child of Array.from(current.children)) {
+                    if (child !== list) child.remove();
+                }
+                for (const child of Array.from(next.children)) {
+                    if (!child.matches(".session-list, .empty")) current.append(child);
+                }
+            }
+            async function refreshSessionList() {
+                window.clearTimeout(listRefreshTimer);
+                if (listRefreshing) return;
+                try {
+                    if (document.hidden) return;
+                    listRefreshing = true;
+                    const interaction = listInteraction;
+                    const response = await fetch(window.location.href, {
+                        headers: { "X-Hitch-Refresh": "sessions" },
+                        cache: "no-store", signal: AbortSignal.timeout(15000),
+                    });
+                    if (!response.ok) throw new Error("Session refresh failed");
+                    const html = await response.text();
+                    if (document.hidden || interaction !== listInteraction) return;
+                    const parsed = new DOMParser().parseFromString(html, "text/html");
+                    const next = parsed.querySelector("[data-session-results]");
+                    const current = document.querySelector("[data-session-results]");
+                    if (!next || !current) return;
+                    const focused = current.contains(document.activeElement) ? document.activeElement : null;
+                    const focusedRow = focused && focused.closest(".session");
+                    const focusKey = focusedRow ? sessionRowKey(focusedRow) : null;
+                    const controlIndex = focusedRow
+                        ? Array.from(focusedRow.querySelectorAll("a, button, input")).indexOf(focused) : -1;
+                    const focusedLoadMore = focused && focused.closest(".load-more");
+                    const scrollY = window.scrollY;
+                    mergeSessionRows(current, next);
+                    bindSessionRows();
+                    if (focused && !focused.isConnected) {
+                        const nextRow = Array.from(current.querySelectorAll(".session")).find(
+                            (row) => sessionRowKey(row) === focusKey
+                        );
+                        let nextFocus = nextRow ? nextRow.querySelectorAll("a, button, input")[controlIndex] : null;
+                        if (focusedLoadMore) nextFocus = current.querySelector(".load-more a");
+                        if (!nextFocus) { current.tabIndex = -1; nextFocus = current; }
+                        nextFocus.focus({ preventScroll: true });
+                    }
+                    window.scrollTo({ top: scrollY, behavior: "instant" });
+                } catch (error) {
+                    // Retain the current rows and retry after transient failures.
+                } finally {
+                    listRefreshing = false;
+                    listRefreshTimer = window.setTimeout(refreshSessionList, 5000);
+                }
+            }
+            listRefreshTimer = window.setTimeout(refreshSessionList, 1000);
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) refreshSessionList();
+            });
+            window.addEventListener("pageshow", (event) => {
+                if (event.persisted) refreshSessionList();
+            });
 
             document.addEventListener("click", (event) => {
                 if (event.target.closest("[data-session-menu]")) return;

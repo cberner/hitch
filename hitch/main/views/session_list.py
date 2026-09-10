@@ -7,8 +7,10 @@ from django.http import (
     Http404,
     HttpRequest,
     HttpResponse,
+    JsonResponse,
 )
 from django.shortcuts import render
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import CodexError
@@ -588,7 +590,7 @@ def index(request: HttpRequest) -> HttpResponse:
     settings_context = common._settings_context(current_settings, models_data)
     response = render(
         request,
-        "index.html",
+        "_session_list_content.html" if request.headers.get("X-Hitch-Refresh") == "sessions" else "index.html",
         {
             "sessions": session_page.sessions,
             "next_sessions_url": _next_sessions_url(request, session_page),
@@ -641,7 +643,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
     settings_context = common._settings_context(current_settings, models_data)
     response = render(
         request,
-        "index.html",
+        "_session_list_content.html" if request.headers.get("X-Hitch-Refresh") == "sessions" else "index.html",
         {
             "sessions": session_page.sessions,
             "next_sessions_url": _next_sessions_url(request, session_page),
@@ -694,7 +696,21 @@ def usage(request: HttpRequest) -> HttpResponse:
     usage_context = common._usage_context(request)
     response = render(request, "usage.html", usage_context.template_context)
     _apply_cookie_updates(response, usage_context.cookie_updates)
-    return response
+    return common._prevent_stale_cache(response)
+
+
+@require_http_methods(["GET"])
+def usage_refresh(request: HttpRequest) -> HttpResponse:
+    usage_context = common._usage_context(request)
+    context = usage_context.template_context
+    context["show_project_usage_summary"] = request.GET.get("profile") == "1"
+    response = JsonResponse({
+        "html": render_to_string("_usage_sections.html", context, request=request),
+        "should_poll": context["usage_should_poll"],
+        "cursor": context["usage_cursor"],
+    })
+    _apply_cookie_updates(response, usage_context.cookie_updates)
+    return common._prevent_stale_cache(response)
 
 @require_http_methods(["GET"])
 def inbox(request: HttpRequest) -> HttpResponse:

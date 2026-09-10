@@ -1,0 +1,59 @@
+<div data-session-results>
+        {% if sessions %}
+        <ul class="session-list">
+            {% for session in sessions %}
+            <li class="session"{% if not system_session_list %} data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}"{% endif %}>
+                {% if not system_session_list %}
+                <div class="session-swipe-action" aria-hidden="true">Archive</div>
+                {% endif %}
+                <div class="session-content">
+                    <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
+                        <div class="session-title" data-session-title>{{ session.display_title }}</div>
+                        <div class="session-meta">
+                            {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}"{% if session.stage.executing %} data-executing="true"{% endif %}>{{ session.stage.label }}</span>{% endif %}
+                            <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
+                            {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
+                            {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}
+                            {% if session.system_status %}<span class="meta-item"><span class="meta-label">status</span>{{ session.system_status }}</span>{% endif %}
+                            <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
+                            {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
+                        </div>
+                    </a>
+                    {% if not system_session_list %}
+                    <div class="session-row-menu" data-session-menu>
+                        <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
+                        <div class="session-menu" role="menu" data-session-menu-panel hidden>
+                            <button type="button" role="menuitem" data-session-rename-open>Rename</button>
+                            <form method="post" action="{% url 'set_session_archived' session_id=session.id %}" role="none" data-session-archive-form>
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="index">
+                                <input type="hidden" name="archived" value="{% if session.is_archived %}false{% else %}true{% endif %}" data-session-archive-value>
+                                <button type="submit" role="menuitem" data-session-archive-label>{% if session.is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+                {% if not system_session_list %}
+                <div class="session-rename" data-session-rename hidden>
+                    <form method="post" action="{% url 'set_session_name' session_id=session.id %}" data-session-rename-form>
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="index">
+                        <input type="text" name="name" value="{{ session.name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
+                        <button type="submit">Save</button>
+                    </form>
+                </div>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% if next_sessions_url %}
+        <div class="load-more"><a class="button secondary" href="{{ next_sessions_url }}">Load more</a></div>
+        {% endif %}
+        {% else %}
+        <div class="empty">
+            <p>{% if system_session_list %}No system sessions found.{% else %}No sessions found.{% endif %}</p>
+            {% if not system_session_list %}<p class="hint">Tap “New session” to start your first one.</p>{% endif %}
+        </div>
+        {% endif %}
+</div>

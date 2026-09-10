@@ -1,3 +1,4 @@
+<div data-usage-root data-refresh-url="{% url 'usage_refresh' %}" data-profile="{% if show_project_usage_summary %}1{% else %}0{% endif %}" data-cursor="{{ usage_cursor }}" data-should-poll="{{ usage_should_poll|yesno:'true,false' }}">
         <section class="usage-section" aria-labelledby="lifetime-title">
             <p class="section-label">Token usage</p>
             <div class="usage-header">
@@ -14,8 +15,12 @@
                     All sessions
                     {% endif %}
                 </h2>
-                {% if lifetime_usage.refresh_pending %}
-                <p class="usage-plan">Refreshing session token usage...</p>
+                {% if usage_status == 'refreshing' or usage_status == 'partial-refreshing' %}
+                <p class="usage-plan" role="status">Refreshing session token usage...</p>
+                {% elif usage_status == 'failed' %}
+                <p class="usage-plan" role="status">Refresh failed. Showing last-known or partial token usage.</p>
+                {% elif usage_status == 'partial-checked' %}
+                <p class="usage-plan" role="status">Some session history is unavailable. Showing last-known or partial token usage.</p>
                 {% endif %}
             </div>
             {% if lifetime_usage %}
@@ -128,6 +133,11 @@
                 {% endif %}
             </div>
             {% if rate_limits %}
+            <p class="usage-plan" role="status">
+                {% if rate_limits_refresh_pending %}Refreshing quota usage...
+                {% elif rate_limits_stale %}Quota is out of date. Showing the last known values.{% endif %}
+                {% if rate_limits_fetched_at %}Last checked {{ rate_limits_fetched_at|date:"Y-m-d H:i:s T" }}.{% endif %}
+            </p>
             <div class="rate-limit-list" aria-label="Quota usage">
                 {% for window in rate_limits.windows %}
                 <section class="rate-limit-row" aria-labelledby="rate-limit-{{ forloop.counter }}-title">
@@ -152,7 +162,7 @@
             {% elif rate_limits_refresh_pending %}
             <div class="empty" aria-live="polite">
                 <p>Refreshing quota usage...</p>
-                <p class="hint">Reload in a moment to see any available quota details.</p>
+                <p class="hint">Quota details will update automatically.</p>
             </div>
             {% else %}
             <div class="empty">
@@ -161,3 +171,4 @@
             </div>
             {% endif %}
         </section>
+</div>

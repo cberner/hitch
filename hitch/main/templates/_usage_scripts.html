@@ -1,44 +1,122 @@
-            const totalToggle = document.querySelector("[data-lifetime-total-toggle]");
-            if (totalToggle) {
-                const chartId = totalToggle.getAttribute("aria-controls");
-                const totalChart = chartId ? document.getElementById(chartId) : null;
-                if (totalChart) {
-                    totalToggle.addEventListener("click", () => {
-                        const expanded = totalChart.classList.toggle("is-expanded");
-                        totalToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+            function initializeUsage() {
+                const totalToggle = document.querySelector("[data-lifetime-total-toggle]");
+                if (totalToggle) {
+                    const chartId = totalToggle.getAttribute("aria-controls");
+                    const totalChart = chartId ? document.getElementById(chartId) : null;
+                    if (totalChart) {
+                        totalToggle.addEventListener("click", () => {
+                            const expanded = totalChart.classList.toggle("is-expanded");
+                            totalToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                        });
+                    }
+                }
+
+                document.querySelectorAll(".lifetime-stat").forEach((tile) => {
+                    // Only tiles with a chart are expandable; a chartless tile has
+                    // nothing to reveal, so it must not behave (or be announced) as
+                    // a button. The template omits role/tabindex/aria-expanded for
+                    // those, and this guard keeps the toggle handlers off them too.
+                    if (!tile.querySelector(".lifetime-chart")) return;
+                    function toggleTile() {
+                        const expanded = tile.classList.toggle("is-expanded");
+                        tile.setAttribute("aria-expanded", expanded ? "true" : "false");
+                    }
+                    tile.addEventListener("click", (event) => {
+                        // Clicks inside the expanded chart (e.g. reading a bar)
+                        // bubble up to the tile; don't collapse it when the user is
+                        // interacting with the chart rather than the tile itself.
+                        if (event.target.closest(".lifetime-chart")) return;
+                        toggleTile();
                     });
+                    tile.addEventListener("keydown", (event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        toggleTile();
+                    });
+                });
+
+                for (const el of document.querySelectorAll("time[data-resets-at]")) {
+                    const seconds = Number(el.dataset.resetsAt);
+                    if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                    const date = new Date(seconds * 1000);
+                    el.dateTime = date.toISOString();
+                    el.title = date.toString();
+                    el.textContent = window.hitch.relativeFromNow(date);
                 }
             }
+            initializeUsage();
 
-            document.querySelectorAll(".lifetime-stat").forEach((tile) => {
-                // Only tiles with a chart are expandable; a chartless tile has
-                // nothing to reveal, so it must not behave (or be announced) as
-                // a button. The template omits role/tabindex/aria-expanded for
-                // those, and this guard keeps the toggle handlers off them too.
-                if (!tile.querySelector(".lifetime-chart")) return;
-                function toggleTile() {
-                    const expanded = tile.classList.toggle("is-expanded");
-                    tile.setAttribute("aria-expanded", expanded ? "true" : "false");
+            let usageTimer = 0;
+            let usageRefreshing = false;
+            let usageFailures = 0;
+            async function refreshUsage() {
+                window.clearTimeout(usageTimer);
+                if (usageRefreshing) return;
+                let delay = 1000;
+                try {
+                    if (document.hidden) return;
+                    const root = document.querySelector("[data-usage-root]");
+                    if (!root) return;
+                    usageRefreshing = true;
+                    const url = new URL(root.dataset.refreshUrl, window.location.href);
+                    url.searchParams.set("cursor", root.dataset.cursor);
+                    url.searchParams.set("profile", root.dataset.profile);
+                    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+                    if (!response.ok) throw new Error("Usage refresh failed");
+                    const result = await response.json();
+                    const parsed = new DOMParser().parseFromString(result.html, "text/html");
+                    const next = parsed.querySelector("[data-usage-root]");
+                    if (!next) throw new Error("Usage response missing");
+                    // Carry chart expansion through the refreshed markup.
+                    const oldTiles = root.querySelectorAll(".lifetime-stat");
+                    next.querySelectorAll(".lifetime-stat").forEach((tile, index) => {
+                        if (oldTiles[index] && oldTiles[index].classList.contains("is-expanded") && tile.querySelector(".lifetime-chart")) {
+                            tile.classList.add("is-expanded");
+                            tile.setAttribute("aria-expanded", "true");
+                        }
+                    });
+                    if (root.querySelector("[data-lifetime-total-toggle][aria-expanded='true']")) {
+                        const toggle = next.querySelector("[data-lifetime-total-toggle]");
+                        const chart = next.querySelector("#lifetime-total-chart");
+                        if (toggle && chart) {
+                            toggle.setAttribute("aria-expanded", "true");
+                            chart.classList.add("is-expanded");
+                        }
+                    }
+                    const focusedTile = Array.from(oldTiles).indexOf(document.activeElement);
+                    const focusedTotal = document.activeElement === root.querySelector("[data-lifetime-total-toggle]");
+                    root.replaceWith(next);
+                    initializeUsage();
+                    if (focusedTile >= 0) next.querySelectorAll(".lifetime-stat")[focusedTile]?.focus();
+                    else if (focusedTotal) next.querySelector("[data-lifetime-total-toggle]")?.focus();
+                    usageFailures = 0;
+                    // Token polling ends with the sweep; quota still gets its
+                    // normal two-minute refresh while the page remains open.
+                    delay = result.should_poll ? 1000 : 120000;
+                } catch (error) {
+                    usageFailures += 1;
+                    delay = Math.min(30000, 1000 * 2 ** usageFailures);
+                    if (usageFailures >= 3) {
+                        const root = document.querySelector("[data-usage-root]");
+                        let note = root && root.querySelector("[data-usage-error]");
+                        if (root && !note) {
+                            note = document.createElement("p");
+                            note.dataset.usageError = "true";
+                            note.setAttribute("role", "status");
+                            root.prepend(note);
+                        }
+                        if (note) note.textContent = "Unable to refresh usage. Showing the last available values; retrying shortly.";
+                    }
+                } finally {
+                    usageRefreshing = false;
+                    usageTimer = window.setTimeout(refreshUsage, delay);
                 }
-                tile.addEventListener("click", (event) => {
-                    // Clicks inside the expanded chart (e.g. reading a bar)
-                    // bubble up to the tile; don't collapse it when the user is
-                    // interacting with the chart rather than the tile itself.
-                    if (event.target.closest(".lifetime-chart")) return;
-                    toggleTile();
-                });
-                tile.addEventListener("keydown", (event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    toggleTile();
-                });
+            }
+            const usageRoot = document.querySelector("[data-usage-root]");
+            if (usageRoot) usageTimer = window.setTimeout(refreshUsage, usageRoot.dataset.shouldPoll === "true" ? 1000 : 120000);
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) refreshUsage();
             });
-
-            for (const el of document.querySelectorAll("time[data-resets-at]")) {
-                const seconds = Number(el.dataset.resetsAt);
-                if (!Number.isFinite(seconds) || seconds <= 0) continue;
-                const date = new Date(seconds * 1000);
-                el.dateTime = date.toISOString();
-                el.title = date.toString();
-                el.textContent = window.hitch.relativeFromNow(date);
-            }
+            window.addEventListener("pageshow", (event) => {
+                if (event.persisted) refreshUsage();
+            });

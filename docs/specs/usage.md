@@ -99,6 +99,12 @@ spec covers both surfaces.
   page must show a refreshing state while that fetch is active, then show the
   refreshed snapshot on a later request or the unavailable state after a
   terminal failure.
+- `USAGE-quota-freshness`: A failed or throttled fetch must not advance the
+  last-successful-fetch timestamp. Cached quota displays that timestamp and
+  an out-of-date indicator when stale, including during retry backoff. An open
+  Usage or Profile page retrieves background results automatically and checks
+  quota again at its two-minute refresh interval. Quota checks do not restart
+  a completed token sweep.
 
 ### 4.2 Cached Rendering and Performance
 
@@ -125,6 +131,9 @@ spec covers both surfaces.
   that coverage, the UI may show the token-usage unavailable state while the
   index refresh is pending, but that pending state is part of the async Usage
   refresh flow in `USAGE-index-polling`.
+  Enumerating all pages of Codex's state database establishes indexed coverage,
+  matching session-list initialization. Repairing rollout-only records remains
+  an explicit full-scan operation rather than a web-triggered filesystem scan.
 - `USAGE-stale-logic-version`: A cache row produced by an older token-counting
   logic version is stale. If the row is structurally usable, Hitch may display
   its last known values while a sweep recomputes it, but the UI must not present
@@ -152,6 +161,10 @@ spec covers both surfaces.
 - `USAGE-refresh-coalescing`: Concurrent page renders or polling requests must
   not start duplicate token-usage sweeps for the same pending work. Existing
   in-flight refresh work should be reused.
+  A page joining a sweep must also check any currently indexed rows omitted
+  from that sweep, including previously checked rows restored to the index,
+  even when another row in the joined sweep failed. Failure must still settle
+  once a sweep has covered all rows requested by the view.
 - `USAGE-poll-update`: Poll responses must let the browser update token counts,
   refresh indicators, and token-usage charts without a full-page reload.
 - `USAGE-stop-after-sweep`: Browser polling must stop once the backend reports
@@ -194,6 +207,12 @@ spec covers both surfaces.
 - `USAGE-chart-update`: Async refreshes must update chart data along with the
   headline counts. If practical, the browser should preserve the user's current
   expanded/collapsed state across an in-place update.
+- `USAGE-refresh-navigation`: Usage and Profile responses and refresh fragments
+  must prevent HTTP caching. Refreshes pause while the tab is hidden and resume
+  when it becomes visible. Transient request failures retain displayed values
+  and retry with backoff, with a visible failure message after repeated errors.
+  Expired polling cursors start a new refresh cycle when a tab resumes; an
+  earlier unrelated sweep failure must not mark a fresh view as failed.
 - `USAGE-no-quota-charts`: Quota and rate-limit sections should not expand into
   usage-by-day charts under this spec.
 - `USAGE-responsive`: Usage cards, charts, and refresh indicators must remain

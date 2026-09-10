@@ -107,7 +107,7 @@ def profile(request: HttpRequest) -> HttpResponse:
         },
     )
     _apply_cookie_updates(response, usage_context.cookie_updates)
-    return response
+    return common._prevent_stale_cache(response)
 
 def _parse_nuked_count(raw: str | None) -> int | None:
     """Parse the ``?nuked=N`` confirmation count the nuke action redirects with.
