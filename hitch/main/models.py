@@ -396,9 +396,7 @@ class CodexInstance(models.Model):
     workflow_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     agent_kind = models.CharField(max_length=64, blank=True, default="")
     display_author = models.CharField(max_length=128, blank=True, default="")
-    output_schema = models.JSONField(default=None, blank=True, null=True)
     user_message_index = models.PositiveIntegerField(null=True, blank=True, db_index=True)
-    workflow_routing_started_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

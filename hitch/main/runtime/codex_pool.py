@@ -30,7 +30,6 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,7 +43,6 @@ from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
     SandboxMode,
-    ThreadSource,
     WebSearchMode,
 )
 
@@ -139,12 +137,8 @@ def spawn_new_session(
     web_search_mode: str | None = None,
     enable_memories: bool = False,
     plan_mode: bool = False,
-    thread_source: ThreadSource | None = None,
     purpose: str = CodexInstance.PURPOSE_USER,
-    workflow_id: int | None = None,
     agent_kind: str = "",
-    display_author: str = "",
-    output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = 0,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
@@ -177,11 +171,7 @@ def spawn_new_session(
         start_kwargs["approvalPolicy"] = approval[0]
         if approval[1] is not None:
             start_kwargs["approvalsReviewer"] = approval[1]
-    if thread_source is not None:
-        start_kwargs["threadSource"] = thread_source.value
-    dynamic_tools = registered_dynamic_tool_specs(
-        purpose=purpose, agent_kind=agent_kind
-    )
+    dynamic_tools = registered_dynamic_tool_specs(purpose=purpose)
     if dynamic_tools:
         start_kwargs["dynamicTools"] = dynamic_tools
     name_source = (
@@ -226,10 +216,7 @@ def spawn_new_session(
         enable_memories=enable_memories,
         plan_mode=plan_mode,
         purpose=purpose,
-        workflow_id=workflow_id,
         agent_kind=agent_kind,
-        display_author=display_author,
-        output_schema=output_schema,
         user_message_index=user_message_index,
     )
     if thread_path:
@@ -267,8 +254,6 @@ def create_session_thread_with_path(
     enable_memories: bool = False,
     web_search_mode: str | None = None,
     purpose: str = CodexInstance.PURPOSE_USER,
-    agent_kind: str = "",
-    thread_source: ThreadSource | None = None,
 ) -> tuple[str, str]:
     """Create a persisted role-scoped thread without starting its first turn."""
     config = app_server_config(
@@ -281,14 +266,9 @@ def create_session_thread_with_path(
         "developerInstructions": developer_instructions,
         "model": model,
     }
-    dynamic_tools = registered_dynamic_tool_specs(
-        purpose=purpose,
-        agent_kind=agent_kind,
-    )
+    dynamic_tools = registered_dynamic_tool_specs(purpose=purpose)
     if dynamic_tools:
         start_kwargs["dynamicTools"] = dynamic_tools
-    if thread_source is not None:
-        start_kwargs["threadSource"] = thread_source.value
 
     def _create_and_persist(codex: Codex) -> tuple[str, str]:
         response = codex._client.thread_start(start_kwargs)
@@ -360,12 +340,8 @@ def spawn_turn(
     hitch_extra_instructions: str | None = None,
     new_thread: bool = False,
     purpose: str = CodexInstance.PURPOSE_USER,
-    workflow_id: int | None = None,
     agent_kind: str = "",
-    display_author: str = "",
-    output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
-    before_worker_launch: Callable[[CodexInstance], None] | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt.
 
@@ -419,12 +395,8 @@ def spawn_turn(
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
         purpose=purpose,
-        workflow_id=workflow_id,
         agent_kind=agent_kind,
-        display_author=display_author,
-        output_schema=output_schema,
         user_message_index=user_message_index,
-        before_worker_launch=before_worker_launch,
     )
 
 
@@ -439,8 +411,7 @@ def worker_is_alive(instance: CodexInstance) -> bool:
     handshake window: ``_spawn_worker`` commits the row before
     ``subprocess.Popen`` returns the real pid. Treating that as "dead" lets a
     concurrent ``reconcile_dead`` overwrite a still-launching worker with a
-    terminal status and (for system-agent purposes) route the row through its
-    workflow's failure handler before the worker has even started.
+    terminal status before the worker has even started.
     """
     if instance.pid <= 0:
         started_at = instance.started_at
@@ -503,15 +474,6 @@ def _wait_for_tracked_worker(
                 _REAPED_WORKERS.add((pid, instance_id))
 
 
-def _reap_tracked_worker(pid: int) -> bool:
-    with _TRACKED_WORKER_PROCS_LOCK:
-        tracked = _TRACKED_WORKER_PROCS.get(pid)
-    if tracked is None:
-        return False
-    instance_id, proc = tracked
-    return _reap_tracked_worker_process(pid, instance_id, proc)
-
-
 def _reap_finished_workers() -> None:
     with _TRACKED_WORKER_PROCS_LOCK:
         tracked = list(_TRACKED_WORKER_PROCS.items())
@@ -533,33 +495,6 @@ def _reap_tracked_worker_process(
             del _TRACKED_WORKER_PROCS[pid]
             _REAPED_WORKERS.add((pid, instance_id))
     return True
-
-
-def _linux_proc_state(pid: int) -> str | None:
-    """Return Linux's one-letter process state, or None when unavailable.
-
-    ``""`` means /proc exists but the specific pid disappeared between
-    ``kill(pid, 0)`` and the stat read.
-    """
-    proc_root = Path("/proc")
-    if not proc_root.exists():
-        return None
-    try:
-        # The comm field holds the raw executable basename and may contain
-        # arbitrary non-UTF-8 bytes (pids are recycled, so this can be a
-        # foreign process). Decode tolerantly: the state char we want sits
-        # after the final ')', which is always ASCII.
-        stat = (proc_root / str(pid) / "stat").read_bytes().decode(
-            "utf-8", errors="replace"
-        )
-    except FileNotFoundError:
-        return ""
-    except OSError:
-        return None
-    end = stat.rfind(")")
-    if end < 0 or end + 2 >= len(stat):
-        return None
-    return stat[end + 2]
 
 
 def latest_for_thread(thread_id: str) -> CodexInstance | None:
@@ -638,8 +573,7 @@ def interrupt_instance(
     so a tampered/stale post can't be used to stop a worker that
     belongs to a different thread.
 
-    ``force`` is reserved for internal workflow recovery after a bounded
-    graceful-interrupt window. It skips the first-click SIGTERM path while
+    ``force`` skips the first-click SIGTERM path while
     retaining the same worker-identity checks and terminal-row update.
 
     Returns None when the instance is unknown, belongs to a different thread,
@@ -1568,7 +1502,7 @@ def prune_worker_logs_db(
 # locked init instead. Request-path opens stay bounded so a page render does not
 # hang for minutes, while detached worker starts get a longer budget: a worker
 # sitting behind Codex's own long state/log maintenance is much less harmful than
-# failing the whole turn or system-agent workflow.
+# failing the whole turn.
 
 
 # Capped per-attempt backoff; request-path callers spend about 26s in Hitch
@@ -1704,12 +1638,8 @@ def _spawn_worker(
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     purpose: str = CodexInstance.PURPOSE_USER,
-    workflow_id: int | None = None,
     agent_kind: str = "",
-    display_author: str = "",
-    output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
-    before_worker_launch: Callable[[CodexInstance], None] | None = None,
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1753,16 +1683,11 @@ def _spawn_worker(
             status=CodexInstance.STATUS_STARTING,
             pid=0,
             purpose=purpose,
-            workflow_id=workflow_id,
             agent_kind=agent_kind,
-            display_author=display_author,
-            output_schema=output_schema,
             user_message_index=user_message_index,
         )
         instance.events_path = str(target_dir / f"{instance.pk}.jsonl")
         instance.save(update_fields=["events_path"])
-        if before_worker_launch is not None:
-            before_worker_launch(instance)
 
     # A submitted prompt is session activity even if the detached worker is
     # killed before its own completion hook can run.

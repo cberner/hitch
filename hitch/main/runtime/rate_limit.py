@@ -1,9 +1,7 @@
 """Central, process-global debounce for external pings (GitHub, Codex/OpenAI).
 
-Hitch pings external services from several independent code paths -- synchronous
-web renders, the auto-proposal scheduler, the workflow-maintenance scheduler, and
-detached ``codex_worker`` subprocesses. Module-level caches are per-process, so
-they cannot coordinate across gunicorn workers or detached subprocesses.
+Quota refreshes and worker reconciliation run in web and detached worker
+processes. Module-level caches cannot coordinate those processes.
 
 This module backs the debounce with a small DB table (``RefreshThrottle``) keyed
 by an opaque string ("the same thing"), giving a single global floor on how often
@@ -60,25 +58,3 @@ def claim(
             return created
 
     return bool(run_ignoring_database_locks(_claim, description=f"rate-limit claim {key}"))
-
-
-def due(
-    key: str,
-    *,
-    min_interval: timedelta = DEFAULT_MIN_INTERVAL,
-    now: datetime | None = None,
-) -> bool:
-    """Read-only check: would :func:`claim` succeed right now? Records nothing.
-
-    Useful for deciding whether to surface a "refreshing" indicator without
-    committing to a refresh attempt.
-    """
-    moment = now if now is not None else timezone.now()
-    attempted_at = (
-        RefreshThrottle.objects.filter(key=key)
-        .values_list("attempted_at", flat=True)
-        .first()
-    )
-    if attempted_at is None:
-        return True
-    return moment - attempted_at >= min_interval

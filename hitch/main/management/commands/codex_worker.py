@@ -310,9 +310,7 @@ class Command(BaseCommand):
         _apply_worker_oom_score_adjust()
         # Conditional on the row still being active: an unconditional save
         # here would resurrect a row that reconcile_dead already marked FAILED
-        # (slow systemd start past the pid-assignment grace) -- the failure
-        # has been routed to system agents by then, so running the turn anyway
-        # double-drives the workflow.
+        # after a slow systemd start past the pid-assignment grace.
         claimed = CodexInstance.objects.filter(
             pk=instance.pk,
             status__in=CodexInstance.ACTIVE_STATUSES,
@@ -348,7 +346,6 @@ class Command(BaseCommand):
                     enable_memories=enable_memories or instance.enable_memories,
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
-                    output_schema=instance.output_schema,
                     sqlite_home=sqlite_home,
                 )
         except BaseException as exc:  # noqa: BLE001 - record any failure, then re-raise
@@ -484,7 +481,6 @@ def _run_turn(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
-    output_schema: dict[str, Any] | None = None,
     sqlite_home: str | None = None,
 ) -> Turn | None:
     os.environ["HITCH_THREAD_ID"] = instance.thread_id
@@ -618,7 +614,6 @@ def _run_turn(
                     approval_mode=approval_mode,
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
-                    output_schema=output_schema,
                     client_user_message_id=client_message_id,
                     submission=submission,
                     notification_sequencer=notification_sequencer,
@@ -1010,7 +1005,6 @@ class _ThreadTurnKwargs(TypedDict, total=False):
     approval_mode: ApprovalMode
     effort: ReasoningEffort
     model: str
-    output_schema: dict[str, Any]
     sandbox: Sandbox
 
 
@@ -1026,7 +1020,6 @@ def _start_turn(
     approval_mode: str | None,
     collaboration_mode: str | None,
     plan_mode: bool,
-    output_schema: dict[str, Any] | None,
     client_user_message_id: str | None = None,
     submission: _TurnSubmission | None = None,
     notification_sequencer: _NotificationSequencer | None = None,
@@ -1086,7 +1079,6 @@ def _start_turn(
             approval_mode=approval_mode,
             collaboration_mode=collaboration_mode,
             plan_mode=plan_mode,
-            output_schema=output_schema,
         )
     finally:
         client.turn_start = turn_start  # type: ignore[method-assign]
@@ -1105,7 +1097,6 @@ def _start_ordinary_turn(
     approval_mode: str | None,
     collaboration_mode: str | None,
     plan_mode: bool,
-    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if plan_mode:
         return _start_plan_turn(
@@ -1116,7 +1107,6 @@ def _start_ordinary_turn(
             model=model,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
-            output_schema=output_schema,
         )
     if collaboration_mode == _DEFAULT_COLLABORATION_MODE:
         return _start_default_collaboration_turn(
@@ -1128,7 +1118,6 @@ def _start_ordinary_turn(
             effort=effort,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
-            output_schema=output_schema,
         )
     if collaboration_mode:
         raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
@@ -1143,7 +1132,6 @@ def _start_ordinary_turn(
             effort=effort,
             model=model,
             sandbox_policy=sandbox_policy,
-            output_schema=output_schema,
         )
         # ``_client.turn_start`` requires the input again as its second
         # positional arg; the value in ``params.input`` is overwritten by
@@ -1160,8 +1148,6 @@ def _start_ordinary_turn(
         turn_kwargs["effort"] = effort
     if model is not None:
         turn_kwargs["model"] = model
-    if output_schema is not None:
-        turn_kwargs["output_schema"] = output_schema
     if sandbox_policy is not None:
         turn_kwargs["sandbox"] = _sandbox_preset(sandbox_policy)
     return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
@@ -1176,7 +1162,6 @@ def _start_plan_turn(
     model: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
-    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("plan mode requires a model")
@@ -1196,7 +1181,6 @@ def _start_plan_turn(
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
-        output_schema=output_schema,
     )
 
 
@@ -1210,7 +1194,6 @@ def _start_default_collaboration_turn(
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
-    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("default collaboration mode requires a model")
@@ -1231,7 +1214,6 @@ def _start_default_collaboration_turn(
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
-        output_schema=output_schema,
     )
 
 
@@ -1244,7 +1226,6 @@ def _start_collaboration_turn(
     collaboration_mode: CollaborationMode | dict[str, Any],
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
-    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     typed_input = _typed_turn_input(prompt, input_image_paths)
     wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
@@ -1260,8 +1241,6 @@ def _start_collaboration_turn(
     }
     if sandbox_policy is not None:
         params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
-    if output_schema is not None:
-        params["outputSchema"] = output_schema
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         params["approvalPolicy"] = AskForApproval(
             root=AskForApprovalValue.on_request
@@ -1823,7 +1802,6 @@ def _make_approval_handler(
                     instance_id=instance.pk,
                     agent_kind=instance.agent_kind,
                     purpose=instance.purpose,
-                    workflow_id=instance.workflow_id,
                     user_message_index=instance.user_message_index,
                     cancel_requested=lambda: _cancel_requested,
                     enable_memories=instance.enable_memories,

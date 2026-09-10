@@ -15,8 +15,10 @@ from django.urls import reverse
 from django.utils import timezone
 
 from hitch.main.models import (
+    ApprovalRequest,
     CodexInstance,
     SystemWorkflow,
+    UserInputRequest,
 )
 from hitch.main.runtime import disk_cleanup, health, host_probes, reconciliation, server_lifecycle
 from hitch.main.runtime.disk_cleanup import HitchDiskUsage
@@ -66,20 +68,39 @@ class CollectHealthReportTests(TestCase):
         disk_patcher.start()
         self.addCleanup(disk_patcher.stop)
 
-    def test_blocked_workflow_raises_overall_to_warn(self) -> None:
-        SystemWorkflow.objects.create(
-            kind="autonomous_goal_run",
-            main_thread_id="m",
-            cwd="/r",
+    def test_historical_workflow_errors_do_not_raise_current_health_alerts(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind="pr_qa",
+            main_thread_id="historical",
+            cwd="/repo",
             status=SystemWorkflow.STATUS_BLOCKED,
+            state={"error": "gh pr create failed"},
         )
+        for status in (CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED):
+            instance = _make_instance(
+                status=status,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+            )
+            ApprovalRequest.objects.create(instance=instance)
+            UserInputRequest.objects.create(instance=instance)
 
         report = health.collect_health_report()
 
-        self.assertEqual(report.overall_severity, health.SEVERITY_WARN)
-        metric = _find(report, "blocked_workflows")
-        self.assertEqual(metric.value, "1")
-        self.assertEqual(metric.severity, health.SEVERITY_WARN)
+        self.assertEqual(report.overall_severity, health.SEVERITY_OK)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+
+        for status in CodexInstance.ACTIVE_STATUSES:
+            instance = _make_instance(status=status)
+            ApprovalRequest.objects.create(instance=instance)
+            UserInputRequest.objects.create(instance=instance)
+            ApprovalRequest.objects.create(instance=instance, decision=ApprovalRequest.DECISION_ACCEPT)
+            UserInputRequest.objects.create(instance=instance, response={"answers": {}})
+
+        report = health.collect_health_report()
+        for key in ("pending_approvals", "pending_inputs"):
+            self.assertEqual(_find(report, key).value, "2")
+            self.assertEqual(_find(report, key).severity, health.SEVERITY_WARN)
 
     def test_app_server_surplus_is_danger(self) -> None:
         with patch.object(reconciliation, "count_running_codex_app_servers", return_value=12):
@@ -159,34 +180,6 @@ class CollectHealthReportTests(TestCase):
             report = health.collect_health_report()
 
         self.assertEqual(_find(report, "load_avg").severity, health.SEVERITY_DANGER)
-
-    def test_blocked_buckets_classify_and_respect_benign(self) -> None:
-        self._blocked("Command 'gh pr create --fill' failed: no commits")
-        self._blocked("worker process exited before reporting completion")
-        self._blocked("QA workflow stopped by user")
-
-        report = health.collect_health_report()
-
-        gh = _find(report, "blocked_bucket_gh_pr_create_failures")
-        self.assertEqual(gh.value, "1")
-        self.assertEqual(gh.severity, health.SEVERITY_WARN)
-        self.assertIn("+1 in 24h", gh.detail)
-        # Benign buckets never escalate even when fresh.
-        stopped = _find(report, "blocked_bucket_stopped_by_user")
-        self.assertEqual(stopped.value, "1")
-        self.assertEqual(stopped.severity, health.SEVERITY_OK)
-
-    _blocked_seq = 0
-
-    def _blocked(self, error: str) -> None:
-        type(self)._blocked_seq += 1
-        SystemWorkflow.objects.create(
-            kind="autonomous_goal_run",
-            main_thread_id=f"thread-{type(self)._blocked_seq}",
-            cwd="/r",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            state={"error": error},
-        )
 
 
 class HealthReportCacheTests(TestCase):

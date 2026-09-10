@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from django.test import TestCase
 from django.utils import timezone
-from openai_codex import Codex, CodexError
+from openai_codex import Codex
 
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
 from hitch.main.sessions import session_index
@@ -83,53 +83,6 @@ class SessionIndexRefreshTests(TestCase):
 
         metadata = SessionMetadata.objects.get(thread_id="system-thread")
         self.assertTrue(metadata.is_hidden_system_session)
-
-    def test_active_window_failure_keeps_cursor_and_reports_failed(self) -> None:
-        # A failed window must not advance: it reports failed and hands back the
-        # start cursor so the scheduler retries the same spot next tick.
-        thread_list = MagicMock(side_effect=CodexError("thread list down"))
-        codex = cast(Codex, SimpleNamespace(thread_list=thread_list))
-
-        result = session_index.refresh_active_window(
-            codex, projects=[], start_cursor="page-4", max_pages=5
-        )
-
-        self.assertTrue(result.failed)
-        self.assertFalse(result.complete)
-        self.assertEqual(result.synced, 0)
-        self.assertEqual(result.next_cursor, "page-4")
-        # A failed window leaves the request-path sync state untouched.
-        self.assertFalse(
-            SessionIndexSyncState.objects.filter(
-                source=SessionIndexSyncState.SOURCE_ACTIVE
-            ).exists()
-        )
-
-    def test_active_window_self_referential_cursor_resets_to_front(self) -> None:
-        # A thread_list response that hands back the same cursor it was called
-        # with must not pin the scheduler on that page forever: the window is
-        # seeded with start_cursor so the duplicate is caught on the first page,
-        # and the next cursor resets to the front for a clean pass next tick.
-        thread_list = MagicMock(
-            return_value=SimpleNamespace(
-                data=[_thread("stuck-thread")],
-                next_cursor="page-2",
-            )
-        )
-        codex = cast(Codex, SimpleNamespace(thread_list=thread_list))
-
-        result = session_index.refresh_active_window(
-            codex, projects=[], start_cursor="page-2", max_pages=5
-        )
-
-        self.assertEqual(result.synced, 1)
-        self.assertFalse(result.complete)
-        self.assertFalse(result.failed)
-        # Reset to the front rather than resuming from the self-referential page.
-        self.assertEqual(result.next_cursor, "")
-        # Detected on the first page (seeded guard), so it never re-fetched the
-        # same stuck page within the window.
-        self.assertEqual(thread_list.call_count, 1)
 
     def test_capped_refresh_keeps_never_complete_source_incomplete(self) -> None:
         thread_list = MagicMock(

@@ -29,7 +29,7 @@ the top level:
   spawning, app-server pooling, reconciliation), `codex_tools` (dynamic Hitch
   tools), `streaming` (SSE),
   `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
-  `disk_cleanup`, `health`, and process/host infrastructure.
+  `disk_cleanup`, `health`, periodic maintenance, and process/host infrastructure.
 - `workflows/` -- agent-driven PR watch, `gh` CLI integration, PR handoff/stage
   bookkeeping, and historical system-session identification.
 - `sessions/` -- session-page support: entry/metadata display, settings and

@@ -49,7 +49,6 @@ class ToolContext:
     instance_id: int = 0
     agent_kind: str = ""
     purpose: str = CodexInstance.PURPOSE_USER
-    workflow_id: int | None = None
     user_message_index: int | None = None
     cancel_requested: Callable[[], bool] = _not_cancelled
     enable_memories: bool = False
@@ -77,9 +76,8 @@ def is_dynamic_tool_call(method: str) -> bool:
 def registered_dynamic_tool_specs(
     *,
     purpose: str = CodexInstance.PURPOSE_USER,
-    agent_kind: str = "",
 ) -> list[dict[str, Any]]:
-    role = _tool_role(purpose=purpose, agent_kind=agent_kind)
+    role = _tool_role(purpose=purpose)
     tools = _TOOLS.values()
     return [
         {
@@ -103,7 +101,7 @@ def handle_dynamic_tool_call(params: dict[str, Any] | None, context: ToolContext
         namespace = _HITCH_NAMESPACE
     if not isinstance(namespace, str) or not isinstance(tool_name, str):
         return _tool_response("tool namespace and name are required", success=False)
-    role = _tool_role(purpose=context.purpose, agent_kind=context.agent_kind)
+    role = _tool_role(purpose=context.purpose)
     tool = _TOOLS.get((namespace, tool_name))
     if tool is None:
         return _tool_response(f"unknown Hitch tool: {namespace}.{tool_name}", success=False)
@@ -269,7 +267,7 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
     return json.dumps(result, sort_keys=True)
 
 
-def _tool_role(*, purpose: str, agent_kind: str) -> str:
+def _tool_role(*, purpose: str) -> str:
     if purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
         return "visible"
     return "none"

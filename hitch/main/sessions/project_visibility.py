@@ -34,14 +34,6 @@ def _settings_with_visible_selected_project(
     return values._replace(visible_session_project_ids=visible_project_ids)
 
 
-def _session_project_is_visible(
-    project: Project | None, visibility: SessionProjectVisibility
-) -> bool:
-    if project is None:
-        return visibility.include_no_project
-    return visibility.project_ids is None or project.pk in visibility.project_ids
-
-
 def _filter_session_metadata_by_project_visibility(
     rows: QuerySet[SessionMetadata], visibility: SessionProjectVisibility
 ) -> QuerySet[SessionMetadata]:

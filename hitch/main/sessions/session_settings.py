@@ -219,10 +219,6 @@ def _selected_project_for_settings(
     )
 
 
-def _active_project_from_request(request: HttpRequest) -> Project | None:
-    return _selected_project_for_settings(_stored_settings(request))
-
-
 def _current_disk_usage_max_percent() -> float:
     return disk_cleanup._max_allowed_percent()
 

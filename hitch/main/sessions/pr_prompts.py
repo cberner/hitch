@@ -1,4 +1,4 @@
-"""Prompts and legacy aliases for agent-owned PR turns."""
+"""Prompts and command aliases for agent-owned PR turns."""
 
 PR_SLASH_DISPLAY_PROMPT = (
     "Rebase on the default branch, clean it up, and then open a PR"
@@ -58,22 +58,7 @@ _PR_PROMPT_ALIASES = frozenset(
         *_LEGACY_HITCH_PUBLISHED_PR_PROMPTS,
     }
 )
-_LEGACY_PR_WORKFLOW_NOTICE_PREFIXES = (
-    "Hitch review workflow could not complete.",
-    "Hitch PR workflow could not complete.",
-    "Hitch PR monitor found follow-up work on the active PR.",
-)
 
 
 def is_pr_creation_prompt(text: str) -> bool:
     return text.strip() in _PR_PROMPT_ALIASES
-
-
-def is_legacy_hitch_published_pr_prompt(text: str) -> bool:
-    """Return whether a pre-watch PR turn expected Hitch to publish for it."""
-    return any(prompt in text for prompt in _LEGACY_HITCH_PUBLISHED_PR_PROMPTS)
-
-
-def is_pr_workflow_notice(text: str) -> bool:
-    """Recognize old wrapper narration while parsing pre-upgrade rollouts."""
-    return text.strip().startswith(_LEGACY_PR_WORKFLOW_NOTICE_PREFIXES)

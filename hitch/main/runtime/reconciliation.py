@@ -1,8 +1,8 @@
 """Dead/orphaned worker reconciliation and app-server process hygiene.
 
 The sweeps that keep the database and the process table agreeing: mark
-rows FAILED when their worker pid is gone (with post-terminal routing to
-the system agents), kill leaked workers whose row is already terminal,
+rows FAILED when their worker pid is gone, update their session PR state,
+kill leaked workers whose row is already terminal,
 and find/nuke app-server processes belonging to this deployment.
 Worker spawning and liveness primitives stay in ``codex_pool``.
 """
@@ -581,7 +581,7 @@ def reconcile_dead_if_due() -> int:
     full-table sweeps all contending for SQLite's single write lock. Gating the
     sweep through ``rate_limit.claim`` collapses that to at most one sweep per
     ``_RECONCILE_DEAD_MIN_INTERVAL`` across the whole app; skipped callers rely
-    on the next due request and the 60s workflow-maintenance scheduler (which
+    on the next due request and the 60s runtime maintenance scheduler (which
     still calls ``reconcile_dead`` directly) to clear dead workers. Tests run the
     sweep unconditionally so existing per-request reconcile assertions hold.
     """
@@ -612,7 +612,7 @@ def reconcile_dead_for_thread(thread_id: str) -> int:
     return updated
 
 def _reconcile_orphaned_workers_if_due() -> int:
-    """Debounced global orphan reap for scoped callers (workflow streams)."""
+    """Debounced global orphan reap for session-scoped callers."""
     if getattr(settings, "TESTING", False):
         return reconcile_orphaned_workers()
     if rate_limit.claim(

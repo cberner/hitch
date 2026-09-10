@@ -40,7 +40,9 @@ class CodexQuotaToolTests(TestCase):
         for kind in ("unrelated", "autonomous_goal_run", "autonomous_goal_reviewer"):
             with self.subTest(kind=kind), patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry") as run:
                 context = {"purpose": CodexInstance.PURPOSE_SYSTEM_AGENT, "agent_kind": kind}
-                self.assertNotIn("get_codex_quota", [spec["name"] for spec in registered_dynamic_tool_specs(**context)])
+                self.assertNotIn("get_codex_quota", [spec["name"] for spec in registered_dynamic_tool_specs(
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                )])
                 self.assertFalse(self._call(**context)["success"])
                 run.assert_not_called()
 

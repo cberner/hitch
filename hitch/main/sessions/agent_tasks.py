@@ -22,10 +22,6 @@ class AgentTask:
     requires_pr_watch: bool
 
 
-class PrWatchUnavailableError(RuntimeError):
-    pass
-
-
 def review_task(*, prepare_pull_request: bool, pr_title: str = "") -> AgentTask:
     prompt = optional_review_prompt(prepare_pull_request=prepare_pull_request)
     if pr_title := " ".join(pr_title.split()):

@@ -5,9 +5,8 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from hitch.main.models import RefreshThrottle
-from hitch.main.runtime import retention
+from hitch.main.runtime import maintenance, retention
 from hitch.main.runtime.retention import RetentionResult
-from hitch.main.workflows import workflow_maintenance
 
 
 class StaleThrottleSweepTests(TestCase):
@@ -51,17 +50,17 @@ class RetentionTickTests(SimpleTestCase):
             "run_retention_sweep",
             return_value=RetentionResult(throttles_deleted=3),
         ) as sweep:
-            unchanged = workflow_maintenance._run_due_row_retention(
+            unchanged = maintenance._run_due_row_retention(
                 next_due_at=100.0, now=50.0
             )
             self.assertEqual(unchanged, 100.0)
             sweep.assert_not_called()
 
-            rescheduled = workflow_maintenance._run_due_row_retention(
+            rescheduled = maintenance._run_due_row_retention(
                 next_due_at=100.0, now=150.0
             )
             self.assertEqual(
                 rescheduled,
-                150.0 + workflow_maintenance._ROW_RETENTION_INTERVAL_SECONDS,
+                150.0 + maintenance._ROW_RETENTION_INTERVAL_SECONDS,
             )
             sweep.assert_called_once_with()

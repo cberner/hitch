@@ -40,7 +40,6 @@ from openai_codex.generated.v2_all import (
     ThreadGoalStatus,
     ThreadGoalUpdatedNotification,
     ThreadItem,
-    ThreadSource,
     Turn,
     TurnCompletedNotification,
     TurnError,
@@ -219,10 +218,37 @@ def _stub_thread_resume(events: list[SimpleNamespace], turn_id: str = "turn-1") 
     )
 
 
+def _linux_proc_state(pid: int) -> str | None:
+    """Return Linux's one-letter process state, or None when unavailable.
+
+    ``""`` means /proc exists but the specific pid disappeared between
+    ``kill(pid, 0)`` and the stat read.
+    """
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return None
+    try:
+        # The comm field holds the raw executable basename and may contain
+        # arbitrary non-UTF-8 bytes (pids are recycled, so this can be a
+        # foreign process). Decode tolerantly: the state char we want sits
+        # after the final ')', which is always ASCII.
+        stat = (proc_root / str(pid) / "stat").read_bytes().decode(
+            "utf-8", errors="replace"
+        )
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    end = stat.rfind(")")
+    if end < 0 or end + 2 >= len(stat):
+        return None
+    return stat[end + 2]
+
+
 def _wait_for_linux_proc_state(pid: int, state: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if codex_pool._linux_proc_state(pid) == state:
+        if _linux_proc_state(pid) == state:
             return
         time.sleep(0.01)
     raise AssertionError(f"pid {pid} did not reach Linux process state {state!r}")
@@ -491,7 +517,7 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_system_agent_thread_start_forwards_source_without_hitch_tools(
+    def test_system_agent_thread_start_excludes_hitch_tools(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         codex = _stub_codex_thread_start(mock_codex)
@@ -504,12 +530,10 @@ class SpawnNewSessionTests(TestCase):
             codex_pool.spawn_new_session(
                 cwd="/repo",
                 prompt="hi",
-                thread_source=ThreadSource.subagent,
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             )
 
         payload = _thread_start_payload(codex)
-        self.assertEqual(payload["threadSource"], ThreadSource.subagent.value)
         self.assertNotIn("dynamicTools", payload)
         self.assertIn(
             "features.default_mode_request_user_input=false",
@@ -835,49 +859,6 @@ class SpawnFailureTests(TestCase):
         self.assertEqual(instance.input_attachment_paths, [])
         metadata.refresh_from_db()
         self.assertEqual(metadata.codex_updated_at, instance.ended_at)
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_durable_binding_runs_before_worker_launch(self, mock_launch: MagicMock) -> None:
-        bound_instance_ids: list[int] = []
-
-        def launch(**kwargs: object) -> SimpleNamespace:
-            self.assertEqual(bound_instance_ids, [kwargs["instance_id"]])
-            return SimpleNamespace(pid=1234)
-
-        mock_launch.side_effect = launch
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            instance = codex_pool.spawn_turn(
-                thread_id="bound-thread",
-                cwd="/repo",
-                prompt="hi",
-                before_worker_launch=lambda created: bound_instance_ids.append(created.pk),
-            )
-
-        self.assertEqual(bound_instance_ids, [instance.pk])
-
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    def test_failed_durable_binding_prevents_worker_launch(self, mock_launch: MagicMock) -> None:
-        def fail_binding(_instance: CodexInstance) -> None:
-            raise RuntimeError("binding failed")
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-            self.assertRaisesRegex(RuntimeError, "binding failed"),
-        ):
-            codex_pool.spawn_turn(
-                thread_id="unbound-thread",
-                cwd="/repo",
-                prompt="hi",
-                before_worker_launch=fail_binding,
-            )
-
-        mock_launch.assert_not_called()
-        self.assertFalse(CodexInstance.objects.filter(thread_id="unbound-thread").exists())
-
 
     @patch("hitch.main.runtime.codex_pool._launch_worker_process", return_value=SimpleNamespace(pid=0))
     @patch("hitch.main.runtime.codex_pool.Codex")
@@ -1635,26 +1616,6 @@ class SwapCapHierarchyWarningTests(TestCase):
             proc.wait.assert_called_once_with(timeout=0)
         finally:
             _forget_worker_pid(pid)
-
-    def test_linux_proc_state_defensive_branches(self) -> None:
-        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
-            proc_root = mock_path.return_value
-            proc_root.exists.return_value = False
-            self.assertIsNone(codex_pool._linux_proc_state(1))
-
-        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
-            proc_root = mock_path.return_value
-            proc_root.exists.return_value = True
-            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
-            stat_path.read_bytes.side_effect = FileNotFoundError
-            self.assertEqual(codex_pool._linux_proc_state(1), "")
-
-        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
-            proc_root = mock_path.return_value
-            proc_root.exists.return_value = True
-            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
-            stat_path.read_bytes.return_value = b"malformed"
-            self.assertIsNone(codex_pool._linux_proc_state(1))
 
 
 class CodexInstanceModelTests(TestCase):
@@ -4761,7 +4722,6 @@ class CodexWorkerCommandTests(TestCase):
             approval_mode=None,
             collaboration_mode=None,
             plan_mode=False,
-            output_schema=None,
             client_user_message_id="client-1",
             submission=submission,
             notification_sequencer=sequencer,

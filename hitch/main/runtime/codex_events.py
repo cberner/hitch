@@ -63,7 +63,6 @@ def prune_diff_events(events_path: str | Path) -> int:
 class _GoalEvent:
     order: tuple[int, int, int]
     objective: str | None
-    tokens_used: int | None
 
 
 @dataclass(frozen=True)
@@ -97,20 +96,6 @@ def latest_goal_for_thread(thread_id: str) -> str:
 def latest_goal_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> str | None:
     current = _latest_goal_event_from_event_paths(paths, thread_id=thread_id)
     return current.objective if current is not None else None
-
-
-def latest_goal_tokens_for_instance(instance: CodexInstance | None) -> int | None:
-    if instance is None or not instance.events_path:
-        return None
-    return latest_goal_tokens_from_event_paths(
-        [instance.events_path],
-        thread_id=instance.thread_id,
-    )
-
-
-def latest_goal_tokens_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> int | None:
-    current = _latest_goal_event_from_event_paths(paths, thread_id=thread_id)
-    return current.tokens_used if current is not None else None
 
 
 def _latest_goal_event_from_event_paths(paths: Iterable[str | Path], *, thread_id: str) -> _GoalEvent | None:
@@ -201,7 +186,7 @@ def _goal_event_from_event(event: dict[str, Any], thread_id: str, fallback_order
         return None
     order = _event_order(event, fallback_order)
     if method == GOAL_CLEARED_METHOD:
-        return _GoalEvent(order=order, objective=None, tokens_used=None)
+        return _GoalEvent(order=order, objective=None)
     goal = payload.get("goal")
     if not isinstance(goal, dict):
         return None
@@ -211,16 +196,7 @@ def _goal_event_from_event(event: dict[str, Any], thread_id: str, fallback_order
     return _GoalEvent(
         order=order,
         objective=objective.strip() or None,
-        tokens_used=_goal_tokens_used(goal),
     )
-
-
-def _goal_tokens_used(goal: dict[str, Any]) -> int | None:
-    for key in ("tokensUsed", "tokens_used"):
-        value = goal.get(key)
-        if is_nonbool_int(value):
-            return max(0, value)
-    return None
 
 
 def _task_plan_event_from_event(

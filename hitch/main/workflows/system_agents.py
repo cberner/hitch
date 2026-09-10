@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any
 
 from hitch.main.models import (
@@ -38,15 +37,6 @@ def hidden_thread_ids() -> set[str]:
         .values_list("thread_id", flat=True)
         .distinct()
     )
-    return hidden_ids - legacy_promoted_system_thread_ids()
-
-
-def hidden_thread_ids_from_threads(threads: Iterable[Any]) -> set[str]:
-    hidden_ids = {
-        thread_id
-        for thread in threads
-        if isinstance(thread_id := getattr(thread, "id", None), str) and hitch_system_agent_thread(thread)
-    }
     return hidden_ids - legacy_promoted_system_thread_ids()
 
 

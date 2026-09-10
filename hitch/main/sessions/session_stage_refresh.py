@@ -10,7 +10,6 @@ from typing import Any
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
-    SystemWorkflow,
     UserInputRequest,
 )
 from hitch.main.runtime import rollout
@@ -93,7 +92,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # only hold stages that are a pure function of the rollout. A stage that
         # an active worker forced (e.g. Implementation while
         # a turn runs) is transient state the mtime key cannot track: once the
-        # worker/workflow goes away without rewriting the rollout, the cached
+        # worker goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
         if active_instance is None and not awaiting_user_input:
@@ -148,26 +147,10 @@ def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
         instance__thread_id__in=ids,
         instance__status__in=active_statuses,
     ).values_list("instance__thread_id", flat=True)
-    workflow_input_thread_ids = UserInputRequest.objects.filter(
-        response__isnull=True,
-        instance__system_agent_runs__workflow__main_thread_id__in=ids,
-        instance__system_agent_runs__workflow__status=SystemWorkflow.STATUS_RUNNING,
-    ).values_list(
-        "instance__system_agent_runs__workflow__main_thread_id", flat=True
-    )
-    workflow_approval_thread_ids = ApprovalRequest.objects.filter(
-        decision=ApprovalRequest.DECISION_PENDING,
-        instance__system_agent_runs__workflow__main_thread_id__in=ids,
-        instance__system_agent_runs__workflow__status=SystemWorkflow.STATUS_RUNNING,
-    ).values_list(
-        "instance__system_agent_runs__workflow__main_thread_id", flat=True
-    )
     waiting_thread_ids: set[str] = set()
     for thread_ids_result in (
         direct_input_thread_ids,
         direct_approval_thread_ids,
-        workflow_input_thread_ids,
-        workflow_approval_thread_ids,
     ):
         for thread_id in thread_ids_result:
             if isinstance(thread_id, str) and thread_id:

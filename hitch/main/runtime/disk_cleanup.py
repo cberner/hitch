@@ -23,7 +23,6 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
-    SystemWorkflow,
 )
 from hitch.main.runtime import codex_events
 from hitch.main.workflows import system_agents
@@ -44,7 +43,6 @@ _PROPOSAL_SESSION_ID_FIELDS = (
     "source_session_id",
     "accepted_session_id",
 )
-_ACTIVE_WORKFLOW_CWD_STATE_KEYS = ("session_cwd",)
 _DISK_USAGE_SNAPSHOT_TTL = timedelta(minutes=5)
 _DISK_USAGE_INVALIDATION_FILE = ".disk-usage-cache-token"
 
@@ -369,7 +367,6 @@ class _CleanupContext:
     hidden_system_thread_ids: frozenset[str]
     protected_proposal_session_ids: frozenset[int]
     active_thread_ids: frozenset[str]
-    active_workflow_thread_ids: frozenset[str]
     protected_worktree_paths: frozenset[str]
 
 
@@ -387,20 +384,8 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         .exclude(cwd="")
         .values_list("cwd", flat=True)
     )
-    active_workflows = list(
-        SystemWorkflow.objects.filter(status__in=SystemWorkflow.ACTIVE_STATUSES).only("main_thread_id", "cwd", "state")
-    )
-    active_workflow_paths = set(_active_workflow_paths(active_workflows))
-    active_workflow_thread_ids = frozenset(
-        workflow.main_thread_id for workflow in active_workflows if workflow.main_thread_id
-    ) | frozenset(
-        SystemAgentRun.objects.filter(workflow__status__in=SystemWorkflow.ACTIVE_STATUSES)
-        .exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-    )
     protected_paths = (
         active_codex_paths
-        | active_workflow_paths
         | _pending_proposal_worktree_paths(protected_proposal_session_ids)
         | _protected_visible_user_worktree_paths(
             legacy_promoted_thread_ids,
@@ -413,7 +398,6 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         hidden_system_thread_ids=frozenset(hidden_system_thread_ids),
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
-        active_workflow_thread_ids=active_workflow_thread_ids,
         protected_worktree_paths=frozenset(_normalized_managed_paths(path for path in protected_paths if path)),
     )
 
@@ -438,8 +422,6 @@ def _safe_to_remove_worktree(metadata: SessionMetadata, context: _CleanupContext
     if metadata.pk in context.protected_proposal_session_ids:
         return False
     if metadata.thread_id in context.active_thread_ids:
-        return False
-    if metadata.thread_id in context.active_workflow_thread_ids:
         return False
     normalized = _normalized_managed_path(metadata.cwd)
     return normalized is not None and normalized not in context.protected_worktree_paths
@@ -578,19 +560,6 @@ def _hidden_system_thread_ids() -> set[str]:
         .distinct()
     )
     return thread_ids - system_agents.legacy_promoted_system_thread_ids()
-
-
-def _active_workflow_paths(workflows: list[SystemWorkflow]) -> set[str]:
-    paths: set[str] = set()
-    for workflow in workflows:
-        if workflow.cwd:
-            paths.add(workflow.cwd)
-        state = workflow.state if isinstance(workflow.state, dict) else {}
-        for key in _ACTIVE_WORKFLOW_CWD_STATE_KEYS:
-            cwd = state.get(key)
-            if isinstance(cwd, str) and cwd:
-                paths.add(cwd)
-    return paths
 
 
 def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
