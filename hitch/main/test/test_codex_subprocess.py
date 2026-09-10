@@ -511,6 +511,10 @@ class SpawnNewSessionTests(TestCase):
         payload = _thread_start_payload(codex)
         self.assertEqual(payload["threadSource"], ThreadSource.subagent.value)
         self.assertNotIn("dynamicTools", payload)
+        self.assertIn(
+            "features.default_mode_request_user_input=false",
+            mock_codex.call_args.kwargs["config"].config_overrides,
+        )
 
     @patch("hitch.main.runtime.codex_pool.Codex")
     def test_create_session_thread_registers_hitch_tools(
@@ -614,7 +618,10 @@ class SpawnNewSessionTests(TestCase):
         self.assertTrue(instance.enable_memories)
         mock_codex.assert_called_once()
         config = mock_codex.call_args.kwargs["config"]
-        self.assertEqual(config.config_overrides, ("features.memories=true",))
+        self.assertEqual(
+            config.config_overrides,
+            ("features.memories=true", "features.default_mode_request_user_input=true"),
+        )
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             reasoning_effort=None,
@@ -645,7 +652,7 @@ class SpawnNewSessionTests(TestCase):
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(
             config.config_overrides,
-            ('features.memories=false', 'web_search="live"'),
+            ('features.memories=false', 'features.default_mode_request_user_input=true', 'web_search="live"'),
         )
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
@@ -4772,7 +4779,7 @@ class CodexWorkerCommandTests(TestCase):
 
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_visible_system_feedback_worker_uses_native_agent_configuration(
+    def test_worker_scopes_user_input_to_visible_purposes(
         self, mock_codex: MagicMock
     ) -> None:
         codex_ctx = mock_codex.return_value.__enter__.return_value
@@ -4785,17 +4792,27 @@ class CodexWorkerCommandTests(TestCase):
         )
         codex_ctx.thread_resume.return_value = thread
 
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw), prompt="Apply the review fix")
-            instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
-            instance.save(update_fields=["purpose"])
-            call_command("codex_worker", "--instance-id", str(instance.pk))
+        for purpose, enabled in (
+            (CodexInstance.PURPOSE_USER, "true"),
+            (CodexInstance.PURPOSE_SYSTEM_FEEDBACK, "true"),
+            (CodexInstance.PURPOSE_SYSTEM_AGENT, "false"),
+        ):
+            with self.subTest(purpose=purpose), tempfile.TemporaryDirectory() as raw:
+                thread.turn.reset_mock()
+                codex_ctx.thread_resume.reset_mock()
+                instance = self._make_instance(Path(raw), prompt="Apply the review fix")
+                instance.purpose = purpose
+                instance.save(update_fields=["purpose"])
+                call_command("codex_worker", "--instance-id", str(instance.pk))
 
-        thread.turn.assert_called_once()
-        codex_ctx._client.request.assert_not_called()
-        codex_ctx.thread_resume.assert_called_once_with("thread-1")
-        config = mock_codex.call_args.kwargs["config"]
-        self.assertEqual(config.config_overrides, ("features.memories=false",))
+                thread.turn.assert_called_once()
+                codex_ctx._client.request.assert_not_called()
+                codex_ctx.thread_resume.assert_called_once_with("thread-1")
+                config = mock_codex.call_args.kwargs["config"]
+                self.assertEqual(
+                    config.config_overrides,
+                    ("features.memories=false", f"features.default_mode_request_user_input={enabled}"),
+                )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_diff_updates_are_not_persisted(self, mock_codex: MagicMock) -> None:
@@ -4976,8 +4993,8 @@ class CodexWorkerCommandTests(TestCase):
 
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(
-            config.config_overrides[:2],
-            ('features.memories=false', 'web_search="cached"'),
+            config.config_overrides[:3],
+            ('features.memories=false', 'features.default_mode_request_user_input=true', 'web_search="cached"'),
         )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
@@ -5003,7 +5020,10 @@ class CodexWorkerCommandTests(TestCase):
             developer_instructions="Prefer small, typed changes.",
         )
         config = mock_codex.call_args.kwargs["config"]
-        self.assertEqual(config.config_overrides, ("features.memories=false",))
+        self.assertEqual(
+            config.config_overrides,
+            ("features.memories=false", "features.default_mode_request_user_input=true"),
+        )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_separate_hitch_instructions_are_replaced_or_cleared_on_resume(
@@ -6007,64 +6027,54 @@ class ApprovalHandlerTests(TestCase):
 
         self.assertEqual(_wait_for_user_input_response(999_999), {"answers": {}})
 
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
-    )
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.02
-    )
-    def test_wait_for_user_input_response_defaults_to_empty_on_timeout(self) -> None:
-        from hitch.main.management.commands.codex_worker import (
-            _wait_for_user_input_response,
-        )
+    @patch("hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.0)
+    def test_user_question_waits_past_approval_timeout_for_browser_answer(self) -> None:
+        instance = self._make_instance()
+        response = {"answers": {"surface": {"answers": ["Session status"]}}}
+        events: list[str] = []
 
-        input_request = UserInputRequest.objects.create(
-            instance=self._make_instance(),
-            method="request_user_input",
-            params={},
-        )
+        def record(method: str, payload: Any) -> None:
+            events.append(method)
 
-        self.assertEqual(
-            _wait_for_user_input_response(input_request.pk),
-            {"answers": {}},
-        )
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": {}})
-        self.assertIsNotNone(input_request.responded_at)
+        def answer(_interval: float) -> None:
+            row = UserInputRequest.objects.get(instance=instance)
+            self.assertIsNone(row.response)
+            self.assertIsNone(row.responded_at)
+            self.assertEqual(events, ["input/requested"])
+            result = self.client.post(
+                f"/input/{row.pk}/",
+                data={"answers": json.dumps(response["answers"])},
+            )
+            self.assertEqual(result.status_code, 200)
 
-    @patch(
-        "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.0
-    )
-    def test_wait_for_user_input_response_honours_user_pick_at_timeout_boundary(
-        self,
-    ) -> None:
-        """When the user's answer lands in the window between the last empty
-        poll and the timeout's conditional default-write, the write matches
-        zero rows. The handler must round-trip the user's recorded answer
-        rather than returning the empty fallback -- otherwise codex acts on
-        ``{"answers": {}}`` even though the user answered (and the browser
-        already showed the answer as accepted). Mirrors
-        ``test_wait_for_decision_honours_user_pick_at_timeout_boundary``."""
-        from hitch.main.management.commands.codex_worker import (
-            _wait_for_user_input_response,
+        handler = _make_approval_handler(
+            instance=instance, write_event=record, approval_mode="approve_all",
         )
+        with patch("hitch.main.management.commands.codex_worker.time.sleep", side_effect=answer) as sleep:
+            self.assertEqual(handler("item/tool/requestUserInput", {
+                "questions": [{"id": "surface", "question": "Which information has looked wrong?"}],
+            }), response)
+        sleep.assert_called_once()
+        self.assertEqual(events, ["input/requested", "input/resolved"])
 
-        # The user's answer is already persisted by the time the wait loop
-        # reaches its timeout default-write: this is what the deadline-boundary
-        # race looks like once the POST commits.
-        input_request = UserInputRequest.objects.create(
-            instance=self._make_instance(),
-            method="request_user_input",
-            params={},
-            response={"answers": {"scope": "UI"}},
-        )
+    @patch("hitch.main.management.commands.codex_worker._cancel_requested", True)
+    def test_wait_for_user_input_response_cancellation_preserves_answer(self) -> None:
+        from hitch.main.management.commands.codex_worker import _wait_for_user_input_response
 
-        self.assertEqual(
-            _wait_for_user_input_response(input_request.pk),
-            {"answers": {"scope": "UI"}},
-        )
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+        for response in (None, {"answers": {"scope": {"answers": ["UI"]}}}):
+            with self.subTest(response=response):
+                input_request = UserInputRequest.objects.create(
+                    instance=self._make_instance(),
+                    method="request_user_input",
+                    params={},
+                    response=response,
+                )
+                expected = response if response is not None else {"answers": {}}
+                self.assertEqual(_wait_for_user_input_response(input_request.pk), expected)
+                input_request.refresh_from_db()
+                self.assertEqual(input_request.response, expected)
+                if response is None:
+                    self.assertIsNotNone(input_request.responded_at)
 
 
 class WorkerCancellationTests(TestCase):
