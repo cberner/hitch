@@ -1,4 +1,4 @@
-"""Background maintenance for durable Hitch system workflows."""
+"""Periodic worker reconciliation, disk cleanup, and throttle retention."""
 
 from __future__ import annotations
 
@@ -12,36 +12,37 @@ from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_l
 
 logger = logging.getLogger(__name__)
 
-_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
+_MAINTENANCE_INTERVAL_SECONDS = 60
 _DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
 # Row/file retention runs daily, but the first sweep happens shortly after
 # startup: this server restarts often enough that "a day after boot" could
 # mean never, and a backlogged first sweep is already bounded per pass.
 _ROW_RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
 _ROW_RETENTION_STARTUP_DELAY_SECONDS = 15 * 60
+# Keep the existing deployment switch when relocating the scheduler.
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
 _scheduler = server_lifecycle.SchedulerHandle(
-    thread_name="hitch-workflow-maintenance",
-    tick_interval_seconds=_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS,
+    thread_name="hitch-maintenance",
+    tick_interval_seconds=_MAINTENANCE_INTERVAL_SECONDS,
 )
 
 
-def start_workflow_maintenance_scheduler() -> bool:
-    """Start the in-process workflow maintenance scheduler when enabled."""
-    if not _workflow_maintenance_scheduler_enabled():
+def start_maintenance_scheduler() -> bool:
+    """Start the in-process runtime maintenance scheduler when enabled."""
+    if not _maintenance_scheduler_enabled():
         return False
-    return _scheduler.start(_workflow_maintenance_scheduler_loop)
+    return _scheduler.start(_maintenance_scheduler_loop)
 
 
-def _workflow_maintenance_scheduler_enabled() -> bool:
+def _maintenance_scheduler_enabled() -> bool:
     return server_lifecycle.background_work_enabled(
         env_var=_SCHEDULER_ENV,
         include_wsgi_server_commands=True,
     )
 
 
-def _workflow_maintenance_scheduler_loop() -> None:
+def _maintenance_scheduler_loop() -> None:
     # One-shot at startup: app-servers left behind by the previous server
     # process (pooled servers checked out across a restart, workers killed
     # before their cgroup reap) each hold a CODEX_HOME state-DB connection
@@ -59,21 +60,21 @@ def _workflow_maintenance_scheduler_loop() -> None:
     next_disk_cleanup_at = start + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
     next_row_retention_at = start + _ROW_RETENTION_STARTUP_DELAY_SECONDS
     while True:
-        _run_workflow_maintenance_scheduler_tick()
+        _run_maintenance_scheduler_tick()
         next_disk_cleanup_at = _run_due_disk_usage_cleanup(
             next_due_at=next_disk_cleanup_at
         )
         next_row_retention_at = _run_due_row_retention(
             next_due_at=next_row_retention_at
         )
-        stop.wait(_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS)
+        stop.wait(_MAINTENANCE_INTERVAL_SECONDS)
 
 
-def _run_workflow_maintenance_scheduler_tick() -> None:
-    _scheduler.run_tick(_workflow_maintenance_tick)
+def _run_maintenance_scheduler_tick() -> None:
+    _scheduler.run_tick(_maintenance_tick)
 
 
-def _workflow_maintenance_tick() -> None:
+def _maintenance_tick() -> None:
     reconciliation.reconcile_dead()
 
 

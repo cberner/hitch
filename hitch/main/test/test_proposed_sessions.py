@@ -494,7 +494,7 @@ class RetiredGoalToolsTests(TestCase):
         for kind in ("autonomous_goal_run", "autonomous_goal_reviewer"):
             with self.subTest(kind=kind):
                 self.assertEqual(registered_dynamic_tool_specs(
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT, agent_kind=kind,
+                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
                 ), [])
                 context = ToolContext(
                     cwd="/repo", thread_id="hidden", agent_kind=kind,

@@ -1,7 +1,7 @@
 """Health metrics for the Hitch health dashboard.
 
 Gathers leak signals (Codex app-servers, managed worktree disk, stuck worker
-rows) and backlog signals (workflows and pending human handoffs) into one
+rows) and backlog signals (pending human handoffs and proposals) into one
 report so a glance tells whether something is piling up. Every metric is
 collected defensively: a failure in one collector degrades that row to
 "unavailable" rather than breaking the whole page.
@@ -24,7 +24,6 @@ from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
     ProposedSession,
-    SystemWorkflow,
     UserInputRequest,
 )
 from hitch.main.runtime import (
@@ -78,25 +77,6 @@ _report_cache: tuple[
 # ~80 fds, 0 CLOSE_WAIT); these floors only catch a runaway snapshot.
 _RUNSERVER_FD_WARN = 800
 _CLOSE_WAIT_WARN = 50
-
-# Blocked-workflow failure-mode buckets, matched in order against the stored
-# error text. ``benign`` buckets (normal user action / external limits) never
-# raise severity even when fresh. Derived from the failure-mode census in the
-# health investigation handoff.
-_BLOCKED_BUCKETS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
-    ("gh pr create failures", ("gh pr create", "pr create --fill"), False),
-    ("Worker exited before completion", ("worker process exited",), False),
-    (
-        "State-DB lock / transport closed",
-        ("transportclosederror", "database is locked", "sqlite state runtime", "state db locked"),
-        False,
-    ),
-    ("CodexInstance NOT NULL IntegrityError", ("not null constraint failed: main_codexinstance",), False),
-    ("Invalid JSON schema", ("invalid_json_schema",), False),
-    ("Stopped by user", ("stopped by user",), True),
-    ("Rate limited (429 / usage)", ("429", "too many requests", "usage limit"), True),
-    ("Unsupported workflow kind", ("no longer supported",), True),
-)
 
 
 @dataclass(frozen=True)
@@ -343,30 +323,24 @@ def _backlog_section() -> HealthSection:
         title="Backlogs",
         metrics=[
             _count_metric(
-                "running_workflows",
-                "Running workflows",
-                lambda: SystemWorkflow.objects.filter(status=SystemWorkflow.STATUS_RUNNING).count(),
-            ),
-            _count_metric(
-                "blocked_workflows",
-                "Blocked workflows",
-                lambda: SystemWorkflow.objects.filter(status=SystemWorkflow.STATUS_BLOCKED).count(),
-                warn_at=1,
-                detail="Workflows halted on an error, awaiting attention.",
-            ),
-            _count_metric(
                 "pending_approvals",
                 "Pending approvals",
-                lambda: ApprovalRequest.objects.filter(decision=ApprovalRequest.DECISION_PENDING).count(),
+                lambda: ApprovalRequest.objects.filter(
+                    decision=ApprovalRequest.DECISION_PENDING,
+                    instance__status__in=CodexInstance.ACTIVE_STATUSES,
+                ).count(),
                 warn_at=1,
-                detail="Approval handoffs waiting on a human decision.",
+                detail="Active workers waiting on a human approval decision.",
             ),
             _count_metric(
                 "pending_inputs",
                 "Pending input requests",
-                lambda: UserInputRequest.objects.filter(response__isnull=True).count(),
+                lambda: UserInputRequest.objects.filter(
+                    response__isnull=True,
+                    instance__status__in=CodexInstance.ACTIVE_STATUSES,
+                ).count(),
                 warn_at=1,
-                detail="Plan-mode input prompts waiting on a human answer.",
+                detail="Active workers waiting on a human answer to an input prompt.",
             ),
             _count_metric(
                 "pending_proposals",
@@ -598,78 +572,6 @@ def _human_age(age: timedelta | None) -> str:
     return f"{minutes // 60}h"
 
 
-def _blocked_bucket_section() -> HealthSection:
-    title = "Blocked workflow buckets"
-    try:
-        metrics = _blocked_bucket_metrics()
-    except Exception:
-        logger.exception("failed to build blocked-workflow buckets")
-        return HealthSection(
-            title,
-            [HealthMetric("blocked_buckets", title, "unavailable", SEVERITY_UNKNOWN)],
-        )
-    if not metrics:
-        metrics = [
-            HealthMetric("blocked_buckets_none", "Blocked workflows", "0", SEVERITY_OK)
-        ]
-    return HealthSection(title, metrics)
-
-
-def _classify_blocked_error(error: str) -> tuple[str, bool]:
-    lowered = error.lower()
-    for label, needles, benign in _BLOCKED_BUCKETS:
-        if any(needle in lowered for needle in needles):
-            return label, benign
-    return "Other", False
-
-
-def _blocked_bucket_metrics() -> list[HealthMetric]:
-    cutoff = timezone.now() - _RECENT_FAILURE_AGE
-    counts: dict[str, int] = {}
-    fresh: dict[str, int] = {}
-    last_seen: dict[str, datetime] = {}
-    benign_by_label: dict[str, bool] = {}
-    for row in SystemWorkflow.objects.filter(
-        status=SystemWorkflow.STATUS_BLOCKED
-    ).values("state", "updated_at"):
-        state = row["state"] if isinstance(row["state"], dict) else {}
-        label, benign = _classify_blocked_error(str(state.get("error", "")))
-        benign_by_label[label] = benign
-        counts[label] = counts.get(label, 0) + 1
-        updated = row["updated_at"]
-        if updated is not None:
-            if label not in last_seen or updated > last_seen[label]:
-                last_seen[label] = updated
-            if updated >= cutoff:
-                fresh[label] = fresh.get(label, 0) + 1
-
-    ordered_labels = [label for label, _, _ in _BLOCKED_BUCKETS] + ["Other"]
-    metrics: list[HealthMetric] = []
-    for label in ordered_labels:
-        count = counts.get(label, 0)
-        if count == 0:
-            continue
-        new_24h = fresh.get(label, 0)
-        benign = benign_by_label.get(label, False)
-        severity = SEVERITY_WARN if (new_24h > 0 and not benign) else SEVERITY_OK
-        seen = last_seen.get(label)
-        seen_text = seen.date().isoformat() if seen is not None else "unknown"
-        metrics.append(
-            HealthMetric(
-                key=f"blocked_bucket_{_slug(label)}",
-                label=label,
-                value=str(count),
-                severity=severity,
-                detail=f"last {seen_text}; +{new_24h} in 24h",
-            )
-        )
-    return metrics
-
-
-def _slug(label: str) -> str:
-    return "".join(char if char.isalnum() else "_" for char in label.lower())
-
-
 def _recent_failed_queryset() -> QuerySet[CodexInstance]:
     cutoff = timezone.now() - _RECENT_FAILURE_AGE
     return CodexInstance.objects.filter(status=CodexInstance.STATUS_FAILED).filter(
@@ -721,7 +623,6 @@ def _build_health_report(*, hitch_disk_metric: HealthMetric | None = None) -> He
         _schedulers_section(),
         _host_section(),
         _leak_section(hitch_disk_metric=hitch_disk_metric),
-        _blocked_bucket_section(),
         _backlog_section(),
         _recent_failure_section(),
     ]

@@ -63,13 +63,6 @@ class _SourceRefreshResult(NamedTuple):
     seen_thread_ids: set[str]
 
 
-class ActiveWindowResult(NamedTuple):
-    synced: int
-    next_cursor: str
-    complete: bool
-    failed: bool
-
-
 def should_refresh(*, archived: bool) -> bool:
     source = (
         SessionIndexSyncState.SOURCE_ARCHIVED
@@ -155,56 +148,6 @@ def refresh_from_codex(
         failed=failed,
         active_next_cursor=active_next_cursor,
         archived_next_cursor=archived_next_cursor,
-    )
-
-
-def refresh_active_window(
-    codex: Codex,
-    *,
-    projects: list[Project],
-    start_cursor: str = "",
-    max_pages: int = 1,
-) -> ActiveWindowResult:
-    """Refresh one bounded window of the *active* session index from a cursor.
-
-    The background scheduler used to rescan the entire active list on every
-    tick (``max_pages=None``). This pages a bounded number of pages from
-    ``start_cursor`` instead and returns the cursor to resume from, so the
-    scheduler covers the whole list incrementally across ticks without holding
-    one app-server busy on a full sweep every minute. An empty returned
-    ``next_cursor`` means the list was fully traversed; the caller should resume
-    from the front next cycle.
-
-    Deliberately self-contained relative to ``SessionIndexSyncState``: a partial
-    background window is not a completed sync and must not advance the
-    request-path freshness/pagination cursor. On a *completed* pass it does bump
-    the freshness signal (``mark_synced``) so an idle dashboard still skips its
-    own refresh, matching the old full-sweep behavior.
-    """
-    try:
-        result = _refresh_source(
-            codex,
-            projects=projects,
-            archived=False,
-            use_state_db_only=True,
-            max_pages=max_pages,
-            start_cursor=start_cursor or None,
-        )
-    except CodexError:
-        logger.warning("failed to refresh active session index window")
-        return ActiveWindowResult(
-            synced=0, next_cursor=start_cursor, complete=False, failed=True
-        )
-    if result.complete:
-        mark_synced(archived=False, complete=True)
-        return ActiveWindowResult(
-            synced=result.synced, next_cursor="", complete=True, failed=False
-        )
-    return ActiveWindowResult(
-        synced=result.synced,
-        next_cursor=result.next_cursor,
-        complete=False,
-        failed=False,
     )
 
 

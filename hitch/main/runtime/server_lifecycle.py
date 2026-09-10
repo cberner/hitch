@@ -108,8 +108,8 @@ def scheduler_statuses() -> list[SchedulerStatus]:
 class SchedulerHandle:
     """Once-only starter for an in-process background scheduler thread.
 
-    Owns the started flag and its lock so every scheduler (workflow
-    maintenance, auto proposals, codex pool keepalive) shares one start
+    Owns the started flag and its lock so every scheduler (runtime
+    maintenance and Codex pool keepalive) shares one start
     protocol instead of each module hand-rolling the same guard. Loops route
     their per-tick work through :meth:`run_tick`, which owns the DB-connection
     bracketing and exception logging and records the heartbeat the health

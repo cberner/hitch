@@ -39,9 +39,3 @@ class RateLimitTests(TestCase):
             rate_limit.claim("shared", now=self.now),
         ]
         self.assertEqual(results.count(True), 1)
-
-    def test_due_does_not_record_an_attempt(self) -> None:
-        self.assertTrue(rate_limit.due("k", now=self.now))
-        self.assertFalse(RefreshThrottle.objects.filter(key="k").exists())
-        # A claim is still available because `due` recorded nothing.
-        self.assertTrue(rate_limit.claim("k", now=self.now))

@@ -339,7 +339,6 @@ class SessionDetailFastPathTests(TestCase):
         self.assertNotContains(response, "Queued active prompt")
         self.assertFalse(response.context["show_active_worker_transcript"])
         self.assertContains(response, 'data-hide-transcript="true"')
-        self.assertContains(response, 'data-sanitize-live-details="false"')
         self.assertNotIn("transcript_after", response.context["stream_url"])
         self.assertIn("transcript_owner=rollout", rollout_next_url)
         self.assertEqual(rollout_older.status_code, 200)
@@ -358,7 +357,6 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(full.context["pending_user_prompt"], "")
         self.assertFalse(full.context["show_active_worker_transcript"])
         self.assertContains(full, 'data-hide-transcript="true"')
-        self.assertContains(full, 'data-sanitize-live-details="false"')
         self.assertNotIn("transcript_after", full.context["stream_url"])
 
         with patch("hitch.main.runtime.streaming._is_done", return_value=True):

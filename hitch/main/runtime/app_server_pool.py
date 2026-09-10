@@ -22,7 +22,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 from django.conf import settings
-from openai_codex import Codex, CodexConfig, TransportClosedError
+from openai_codex import Codex, TransportClosedError
 from openai_codex.api import Thread
 from openai_codex.generated.v2_all import ThreadResumeParams
 from pydantic import ValidationError
@@ -174,16 +174,6 @@ def run_borrowed_op_with_retry(
             finally:
                 _SHARED_POOL.release(key, warm, healthy=healthy)
     return run_codex_op_with_retry(lambda: codex_factory(config=config), operation)
-
-def start_codex(config: CodexConfig) -> Codex:
-    """Construct a long-lived Codex app-server with ``_start_codex_with_retry``.
-
-    For callers that own and reuse one app-server across many operations (e.g.
-    the background scheduler) rather than opening a fresh one per use; the
-    caller is responsible for ``close()``. Reusing a single app-server keeps its
-    state DB initialized once instead of racing a new init on every operation.
-    """
-    return _start_codex_with_retry(lambda: Codex(config=config))
 
 @contextlib.contextmanager
 def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:

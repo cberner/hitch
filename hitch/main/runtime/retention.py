@@ -1,14 +1,13 @@
 """Age-based cleanup of stale rate-limit debounce rows.
 
 A deliberately minimal, conservative backstop: ``RefreshThrottle`` rows
-accumulate one per distinct debounced resource (mostly per-PR URLs) and
-nothing else prunes them, yet an old key is safe to drop without reasoning
-about what any UI reader or session resume needs. This runs as a daily sweep
-on the workflow-maintenance scheduler.
+accumulate per debounced quota or reconciliation resource. An old key is safe
+to drop without affecting session history. The runtime maintenance scheduler
+runs this sweep daily.
 
 Reaping terminal ``SystemWorkflow`` / ``CodexInstance`` rows and their event
 files is intentionally out of scope -- those are read back by the
-historical system-session logs, PR-stage rendering, and session resume in ways
+historical system-session logs and session resume in ways
 that make age alone an unsafe deletion signal -- and is left to a separate,
 more carefully scoped change. Disk-pressure cleanup remains the backstop for
 worktrees.
@@ -52,11 +51,9 @@ def _delete_expired_refresh_throttles(cutoff: datetime) -> int:
     Staleness is judged by ``attempted_at`` (indexed), not the auto-now
     ``updated_at``: ``rate_limit.claim`` refreshes live rows with a
     ``QuerySet.update`` that does not advance ``updated_at``, so that field can
-    look ancient on an actively-claimed key. Stale keys are mostly URLs of
-    long-merged PRs; live keys (the account rate-limit endpoint, active PRs)
-    are re-touched constantly and survive. Batched and capped, and the
-    staleness predicate is re-asserted on the delete so a key a concurrent
-    ``claim`` refreshed between the id select and the delete is not erased.
+    look ancient on an actively-claimed key. Old per-PR keys can expire;
+    live quota and reconciliation keys are re-touched and survive. The delete
+    rechecks staleness so a concurrent claim cannot lose its refreshed row.
     """
     deleted = 0
     for _ in range(_MAX_BATCHES_PER_SWEEP):

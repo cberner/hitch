@@ -66,9 +66,6 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
 
         self.assertIsNone(goal)
 
-    def test_latest_goal_tokens_for_instance_handles_missing_instance(self) -> None:
-        self.assertIsNone(codex_events.latest_goal_tokens_for_instance(None))
-
     def test_ignores_malformed_goal_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"

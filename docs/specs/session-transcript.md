@@ -56,9 +56,6 @@ space used by repetitive reasoning, command, and web-search activity.
   preview. After the turn, the page reload builds its stable preview directly
   from the worktree. Disk-pressure cleanup removes these obsolete snapshots
   from oversized logs created by older Hitch versions.
-- `ST-live-detail-authority`: When a live session requires detail sanitization,
-  every tool-detail snapshot and delta is rendered through the same policy.
-  Sensitive command, file, and reasoning details use safe placeholders.
 - `ST-agent-math`: Agent and Thinking messages render TeX enclosed by explicit
   `\(...\)`, `\[...\]`, or `$$...$$` delimiters as mathematical notation.
   Rendering applies consistently to persisted history, lazily loaded entries,

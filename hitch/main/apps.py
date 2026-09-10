@@ -10,13 +10,13 @@ class MainConfig(AppConfig):
     @override
     def ready(self) -> None:
         from hitch.main.runtime.app_server_pool import start_codex_pool_keepalive
-        from hitch.main.workflows.workflow_maintenance import (
-            start_workflow_maintenance_scheduler,
+        from hitch.main.runtime.maintenance import (
+            start_maintenance_scheduler,
         )
 
         # The keepalive self-gates to real server processes (where the shared
         # app-server pool is used), independent of whether the maintenance
         # scheduler is enabled -- a server that runs maintenance elsewhere still
         # needs its request-path pool kept warm.
-        start_workflow_maintenance_scheduler()
+        start_maintenance_scheduler()
         start_codex_pool_keepalive()

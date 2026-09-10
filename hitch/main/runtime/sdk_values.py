@@ -99,10 +99,6 @@ def positive_int(value: Any) -> int | None:
     return None
 
 
-def datetime_value(value: Any) -> datetime | None:
-    return value if isinstance(value, datetime) else None
-
-
 def updated_at_seconds(updated_at: Any) -> float | None:
     if isinstance(updated_at, bool):
         return None

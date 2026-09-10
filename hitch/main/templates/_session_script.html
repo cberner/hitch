@@ -860,8 +860,6 @@
             const historyPartial = sessionMain && sessionMain.dataset.historyPartial === "true";
             const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
             const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
-            const HIDE_LIVE_USER_MESSAGE = liveRoot && liveRoot.dataset.hideUserMessage === "true";
-            const SANITIZE_LIVE_DETAILS = liveRoot && liveRoot.dataset.sanitizeLiveDetails === "true";
             // The Django ``resolve_approval`` URL is templated with a
             // placeholder pk of ``0`` server-side; the JS swaps in the
             // real ApprovalRequest id when a decision is posted.
@@ -1064,31 +1062,6 @@
                 return JSON.stringify(item, null, 2);
             }
 
-            function redactedCommandDetail(command) {
-                return String(command || "").trim() ? "Command details hidden for this system agent." : "";
-            }
-
-            function redactedFileChangeDetail(changes) {
-                const count = (changes || []).filter((c) => c.path).length;
-                if (!count) return "";
-                return count === 1 ? "1 file" : count + " files";
-            }
-
-            function sanitizedApprovalDetail(method, params) {
-                const item = (params && params.item) || params || {};
-                if (method === "item/commandExecution/requestApproval") {
-                    const detail = redactedCommandDetail(item.command || "");
-                    if (detail) return "System agent command approval requested. " + detail;
-                    return "System agent command approval requested.";
-                }
-                if (method === "item/fileChange/requestApproval") {
-                    const detail = redactedFileChangeDetail(item.changes || []);
-                    if (detail) return "System agent file change approval requested. " + detail;
-                    return "System agent file change approval requested.";
-                }
-                return "System agent approval requested.";
-            }
-
             function execpolicyAmendmentDecision(params) {
                 const decisions = params && Array.isArray(params.availableDecisions)
                     ? params.availableDecisions
@@ -1107,28 +1080,6 @@
                     return "accept and remember";
                 }
                 return "decline";
-            }
-
-            function sanitizedToolDetail(item) {
-                if (item.type === "commandExecution") {
-                    return redactedCommandDetail(item.command || "") || "System agent command details hidden.";
-                }
-                if (item.type === "fileChange") {
-                    return redactedFileChangeDetail(item.changes || []) || "System agent file change";
-                }
-                if (item.type === "reasoning") {
-                    return "Reasoning details hidden for this system agent.";
-                }
-                if (
-                    item.type === "mcpToolCall"
-                    || item.type === "webSearch"
-                    || item.type === "plan"
-                    || item.type === "imageView"
-                    || item.type === "imageGeneration"
-                ) {
-                    return rawToolDetail(item);
-                }
-                return "";
             }
 
             function ensureNoEmpty() {
@@ -1617,7 +1568,7 @@
                 return typeof item.text === "string" ? item.text.trim().split("\n", 1)[0] : "";
             }
 
-            function rawToolDetail(item) {
+            function toolDetail(item) {
                 switch (item.type) {
                     case "commandExecution": return item.command || "";
                     case "mcpToolCall": return (item.server || "") + " / " + (item.tool || "");
@@ -1632,13 +1583,6 @@
                     case "reasoning": return reasoningSnapshotText(item);
                     default: return "";
                 }
-            }
-
-            // All text written to live tool-detail nodes crosses this policy boundary.
-            function toolDetail(item) {
-                return SANITIZE_LIVE_DETAILS
-                    ? sanitizedToolDetail(item)
-                    : rawToolDetail(item);
             }
 
             function handleItemStarted(payload, event) {
@@ -1658,7 +1602,7 @@
                 const timestampSeconds = timestampSecondsForEvent(event);
                 switch (item.type) {
                     case "userMessage":
-                        if (!HIDE_LIVE_USER_MESSAGE) renderUserItem(item, timestampSeconds);
+                        renderUserItem(item, timestampSeconds);
                         break;
                     case "agentMessage": renderAgentItem(item, timestampSeconds); break;
                     case "plan": renderPlanItem(item, payload.turnId, timestampSeconds); break;
@@ -1710,7 +1654,6 @@
             function handleItemCompleted(payload, event) {
                 const item = payload.item || {};
                 if (HIDE_LIVE_TRANSCRIPT) return;
-                if (HIDE_LIVE_USER_MESSAGE && item.type === "userMessage") return;
                 const entry = items.get(item.id);
                 if (!entry) {
                     // Item that completed without a prior started event —
@@ -1850,9 +1793,7 @@
                 box.appendChild(header);
                 const detail = document.createElement("div");
                 detail.className = "approval-detail";
-                detail.textContent = SANITIZE_LIVE_DETAILS
-                    ? sanitizedApprovalDetail(payload.method, payload.params)
-                    : approvalDetail(payload.method, payload.params);
+                detail.textContent = approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
                 if (READ_ONLY) {
                     wrap.appendChild(box);
