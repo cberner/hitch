@@ -147,10 +147,8 @@ _DEFAULT_COLLABORATION_INSTRUCTIONS = (
     "Use the `request_user_input` tool only when it is listed in the available "
     "tools for this turn.\n\n"
     "In Default mode, strongly prefer making reasonable assumptions and "
-    "executing the user's request rather than stopping to ask questions. If "
-    "you absolutely must ask a question because the answer cannot be "
-    "discovered from local context and a reasonable assumption would be risky, "
-    "ask the user directly with a concise plain-text question. Never write a "
+    "executing the user's request when clarification is unnecessary. Follow "
+    "the current developer instructions for asking questions. Never write a "
     "multiple choice question as a textual assistant message.\n"
 )
 
@@ -499,6 +497,7 @@ def _run_turn(
     os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
     config = app_server_config(
         enable_memories=enable_memories,
+        enable_user_input=instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
     )
@@ -2003,12 +2002,11 @@ def _create_pending_user_input(
 
 
 def _wait_for_user_input_response(request_id: int) -> dict[str, Any]:
-    deadline = time.monotonic() + _APPROVAL_WAIT_SECONDS
     # Stop on cancellation too: while blocked here the main stream loop can't act
     # on a SIGTERM, so a Stop click would otherwise hang until SIGKILL. Falling
     # through records the empty-answer fallback (the conditional UPDATE preserves
     # a real answer submitted at the boundary) and lets the main loop interrupt.
-    while time.monotonic() < deadline and not _cancel_requested:
+    while not _cancel_requested:
         response = _user_input_response_value(request_id)
         if isinstance(response, dict):
             return response
@@ -2036,7 +2034,7 @@ def _record_default_user_input_response(
     """Record the no-answer fallback and return the response codex must see.
 
     The conditional ``response__isnull=True`` UPDATE serialises against a
-    user who submits at the deadline boundary: if it matches zero rows the
+    user who submits during cancellation: if it matches zero rows the
     row already carries the user's real answer, so round-trip that back to
     codex instead of clobbering it with the empty fallback. Mirrors the
     ``decision=""`` guard in ``_wait_for_decision``.

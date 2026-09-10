@@ -158,6 +158,7 @@ def spawn_new_session(
     """
     config = app_server_config(
         enable_memories=enable_memories,
+        enable_user_input=purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
         web_search_mode=web_search_mode,
     )
     start_kwargs: dict[str, Any] = {
@@ -272,6 +273,7 @@ def create_session_thread_with_path(
     """Create a persisted role-scoped thread without starting its first turn."""
     config = app_server_config(
         enable_memories=enable_memories,
+        enable_user_input=purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
         web_search_mode=web_search_mode,
     )
     start_kwargs: dict[str, Any] = {
@@ -1477,11 +1479,15 @@ def _newer_system_codex_bin() -> str | None:
 def app_server_config(
     *,
     enable_memories: bool = False,
+    enable_user_input: bool = False,
     web_search_mode: str | None = None,
     sqlite_home: str | os.PathLike[str] | None = None,
 ) -> CodexConfig:
     memory_value = "true" if enable_memories else "false"
-    overrides = [f"features.memories={memory_value}"]
+    overrides = [
+        f"features.memories={memory_value}",
+        f"features.default_mode_request_user_input={'true' if enable_user_input else 'false'}",
+    ]
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     if web_search_mode:
         overrides.append(f"web_search={json.dumps(web_search_mode)}")

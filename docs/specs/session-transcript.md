@@ -9,6 +9,11 @@ space used by repetitive reasoning, command, and web-search activity.
 
 ## Requirements
 
+- `ST-user-questions`: Blocking user input is available in ordinary Default
+  sessions as well as Plan mode. Pending questions remain answerable until
+  the user responds or stops the worker; elapsed time must not supply an
+  empty answer or resume the agent. Approval mode does not answer questions.
+  Hidden background workers do not enable Default-mode user input.
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.

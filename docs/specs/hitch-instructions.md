@@ -9,6 +9,10 @@ setting, separately from personal/project instructions and user messages.
 
 ## Requirements
 
+- `HI-questions`: Default Hitch guidance directs agents to use blocking
+  `request_user_input` when asking the user a question and wait for the answer,
+  or end the turn with the question if that tool is unavailable. Do not use
+  asynchronous questions to continue past an unanswered question.
 - `HI-editable-default`: Settings expose a prefilled Hitch extra instructions
   field and a Reset to defaults button. An unset value uses the current built-in
   defaults; a custom value replaces them; an explicitly empty value disables
