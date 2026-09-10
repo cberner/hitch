@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from django.db.models import Q
+
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -138,6 +140,7 @@ def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
         return set()
     active_statuses = CodexInstance.ACTIVE_STATUSES
     direct_input_thread_ids = UserInputRequest.objects.filter(
+        Q(params__isBlocking__isnull=True) | ~Q(params__isBlocking=False),
         response__isnull=True,
         instance__thread_id__in=ids,
         instance__status__in=active_statuses,

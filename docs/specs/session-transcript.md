@@ -14,6 +14,30 @@ space used by repetitive reasoning, command, and web-search activity.
   the user responds or stops the worker; elapsed time must not supply an
   empty answer or resume the agent. Approval mode does not answer questions.
   Hidden background workers do not enable Default-mode user input.
+- `ST-nonblocking-questions`: Honor Codex's `isBlocking` distinction. A
+  nonblocking question leaves generation, streamed progress, steering, and
+  subsequent questions available. Blocking questions still wait for a real
+  response while leaving the transport responsive. Missing `isBlocking` keeps
+  legacy blocking presentation. Pending nonblocking questions do not mark a
+  running session as waiting for input.
+- `ST-question-runtime`: The pinned SDK and its bundled Codex executable
+  support nonblocking questions without a separately installed CLI. Verify the
+  bundled app-server's question schema as part of the test suite.
+- `ST-question-answers`: Accept string answers, lists of strings, and Codex's
+  canonical `{"answers": ["text"]}` value for each question. Reject other
+  shapes with HTTP 400 before resolving the request, so a successful submission
+  never silently drops an answer on its way to Codex.
+- `ST-question-lifecycle`: Each question request has an independent durable
+  response. Multiple requests may remain pending and be answered in any order;
+  reconnecting replays their state without duplicating controls. Never answer
+  automatically on a timer. A server cancellation, completed originating turn,
+  stopped worker, or closed transport closes unanswered questions. A closed
+  request rejects later answers and must not appear to have been answered.
+- `ST-question-workflows`: Show whether a question needs an answer before
+  continuing or can be answered while Codex works. Keep a pending-question
+  shortcut near the composer, support multiline free-text answers, and preserve
+  the main composer draft when questions arrive or are answered. Suggested
+  choices are not submitted automatically; Skip is an explicit user action.
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.

@@ -1037,6 +1037,17 @@
             // node without re-rendering the whole turn.
             const approvals = new Map();
             const inputRequests = new Map();
+            const pendingQuestionsButton = document.querySelector("[data-pending-questions]");
+
+            function updatePendingQuestions() {
+                if (!pendingQuestionsButton) return;
+                const pending = Array.from(inputRequests.values()).filter((entry) => !entry.resolved);
+                pendingQuestionsButton.parentElement.hidden = pending.length === 0;
+                pendingQuestionsButton.textContent = pending.length === 1 ? "1 question" : pending.length + " questions";
+                pendingQuestionsButton.onclick = () => {
+                    if (pending[0]) pending[0].node.scrollIntoView({ block: "center", behavior: "smooth" });
+                };
+            }
             let latestGoalOrder = [0, 0];
             let streamFallbackOrder = 0;
             let latestTaskPlanOrder = [
@@ -1852,7 +1863,7 @@
                 box.className = "input-request";
                 const header = document.createElement("div");
                 header.className = "input-request-header";
-                header.textContent = "Input requested";
+                header.textContent = params.isBlocking === false ? "Question · Codex is continuing" : "Question · Answer to continue";
                 box.appendChild(header);
                 if (READ_ONLY) {
                     for (const question of questions) {
@@ -1937,11 +1948,12 @@
                         optionRow.appendChild(btn);
                         buttons.push(btn);
                     }
-                    const other = document.createElement("input");
-                    other.type = "text";
+                    const other = document.createElement(question.isSecret ? "input" : "textarea");
+                    if (question.isSecret) other.type = "password";
+                    else other.rows = 2;
                     other.className = "input-other";
-                    other.placeholder = "Other";
-                    other.setAttribute("aria-label", "Other answer for " + qid);
+                    other.placeholder = buttons.length ? "Other" : "Your answer";
+                    other.setAttribute("aria-label", "Your answer for " + qid);
                     // Focusing the empty Other field must not wipe a selected
                     // option; only adopt its text once it actually has content
                     // (re-selecting an already-filled Other, or as the user
@@ -1991,6 +2003,7 @@
                 wrap.appendChild(box);
                 insertBeforeLive(wrap);
                 inputRequests.set(id, { node: wrap, box, actions, answers, requiredQuestionIds, resolved: false });
+                updatePendingQuestions();
                 followRenderedContent();
             }
 
@@ -2044,7 +2057,7 @@
                     });
                     if (missingRequired) return;
                 }
-                const controls = entry.box.querySelectorAll("button, input");
+                const controls = entry.box.querySelectorAll("button, input, textarea");
                 for (const btn of controls) btn.disabled = true;
                 const body = new URLSearchParams({ answers: JSON.stringify(entry.answers || {}) });
                 const url = INPUT_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
@@ -2078,14 +2091,16 @@
                 if (!entry || entry.resolved) return;
                 entry.resolved = true;
                 entry.box.classList.add("resolved");
-                for (const control of entry.box.querySelectorAll("button, input")) {
+                for (const control of entry.box.querySelectorAll("button, input, textarea")) {
                     control.disabled = true;
                 }
                 if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
-                note.textContent = "Answers submitted";
+                note.textContent = payload.cancelled ? "Question closed" :
+                    Object.keys((payload.response || {}).answers || {}).length ? "Answers submitted" : "Skipped";
                 entry.box.appendChild(note);
+                updatePendingQuestions();
                 followRenderedContent();
             }
 
