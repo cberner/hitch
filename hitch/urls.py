@@ -7,9 +7,9 @@ from django.urls import path
 from hitch.main.sessions import session_approval
 from hitch.main.views import (
     account,
-    goals,
     messages,
     new_session,
+    proposals,
     session_actions,
     session_detail,
     session_list,
@@ -26,40 +26,9 @@ urlpatterns = [
     path("health/", account.health_dashboard, name="health_dashboard"),
     path("usage/", session_list.usage, name="usage"),
     path("inbox/", session_list.inbox, name="inbox"),
-    path("autonomous-goals/", goals.autonomous_goals, name="autonomous_goals"),
     path(
-        "autonomous-goals/create/",
-        goals.create_autonomous_goal,
-        name="create_autonomous_goal",
-    ),
-    path(
-        "autonomous-goals/<int:autonomous_goal_id>/edit/",
-        goals.edit_autonomous_goal,
-        name="edit_autonomous_goal",
-    ),
-    path(
-        "autonomous-goals/<int:autonomous_goal_id>/delete/",
-        goals.delete_autonomous_goal,
-        name="delete_autonomous_goal",
-    ),
-    path(
-        "autonomous-goals/<int:autonomous_goal_id>/run/",
-        goals.run_autonomous_goal,
-        name="run_autonomous_goal",
-    ),
-    path(
-        "autonomous-goals/run-all/",
-        goals.run_autonomous_goals,
-        name="run_autonomous_goals",
-    ),
-    path(
-        "autonomous-goals/runs/<int:workflow_id>/log/",
-        goals.autonomous_goal_run_log,
-        name="autonomous_goal_run_log",
-    ),
-    path(
-        "autonomous-goals/proposed-sessions/<int:proposed_session_id>/outcome/",
-        goals.update_proposed_session_outcome,
+        "inbox/proposed-sessions/<int:proposed_session_id>/outcome/",
+        proposals.update_proposed_session_outcome,
         name="update_proposed_session_outcome",
     ),
     path("settings/", settings_views.update_settings, name="update_settings"),

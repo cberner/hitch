@@ -11,7 +11,7 @@ from django.test import TestCase
 from openai_codex.errors import InvalidRequestError, MethodNotFoundError
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
-from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.models import CodexInstance
 from hitch.main.runtime.codex_tools import ToolContext, handle_dynamic_tool_call, registered_dynamic_tool_specs
 
 
@@ -37,7 +37,7 @@ class CodexQuotaToolTests(TestCase):
         spec = next(spec for spec in registered_dynamic_tool_specs() if spec["name"] == "get_codex_quota")
         self.assertEqual(spec["namespace"], "hitch")
         self.assertEqual(spec["inputSchema"], {"type": "object", "properties": {}, "additionalProperties": False})
-        for kind in ("unrelated", SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN, "autonomous_goal_reviewer"):
+        for kind in ("unrelated", "autonomous_goal_run", "autonomous_goal_reviewer"):
             with self.subTest(kind=kind), patch("hitch.main.runtime.app_server_pool.run_borrowed_op_with_retry") as run:
                 context = {"purpose": CodexInstance.PURPOSE_SYSTEM_AGENT, "agent_kind": kind}
                 self.assertNotIn("get_codex_quota", [spec["name"] for spec in registered_dynamic_tool_specs(**context)])

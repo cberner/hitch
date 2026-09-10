@@ -5,8 +5,7 @@ Status: Draft
 ## 1. Overview
 
 Hitch exposes immutable, thread-scoped dynamic tools. Visible coding sessions
-receive user-session tools; selected hidden workflow roles receive only the
-tools for that role.
+receive user-session tools; hidden system sessions receive no tools.
 
 ## 2. Requirements
 
@@ -41,21 +40,10 @@ tools for that role.
 - `SESSIONTOOLS-rename-failure`: If Codex rejects the rename because the thread
   is archived or unknown, the tool returns an error and does not update Hitch's
   cached title.
-- `SESSIONTOOLS-role-registration`: A new thread's dynamic tools are selected
-  from its purpose and agent kind when the thread is created. Ordinary hidden
-  system sessions receive no tools, AG candidates receive only candidate AG
-  tools, and AG reviewers receive only reviewer AG tools.
-- `SESSIONTOOLS-role-authorization`: Tool handlers repeat the purpose, agent
-  kind, workflow, invoking thread, active-run, and terminal-state checks. A
-  registered tool is not authorization by itself.
-- `SESSIONTOOLS-ag-candidate`: AG candidate tools are `hitch.get_goal`,
-  `hitch.list_goal_sessions`, `hitch.review`, `hitch.propose_session`, and
-  `hitch.no_proposal`. The candidate form of `hitch.propose_session` accepts no
-  arguments and publishes only the candidate approved by `hitch.review`.
-- `SESSIONTOOLS-ag-reviewer`: AG reviewer tools are `hitch.approve` and
-  `hitch.deny`.
-- `SESSIONTOOLS-ag-scope`: AG tool inputs never select another workflow, goal,
-  or session. Scope comes exclusively from the invoking worker context.
+- `SESSIONTOOLS-role-registration`: Only visible coding sessions receive Hitch
+  tools. Hidden system sessions receive no tools.
+- `SESSIONTOOLS-role-authorization`: Tool handlers check the invoking session's
+  purpose before dispatch. Registration alone is not authorization.
 
 ## 3. Success Criteria
 
@@ -66,6 +54,5 @@ tools for that role.
   name changes the invoking session's persisted and cached names.
 - `SESSIONTOOLS-rename-validation`: Invalid names fail without attempting a
   rename.
-- `SESSIONTOOLS-role-isolation-success`: A candidate cannot invoke reviewer or
-  visible-session tools, a reviewer cannot invoke candidate or visible-session
-  tools, and a visible session cannot invoke AG workflow tools.
+- `SESSIONTOOLS-role-isolation-success`: Hidden system sessions cannot invoke
+  visible-session tools or retired autonomous-goal tools.

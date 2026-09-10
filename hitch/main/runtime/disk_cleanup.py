@@ -41,12 +41,10 @@ LEGACY_DIFF_EVENT_COMPACTION_MIN_BYTES = 512 * 1024 * 1024
 _WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 _PROPOSAL_SESSION_ID_FIELDS = (
-    "candidate_session_id",
-    "judge_session_id",
     "source_session_id",
     "accepted_session_id",
 )
-_ACTIVE_WORKFLOW_CWD_STATE_KEYS = ("session_cwd", "stacked_diff_fork_from_cwd")
+_ACTIVE_WORKFLOW_CWD_STATE_KEYS = ("session_cwd",)
 _DISK_USAGE_SNAPSHOT_TTL = timedelta(minutes=5)
 _DISK_USAGE_INVALIDATION_FILE = ".disk-usage-cache-token"
 
@@ -556,13 +554,7 @@ _EARLIEST = datetime.min.replace(tzinfo=UTC)
 
 
 def _protected_proposal_session_ids() -> set[int]:
-    protected = ProposedSession.objects.filter(
-        models.Q(outcome_status=ProposedSession.OUTCOME_UNSET)
-        | models.Q(
-            outcome_status=ProposedSession.OUTCOME_DISMISSED,
-            outcome_metadata__stacked_diff_hidden_until_complete=True,
-        )
-    )
+    protected = ProposedSession.objects.filter(outcome_status=ProposedSession.OUTCOME_UNSET)
     session_ids: set[int] = set()
     for field in _PROPOSAL_SESSION_ID_FIELDS:
         session_ids.update(

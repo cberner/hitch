@@ -50,7 +50,6 @@ def reconcile_dead() -> int:
         status__in=CodexInstance.ACTIVE_STATUSES
     )
     updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances()
     reconcile_orphaned_workers()
     codex_pool.retry_failed_input_image_cleanups()
     _prune_reaped_workers()
@@ -135,7 +134,7 @@ def reconcile_orphaned_workers() -> int:
       never reaped);
     * its instance reached a terminal status within ``_ORPHAN_REAP_GRACE``:
       ``codex_worker`` commits the terminal status *before* running
-      ``_notify_system_agents`` (which can spawn follow-up turns) and input-image
+      ``_update_completed_turn_pr`` and input-image
       cleanup, so a terminal-but-live worker inside that window is finishing
       hooks, not leaked. *Past* the grace a still-live terminal worker is wedged
       and is reaped even if this process spawned it -- the tracked check only
@@ -551,11 +550,7 @@ def _finalize_reaped_instance(instance_id: int) -> None:
 
     Things the killed worker never got to handle itself:
 
-    * finish routing: a terminal system-agent turn
-      relies on ``_notify_system_agents_if_needed`` to route its post-terminal
-      hooks, the same idempotent callback ``_mark_dead_instances_failed`` runs for
-      rows that died after saving terminal status; without it the
-      ``SystemAgentRun``/workflow follow-up is stranded;
+    * update PR state after the completed turn;
     * a ``FAILED`` turn's dangling prompts: ``codex_worker`` cancels its pending
       approval/input prompts before exiting, and reaped terminal rows never pass
       through ``_mark_dead_instances_failed`` (which does the same), so otherwise
@@ -573,9 +568,7 @@ def _finalize_reaped_instance(instance_id: int) -> None:
         return
     if instance.status == CodexInstance.STATUS_FAILED:
         codex_pool._resolve_dangling_requests(instance.pk)
-    # Idempotent finish routing for system-agent/workflow-owned rows (a
-    # no-op for a plain user turn, which the lost-auto-review check below covers).
-    _notify_system_agents_if_needed(instance)
+    _update_completed_turn_pr(instance)
     codex_pool.cleanup_requested_input_images_for(instance)
 
 _RECONCILE_DEAD_MIN_INTERVAL = timedelta(seconds=2)
@@ -613,7 +606,6 @@ def reconcile_dead_for_thread(thread_id: str) -> int:
         status__in=CodexInstance.ACTIVE_STATUSES,
     )
     updated = _mark_dead_instances_failed(pending)
-    _reconcile_terminal_workflow_instances(main_thread_id=thread_id)
     if updated:
         _reconcile_orphaned_workers_if_due()
     _prune_reaped_workers()
@@ -639,7 +631,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         # Conditional UPDATE keyed on the active statuses so a worker that
         # reached a terminal state in the gap between the queryset read and this
         # write is preserved rather than retroactively rewritten as failed (and
-        # falsely routed to the system agents). Mirrors ``_mark_failed``.
+        # incorrectly treated as a failure). Mirrors ``_mark_failed``.
         rows = CodexInstance.objects.filter(
             pk=instance.pk,
             status__in=CodexInstance.ACTIVE_STATUSES,
@@ -652,7 +644,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
             # The worker reached a terminal state in the gap. Preserve its
             # status (don't count it as a kill), but still run finish routing:
             # A worker that died after saving its status but before notifying
-            # would otherwise strand its SystemAgentRun. Routing is
+            # would otherwise leave stale PR state. The update is
             # idempotent, so a worker that already notified is a no-op.
             try:
                 instance.refresh_from_db()
@@ -662,7 +654,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
                 CodexInstance.STATUS_COMPLETED,
                 CodexInstance.STATUS_FAILED,
             ):
-                _notify_system_agents_if_needed(instance)
+                _update_completed_turn_pr(instance)
                 codex_pool.cleanup_requested_input_images_for(instance)
             continue
         codex_pool._resolve_dangling_requests(instance.pk)
@@ -675,7 +667,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         # session (a process-group signal would miss them). Reap the cgroup so a
         # leaked ``cargo bench`` can't hold memory long after the worker is gone.
         systemd_isolation._reap_scope_cgroup(instance)
-        _notify_system_agents_if_needed(instance)
+        _update_completed_turn_pr(instance)
         codex_pool.cleanup_requested_input_images_for(instance)
         updated += 1
     return updated
@@ -694,32 +686,12 @@ def _prune_reaped_workers() -> None:
     with codex_pool._TRACKED_WORKER_PROCS_LOCK:
         codex_pool._REAPED_WORKERS.intersection_update(active_workers)
 
-def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
-    if instance.purpose in (
-        CodexInstance.PURPOSE_SYSTEM_AGENT,
-        CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-    ) or (
-        instance.purpose == CodexInstance.PURPOSE_USER
-        and instance.workflow_id is not None
-    ):
-        try:
-            from hitch.main.workflows import system_agents
-
-            system_agents.on_codex_instance_finished(instance)
-        except Exception:
-            codex_pool.logger.exception(
-                "failed to notify system workflow for reconciled instance %s",
-                instance.pk,
-            )
-def _reconcile_terminal_workflow_instances(
-    *, main_thread_id: str | None = None, workflow_id: int | None = None
-) -> None:
+def _update_completed_turn_pr(instance: CodexInstance) -> None:
     try:
-        from hitch.main.workflows import system_agents
+        from hitch.main.workflows import pr_tracking
 
-        system_agents.reconcile_terminal_workflow_instances(
-            main_thread_id=main_thread_id,
-            workflow_id=workflow_id,
-        )
+        pr_tracking.supersede_pr_after_turn(instance)
     except Exception:
-        codex_pool.logger.exception("failed to reconcile terminal workflow instances")
+        codex_pool.logger.exception(
+            "failed to update PR state for reconciled instance %s", instance.pk
+        )

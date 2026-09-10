@@ -558,8 +558,6 @@ def _project_for_proposed_session(
         return None
     if proposed_session.project is not None:
         return proposed_session.project
-    if proposed_session.autonomous_goal is not None:
-        return proposed_session.autonomous_goal.project
     return None
 
 

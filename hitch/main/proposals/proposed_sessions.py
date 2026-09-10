@@ -7,7 +7,7 @@ from pathlib import Path
 
 from django.utils import timezone
 
-from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
+from hitch.main.models import Project, ProposedSession, SessionMetadata
 from hitch.main.repos import same_repo_or_worktree
 
 _TITLE_MAX_LEN = 200
@@ -24,7 +24,7 @@ class ProposedSessionInput:
     prompt: str
     cwd: str
     relevant_files: list[str]
-    confidence: str = AutonomousGoal.CONFIDENCE_MEDIUM
+    confidence: str = ProposedSession.CONFIDENCE_MEDIUM
     source_thread_id: str = ""
 
 
@@ -129,8 +129,8 @@ def _clean_cwd(value: str) -> str:
 
 
 def _clean_confidence(value: str) -> str:
-    confidence = value.strip() or AutonomousGoal.CONFIDENCE_MEDIUM
-    if confidence not in {choice[0] for choice in AutonomousGoal.CONFIDENCE_CHOICES}:
+    confidence = value.strip() or ProposedSession.CONFIDENCE_MEDIUM
+    if confidence not in {choice[0] for choice in ProposedSession.CONFIDENCE_CHOICES}:
         raise ProposedSessionError("confidence is invalid")
     return confidence
 
@@ -145,11 +145,7 @@ def _project_for_clean_cwd(cwd: str) -> Project:
 def project_for_cwd(cwd: str) -> Project | None:
     projects = Project.objects.all().order_by("created_at", "id")
     return next(
-        (
-            project
-            for project in projects
-            if same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir)
-        ),
+        (project for project in projects if same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir)),
         None,
     )
 
@@ -164,3 +160,15 @@ def _clean_relevant_files(files: list[str]) -> list[str]:
         cleaned.append(value)
         seen.add(value)
     return cleaned
+
+
+def _proposal_outcome_metadata(
+    proposal: ProposedSession, updates: dict[str, object] | None = None
+) -> dict[str, object]:
+    metadata = dict(proposal.outcome_metadata) if isinstance(proposal.outcome_metadata, dict) else {}
+    for key, value in (updates or {}).items():
+        if value is None:
+            metadata.pop(key, None)
+        else:
+            metadata[key] = value
+    return metadata

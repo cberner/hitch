@@ -69,8 +69,8 @@ space used by repetitive reasoning, command, and web-search activity.
   as its source, and the renderer does not trust TeX commands that request
   external resources or unsafe HTML.
 - `ST-history-preview`: Large sessions initially render a bounded preview of
-  recent persisted user and agent messages, including read-only system and
-  autonomous-goal logs. Scrolling upward loads older preview pages.
+  recent persisted user and agent messages, including read-only historical
+  system-session logs. Scrolling upward loads older preview pages.
 - `ST-message-records`: Preview and full-history readers support both legacy
   message events and completed `UserMessage`/`AgentMessage` snapshots. Preserve
   user turn boundaries, image markers, and agent phases, and render assistant

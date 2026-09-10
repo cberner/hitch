@@ -37,7 +37,6 @@ from hitch.main import caches
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import DiffView, build_worktree_diff
-from hitch.main.goals.autonomous_goal_proposal_stack import _proposal_outcome_metadata
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -45,6 +44,7 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
 )
+from hitch.main.proposals.proposed_sessions import _proposal_outcome_metadata
 from hitch.main.repos import git_common_dir as git_common_dir
 from hitch.main.repos import same_repo_or_worktree
 from hitch.main.runtime import (
@@ -83,13 +83,11 @@ from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_entry_display import (
-    _accepted_proposal_context,
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
     _active_worker_status_text,
     _apply_system_authors,
-    _attach_accepted_proposal_context,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
@@ -149,7 +147,6 @@ from hitch.main.sessions.settings_cookies import (
     _option_label,
     _web_search_mode_label,
 )
-from hitch.main.workflows import autonomous_goals as goal_workflows
 from hitch.main.workflows import pr_stage, pr_tracking, system_agents
 from hitch.main.worktrees import cleanup_managed_worktree_path as cleanup_managed_worktree_path
 from hitch.main.worktrees import cleanup_worktree as cleanup_worktree
@@ -427,16 +424,6 @@ def _usage_context(request: HttpRequest) -> UsageContext:
         cookie_updates=cookie_updates,
     )
 
-def _stop_autonomous_goal_stack_after_proposal_resolution(
-    proposed_session: ProposedSession,
-) -> bool:
-    if proposed_session.autonomous_goal_id is None:
-        return True
-    return goal_workflows.stop_running_autonomous_goal_stack_after_proposal_resolution(
-        proposed_session.autonomous_goal_id,
-        proposed_session.pk,
-        proposed_session.outcome_status,
-    )
 
 def _render_session_detail(
     request: HttpRequest,
@@ -720,16 +707,6 @@ def _render_session_detail(
         active_turn_unresolved=active_turn_unresolved,
         active_stream_owns_turn=active_stream_owns_turn,
     )
-    accepted_proposal_context = _accepted_proposal_context(session_id)
-    if accepted_proposal_context is not None and (
-        history_page is None or not history_page.has_older
-    ):
-        _attach_accepted_proposal_context(entries, accepted_proposal_context)
-    active_accepted_proposal_context = (
-        accepted_proposal_context
-        if active_instance is not None and active_instance.user_message_index == 0
-        else None
-    )
     plan_mode_state = _thread_plan_mode_state(
         session_id,
         thread,
@@ -924,12 +901,6 @@ def _render_session_detail(
             ),
             "pending_user_author": _pending_user_author(active_instance or unstarted_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance or unstarted_instance),
-            "pending_accepted_proposal_context": (
-                active_accepted_proposal_context
-                if not rollout_owns_active_turn
-                else None
-            ),
-            "live_accepted_proposal_context": active_accepted_proposal_context,
             "token_usage": session_token_usage,
             "session_model": session_model,
             "session_reasoning": session_reasoning,

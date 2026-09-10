@@ -18,7 +18,7 @@ Include `Status: Draft` or another clear status near the top.
 ## Requirement Slugs
 
 Use stable, human-readable slugs for citeable requirements, such as
-`AG-low-quota-blocks-auto`.
+`INBOX-unresolved-only`.
 
 When editing a spec:
 

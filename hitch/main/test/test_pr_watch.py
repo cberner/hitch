@@ -16,7 +16,7 @@ from hitch.main.runtime.codex_tools import (
 )
 from hitch.main.sessions import agent_tasks
 from hitch.main.test.support import _make_project
-from hitch.main.workflows import pr_tracking, pr_watch, system_agents
+from hitch.main.workflows import pr_tracking, pr_watch
 from hitch.main.workflows.gh_cli import _GhPrOpenError
 from hitch.main.workflows.gh_observations import (
     _evaluate_pr_gates,
@@ -920,7 +920,7 @@ class PrWatchToolTests(TestCase):
             agent_kind=agent_tasks.PR_WATCH_AGENT_KIND,
         )
 
-        system_agents.on_codex_instance_finished(watch_turn)
+        pr_tracking.supersede_pr_after_turn(watch_turn)
 
         self.assertIsNotNone(pr_tracking.record_for_thread("main-thread"))
         ordinary_turn = CodexInstance.objects.create(
@@ -931,7 +931,7 @@ class PrWatchToolTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
         )
 
-        system_agents.on_codex_instance_finished(ordinary_turn)
+        pr_tracking.supersede_pr_after_turn(ordinary_turn)
 
         self.assertIsNone(pr_tracking.record_for_thread("main-thread"))
         record = SessionPullRequest.objects.get(thread_id="main-thread")

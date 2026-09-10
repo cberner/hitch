@@ -879,7 +879,6 @@ class SpawnFailureTests(TestCase):
         self.assertFalse(CodexInstance.objects.filter(thread_id="unbound-thread").exists())
 
 
-
     @patch("hitch.main.runtime.codex_pool._launch_worker_process", return_value=SimpleNamespace(pid=0))
     @patch("hitch.main.runtime.codex_pool.Codex")
     def test_hitch_guidance_preserves_configured_developer_instructions(
@@ -1611,8 +1610,6 @@ class SwapCapHierarchyWarningTests(TestCase):
         self.assertEqual(len(hierarchy_warnings), 1, logs.output)
 
 
-
-
     def test_worker_is_alive_handles_unset_pid_and_tracked_running_process(self) -> None:
         self.assertFalse(codex_pool.worker_is_alive(CodexInstance(pid=0)))
 
@@ -1658,8 +1655,6 @@ class SwapCapHierarchyWarningTests(TestCase):
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
             stat_path.read_bytes.return_value = b"malformed"
             self.assertIsNone(codex_pool._linux_proc_state(1))
-
-
 
 
 class CodexInstanceModelTests(TestCase):
@@ -2325,9 +2320,9 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.input_attachment_paths, [outside_path])
         self.assertTrue(instance.input_attachment_cleanup_requested)
 
-    @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.workflows.pr_tracking.supersede_pr_after_turn")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_notifies_system_agents_for_dead_system_rows(
+    def test_reconcile_updates_pr_state_for_dead_workers(
         self, _mock_worker_alive: MagicMock, mock_notify: MagicMock
     ) -> None:
         system_agent = self._make(
@@ -2404,7 +2399,6 @@ class ReconcileAndLookupTests(TestCase):
                 )
         finally:
             _forget_worker_pid(pid)
-
 
 
 class ReapScopeCgroupTests(TestCase):
@@ -3704,7 +3698,6 @@ class SteerInstanceTests(TestCase):
         )
 
 
-
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_queues_image_only_steer(
@@ -4848,7 +4841,7 @@ class CodexWorkerCommandTests(TestCase):
         self.assertNotIn("old diff", events_text)
         self.assertNotIn("latest diff", events_text)
 
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._update_completed_turn_pr")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
     def test_worker_completed_save_does_not_resurrect_parent_forced_stop(
         self, mock_run_turn: MagicMock, _mock_notify: MagicMock
@@ -4880,7 +4873,7 @@ class CodexWorkerCommandTests(TestCase):
         "hitch.main.management.commands.codex_worker.disk_cleanup"
         ".run_finished_session_disk_cleanup"
     )
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._update_completed_turn_pr")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
     @patch("hitch.main.management.commands.codex_worker.acquire_worker_sqlite_home")
     def test_worker_leases_and_releases_sqlite_home(
@@ -4911,7 +4904,7 @@ class CodexWorkerCommandTests(TestCase):
         "hitch.main.management.commands.codex_worker.disk_cleanup"
         ".run_finished_session_disk_cleanup"
     )
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._update_completed_turn_pr")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
     @patch("hitch.main.management.commands.codex_worker.acquire_worker_sqlite_home")
     def test_worker_inherits_codex_home_when_lease_fails(
@@ -4936,7 +4929,7 @@ class CodexWorkerCommandTests(TestCase):
         )
 
     @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=_BrokenStderr)
-    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._update_completed_turn_pr")
     @patch("hitch.main.management.commands.codex_worker._run_turn")
     def test_worker_stderr_errors_do_not_skip_failed_status(
         self,
@@ -6695,7 +6688,6 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"rg outputDelta", body)
         self.assertNotIn(b"item/commandExecution/outputDelta", body)
         self.assertNotIn(b"ignored", body)
-
 
 
     def test_compact_token_count_formatter(self) -> None:

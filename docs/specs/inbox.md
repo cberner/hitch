@@ -17,8 +17,6 @@ acknowledge notices from Hitch background systems.
 - Notice: A dismissible Inbox message that informs the user about automation
   state, such as automation failing or finding no proposal.
 - Source session: The Codex session or system session that created the item.
-- Candidate session: A background session whose work can be continued when a
-  Proposal is accepted.
 - Outcome: The final user decision for an Inbox item: accepted, rejected, or
   dismissed.
 
@@ -65,8 +63,7 @@ acknowledge notices from Hitch background systems.
 - `INBOX-nav-count`: The primary navigation shows the count of visible unresolved
   Inbox items.
 - `INBOX-source-metadata`: Inbox items preserve source metadata such as project,
-  source session, source workflow, source automation, candidate session,
-  reviewer session, outcome metadata, and relevant files when available.
+  source session, accepted session, outcome metadata, and relevant files when available.
 
 ### 4.2 Proposals
 
@@ -75,17 +72,9 @@ acknowledge notices from Hitch background systems.
 - `INBOX-proposal-content`: A Proposal includes title, summary, prompt,
   confidence, project, and relevant files when available.
 - `INBOX-proposal-display`: The Inbox displays Proposal source, confidence,
-  relevant files, stack labels, token usage, stack-stop reason, and candidate or
-  reviewer logs when available.
+  and relevant files when available.
 - `INBOX-proposal-accept`: Accepting a Proposal starts a fresh normal
   user-visible session using the Proposal prompt and source context.
-- `INBOX-proposal-candidate`: An AG Proposal starts its fresh visible session
-  and worktree from the approved candidate snapshot. Hidden candidate and reviewer
-  threads remain hidden and are never promoted into user-visible sessions.
-  Pending implementation proposals created before snapshot-based acceptance
-  snapshot their candidate checkout when starting the fresh visible session.
-  Candidate threads promoted by older Hitch versions remain visible after an
-  upgrade, but no new acceptance uses that path.
 - `INBOX-proposal-reject`: Rejecting a Proposal requires a user-provided reason.
 - `INBOX-proposal-dismiss`: Dismissing a Proposal resolves it without requiring a
   reason.
@@ -98,8 +87,6 @@ acknowledge notices from Hitch background systems.
   items.
 - `INBOX-notice-system-cleanup`: System cleanup may also resolve Notice items
   when their source automation is deleted or otherwise cleaned up.
-- `INBOX-notice-logs`: Notices may link to candidate or reviewer logs when those
-  logs help explain the automation result.
 
 ### 4.4 Codex-Created Proposals
 
@@ -140,25 +127,14 @@ acknowledge notices from Hitch background systems.
   rejection reason.
 - `INBOX-dismissed-metadata`: Dismissed items record the user resolution.
 
-### 4.6 Automation Integration
-
-- `INBOX-ag-reference`: User-actionable, published AG-created Proposals and
-  Notices appear in the Inbox, but AG-specific proposal, notice, blocking,
-  retry, hidden intermediate stack records, and cleanup behavior is owned by
-  [Autonomous Goals Spec](autonomous-goals.md).
-
-### 4.7 UX Requirements
+### 4.6 UX Requirements
 
 - `INBOX-empty-state`: The Inbox has a clear empty state when there are no visible
   unresolved items.
 - `INBOX-visible-projects`: Users can adjust visible project filtering from the
   Inbox.
 - `INBOX-do-it-dialog`: Starting a Proposal lets the user review or edit the
-  starting message before creating the session. When an AG Proposal is
-  accepted, Hitch appends final server-selected provenance to that starting
-  message: its candidate log, its approved snapshot when applicable, and the
-  distinction between linked transcript history and conversation context
-  loaded into the fresh session.
+  starting message before creating the session.
 - `INBOX-reject-dialog`: Rejecting a Proposal asks for a reason before resolving
   it.
 - `INBOX-item-actions`: Proposal and Notice actions must match their item kind so

@@ -328,12 +328,6 @@
                                     data-reject-url="{% url 'update_proposed_session_outcome' proposed_session.pk %}"
                                     data-session-title="{{ proposed_session.title }}"
                                 >Reject</button>
-                                {% if proposed_session.candidate_log_url %}
-                                <a href="{{ proposed_session.candidate_log_url }}" role="menuitem">Candidate log</a>
-                                {% endif %}
-                                {% if proposed_session.judge_log_url %}
-                                <a href="{{ proposed_session.judge_log_url }}" role="menuitem">Reviewer log</a>
-                                {% endif %}
                             </div>
                         </div>
                         {% endif %}
@@ -347,16 +341,10 @@
                         {% endif %}
                         {% endif %}
                         {% if proposed_session.inbox_kind == "notice" %}
-                            {% if proposed_session.autonomous_goal %}
-                            From autonomous goal: {{ proposed_session.autonomous_goal.title }}{% if proposed_session.stack_label %} - {{ proposed_session.stack_label }}{% endif %}
-                            {% else %}
-                            Notice
-                            {% endif %}
-                        {% elif proposed_session.autonomous_goal %}
-                        {{ proposed_session.autonomous_goal.title }} - {{ proposed_session.autonomous_goal.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence{% if proposed_session.stack_label %} - {{ proposed_session.stack_label }}{% endif %}
+                        Notice
                         {% else %}
                         From coding agent - {{ proposed_session.get_confidence_display }} confidence
-                        {% endif %}{% if proposed_session.tokens_used_display %} - Tokens used: {{ proposed_session.tokens_used_display }}{% endif %}{% if proposed_session.stack_stopped_display %} - Stack stopped: {{ proposed_session.stack_stopped_display }}{% endif %}{% if proposed_session.notice_stopped_display %} - Run stopped: {{ proposed_session.notice_stopped_display }}{% endif %}
+                        {% endif %}
                     </p>
                     {% if proposed_session.summary %}
                     <p>{{ proposed_session.summary }}</p>
@@ -378,12 +366,6 @@
                             <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
                             <button type="submit" class="button secondary">Dismiss</button>
                         </form>
-                        {% if proposed_session.candidate_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.candidate_log_url }}">Candidate log</a>
-                        {% endif %}
-                        {% if proposed_session.judge_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Reviewer log</a>
-                        {% endif %}
                         {% else %}
                         <button
                             type="button"

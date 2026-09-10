@@ -17,7 +17,6 @@
             {% if inbox_count %}<span class="primary-nav-badge" aria-label="{{ inbox_count }} inbox message{{ inbox_count|pluralize }}">{{ inbox_count }}</span>{% endif %}
         </a>
         {% if current_project %}
-        <a href="{% url 'autonomous_goals' %}"{% if current_route == "autonomous_goals" %} aria-current="page"{% endif %}>auto goals</a>
         {% endif %}
         <a href="{{ settings_url }}{% if current_route != 'update_settings' %}?next={{ request.get_full_path|urlencode }}{% endif %}"{% if current_route == "update_settings" %} aria-current="page"{% endif %}>settings</a>
         <a class="primary-nav-account"

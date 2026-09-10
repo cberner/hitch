@@ -13,15 +13,15 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import CodexError
 
-from hitch.main.goals.autonomous_goal_run_display import (
-    _attach_proposed_session_display_state,
-)
 from hitch.main.models import (
     CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
+)
+from hitch.main.proposals.proposal_display import (
+    _attach_proposed_session_display_state,
 )
 from hitch.main.runtime import app_server_pool, reconciliation
 from hitch.main.sessions import session_index, system_agent_summary
@@ -711,11 +711,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
         common._proposed_session_inbox_queryset(inbox_project_visibility)
         .select_related(
             "project",
-            "autonomous_goal",
-            "candidate_session",
-            "judge_session",
             "source_session",
-            "source_workflow",
         )
         .order_by("created_at", "id")
     )
