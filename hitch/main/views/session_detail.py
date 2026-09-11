@@ -1,20 +1,28 @@
 """The session detail page, SSE stream, and intermediate-entry endpoint."""
+import logging
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from django.http import (
     Http404,
     HttpRequest,
     HttpResponse,
+    JsonResponse,
     StreamingHttpResponse,
 )
 from django.shortcuts import render
+from django.template.loader import render_to_string
+from django.urls import reverse
 from django.views.decorators.http import require_http_methods
+from openai_codex import CodexError
 
 from hitch.main.runtime import codex_pool, reconciliation, rollout, streaming
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _RolloutFileState,
 )
+from hitch.main.sessions import subagents
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
 )
@@ -32,12 +40,96 @@ from hitch.main.sessions.session_resume import (
     _entries_include_transcript,
     _rollout_path_for_session_detail,
     _session_detail_metadata,
+    _stored_rollout_path_for_thread,
 )
 from hitch.main.views import common
+
+logger = logging.getLogger(__name__)
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
     return common._render_session_detail(request, session_id)
+
+
+@require_http_methods(["GET"])
+def session_agents(request: HttpRequest, session_id: str) -> HttpResponse:
+    try:
+        agents = subagents.list_subagents(session_id)
+    except (CodexError, OSError, ValueError):
+        logger.exception("failed to list subagents for %s", session_id)
+        return common._prevent_stale_cache(JsonResponse({"error": "Unable to load agents. Try again."}, status=503))
+    data: dict[str, Any] = {
+        "agents": [
+            {"id": agent.id, "name": agent.name, "role": agent.role, "parent_id": agent.parent_id}
+            for agent in agents
+        ],
+    }
+    selected = request.GET.get("agent", "")
+    if selected:
+        agent = next((agent for agent in agents if agent.id == selected), None)
+        if agent is None:
+            raise Http404("subagent not found")
+        path = Path(agent.path) if agent.path else None
+        if path is None or not path.is_file():
+            path = _stored_rollout_path_for_thread(agent.id)
+        before: int | None = None
+        record_end: int | None = None
+        try:
+            if "before" in request.GET:
+                before = int(request.GET["before"])
+            if "record_end" in request.GET:
+                record_end = int(request.GET["record_end"])
+        except ValueError as exc:
+            raise Http404("history page not found") from exc
+        if (before is not None and before < 0) or (
+            record_end is not None and (before is None or record_end <= before)
+        ):
+            raise Http404("history page not found")
+        page = None
+        flat_entries: list[dict[str, Any]] = []
+        if path is not None:
+            try:
+                size = path.stat().st_size
+                if (before is not None and before > size) or (record_end is not None and record_end > size):
+                    raise Http404("history page not found")
+                if before is None and (
+                    request.GET.get("history") == "all" or size < common._SESSION_HISTORY_MIN_BYTES
+                ):
+                    detail = rollout.session_stage_data(path)
+                    if detail is None:
+                        raise OSError("Unable to read subagent transcript")
+                    flat_entries = list(detail.entries)
+                else:
+                    page = rollout.session_history_page(
+                        path, before_offset=before, partial_record_end=record_end,
+                        message_target=common._SESSION_HISTORY_MESSAGE_TARGET,
+                    )
+                    if page is None:
+                        raise OSError("Unable to read subagent history")
+                    flat_entries = list(page.flat_entries)
+            except OSError:
+                return common._prevent_stale_cache(JsonResponse({"error": "Unable to read subagent."}, status=503))
+        if page is None and before is not None:
+            raise Http404("history page not found")
+        next_url = ""
+        if page is not None and page.has_older:
+            params: dict[str, str | int] = {"agent": agent.id, "before": page.start_offset}
+            if page.partial_record_end is not None:
+                params["record_end"] = page.partial_record_end
+            next_url = f"{reverse('session_agents', args=[session_id])}?{urlencode(params)}"
+        data.update(
+            selected=agent.id,
+            name=agent.name,
+            role=agent.role,
+            next_url=next_url,
+            partial=page is not None,
+            html=render_to_string(
+                "_session_entries.html",
+                {"entries": list(collapse_flat_entries(flat_entries))},
+                request=request,
+            ),
+        )
+    return common._prevent_stale_cache(JsonResponse(data))
 
 
 @require_http_methods(["GET"])

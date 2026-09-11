@@ -9,6 +9,22 @@ space used by repetitive reasoning, command, and web-search activity.
 
 ## Requirements
 
+- `ST-agent-picker`: Visible session detail pages offer an Agent drop-down with
+  Main agent and its native Codex subagents, including nested and archived
+  descendants. Use nicknames and roles when available. Unrelated threads and
+  historical Hitch system sessions without native ancestry are excluded.
+- `ST-agent-transcripts`: Selecting a subagent displays its read-only transcript
+  on the same page. Preserve the main agent's draft and keep its stream separate.
+  Switching back restores the main conversation and its controls. Selection
+  survives a page refresh through the `agent` query parameter. Large subagent
+  previews offer a full transcript with commands, reasoning, and web searches.
+- `ST-agent-refresh`: Discover newly spawned agents while the main turn runs and
+  refresh the selected subagent's latest messages. Older messages load on demand;
+  browsing older history pauses automatic transcript refresh until Return to
+  latest is selected. A parent finishing defers its page reload while a subagent
+  is selected, until switching to Main agent or choosing Return to latest.
+  Discovery or read failures show a retryable message without
+  blocking the main conversation. Viewing agents never resumes their threads.
 - `ST-user-questions`: Blocking user input is available in ordinary Default
   sessions as well as Plan mode. Pending questions remain answerable until
   the user responds or stops the worker; elapsed time must not supply an
