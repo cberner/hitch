@@ -9,6 +9,7 @@ import time
 from django.db import close_old_connections
 
 from hitch.main.runtime import disk_cleanup, reconciliation, retention, server_lifecycle
+from hitch.main.workflows import pr_watch_service
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ def start_maintenance_scheduler() -> bool:
     """Start the in-process runtime maintenance scheduler when enabled."""
     if not _maintenance_scheduler_enabled():
         return False
+    pr_watch_service.start_pr_watch_scheduler()
     return _scheduler.start(_maintenance_scheduler_loop)
 
 

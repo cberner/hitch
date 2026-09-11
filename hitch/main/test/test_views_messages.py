@@ -607,18 +607,20 @@ class SendMessageViewTests(TestCase):
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
-        _mock_has_watch_tool: MagicMock,
+        mock_has_watch_tool: MagicMock,
     ) -> None:
         self._patch_codex(mock_codex, model="gpt-5.4")
         mock_discover.return_value = [Path("/repo")]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/pr"},
-        )
-
-        self.assertContains(response, "hitch.watch_pr is unavailable", status_code=400)
-        mock_spawn.assert_not_called()
+        for missing in ("watch_pr", "unwatch_pr"):
+            with self.subTest(missing=missing):
+                mock_has_watch_tool.side_effect = lambda _thread, *, namespace, name, missing=missing: name != missing
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": "/pr"},
+                )
+                self.assertContains(response, f"hitch.{missing} is unavailable", status_code=400)
+                mock_spawn.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
@@ -1534,16 +1536,18 @@ class SendMessageViewTests(TestCase):
         )
         self._patch_codex(mock_codex)
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self._assert_follow_up_spawn(mock_spawn)
-        mock_has_watch_tool.assert_called_once_with(
-            "abc", namespace="hitch", name="watch_pr"
-        )
+        for missing in ("watch_pr", "unwatch_pr"):
+            with self.subTest(missing=missing):
+                mock_has_watch_tool.reset_mock()
+                mock_spawn.reset_mock()
+                mock_has_watch_tool.side_effect = lambda _thread, *, namespace, name, missing=missing: name != missing
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": "follow-up"},
+                )
+                self.assertEqual(response.status_code, 302)
+                self._assert_follow_up_spawn(mock_spawn)
+                mock_has_watch_tool.assert_any_call("abc", namespace="hitch", name=missing)
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")

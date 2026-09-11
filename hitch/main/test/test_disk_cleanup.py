@@ -17,6 +17,7 @@ from hitch.main.models import (
     GlobalSettings,
     ProposedSession,
     SessionMetadata,
+    SessionPullRequest,
     SystemWorkflow,
 )
 from hitch.main.runtime import disk_cleanup
@@ -567,6 +568,28 @@ class DiskCleanupTests(TestCase):
             [call.args[0] for call in mock_cleanup.call_args_list],
             [old_path, fallback_path],
         )
+
+    def test_active_watch_protects_archived_worktree_until_unwatched(self) -> None:
+        for active in (True, False):
+            with (
+                self.subTest(active=active),
+                tempfile.TemporaryDirectory() as raw,
+                patch("hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path", return_value=True) as cleanup,
+            ):
+                root = Path(raw)
+                cwd = self._managed_path(root, "watched")
+                thread_id = f"watched-{active}"
+                self._session(
+                    thread_id=thread_id, cwd=cwd, archived=True,
+                    archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                )
+                SessionPullRequest.objects.create(thread_id=thread_id, cwd=cwd, state={"watch_active": active})
+                cleaned = self._run_cleanup(root=root, sizes=[300, 150], mock_cleanup=cleanup)
+                self.assertEqual(cleaned, 0 if active else 1)
+                if active:
+                    cleanup.assert_not_called()
+                else:
+                    cleanup.assert_called_once_with(cwd)
 
     def test_unarchived_user_session_protects_shared_worktree(self) -> None:
         with (

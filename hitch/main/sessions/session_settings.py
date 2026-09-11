@@ -576,3 +576,9 @@ def _allowed_session_cwds() -> set[str]:
             *worktrees_module.discover_managed_worktrees(),
         ]
     }
+
+
+def _is_allowed_session_cwd(cwd: str) -> bool:
+    if worktrees_module.is_managed_worktree_path(cwd):
+        return True
+    return cwd in _allowed_session_cwds()

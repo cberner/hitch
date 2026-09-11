@@ -94,7 +94,7 @@ class PrWatchTests(SimpleTestCase):
         self.assertEqual(result["status"], "attention")
         self.assertTrue(result["feedback_fingerprint"])
         self.assertIn("even if no changes were needed", result["next_action"])
-        self.assertIn("no background watcher remains", result["next_action"])
+        self.assertIn("registered watch remains active", result["next_action"])
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_seen_feedback_does_not_create_a_hot_loop(
@@ -115,6 +115,19 @@ class PrWatchTests(SimpleTestCase):
             )
 
         self.assertEqual(result["status"], "ready")
+        self.assertEqual(mock_observe.call_count, 2)
+
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_assessed_blocker_waits_for_changed_evidence(self, mock_observe: MagicMock) -> None:
+        blocked = _observation({"ci_status": "failure"}, feedback="Known failure")
+        mock_observe.side_effect = [blocked, _observation({"state": "closed"})]
+        with tempfile.TemporaryDirectory() as cwd:
+            result = pr_watch.watch_pr(
+                cwd=cwd, url=_PR_URL, poll_seconds=0,
+                previous_feedback_fingerprint=pr_watch.feedback_fingerprint(blocked),
+                previous_event_fingerprint=pr_watch.event_fingerprint(blocked),
+            )
+        self.assertEqual(result["status"], "terminal")
         self.assertEqual(mock_observe.call_count, 2)
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
@@ -260,6 +273,9 @@ class PrWatchTests(SimpleTestCase):
 class PrWatchToolTests(TestCase):
     @override
     def setUp(self) -> None:
+        capability = patch("hitch.main.sessions.session_resume.thread_has_dynamic_tool", return_value=True)
+        self.mock_capability = capability.start()
+        self.addCleanup(capability.stop)
         cwd = tempfile.TemporaryDirectory()
         self.addCleanup(cwd.cleanup)
         self.cwd = cwd.name
@@ -286,12 +302,23 @@ class PrWatchToolTests(TestCase):
             ),
         )
 
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_legacy_thread_cannot_start_unstoppable_watch(self, mock_watch: MagicMock) -> None:
+        self.mock_capability.return_value = False
+        response = self._call(agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND)
+        self.assertFalse(response["success"])
+        self.assertIn("hitch.unwatch_pr", str(response))
+        mock_watch.assert_not_called()
+        self.assertFalse(SessionPullRequest.objects.exists())
+
     def test_registered_specs_include_watch_pr(self) -> None:
         specs = registered_dynamic_tool_specs()
 
         watch = next(spec for spec in specs if spec["name"] == "watch_pr")
         self.assertEqual(watch["namespace"], "hitch")
         self.assertEqual(watch["inputSchema"]["required"], ["url"])
+        unwatch = next(spec for spec in specs if spec["name"] == "unwatch_pr")
+        self.assertEqual(unwatch["inputSchema"]["required"], ["url"])
 
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_informational_feedback_returns_guidance_and_resumes_watch(
@@ -915,7 +942,7 @@ class PrWatchToolTests(TestCase):
         )
         self.assertNotIn(pr_tracking.AUTO_PULL_RESULT_STATE_KEY, record.state)
 
-    def test_unrelated_completed_turn_supersedes_registered_pr(self) -> None:
+    def test_unrelated_turn_preserves_watch_until_explicit_unwatch(self) -> None:
         owner = CodexInstance.objects.create(
             pid=1,
             thread_id="main-thread",
@@ -958,6 +985,12 @@ class PrWatchToolTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
         )
 
+        pr_tracking.supersede_pr_after_turn(ordinary_turn)
+        self.assertIsNotNone(pr_tracking.record_for_thread("main-thread"))
+        pr_tracking.unwatch_pr(
+            thread_id="main-thread", instance_id=ordinary_turn.pk,
+            requested_pr={"url": _PR_URL},
+        )
         pr_tracking.supersede_pr_after_turn(ordinary_turn)
 
         self.assertIsNone(pr_tracking.record_for_thread("main-thread"))

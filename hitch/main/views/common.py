@@ -37,7 +37,6 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import caches
 from hitch.main import repos as repos_module
-from hitch.main import worktrees as worktrees_module
 from hitch.main.diffs import DiffView, build_worktree_diff
 from hitch.main.models import (
     ApprovalRequest,
@@ -118,7 +117,6 @@ from hitch.main.sessions.session_resume import (
 from hitch.main.sessions.session_settings import (
     _PLAN_MODE_REASONING_EFFORT,
     _QA_SLASH_PROMPT,
-    _allowed_session_cwds,
     _current_disk_usage_max_percent,
     _effective_approval_mode,
     _effective_approval_mode_for_session,
@@ -131,6 +129,9 @@ from hitch.main.sessions.session_settings import (
     _session_project_visibility_for_settings,
     _stored_settings,
     _supported_effort_values,
+)
+from hitch.main.sessions.session_settings import (
+    _is_allowed_session_cwd as _is_allowed_session_cwd,
 )
 from hitch.main.sessions.session_stage_refresh import (
     _thread_ids_awaiting_input,
@@ -1877,8 +1878,3 @@ def _session_template_thread(thread: Any) -> _SessionTemplateThread:
         cwd=_thread_cwd(thread) or "",
         updated_at="" if updated_at is None else updated_at,
     )
-
-def _is_allowed_session_cwd(cwd: str) -> bool:
-    if worktrees_module.is_managed_worktree_path(cwd):
-        return True
-    return cwd in _allowed_session_cwds()
