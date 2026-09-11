@@ -85,6 +85,11 @@ urlpatterns = [
         name="set_session_approval_mode",
     ),
     path(
+        "sessions/<str:session_id>/model/",
+        session_actions.set_session_model,
+        name="set_session_model",
+    ),
+    path(
         "sessions/<str:session_id>/message/",
         messages.send_message,
         name="send_message",

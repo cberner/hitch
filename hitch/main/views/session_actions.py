@@ -8,17 +8,19 @@ from django.http import (
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
+    JsonResponse,
 )
 from django.shortcuts import redirect
 from django.views.decorators.http import require_http_methods
 from openai_codex.errors import InvalidRequestError
 
+from hitch.main import caches
 from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
     SessionMetadata,
 )
-from hitch.main.runtime import app_server_pool, reconciliation
+from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
@@ -28,7 +30,10 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.session_resume import _stored_rollout_path_for_thread
 from hitch.main.sessions.session_settings import (
     _effective_approval_mode,
+    _model_default_effort,
+    _reasoning_effort_values,
     _stored_settings,
+    _validate_model_and_effort_against_models,
 )
 from hitch.main.sessions.settings_cookies import (
     _VALID_APPROVAL_MODES,
@@ -125,6 +130,57 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
     )
     _apply_live_session_approval_mode(session_id, effective_approval_mode)
     return redirect("session", session_id=session_id)
+
+@require_http_methods(["POST"])
+def set_session_model(request: HttpRequest, session_id: str) -> HttpResponse:
+    model = request.POST.get("model", "").strip()
+    effort = request.POST.get("reasoning_effort", "").strip()
+    if not model or len(model) > 256 or len(effort) > 32:
+        return HttpResponseBadRequest("Choose a model and a valid reasoning effort.")
+    settings = _stored_settings(request)
+    try:
+        models_data = caches._fetch_models_data(enable_memories=settings.enable_memories)
+    except Exception:
+        models_data = caches._cached_models_data(enable_memories=settings.enable_memories)
+    if not models_data:
+        return HttpResponse("Model list unavailable. Try again shortly.", status=503)
+    error = _validate_model_and_effort_against_models(model, effort, models_data)
+    if error or (effort and effort not in _reasoning_effort_values(models_data)):
+        return HttpResponseBadRequest(error or "Invalid reasoning effort.")
+    selected = next(item for item in models_data if item.id == model)
+    effort = effort or _model_default_effort(selected)
+    with session_lifecycle.hold(session_id):
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+        cwd = metadata.cwd if metadata is not None and metadata.cwd else _read_thread_cwd(request, session_id)
+        if cwd is None:
+            return HttpResponseBadRequest("Session is unknown.")
+        SessionMetadata.objects.update_or_create(
+            thread_id=session_id,
+            defaults={"cwd": cwd, "model": model, "reasoning_effort": effort},
+        )
+        instances = list(CodexInstance.objects.filter(
+            thread_id=session_id,
+            status__in=CodexInstance.ACTIVE_STATUSES,
+            purpose__in=CodexInstance.VISIBLE_CODING_PURPOSES,
+        ))
+        results = [codex_pool.update_instance_model(
+            instance, model=model, reasoning_effort=effort,
+        ) for instance in instances]
+    pending = bool(instances) and not all(results)
+    message = (
+        "Saved for the next turn. The running turn has not confirmed the change."
+        if pending else
+        "Model and effort updated for subsequent model calls and future turns."
+        if instances else "Model and effort saved for this session."
+    )
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return JsonResponse({
+            "model": model, "effort": effort or "Model default",
+            "pending": pending, "message": message,
+        })
+    messages.info(request, message)
+    return redirect("session", session_id=session_id)
+
 
 @require_http_methods(["POST"])
 def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:

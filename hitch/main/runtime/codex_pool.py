@@ -349,6 +349,13 @@ def spawn_turn(
     text is copied from prior rows; omitted tool/config values mean Codex
     default for this turn, not "inherit the last worker row."
     """
+    from hitch.main.sessions.model_settings import session_model_override
+
+    if purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
+        override = session_model_override(thread_id)
+        if override is not None:
+            model, reasoning_effort = override
+            stored_model, stored_reasoning_effort = override
     previous = latest_for_thread(thread_id)
     if developer_instructions is None:
         developer_instructions = (
@@ -626,6 +633,39 @@ def control_path_for(instance: CodexInstance) -> Path:
     return events_path.with_name(f"{events_path.stem}.control.jsonl")
 
 
+def update_instance_model(
+    instance: CodexInstance, *, model: str, reasoning_effort: str,
+) -> bool:
+    """Ask the owning worker to update its live turn; require acknowledgement."""
+    if not instance.is_active or not instance.events_path:
+        return False
+    running = instance.status == CodexInstance.STATUS_RUNNING
+    if running and not _pid_is_instance_worker(instance):
+        return False
+    request_id = uuid.uuid4().hex
+    try:
+        _append_control_request(instance, {
+            "op": "model_settings", "id": request_id,
+            "model": model, "effort": reasoning_effort,
+        })
+    except OSError:
+        return False
+    if running:
+        with contextlib.suppress(OSError):
+            os.kill(instance.pid, signal.SIGUSR1)
+    deadline = time.monotonic() + 2.0
+    while True:
+        applied = _read_steer_ack(
+            control_path_for(instance), request_id, op="model_settings_ack",
+        )
+        if applied is not None:
+            return applied
+        instance.refresh_from_db()
+        if not instance.is_active or time.monotonic() >= deadline:
+            return False
+        time.sleep(_STEER_ACK_POLL_SECONDS)
+
+
 def _steer_instance(
     instance: CodexInstance,
     *,
@@ -729,7 +769,9 @@ def _await_steer_ack(
         time.sleep(_STEER_ACK_POLL_SECONDS)
 
 
-def _read_steer_ack(control_path: Path, steer_id: str) -> bool | None:
+def _read_steer_ack(
+    control_path: Path, steer_id: str, *, op: str = "steer_ack",
+) -> bool | None:
     try:
         data = control_path.read_bytes()
     except OSError:
@@ -743,7 +785,7 @@ def _read_steer_ack(control_path: Path, steer_id: str) -> bool | None:
             continue
         if (
             isinstance(record, dict)
-            and record.get("op") == "steer_ack"
+            and record.get("op") == op
             and record.get("id") == steer_id
         ):
             return bool(record.get("delivered"))

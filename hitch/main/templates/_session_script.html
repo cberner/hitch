@@ -172,6 +172,59 @@
                 approvalModeCancel.addEventListener("click", () => hideDialog(approvalModeDialog));
             }
 
+            {% include "_settings_effort_script.html" %}
+            const modelDialog = document.querySelector("[data-model-settings-dialog]");
+            const modelForm = document.querySelector("[data-model-settings-form]");
+            const modelButton = document.querySelector("[data-model-settings-open]");
+            if (modelButton && modelDialog && modelForm) {
+                const modelError = modelForm.querySelector("[data-model-settings-error]");
+                modelButton.addEventListener("click", () => {
+                    closeMenu();
+                    modelError.hidden = true;
+                    showDialog(modelDialog);
+                });
+                modelForm.querySelector("[data-model-settings-cancel]").addEventListener("click", () => hideDialog(modelDialog));
+                modelForm.addEventListener("submit", async (event) => {
+                    event.preventDefault();
+                    const save = modelForm.querySelector("[type='submit']");
+                    if (save.disabled) return;
+                    save.disabled = true;
+                    modelError.hidden = true;
+                    try {
+                        const response = await fetch(modelForm.action, {
+                            method: "POST", body: new FormData(modelForm),
+                            headers: { "X-Requested-With": "XMLHttpRequest" },
+                        });
+                        if (!response.ok) throw new Error(await response.text());
+                        const result = await response.json();
+                        const pending = document.querySelector("[data-model-settings-pending]");
+                        pending.hidden = !result.pending;
+                        pending.querySelector("[data-pending-model]").textContent = result.model;
+                        pending.querySelector("[data-pending-effort]").textContent = result.effort;
+                        if (!result.pending) {
+                            document.querySelector("[data-session-model]").textContent = result.model;
+                            document.querySelector("[data-session-effort]").textContent = result.effort;
+                        }
+                        for (const [setting, value] of Object.entries({ model: result.model, reasoning: result.effort })) {
+                            const item = document.querySelector(`[data-next-message-item][data-setting='${setting}']`);
+                            if (!item) continue;
+                            item.dataset.normalValue = value;
+                            item.dataset.planValue = value;
+                            item.querySelector("[data-next-message-value]").textContent = value;
+                        }
+                        const status = document.querySelector("[data-model-settings-status]");
+                        status.textContent = result.message;
+                        status.hidden = false;
+                        hideDialog(modelDialog);
+                    } catch (error) {
+                        modelError.textContent = error.message || "Could not save. Try again.";
+                        modelError.hidden = false;
+                    } finally {
+                        save.disabled = false;
+                    }
+                });
+            }
+
             const diffModal = document.querySelector("[data-diff-modal]");
             const diffOpeners = document.querySelectorAll("[data-diff-open]");
             const diffClose = document.querySelector("[data-diff-close]");
