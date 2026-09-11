@@ -1617,10 +1617,15 @@ class SendMessageViewTests(TestCase):
                 302,
             ),
             ("unresolved", {}, [], None, 400),
+            ("session override", {}, [], "gpt-session", 302),
         ]
 
         for label, cookies, models, expected_model, expected_status in cases:
             with self.subTest(label=label):
+                if label == "session override":
+                    SessionMetadata.objects.update_or_create(
+                        thread_id="abc", defaults={"cwd": "/repo", "model": "gpt-session", "reasoning_effort": "high"},
+                    )
                 client = Client()
                 self._patch_codex(mock_codex, model=None, models=models)
                 mock_spawn.reset_mock()

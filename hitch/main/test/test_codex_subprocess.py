@@ -4799,7 +4799,8 @@ class CodexWorkerCommandTests(TestCase):
                 config = mock_codex.call_args.kwargs["config"]
                 self.assertEqual(
                     config.config_overrides,
-                    ("features.memories=false", f"features.default_mode_request_user_input={enabled}"),
+                    ("features.memories=false", f"features.default_mode_request_user_input={enabled}",
+                     "features.step_model_switching=true"),
                 )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
@@ -5010,7 +5011,8 @@ class CodexWorkerCommandTests(TestCase):
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(
             config.config_overrides,
-            ("features.memories=false", "features.default_mode_request_user_input=true"),
+            ("features.memories=false", "features.default_mode_request_user_input=true",
+             "features.step_model_switching=true"),
         )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
@@ -5421,6 +5423,7 @@ class CodexWorkerCommandTests(TestCase):
     def test_plan_mode_forwards_sandbox_and_approval_overrides(
         self, mock_codex: MagicMock
     ) -> None:
+        SessionMetadata.objects.create(thread_id="thread-1", model="session-model", reasoning_effort="high")
         captured_params: dict[str, object] = {}
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
@@ -5467,6 +5470,9 @@ class CodexWorkerCommandTests(TestCase):
                 codex_ctx.thread_resume.return_value.turn.assert_not_called()
                 params = captured_params["params"]
                 assert isinstance(params, dict)
+                self.assertEqual(params["collaborationMode"]["settings"], {
+                    "developer_instructions": None, "model": "session-model", "reasoning_effort": "high",
+                })
                 self.assertEqual(params["approvalPolicy"], approval_policy)
                 if approvals_reviewer is None:
                     self.assertNotIn("approvalsReviewer", params)

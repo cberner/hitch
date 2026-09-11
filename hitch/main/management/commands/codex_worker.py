@@ -471,6 +471,14 @@ def _run_turn(
     plan_mode: bool = False,
     sqlite_home: str | None = None,
 ) -> Turn | None:
+    from hitch.main.sessions.model_settings import session_model_override
+
+    if instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
+        override = session_model_override(instance.thread_id)
+        if override is not None:
+            model, reasoning_effort = override
+            instance.model, instance.reasoning_effort = override
+            instance.save(update_fields=["model", "reasoning_effort"])
     os.environ["HITCH_THREAD_ID"] = instance.thread_id
     os.environ["HITCH_CWD"] = instance.cwd
     project_dir = Path(settings.BASE_DIR)
@@ -484,6 +492,9 @@ def _run_turn(
         enable_user_input=instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
+    )
+    config = dataclasses.replace(
+        config, config_overrides=(*config.config_overrides, "features.step_model_switching=true"),
     )
     normalized_effort = reasoning_effort.strip() if reasoning_effort else None
     effort = ReasoningEffort(normalized_effort) if normalized_effort else None
@@ -902,7 +913,16 @@ def _drain_steer_requests(
             request = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if not isinstance(request, dict) or request.get("op") != "steer":
+        if not isinstance(request, dict):
+            continue
+        if request.get("op") == "model_settings":
+            applied = _apply_turn_model_settings(turn, instance, request)
+            _append_steer_ack(
+                control_path, request.get("id"), delivered=applied,
+                op="model_settings_ack",
+            )
+            continue
+        if request.get("op") != "steer":
             continue
         text = request.get("input")
         input_image_paths = _control_input_image_paths(request.get("inputImagePaths"))
@@ -914,7 +934,33 @@ def _drain_steer_requests(
     return control_offset + len(complete)
 
 
-def _append_steer_ack(control_path: Path, steer_id: Any, *, delivered: bool) -> None:
+def _apply_turn_model_settings(
+    turn: TurnHandle, instance: CodexInstance, request: dict[str, Any],
+) -> bool:
+    model, effort = request.get("model"), request.get("effort")
+    # Null effort means "unchanged" on this API, so never claim a reset applied.
+    if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
+        return False
+    try:
+        response = turn._client._request_raw("turn/settings/update", {
+            "threadId": turn.thread_id, "turnId": turn.id,
+            "model": model, "effort": effort,
+        })
+        if not isinstance(response, dict) or response.get("status") != "applied":
+            return False
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            model=model, reasoning_effort=effort,
+        )
+        instance.model, instance.reasoning_effort = model, effort
+    except Exception as exc:
+        _worker_log(instance.pk, f"live model settings unavailable: {exc}")
+        return False
+    return True
+
+
+def _append_steer_ack(
+    control_path: Path, steer_id: Any, *, delivered: bool, op: str = "steer_ack",
+) -> None:
     """Record a steer's delivery outcome for the requesting process.
 
     ``steer_instance`` waits on this ack: a failed delivery (the SDK refuses
@@ -925,7 +971,7 @@ def _append_steer_ack(control_path: Path, steer_id: Any, *, delivered: bool) -> 
         return
     line = (
         json.dumps(
-            {"op": "steer_ack", "id": steer_id, "delivered": delivered},
+            {"op": op, "id": steer_id, "delivered": delivered},
             separators=(",", ":"),
         )
         + "\n"
@@ -1096,6 +1142,7 @@ def _start_ordinary_turn(
             prompt=prompt,
             input_image_paths=input_image_paths,
             model=model,
+            effort=effort,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
         )
@@ -1151,6 +1198,7 @@ def _start_plan_turn(
     prompt: str,
     input_image_paths: list[str] | None,
     model: str | None,
+    effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
 ) -> TurnHandle:
@@ -1161,7 +1209,7 @@ def _start_plan_turn(
         settings=CodexModeSettings(
             developer_instructions=None,
             model=model,
-            reasoning_effort=_PLAN_MODE_REASONING_EFFORT,
+            reasoning_effort=effort or _PLAN_MODE_REASONING_EFFORT,
         ),
     )
     return _start_collaboration_turn(

@@ -221,17 +221,12 @@ _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
     tuple[str, str, int, int], dict[str, Any]
 ] = OrderedDict()
 
-def _settings_context(
+def _model_effort_context(
     current_settings: SettingsValues,
     models_data: list[Any],
     *,
     preserve_current_choices: bool = False,
 ) -> dict[str, Any]:
-    projects = list(Project.objects.all())
-    current_project = _selected_project_for_settings(current_settings, projects)
-    project_visibility = _session_project_visibility_for_settings(
-        current_settings, projects
-    )
     # Each model advertises which reasoning efforts it accepts. The dialog
     # must only offer the efforts the *selected* model supports — otherwise a
     # user can pick an effort the model rejects and ``update_settings`` bounces
@@ -273,9 +268,8 @@ def _settings_context(
             },
         )
     return {
-        "settings_url": reverse("update_settings"),
-        "new_project_url": reverse("new_project"),
-        "edit_project_url": reverse("edit_project"),
+        "current_model": current_settings.model,
+        "current_effort": current_settings.reasoning_effort,
         "model_options": model_options,
         "effort_options": [
             {
@@ -286,6 +280,25 @@ def _settings_context(
                 models_data, current_effort=current_settings.reasoning_effort
             )
         ],
+    }
+
+
+def _settings_context(
+    current_settings: SettingsValues,
+    models_data: list[Any],
+    *,
+    preserve_current_choices: bool = False,
+) -> dict[str, Any]:
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    project_visibility = _session_project_visibility_for_settings(
+        current_settings, projects
+    )
+    return {
+        **_model_effort_context(current_settings, models_data, preserve_current_choices=preserve_current_choices),
+        "settings_url": reverse("update_settings"),
+        "new_project_url": reverse("new_project"),
+        "edit_project_url": reverse("edit_project"),
         "sandbox_options": [
             {"id": value, "display_name": label}
             for value, label in _SANDBOX_POLICY_OPTIONS
@@ -298,8 +311,6 @@ def _settings_context(
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS
         ],
-        "current_model": current_settings.model,
-        "current_effort": current_settings.reasoning_effort,
         "current_sandbox": current_settings.sandbox_policy,
         "current_approval": current_settings.approval_mode,
         "current_extra_system_prompt": current_settings.extra_system_prompt,
@@ -923,6 +934,23 @@ def _render_session_detail(
         rollout_config=rollout_model_config,
         stored_config=stored_model_config,
     )
+    selected_model, selected_effort = session_model, session_reasoning
+    model_pending = False
+    if metadata is not None and metadata.model:
+        selected_model = metadata.model
+        selected_effort = metadata.reasoning_effort or "Model default"
+        if active_instance is None:
+            session_model, session_reasoning = selected_model, selected_effort
+        else:
+            model_pending = (selected_model, selected_effort) != (session_model, session_reasoning)
+    session_model_settings = _model_effort_context(
+        settings._replace(
+            model=selected_model if selected_model != "Unknown" else settings.model,
+            reasoning_effort=selected_effort if selected_effort != "Model default" else "",
+        ),
+        models_data,
+        preserve_current_choices=True,
+    )
     instruction_instance = (
         active_instance or codex_pool.latest_for_thread(session_id)
         if not read_only else None
@@ -1012,11 +1040,12 @@ def _render_session_detail(
             "session_reasoning": session_reasoning,
             "next_message_config": _next_message_config(
                 settings,
-                session_model,
-                session_reasoning,
-                plan_model,
+                selected_model,
+                selected_effort,
+                metadata.model if metadata is not None and metadata.model else plan_model,
                 cwd=thread_cwd or "",
                 approval_mode=approval_mode,
+                plan_effort=metadata.reasoning_effort if metadata is not None and metadata.model else None,
             ),
             "input_image_accept": _INPUT_IMAGE_ACCEPT,
             "pr_slash_prompt": PR_SLASH_DISPLAY_PROMPT,
@@ -1035,6 +1064,9 @@ def _render_session_detail(
             "session_project_id": session_project.pk if session_project is not None else "",
             "debug_chat_url": debug_chat_url,
             **_session_approval_mode_context(settings, session_id, metadata),
+            "set_session_model_url": reverse("set_session_model", kwargs={"session_id": session_id}),
+            "session_model_settings": session_model_settings,
+            "session_model_pending": model_pending,
             **settings_context,
         },
     )
@@ -1373,6 +1405,7 @@ def _next_message_config(
     *,
     cwd: str,
     approval_mode: str | None = None,
+    plan_effort: str | None = None,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
     plan_model_value = plan_model or "Unknown"
@@ -1390,7 +1423,7 @@ def _next_message_config(
         {
             "label": "reasoning",
             "value": reasoning,
-            "plan_value": _PLAN_MODE_REASONING_EFFORT.value,
+            "plan_value": plan_effort or _PLAN_MODE_REASONING_EFFORT.value,
         },
         {
             "label": "sandbox",
@@ -1425,7 +1458,7 @@ def _session_model_and_reasoning(
         getattr(active_instance, "reasoning_effort", None)
     )
     if active_instance is not None and getattr(active_instance, "plan_mode", False):
-        return active_model or "Unknown", _PLAN_MODE_REASONING_EFFORT.value
+        return active_model or "Unknown", active_reasoning or _PLAN_MODE_REASONING_EFFORT.value
     if active_model or active_reasoning:
         # A blank active model means Codex resolves its default for this turn.
         if active_reasoning and not active_model:

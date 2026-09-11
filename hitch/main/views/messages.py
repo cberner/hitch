@@ -431,6 +431,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # (and the live models catalog) in preference to the request's cookie.
         # This also covers a cold (empty) models cache. Plain follow-ups never
         # reach this and keep the disk fast path.
+        override_model = metadata.model if metadata is not None else ""
         if (
             used_disk_resume
             and (
@@ -439,6 +440,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 or agent_task_activation
             )
             and not string_value(getattr(resumed, "model", None))
+            and not override_model
         ):
             with app_server_pool.open_codex(
                 lambda: common.Codex(
@@ -450,7 +452,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 resumed = codex._client.thread_resume(session_id)
                 models_data = common._models_for_plan_mode_fallback(codex)
         collaboration_model = (
-            common._plan_mode_model_from_models(resumed, settings, models_data)
+            (override_model or common._plan_mode_model_from_models(resumed, settings, models_data))
             if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
             else None
         )

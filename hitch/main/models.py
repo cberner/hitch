@@ -198,6 +198,8 @@ class SessionMetadata(models.Model):
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
     approval_mode = models.CharField(max_length=32, blank=True, default="")
+    model = models.CharField(max_length=256, blank=True, default="")
+    reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     codex_display_title = models.CharField(max_length=200, blank=True, default="")
     codex_name = models.CharField(max_length=200, blank=True, default="")
     codex_preview = models.TextField(blank=True, default="")

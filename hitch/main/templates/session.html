@@ -29,6 +29,7 @@
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <button type="button" role="menuitem" data-approval-mode-open>Approval mode</button>
+                    <button type="button" role="menuitem" data-model-settings-open>Model and effort</button>
                     {% if pr_url %}
                         <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
                     {% endif %}
@@ -96,8 +97,8 @@
             <p class="meta">
                 {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}">{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
-                <span class="meta-item"><span class="meta-label">model</span><code>{{ session_model }}</code></span>
-                <span class="meta-item"><span class="meta-label">reasoning</span><code>{{ session_reasoning }}</code></span>
+                <span class="meta-item"><span class="meta-label">model</span><code data-session-model>{{ session_model }}</code></span>
+                <span class="meta-item"><span class="meta-label">reasoning</span><code data-session-effort>{{ session_reasoning }}</code></span>
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
                 <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>
             </p>
@@ -116,6 +117,7 @@
                 {% for item in next_message_config %}
                 <span class="next-message-item"
                       data-next-message-item
+                      data-setting="{{ item.label }}"
                       data-normal-value="{{ item.value }}"
                       data-plan-value="{{ item.plan_value }}">
                     <span class="next-message-label">{{ item.label }}</span>
@@ -125,6 +127,11 @@
             </p>
             {% endif %}
         </div>
+
+        {% if not read_only %}
+        <p class="meta" data-model-settings-pending {% if not session_model_pending %}hidden{% endif %}>Main agent next turn: <span data-pending-model>{{ session_model_settings.current_model }}</span> · <span data-pending-effort>{{ session_model_settings.current_effort|default:"Model default" }}</span></p>
+        <p class="meta" data-model-settings-status role="status" hidden></p>
+        {% endif %}
 
         <div class="agent-picker" data-agent-picker
              data-agents-url="{{ session_agents_url }}"
@@ -285,6 +292,21 @@
             </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-approval-mode-cancel>Cancel</button>
+                <button type="submit" class="button">Save</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog class="new-session" data-model-settings-dialog aria-labelledby="model-settings-title">
+        <form method="post" action="{{ set_session_model_url }}" data-model-settings-form>
+            {% csrf_token %}
+            <h2 id="model-settings-title">Model and effort</h2>
+            <p>Applies to this session's main agent. Running turns use changes on subsequent model calls when available.</p>
+            {% with model_options=session_model_settings.model_options effort_options=session_model_settings.effort_options current_model=session_model_settings.current_model current_effort=session_model_settings.current_effort %}
+            {% include "_model_effort_fields.html" %}
+            {% endwith %}
+            <p role="alert" data-model-settings-error hidden></p>
+            <div class="actions">
+                <button type="button" class="button secondary" data-model-settings-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
             </div>
         </form>
