@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +35,15 @@ from hitch.main.workflows import pr_watch
 from hitch.main.workflows.pr_handoff import (
     _compact_pr_handoff,
     _merge_pr_handoff_dicts,
+    _pr_handoff_is_terminal,
 )
 
 logger = logging.getLogger(__name__)
+
+WATCH_ACTIVE_STATE_KEY = "watch_active"
+WATCH_TOKEN_STATE_KEY = "watch_token"
+WATCH_DELIVERED_STATE_KEY = "watch_delivered_event"
+WATCH_FEEDBACK_STATE_KEY = "watch_delivered_feedback"
 
 PR_HANDOFF_STATE_KEY = "pr_handoff"
 PR_GATES_STATE_KEY = "pr_gates"
@@ -54,6 +61,7 @@ class PrWatchRegistration:
     record_id: int
     owner_instance_id: int
     owner_message_index: int | None
+    token: str
 
 
 @dataclass(frozen=True)
@@ -136,6 +144,14 @@ def begin_pr_watch_invocation(
         identity_changed = bool(current_pr) and not pr_watch.pr_identity_matches(
             current_pr, requested_pr
         )
+        if (
+            identity_changed
+            and record.state.get(WATCH_ACTIVE_STATE_KEY) is True
+            and not _pr_handoff_is_terminal(current_pr)
+        ):
+            raise pr_watch.PrWatchError(
+                "call hitch.unwatch_pr for the current PR before watching a different PR"
+            )
         state = dict(record.state)
         state.pop(_SUPERSEDED_BY_INSTANCE_STATE_KEY, None)
         state.pop(_SUPERSEDED_AT_STATE_KEY, None)
@@ -150,6 +166,12 @@ def begin_pr_watch_invocation(
             state[PR_HANDOFF_STATE_KEY] = _merge_pr_handoff_dicts(
                 current_pr, requested_pr
             )
+        state[WATCH_ACTIVE_STATE_KEY] = True
+        state[WATCH_TOKEN_STATE_KEY] = uuid.uuid4().hex
+        if identity_changed:
+            state.pop(WATCH_DELIVERED_STATE_KEY, None)
+            state.pop(WATCH_FEEDBACK_STATE_KEY, None)
+        state.setdefault(WATCH_FEEDBACK_STATE_KEY, previous_fingerprint)
         state[_WATCH_OWNER_INSTANCE_STATE_KEY] = instance_id
         state[_WATCH_OWNER_MESSAGE_STATE_KEY] = user_message_index
         record.cwd = cwd
@@ -160,6 +182,7 @@ def begin_pr_watch_invocation(
                 record_id=record.pk,
                 owner_instance_id=instance_id,
                 owner_message_index=user_message_index,
+                token=state[WATCH_TOKEN_STATE_KEY],
             ),
             previous_fingerprint,
         )
@@ -211,6 +234,8 @@ def _newer_user_instance_exists(thread_id: str, instance_id: int) -> bool:
 def record_pr_watch_result(
     registration: PrWatchRegistration | None,
     result: dict[str, Any],
+    *,
+    delivered: bool = True,
 ) -> None:
     if registration is None:
         return
@@ -240,6 +265,11 @@ def record_pr_watch_result(
             state[PR_HANDOFF_STATE_KEY] = _merge_pr_handoff_dicts(
                 current_pr, observed_pr
             )
+        if delivered and observed_pr:
+            state[WATCH_DELIVERED_STATE_KEY] = pr_watch.event_fingerprint(result)
+            state[WATCH_FEEDBACK_STATE_KEY] = result.get("feedback_fingerprint", "")
+        if _pr_handoff_is_terminal(state.get(PR_HANDOFF_STATE_KEY, {})):
+            state[WATCH_ACTIVE_STATE_KEY] = False
         record.state = state
         record.save(update_fields=["state", "updated_at"])
         merged = result.get("status") == "terminal" and _pr_handoff_is_merged(
@@ -254,10 +284,57 @@ def _registration_owns_record(
 ) -> bool:
     return bool(
         record.is_current
+        and record.state.get(WATCH_TOKEN_STATE_KEY) == registration.token
         and record.state.get(_WATCH_OWNER_INSTANCE_STATE_KEY)
         == registration.owner_instance_id
         and record.state.get(_WATCH_OWNER_MESSAGE_STATE_KEY)
         == registration.owner_message_index
+    )
+
+
+def unwatch_pr(*, thread_id: str, instance_id: int, requested_pr: dict[str, Any]) -> dict[str, Any]:
+    """Disable the subscription and invalidate any in-flight observation."""
+    with transaction.atomic():
+        record = SessionPullRequest.objects.select_for_update().filter(thread_id=thread_id).first()
+        if record is None:
+            raise pr_watch.PrWatchError("no pull request is registered for this session")
+        if _record_has_newer_instance(record, instance_id) or _newer_user_instance_exists(thread_id, instance_id):
+            raise pr_watch.PrWatchError("a newer session turn already owns this pull request")
+        _validate_pr_identity(pr_handoff_for_record(record), requested_pr)
+        record.state = {
+            **record.state,
+            WATCH_ACTIVE_STATE_KEY: False,
+            WATCH_TOKEN_STATE_KEY: uuid.uuid4().hex,
+        }
+        record.save(update_fields=["state", "updated_at"])
+    return {"status": "unwatched", "pr": pr_handoff_for_record(record), "summary": "PR watching stopped."}
+
+
+def previous_event_fingerprint(registration: PrWatchRegistration | None) -> str:
+    if registration is None:
+        return ""
+    record = SessionPullRequest.objects.filter(pk=registration.record_id).first()
+    if record is None or not _registration_owns_record(record, registration):
+        return ""
+    return str(record.state.get(WATCH_DELIVERED_STATE_KEY, ""))
+
+
+def watch_registration_cancelled(registration: PrWatchRegistration | None) -> bool:
+    if registration is None:
+        return False
+    return not SessionPullRequest.objects.filter(
+        pk=registration.record_id,
+        state__watch_token=registration.token,
+        state__watch_active=True,
+    ).exists()
+
+
+def registration_for_record(record: SessionPullRequest) -> PrWatchRegistration:
+    return PrWatchRegistration(
+        record_id=record.pk,
+        owner_instance_id=record.state[_WATCH_OWNER_INSTANCE_STATE_KEY],
+        owner_message_index=record.state.get(_WATCH_OWNER_MESSAGE_STATE_KEY),
+        token=record.state[WATCH_TOKEN_STATE_KEY],
     )
 
 
@@ -271,6 +348,8 @@ def _validate_pr_identity(
 
 
 def _previous_feedback_fingerprint(record: SessionPullRequest) -> str:
+    if WATCH_FEEDBACK_STATE_KEY in record.state:
+        return str(record.state[WATCH_FEEDBACK_STATE_KEY])
     previous = record.state.get(pr_watch.PR_WATCH_RESULT_STATE_KEY)
     if not isinstance(previous, dict):
         return ""
@@ -371,7 +450,7 @@ def supersede_pr_after_turn(instance: CodexInstance) -> None:
             .filter(thread_id=instance.thread_id)
             .first()
         )
-        if record is None:
+        if record is None or record.state.get(WATCH_ACTIVE_STATE_KEY) is True:
             return
         owner_id = record.state.get(_WATCH_OWNER_INSTANCE_STATE_KEY)
         if owner_id == instance_id:

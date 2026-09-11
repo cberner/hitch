@@ -530,14 +530,16 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 task = agent_tasks.review_task(
                     prepare_pull_request=not qa_activation
                 )
-            if task.requires_pr_watch and not thread_has_dynamic_tool(
-                session_id,
-                namespace="hitch",
-                name="watch_pr",
-            ):
+            missing_tool = next((
+                name for name in ("watch_pr", "unwatch_pr")
+                if task.requires_pr_watch and not thread_has_dynamic_tool(
+                    session_id, namespace="hitch", name=name,
+                )
+            ), "")
+            if missing_tool:
                 raise _TurnRejectedError(
                     HttpResponseBadRequest(
-                        "hitch.watch_pr is unavailable for this session; "
+                        f"hitch.{missing_tool} is unavailable for this session; "
                         "start a new session before publishing or watching a PR"
                     )
                 )
@@ -564,10 +566,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         automatic_pr_available = bool(
             auto_pr_enabled
             and not plan_mode
-            and thread_has_dynamic_tool(
-                session_id,
-                namespace="hitch",
-                name="watch_pr",
+            and all(
+                thread_has_dynamic_tool(session_id, namespace="hitch", name=name)
+                for name in ("watch_pr", "unwatch_pr")
             )
         )
         spawn_kwargs: dict[str, Any] = {

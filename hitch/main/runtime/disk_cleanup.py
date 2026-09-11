@@ -22,6 +22,7 @@ from hitch.main.models import (
     GlobalSettings,
     ProposedSession,
     SessionMetadata,
+    SessionPullRequest,
     SystemAgentRun,
 )
 from hitch.main.runtime import codex_events
@@ -384,8 +385,14 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         .exclude(cwd="")
         .values_list("cwd", flat=True)
     )
+    watched_paths = set(
+        SessionPullRequest.objects.filter(state__watch_active=True)
+        .exclude(cwd="")
+        .values_list("cwd", flat=True)
+    )
     protected_paths = (
         active_codex_paths
+        | watched_paths
         | _pending_proposal_worktree_paths(protected_proposal_session_ids)
         | _protected_visible_user_worktree_paths(
             legacy_promoted_thread_ids,
