@@ -26,6 +26,10 @@
                 }
             }
             formatTimestamps(document);
+            document.addEventListener("hitch:transcript-updated", (event) => {
+                formatTimestamps(event.detail.root);
+                renderSessionMath(event.detail.root);
+            });
             document.addEventListener("click", (event) => {
                 if (!(event.target instanceof Element)) return;
                 const command = event.target.closest("[data-expandable-command]");
@@ -893,6 +897,7 @@
             }
 
             function scrollToLatest(smooth) {
+                if (document.body.classList.contains("viewing-subagent")) return;
                 window.scrollTo({
                     top: scrollRoot.scrollHeight,
                     behavior: smooth ? "smooth" : "auto",
@@ -901,6 +906,7 @@
             }
 
             function followRenderedContent() {
+                if (document.body.classList.contains("viewing-subagent")) return;
                 if (!followLatest || !liveRoot) {
                     syncJumpButton();
                     return;
@@ -2179,7 +2185,9 @@
                 // Reload so the rollout-based render replaces the live DOM
                 // (markdown rendering, intermediate collapsing, etc.) and the
                 // page picks up any newly-spawned worker.
-                window.location.reload();
+                if (document.dispatchEvent(new Event("hitch:session-ended", { cancelable: true }))) {
+                    window.location.reload();
+                }
             }
 
             function handleReconnect(event) {

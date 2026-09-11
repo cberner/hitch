@@ -178,7 +178,37 @@
             font-size: 0.9rem;
         }
 
-        .session-body { min-width: 0; }
+        .session-content, .session-body { min-width: 0; }
+        .agent-picker {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-bottom: 1rem;
+        }
+        .agent-picker select {
+            flex: 1;
+            min-width: 0;
+            max-width: 30rem;
+            padding: 0.5rem;
+            font: inherit;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+        }
+        .agent-transcript[hidden], .agent-feedback[hidden], .agent-history-actions [hidden] { display: none; }
+        .agent-transcript h2 { margin: 0; font-size: 1rem; }
+        .agent-note { margin: 0; color: var(--text-muted); font-size: 0.85rem; }
+        .agent-history-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        [data-agent-older], [data-agent-entries] { display: flex; flex-direction: column; gap: 0.85rem; }
+        body.viewing-subagent .session-head,
+        body.viewing-subagent [data-main-agent-transcript],
+        body.viewing-subagent .task-plan,
+        body.viewing-subagent .composer,
+        body.viewing-subagent .live-work,
+        body.viewing-subagent .jump-latest,
+        body.viewing-subagent .diff-fab { display: none; }
+        body.viewing-subagent main.has-task-plan { display: block; }
         .session-head { margin: 0.25rem 0 1.25rem; }
         .meta {
             color: var(--text-muted);
@@ -1821,16 +1851,14 @@
                 max-width: 1180px;
                 display: grid;
                 grid-template-columns: minmax(0, 900px) minmax(260px, 320px);
+                grid-template-areas: "messages messages" "content plan";
                 column-gap: 1.25rem;
                 align-items: start;
             }
-            main.has-task-plan .session-head,
-            main.has-task-plan .session-body {
-                grid-column: 1;
-            }
+            main.has-task-plan .session-messages { grid-area: messages; }
+            main.has-task-plan .session-content { grid-area: content; }
             main.has-task-plan .task-plan {
-                grid-column: 2;
-                grid-row: 1 / span 2;
+                grid-area: plan;
                 top: calc(var(--safe-top) + 4.25rem);
                 margin: 0.25rem 0 0;
                 padding: 0;

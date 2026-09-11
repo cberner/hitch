@@ -932,6 +932,8 @@ def _render_session_detail(
         "session.html",
         {
             "thread": _session_template_thread(thread),
+            "main_agent_id": session_id,
+            "session_agents_url": reverse("session_agents", kwargs={"session_id": session_id}),
             "entries": entries,
             "history_partial": history_paginated,
             "history_next_url": (

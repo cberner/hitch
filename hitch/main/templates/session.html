@@ -82,6 +82,7 @@
                 </ol>
             </div>
         </aside>
+        <div class="session-content">
         <div class="session-head">
             {% if not read_only %}
             <div class="edit-title" data-edit-title hidden>
@@ -125,7 +126,29 @@
             {% endif %}
         </div>
 
-        <div class="session-body">
+        <div class="agent-picker" data-agent-picker
+             data-agents-url="{{ session_agents_url }}"
+             data-main-agent-id="{{ main_agent_id }}"
+             data-active="{{ active_worker|yesno:'true,false' }}">
+            <label for="session-agent">Agent</label>
+            <select id="session-agent" data-agent-select aria-controls="agent-transcript">
+                <option value="">Main agent</option>
+            </select>
+            <button type="button" class="button secondary" data-agents-refresh aria-label="Refresh agents">Refresh</button>
+        </div>
+        <p class="agent-feedback" data-agent-feedback role="status" hidden></p>
+        <section id="agent-transcript" class="thread agent-transcript" data-agent-transcript hidden>
+            <h2 data-agent-heading></h2>
+            <p class="agent-note">Subagent conversation · Read only</p>
+            <div class="agent-history-actions">
+                <button type="button" class="button secondary" data-agent-earlier hidden>Load earlier messages</button>
+                <button type="button" class="button secondary" data-agent-full hidden>Load full transcript</button>
+                <button type="button" class="button secondary" data-agent-latest hidden>Return to latest</button>
+            </div>
+            <div data-agent-older></div>
+            <div data-agent-entries></div>
+        </section>
+        <div class="session-body" data-main-agent-transcript>
         {% if system_prompt or instruction_instance or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
         <section class="thread" data-thread id="history-start">
             {% if instruction_instance %}
@@ -209,6 +232,7 @@
                       aria-label="{{ gate.label }}: {{ gate.statusLabel }}">{{ gate.label }}: {{ gate.statusLabel }}</span>
                 {% endfor %}
             </span>
+        </div>
         </div>
     </main>
 
@@ -403,4 +427,5 @@
     <script src="{% static 'vendor/katex/contrib/auto-render.min.js' %}"></script>
     <script src="{% static 'session_math.js' %}"></script>
     {% include "_session_script.html" %}
+    <script src="{% static 'session_agents.js' %}"></script>
 {% endblock %}

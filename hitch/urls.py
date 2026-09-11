@@ -58,6 +58,7 @@ urlpatterns = [
         name="session_history",
     ),
     path("sessions/<str:session_id>/", session_detail.session, name="session"),
+    path("sessions/<str:session_id>/agents/", session_detail.session_agents, name="session_agents"),
     path(
         "sessions/<str:session_id>/intermediate/<int:entry_index>/",
         session_detail.session_intermediate,

@@ -698,7 +698,7 @@ class RolloutFileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "preamble")
         self.assertContains(response, "narrating")
-        self.assertNotContains(response, ">Agent<")
+        self.assertNotContains(response, '<span class="role">Agent</span>')
         self.assertContains(response, ">Agent (thinking)<", count=2)
         self.assertNotContains(response, '<details class="intermediate">')
 
@@ -787,7 +787,7 @@ class IntermediateCollapseTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, '<details class="intermediate">')
-        self.assertNotContains(response, ">Agent<")
+        self.assertNotContains(response, '<span class="role">Agent</span>')
         self.assertContains(response, ">Agent (thinking)<", count=2)
 
     @patch("hitch.main.views.common.Codex")
