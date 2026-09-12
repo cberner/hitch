@@ -20,6 +20,7 @@ import mmap
 import re
 from collections import Counter
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -162,6 +163,7 @@ _HISTORY_TIMESTAMP_RE = re.compile(rb'"timestamp"\s*:\s*"([^"]+)"')
 _HISTORY_MESSAGE_FIELD_RE = re.compile(rb'(?<!\\)"message"\s*:\s*"')
 _HISTORY_TEXT_FIELD_RE = re.compile(rb'(?<!\\)"text"\s*:\s*"')
 _HISTORY_CLIENT_ID_RE = re.compile(rb'(?<!\\)"client_id"\s*:\s*"([^"]*)"')
+_HISTORY_ITEM_ID_RE = re.compile(rb'(?<!\\)"id"\s*:\s*("(?:[^"\\]|\\.){1,1024}")')
 _HISTORY_PHASE_RE = re.compile(
     rb'(?<!\\)"phase"\s*:\s*"(commentary|final_answer)"'
 )
@@ -395,12 +397,22 @@ def _history_message_record(
             )
     elif payload_type == b"agent_message":
         payload = {"type": "agent_message", "message": _HISTORY_OMITTED_MESSAGE}
+        tail = (
+            contents[max(record_offset, record_end - _HISTORY_STRUCTURAL_BYTES):record_end]
+            if contents is not None else b""
+        )
         phase_match = _HISTORY_PHASE_RE.search(raw)
-        if phase_match is None and contents is not None:
-            tail_start = max(record_offset, record_end - _HISTORY_STRUCTURAL_BYTES)
-            phase_match = _HISTORY_PHASE_RE.search(contents[tail_start:record_end])
+        if phase_match is None:
+            phase_match = _HISTORY_PHASE_RE.search(tail)
         if phase_match is not None:
             payload["phase"] = phase_match.group(1).decode()
+        if completed_message:
+            # Delivery metadata can sit between large content and question
+            # bodies. A known question control, not this marker, owns removal.
+            item_id = _HISTORY_ITEM_ID_RE.search(raw) or _HISTORY_ITEM_ID_RE.search(tail)
+            if item_id is not None:
+                with suppress(UnicodeDecodeError, json.JSONDecodeError):
+                    payload["async_question_item_id"] = json.loads(item_id.group(1))
     else:
         return None
     return {"type": "event_msg", "payload": payload}
@@ -863,6 +875,8 @@ def _normalize_completed_message(entry: dict[str, Any]) -> dict[str, Any]:
             "message": ("\n" if is_user else "").join(parts),
             "phase": item.get("phase"),
             "client_id": item.get("client_id"),
+            **({"async_question_item_id": item.get("id")}
+               if item.get("delivery") == "async" and item.get("questions") else {}),
         },
     }
 
@@ -994,6 +1008,9 @@ def _entry_from_event(
             "timestamp": timestamp,
             "phase": phase if isinstance(phase, str) else None,
         }
+        question_item_id = payload.get("async_question_item_id")
+        if isinstance(question_item_id, str):
+            entry["async_question_item_id"] = question_item_id
         citation = _pop_memory_citation(
             memory_citations_by_text, _agent_dedupe_key(text, payload)
         )

@@ -140,6 +140,24 @@ class SessionHistoryPageTests(TestCase):
         self.assertTrue(all(entry["text"] == rollout._HISTORY_OMITTED_MESSAGE for entry in page.flat_entries))
         self.assertEqual(list(rollout.iter_entries(path))[-1]["text"], "x" * 70000)
 
+    def test_oversized_completed_agent_ids_survive_bounded_history(self) -> None:
+        for metadata_first in (True, False):
+            with self.subTest(metadata_first=metadata_first):
+                item_id = 'async-"choice"'
+                metadata = {"id": item_id, "delivery": "async", "phase": "final_answer"}
+                content = {"content": [{"type": "Text", "text": '"id": "fake" ' * 6000}]}
+                item: dict[str, Any] = {"type": "AgentMessage"}
+                item.update(metadata if metadata_first else content)
+                item.update(content if metadata_first else metadata)
+                item["questions"] = [{"title": "Which scope?"}]
+                path = _write_rollout([_line("event_msg", {"type": "item_completed", "item": item})])
+                self.addCleanup(path.unlink, missing_ok=True)
+                page = rollout.session_history_page(path)
+                assert page is not None
+                self.assertEqual(page.flat_entries[0]["text"], rollout._HISTORY_OMITTED_MESSAGE)
+                self.assertEqual(page.flat_entries[0]["async_question_item_id"], item_id)
+                self.assertEqual(page.flat_entries[0]["phase"], "final_answer")
+
     def test_detects_persisted_namespaced_dynamic_tool(self) -> None:
         path = _write_rollout(
             [

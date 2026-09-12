@@ -36,6 +36,16 @@ space used by repetitive reasoning, command, and web-search activity.
   response while leaving the transport responsive. Missing `isBlocking` keeps
   legacy blocking presentation. Pending nonblocking questions do not mark a
   running session as waiting for input.
+- `ST-async-message-questions`: Also recognize structured `agentMessage`
+  notifications with `delivery: "async"` and title/options questions. Present
+  them through the same nonblocking question controls, replacing their plain
+  text live message. Deliver explicit answers as user input to the originating
+  turn, with the question titles as context; Skip sends no input. Duplicate
+  notifications do not duplicate questions or answers, including when controls
+  replay alongside rollout-rendered or lazily loaded history. A rejected
+  answer displays a delivery failure without disrupting unrelated work or
+  questions. Ordinary messages,
+  including older event logs without question controls, stay visible.
 - `ST-question-runtime`: The pinned SDK and its bundled Codex executable
   support nonblocking questions without a separately installed CLI. Verify the
   bundled app-server's question schema as part of the test suite.
@@ -53,7 +63,8 @@ space used by repetitive reasoning, command, and web-search activity.
   continuing or can be answered while Codex works. Keep a pending-question
   shortcut near the composer, support multiline free-text answers, and preserve
   the main composer draft when questions arrive or are answered. Suggested
-  choices are not submitted automatically; Skip is an explicit user action.
+  choices may preselect the first option, but are not submitted automatically;
+  Submit and Skip are explicit user actions.
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.

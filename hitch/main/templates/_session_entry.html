@@ -4,7 +4,7 @@ top-level entries and command/reasoning/web-search activity groups so the
 per-item layout stays identical in both contexts.
 {% endcomment %}
 {% if entry.kind == "user" or entry.kind == "agent" or entry.kind == "thinking" %}
-<div class="entry">
+<div class="entry"{% if entry.async_question_item_id %} data-async-question-item-id="{{ entry.async_question_item_id }}"{% endif %}>
     <div class="entry-header">
         <span class="role">{% if entry.display_author %}{{ entry.display_author }}{% elif entry.kind == "user" %}User{% elif entry.kind == "thinking" %}Agent (thinking){% else %}Agent{% endif %}</span>
         {% if entry.timestamp %}
