@@ -853,9 +853,9 @@ def _render_session_detail(
         cache_entries=rollout_data is not None,
         rollout_state=detail_rollout_state,
     )
-    goal_objective = (
-        "" if history_paginated else codex_events.latest_goal_for_thread(session_id)
-    )
+    from hitch.main.runtime.session_goals import current_goal
+
+    session_goal = current_goal(session_id)
     # Scope the plan to the running worker, or to the latest worker on reload
     # when none is running, so a turn that finished without emitting its own
     # plan does not inherit an earlier turn's.
@@ -1056,7 +1056,9 @@ def _render_session_detail(
             "plan_revision_prompt": _PLAN_REVISION_PROMPT,
             "pr_url": pr_url,
             "session_stage": stage_context,
-            "goal_objective": goal_objective,
+            "session_goal": session_goal,
+            "goal_objective": session_goal.get("objective", "") if session_goal else "",
+            "set_session_goal_url": reverse("set_session_goal", args=[session_id]),
             "task_plan": task_plan,
             "diff_view": diff_view,
             "projects": projects,

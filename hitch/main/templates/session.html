@@ -30,6 +30,7 @@
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <button type="button" role="menuitem" data-approval-mode-open>Approval mode</button>
                     <button type="button" role="menuitem" data-model-settings-open>Model and effort</button>
+                    <button type="button" role="menuitem" data-goal-new {% if session_goal %}hidden{% endif %} {% if is_archived %}disabled title="Unarchive this session to set a goal."{% elif active_worker %}disabled title="Finish the current turn to set a goal."{% endif %}>Set goal</button>
                     {% if pr_url %}
                         <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
                     {% endif %}
@@ -239,10 +240,7 @@
                 <summary><span data-turn-notice-title role="status" aria-live="polite"></span></summary>
                 <div class="turn-notice-body" data-turn-notice-body></div>
             </details>
-            <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
-                <span class="live-goal-label">Goal</span>
-                <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
-            </span>
+            {% include "_session_goal.html" %}
             <span class="pr-progress" data-pr-progress {% if not pr_watch_progress %}hidden{% endif %}>
                 {% for gate in pr_watch_progress %}
                 <span class="pr-gate"
@@ -255,6 +253,7 @@
         </div>
         </div>
     </main>
+    {{ session_goal|json_script:"session-goal-data" }}
 
     {% if diff_view.has_changes and not active_worker %}
     <button type="button" class="diff-fab" data-diff-open aria-label="View diff">
@@ -272,6 +271,29 @@
     {% endif %}
 
     {% if not read_only %}
+    <dialog class="new-session goal-dialog" data-goal-dialog aria-labelledby="goal-dialog-title">
+        <form method="post" action="{{ set_session_goal_url }}" data-goal-form>
+            {% csrf_token %}
+            <h2 id="goal-dialog-title" data-goal-dialog-title>Set goal</h2>
+            <p data-goal-description>Give the main agent an objective to keep working toward.</p>
+            <fieldset data-goal-fields>
+                <label>
+                    Objective
+                    <textarea name="objective" maxlength="4000" rows="5" required></textarea>
+                </label>
+                <label>
+                    <span>Token budget <span class="goal-optional">optional</span></span>
+                    <input name="token_budget" type="number" min="1" max="9007199254740991" step="1" placeholder="No limit">
+                </label>
+                <p class="goal-hint" data-goal-edit-hint>Codex continues until the goal is completed, blocked, paused, or reaches a limit.</p>
+            </fieldset>
+            <p role="alert" data-goal-form-error hidden></p>
+            <div class="actions">
+                <button type="button" class="button secondary" data-goal-cancel>Cancel</button>
+                <button type="submit" class="button" data-goal-submit>Start goal</button>
+            </div>
+        </form>
+    </dialog>
     <dialog class="new-session" data-move-project-dialog aria-labelledby="move-project-title">
         <form method="post" action="{{ set_project_url }}">
             {% csrf_token %}
