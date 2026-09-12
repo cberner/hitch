@@ -1152,6 +1152,13 @@
             // node without re-rendering the whole turn.
             const approvals = new Map();
             const inputRequests = new Map();
+            const questionItemIds = new Set();
+            function removeHistoricalQuestionMessages() {
+                for (const entry of document.querySelectorAll("[data-async-question-item-id]")) {
+                    if (questionItemIds.has(entry.dataset.asyncQuestionItemId)) entry.remove();
+                }
+            }
+            document.addEventListener("hitch:transcript-updated", removeHistoricalQuestionMessages);
             const pendingQuestionsButton = document.querySelector("[data-pending-questions]");
 
             function updatePendingQuestions() {
@@ -1715,6 +1722,7 @@
                 ensureNoEmpty();
                 const item = payload.item || {};
                 if (!item.id) return;
+                if (questionItemIds.has(item.id)) return;
                 if (HIDE_LIVE_TRANSCRIPT) return;
                 if (items.has(item.id)) {
                     if (item.type === "plan") {
@@ -1970,6 +1978,15 @@
                 const id = payload.id;
                 if (id == null || inputRequests.has(id)) return;
                 const params = payload.params || {};
+                if (params.delivery === "async" && params.itemId) {
+                    questionItemIds.add(params.itemId);
+                    const message = items.get(params.itemId);
+                    if (message) {
+                        message.node.remove();
+                        items.delete(params.itemId);
+                    }
+                    removeHistoricalQuestionMessages();
+                }
                 const questions = Array.isArray(params.questions) ? params.questions : [];
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
@@ -2212,7 +2229,8 @@
                 if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
-                note.textContent = payload.cancelled ? "Question closed" :
+                note.textContent = payload.error ? "Answer could not be delivered. Send your answer as a message." :
+                    payload.cancelled ? "Question closed" :
                     Object.keys((payload.response || {}).answers || {}).length ? "Answers submitted" : "Skipped";
                 entry.box.appendChild(note);
                 updatePendingQuestions();
