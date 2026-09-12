@@ -1,9 +1,10 @@
-"""Defer question replies without blocking the pinned SDK's stdout reader."""
+"""Defer questions and dynamic tools without blocking the SDK's stdout reader."""
 
 from __future__ import annotations
 
+import logging
 import threading
-import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import override
 
@@ -11,6 +12,8 @@ from openai_codex import Codex, CodexConfig
 from openai_codex._initialize_metadata import validate_initialize_metadata
 from openai_codex.client import CodexClient
 from openai_codex.models import JsonValue
+
+logger = logging.getLogger(__name__)
 
 
 def is_user_input_request(method: str) -> bool:
@@ -25,6 +28,7 @@ class _Question:
     turn_id: JsonValue
     cancelled: threading.Event = field(default_factory=threading.Event)
     worker: threading.Thread | None = None
+    on_response_sent: list[Callable[[], None]] = field(default_factory=list)
 
 
 class QuestionClient(CodexClient):
@@ -41,10 +45,15 @@ class QuestionClient(CodexClient):
             isinstance(question, _Question) and question.cancelled.is_set()
         )
 
+    def on_response_sent(self, callback: Callable[[], None]) -> None:
+        """Acknowledge tool evidence only after its response is written."""
+        question = self._question_context.question
+        question.on_response_sent.append(callback)
+
     @override
     def _read_message(self) -> dict[str, JsonValue]:
-        # Codex owns whether a question blocks generation. Both kinds must leave
-        # the transport free to receive progress, further questions and Stop.
+        # Requests must leave the reader free to receive their cancellation,
+        # turn completion, progress, and other RPC responses.
         while True:
             try:
                 message = super()._read_message()
@@ -53,7 +62,11 @@ class QuestionClient(CodexClient):
                 raise
             method = message.get("method")
             request_id = message.get("id")
-            if isinstance(method, str) and is_user_input_request(method) and isinstance(request_id, str | int):
+            if (
+                isinstance(method, str)
+                and (is_user_input_request(method) or method == "item/tool/call")
+                and isinstance(request_id, str | int)
+            ):
                 self._defer_question(request_id, message)
                 continue
             self._observe_resolution(message)
@@ -69,6 +82,8 @@ class QuestionClient(CodexClient):
         )
         question.worker = worker
         with self._questions_lock:
+            if self._questions_closed.is_set():
+                return
             self._questions[request_id] = question
             worker.start()
 
@@ -80,6 +95,11 @@ class QuestionClient(CodexClient):
             response = self._handle_server_request(message)
             if not self.question_cancelled():
                 self._write_message({"id": request_id, "result": response})
+                for callback in question.on_response_sent:
+                    try:
+                        callback()
+                    except Exception:
+                        logger.exception("Failed to acknowledge a sent response; evidence remains available for retry")
         except BaseException as exc:
             if not self.question_cancelled():
                 self._router.fail_all(exc)
@@ -115,10 +135,11 @@ class QuestionClient(CodexClient):
         super().close()
         with self._questions_lock:
             workers = [question.worker for question in self._questions.values()]
-        deadline = time.monotonic() + 2
         for worker in workers:
             if worker is not None:
-                worker.join(timeout=max(0, deadline - time.monotonic()))
+                # Cancellation ends polling, but an already-started mutation
+                # such as Auto-pull must finish before the worker process exits.
+                worker.join()
 
 
 class QuestionCodex(Codex):

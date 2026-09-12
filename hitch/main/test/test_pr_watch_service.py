@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from typing import override
+from collections.abc import Callable
+from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
+from hitch.main.management.commands import codex_worker
 from hitch.main.models import CodexInstance, RefreshThrottle, SessionMetadata, SessionPullRequest
 from hitch.main.runtime import maintenance
 from hitch.main.runtime.codex_tools import ToolContext, handle_dynamic_tool_call
 from hitch.main.sessions import agent_tasks
 from hitch.main.test.test_pr_watch import _PR_URL, _observation
 from hitch.main.workflows import pr_tracking, pr_watch, pr_watch_service
+from hitch.main.workflows.gh_observations import _gh_watch_feedback
 
 
 class PersistentPrWatchTests(TestCase):
@@ -59,6 +62,122 @@ class PersistentPrWatchTests(TestCase):
                 instance_id=self.owner.pk if instance_id is None else instance_id,
             ),
         )
+
+    @patch("hitch.main.sessions.session_resume.thread_has_dynamic_tool", return_value=True)
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_cancelled_tool_leaves_later_feedback_for_background_delivery(
+        self, observe: MagicMock, spawn: MagicMock, _capability: MagicMock,
+    ) -> None:
+        initial = pr_watch._result_from_observation("ready", _observation())
+        pr_tracking.record_pr_watch_result(self.registration, initial)
+        self.owner.agent_kind = agent_tasks.PR_WATCH_AGENT_KIND
+        cancelled = False
+        deliveries: list[Callable[[], None]] = []
+        handler = codex_worker._make_approval_handler(
+            instance=self.owner, write_event=lambda *_args: None, approval_mode="deny_all",
+            question_cancelled=lambda: cancelled,
+            on_response_sent=deliveries.append,
+        )
+        later = _observation(feedback="Feedback posted after the turn ended")
+
+        def cancel_during_read(**_kwargs: object) -> dict[str, object]:
+            nonlocal cancelled
+            cancelled = True
+            return later
+
+        observe.side_effect = cancel_during_read
+        response = handler("item/tool/call", {
+            "namespace": "hitch", "tool": "watch_pr", "arguments": {"url": _PR_URL},
+        })
+        self.assertFalse(response["success"])
+        self.assertIn("cancelled", str(response))
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY], initial)
+        self.assertTrue(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+        self.assertEqual(deliveries, [])
+        observe.side_effect = None
+        observe.return_value = later
+
+        # A prepared response is not delivered until the transport writes it.
+        cancelled = False
+        response = handler("item/tool/call", {
+            "namespace": "hitch", "tool": "watch_pr", "arguments": {"url": _PR_URL},
+        })
+        self.assertTrue(response["success"])
+        self.assertEqual(len(deliveries), 1)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.state[pr_tracking.WATCH_FEEDBACK_STATE_KEY], initial["feedback_fingerprint"])
+        pr_watch_service.poll_registered_prs()
+        spawn.assert_called_once()
+
+        deliveries[0]()
+        self._due()
+        pr_watch_service.poll_registered_prs()
+        spawn.assert_called_once()
+
+    @patch("hitch.main.sessions.session_resume.thread_has_dynamic_tool", return_value=True)
+    @patch("hitch.main.workflows.pr_tracking._maybe_auto_pull_default_repo_after_pr_merge")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_auto_pull_finishes_before_response_and_delivery_preserves_newer_snapshot(
+        self, observe: MagicMock, auto_pull: MagicMock, _capability: MagicMock,
+    ) -> None:
+        observe.return_value = _observation({"state": "merged", "merged": True})
+        deliveries: list[Callable[[], None]] = []
+
+        def defer_delivery(callback: Callable[[], None]) -> None:
+            auto_pull.assert_called_once()
+            deliveries.append(callback)
+
+        response = handle_dynamic_tool_call(
+            {"namespace": "hitch", "tool": "watch_pr", "arguments": {"url": _PR_URL}},
+            ToolContext(
+                cwd="/tmp", thread_id=self.owner.thread_id, instance_id=self.owner.pk,
+                agent_kind=agent_tasks.PR_WATCH_AGENT_KIND, on_response_sent=defer_delivery,
+            ),
+        )
+        self.assertTrue(response["success"])
+        self.record.refresh_from_db()
+        self.assertFalse(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+        self.assertNotIn(pr_tracking.WATCH_DELIVERED_STATE_KEY, self.record.state)
+        self.record.state[pr_tracking.AUTO_PULL_RESULT_STATE_KEY] = {"status": "pulled"}
+        self.record.save()
+        deliveries[0]()
+        self.record.refresh_from_db()
+        self.assertIn(pr_tracking.WATCH_DELIVERED_STATE_KEY, self.record.state)
+        self.assertEqual(self.record.state[pr_tracking.AUTO_PULL_RESULT_STATE_KEY], {"status": "pulled"})
+        auto_pull.assert_called_once()
+        self._unwatch()
+        state = SessionPullRequest.objects.get(pk=self.record.pk).state
+        deliveries[0]()
+        self.assertEqual(SessionPullRequest.objects.get(pk=self.record.pk).state, state)
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_feedback_beyond_five_threads_resumes_watch(self, observe: MagicMock, spawn: MagicMock) -> None:
+        threads: list[dict[str, Any]] = [
+            {"path": f"file-{index}.py", "comments": {"nodes": [{"body": f"Finding {index}"}]}}
+            for index in range(6)
+        ]
+        # Reproduce a registration whose delivered feedback omitted its sixth thread.
+        initial = _observation({"unresolved_thread_count": 6}, feedback=_gh_watch_feedback({}, threads[:5], {}))
+        pr_tracking.record_pr_watch_result(
+            self.registration, pr_watch._result_from_observation("action_required", initial),
+        )
+        observe.return_value = {**initial, "feedback": _gh_watch_feedback({}, threads, {})}
+        pr_watch_service.poll_registered_prs()
+        spawn.assert_called_once()
+        self.record.refresh_from_db()
+        self.assertIn("Finding 5", self.record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY]["feedback"])
+
+        pr_tracking.record_pr_watch_result(
+            self.registration, pr_watch._result_from_observation("action_required", observe.return_value),
+        )
+        self._due()
+        threads[-1]["comments"]["nodes"].append({"body": "New reply"})
+        observe.return_value = {**initial, "feedback": _gh_watch_feedback({}, threads, {})}
+        pr_watch_service.poll_registered_prs()
+        self.assertEqual(spawn.call_count, 2)
 
     @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
