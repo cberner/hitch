@@ -74,7 +74,17 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 
 ### 4.4 User Escalation Flow
 
-- `PERM-escalation-triggers`: Hitch handles Codex command-execution and file-change approval requests.
+- `PERM-escalation-triggers`: Hitch handles Codex command-execution, file-change,
+  and MCP tool confirmation requests. MCP confirmations arrive through
+  `mcpServer/elicitation/request` as form requests tagged
+  `_meta.codex_approval_kind: mcp_tool_call` with an empty object schema.
+  They use the same live approval modes and durable interactive prompts,
+  displaying the server, tool, message, and arguments. Replies use MCP's
+  `action`, `content`, and `_meta` fields; acceptance applies to this call only
+  and never requests session or persistent permission. Data-entry and URL/auth
+  elicitations are unsupported and receive an explicit decline with a diagnostic.
+  Waiting leaves the transport free for progress, live settings, and cancellation;
+  resolved server requests and completed turns close matching pending approvals.
 - `PERM-pending-request`: Interactive escalations create durable pending requests and emit session events.
 - `PERM-pending-replay`: Session views render unresolved pending requests from durable state on load; live events are only notifications.
 - `PERM-prompt-detail`: Prompts show enough command/file-change, session, project, and workspace/target context for an informed decision.

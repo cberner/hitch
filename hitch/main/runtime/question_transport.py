@@ -13,6 +13,8 @@ from openai_codex._initialize_metadata import validate_initialize_metadata
 from openai_codex.client import CodexClient
 from openai_codex.models import JsonValue
 
+from hitch.main.runtime.mcp_approval import MCP_ELICITATION_METHOD
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,7 +66,7 @@ class QuestionClient(CodexClient):
             request_id = message.get("id")
             if (
                 isinstance(method, str)
-                and (is_user_input_request(method) or method == "item/tool/call")
+                and (is_user_input_request(method) or method in {"item/tool/call", MCP_ELICITATION_METHOD})
                 and isinstance(request_id, str | int)
             ):
                 self._defer_question(request_id, message)

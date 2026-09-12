@@ -25,6 +25,7 @@ from django.conf import settings
 from django.contrib.staticfiles.handlers import StaticFilesHandler
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 from openai_codex import ApprovalMode, Codex, Sandbox, Thread, TurnHandle
 from openai_codex._message_router import MessageRouter
@@ -5531,6 +5532,75 @@ class ApprovalHandlerTests(TestCase):
             events_path="/dev/null",
             status=CodexInstance.STATUS_RUNNING,
         )
+
+    def test_mcp_tool_confirmation_uses_live_mode_and_wire_action(self) -> None:
+        instance = self._make_instance()
+        params = {
+            "threadId": instance.thread_id, "turnId": "turn", "serverName": "codex_apps",
+            "mode": "form", "message": "Allow GitHub to create the pull request?",
+            "requestedSchema": {"type": "object", "properties": {}},
+            "_meta": {"codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"],
+                      "tool_title": "Create pull request", "tool_params": {"repository_full_name": "cberner/hitch"}},
+        }
+        events: list[tuple[str, Any]] = []
+        handler = _make_approval_handler(
+            instance=instance, write_event=lambda method, payload: events.append((method, payload)),
+            approval_mode="prompt_user",
+        )
+        for mode, decision in (("approve_all", "accept"), ("deny_all", "decline")):
+            instance.approval_mode = mode
+            instance.save(update_fields=["approval_mode"])
+            self.assertEqual(handler("mcpServer/elicitation/request", params), {
+                "action": decision, "content": {} if decision == "accept" else None, "_meta": None,
+            })
+        self.assertFalse(ApprovalRequest.objects.exists())
+        self.assertEqual(events, [])
+
+        for mode in ("prompt_user", "auto_review"):
+            instance.approval_mode = mode
+            instance.save(update_fields=["approval_mode"])
+            for decision in ("accept", "decline", "cancel"):
+                def answer(request_id: int, decision: str = decision, **_kwargs: Any) -> str:
+                    row = ApprovalRequest.objects.get(pk=request_id)
+                    self.assertEqual(row.params, params)
+                    self.assertEqual(row.method, "mcpServer/elicitation/request")
+                    url = reverse("resolve_approval", kwargs={"approval_id": request_id})
+                    self.assertEqual(self.client.post(url, {"decision": decision}).status_code, 200)
+                    self.assertEqual(self.client.post(url, {"decision": "accept"}).status_code, 409)
+                    row.refresh_from_db()
+                    return row.decision
+
+                with patch("hitch.main.management.commands.codex_worker._wait_for_decision", side_effect=answer):
+                    self.assertEqual(handler("mcpServer/elicitation/request", params), {
+                        "action": decision, "content": {} if decision == "accept" else None, "_meta": None,
+                    })
+                self.assertEqual([event[0] for event in events[-2:]], ["approval/requested", "approval/resolved"])
+
+    def test_mcp_data_and_auth_elicitations_are_not_automatically_approved(self) -> None:
+        handler = _make_approval_handler(
+            instance=self._make_instance(), write_event=lambda _method, _payload: None,
+            approval_mode="approve_all",
+        )
+        for params in (None, {"mode": "url", "url": "https://example.com/auth"}, {
+            "mode": "form", "_meta": {"codex_approval_kind": "mcp_tool_call"},
+            "requestedSchema": {"type": "object", "properties": {"password": {"type": "string"}}},
+        }, {"mode": "form", "requestedSchema": {"type": "object", "properties": {}}}):
+            self.assertEqual(handler("mcpServer/elicitation/request", params), {
+                "action": "decline", "content": None, "_meta": None,
+            })
+        self.assertFalse(ApprovalRequest.objects.exists())
+
+    def test_mcp_confirmation_cancellation_resolves_pending_row(self) -> None:
+        instance = self._make_instance()
+        handler = _make_approval_handler(
+            instance=instance, write_event=lambda _method, _payload: None,
+            approval_mode="prompt_user", question_cancelled=lambda: True,
+        )
+        self.assertEqual(handler("mcpServer/elicitation/request", {
+            "mode": "form", "_meta": {"codex_approval_kind": "mcp_tool_call"},
+            "requestedSchema": {"type": "object", "properties": {}},
+        }), {"action": "decline", "content": None, "_meta": None})
+        self.assertEqual(ApprovalRequest.objects.get(instance=instance).decision, "decline")
 
     def test_approve_all_handler_rubber_stamps_known_methods(self) -> None:
         """``approve_all`` must keep its "approve everything" promise even

@@ -1174,10 +1174,16 @@
             const APPROVAL_LABELS = {
                 "item/commandExecution/requestApproval": "Run command?",
                 "item/fileChange/requestApproval": "Apply file change?",
+                "mcpServer/elicitation/request": "Allow tool call?",
             };
 
             function approvalDetail(method, params) {
                 const item = (params && params.item) || params || {};
+                if (method === "mcpServer/elicitation/request") {
+                    const meta = item._meta || {};
+                    return [item.serverName, meta.tool_title || meta.tool_name, item.message,
+                        JSON.stringify(meta.tool_params || {}, null, 2)].filter(Boolean).join("\n");
+                }
                 if (method === "item/commandExecution/requestApproval") {
                     return item.command || JSON.stringify(item, null, 2);
                 }

@@ -179,7 +179,7 @@ class QuestionTransportTests(SimpleTestCase):
     def test_tools_and_questions_leave_progress_and_rpc_responses_live(self) -> None:
         with question_transport() as (client, incoming, outgoing, notifications, responses):
             entered: queue.Queue[str] = queue.Queue()
-            answers = {"1": threading.Event(), "2": threading.Event()}
+            answers = {key: threading.Event() for key in ("1", "2", "3")}
 
             def handler(method: str, params: Any) -> dict[str, Any]:
                 key = params["itemId"]
@@ -192,7 +192,10 @@ class QuestionTransportTests(SimpleTestCase):
             client._approval_handler = handler
             incoming.put(question(1, dynamic_tool=True))
             incoming.put(question(2, blocking=True))
-            self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
+            elicitation = question(3)
+            elicitation["method"] = "mcpServer/elicitation/request"
+            incoming.put(elicitation)
+            self.assertEqual({entered.get(timeout=2) for _ in range(3)}, {"1", "2", "3"})
             incoming.put({"method": "item/agentMessage/delta", "params": {
                 "threadId": "thread", "turnId": "turn", "itemId": "message", "delta": "Still working",
             }})
@@ -200,16 +203,16 @@ class QuestionTransportTests(SimpleTestCase):
             incoming.put({"id": "steer", "result": {"turnId": "turn"}})
             self.assertEqual(responses.get(timeout=2)["id"], "steer")
             self.assertTrue(outgoing.empty())
-            for key in ("2", "1"):
+            for key in ("3", "2", "1"):
                 answers[key].set()
                 self.assertEqual(outgoing.get(timeout=2), {
                     "id": int(key), "result": {"answers": {"choice": {"answers": [key]}}},
                 })
 
     def test_server_resolution_and_turn_end_cancel_only_matching_requests(self) -> None:
-        for dynamic_tool in (False, True):
+        for method in ("item/tool/requestUserInput", "item/tool/call", "mcpServer/elicitation/request"):
             with (
-                self.subTest(dynamic_tool=dynamic_tool),
+                self.subTest(method=method),
                 question_transport() as (client, incoming, outgoing, notifications, _responses),
             ):
                 entered: queue.Queue[str] = queue.Queue()
@@ -226,8 +229,9 @@ class QuestionTransportTests(SimpleTestCase):
                     return {"answers": {}}
 
                 client._approval_handler = handler
-                incoming.put(question(1, dynamic_tool=dynamic_tool))
-                incoming.put(question(2, turn_id="other-turn", dynamic_tool=dynamic_tool))
+                for request in (question(1), question(2, turn_id="other-turn")):
+                    request["method"] = method
+                    incoming.put(request)
                 self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
                 incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "other", "requestId": 1}})
                 notifications.get(timeout=2)
