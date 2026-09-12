@@ -336,6 +336,7 @@ def spawn_turn(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    resume_goal: bool = False,
     developer_instructions: str | None = None,
     hitch_extra_instructions: str | None = None,
     new_thread: bool = False,
@@ -401,6 +402,7 @@ def spawn_turn(
         enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
+        resume_goal=resume_goal,
         purpose=purpose,
         agent_kind=agent_kind,
         user_message_index=user_message_index,
@@ -1679,6 +1681,7 @@ def _spawn_worker(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    resume_goal: bool = False,
     purpose: str = CodexInstance.PURPOSE_USER,
     agent_kind: str = "",
     user_message_index: int | None = None,
@@ -1753,6 +1756,8 @@ def _spawn_worker(
             launch_kwargs["plan_mode"] = plan_mode
         if collaboration_mode:
             launch_kwargs["collaboration_mode"] = collaboration_mode
+        if resume_goal:
+            launch_kwargs["resume_goal"] = resume_goal
         launch = _launch_worker_process(**launch_kwargs)
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
@@ -1804,6 +1809,7 @@ def _launch_worker_process(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    resume_goal: bool = False,
 ) -> WorkerLaunch:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     env = os.environ.copy()
@@ -1822,6 +1828,7 @@ def _launch_worker_process(
         enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
+        resume_goal=resume_goal,
     )
 
     requested_isolation = _worker_isolation()
@@ -2115,6 +2122,7 @@ def _worker_argv(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    resume_goal: bool = False,
 ) -> list[str]:
     manage_py = _our_manage_py()
     argv = [
@@ -2143,6 +2151,8 @@ def _worker_argv(
         argv.extend(["--collaboration-mode", collaboration_mode])
     if plan_mode:
         argv.append("--plan-mode")
+    if resume_goal:
+        argv.append("--resume-goal")
     return argv
 
 

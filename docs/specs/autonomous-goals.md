@@ -16,5 +16,5 @@ contribute live waiting badges, health backlogs, or worktree ownership; active
 workers and visible/proposed sessions retain their normal cleanup protections.
 
 Ordinary coding-session proposals remain supported by the
-[Inbox spec](inbox.md). Codex's own in-session goal events remain part of the
-[session transcript](session-transcript.md).
+[Inbox spec](inbox.md). Codex's own in-session goals and controls remain supported by the
+[Session Goals spec](session-goals.md).

@@ -137,6 +137,8 @@
                     menuButton.focus();
                 });
             }
+            {% include "_session_goal_script.html" %}
+
             if (editPanel && editButton) {
                 editButton.addEventListener("click", () => {
                     closeMenu();
@@ -776,8 +778,6 @@
             const streamSource = document.querySelector("[data-stream-url]");
             const indicator = document.querySelector("[data-live-status]");
             const liveWork = document.querySelector("[data-live-work]");
-            const liveGoal = document.querySelector("[data-live-goal]");
-            const liveGoalText = document.querySelector("[data-live-goal-text]");
             const turnNotice = document.querySelector("[data-turn-notice]");
             const noticeTitle = document.querySelector("[data-turn-notice-title]");
             const noticeBody = document.querySelector("[data-turn-notice-body]");
@@ -1163,7 +1163,9 @@
                     if (pending[0]) pending[0].node.scrollIntoView({ block: "center", behavior: "smooth" });
                 };
             }
-            let latestGoalOrder = [0, 0];
+            let latestGoalOrder = [
+                (JSON.parse(document.getElementById("session-goal-data").textContent)?.updatedAt || 0) * 1000000, 0,
+            ];
             let streamFallbackOrder = 0;
             let latestTaskPlanOrder = [
                 taskPlan ? Number(taskPlan.dataset.recordedAt) || 0 : 0,
@@ -1848,13 +1850,6 @@
                 return null;
             }
 
-            function setGoal(objective) {
-                if (!liveGoal || !liveGoalText) return;
-                const text = typeof objective === "string" ? objective.trim() : "";
-                liveGoalText.textContent = text;
-                liveGoal.hidden = !text;
-            }
-
             function eventOrder(event, fallbackOrder) {
                 return [
                     Number.isSafeInteger(event.recordedAt) ? event.recordedAt : 0,
@@ -1890,12 +1885,12 @@
             function handleGoalUpdated(payload, order) {
                 if (!applyGoalOrder(order)) return;
                 const goal = (payload && payload.goal) || {};
-                setGoal(goal.objective || "");
+                document.dispatchEvent(new CustomEvent("hitch:goal-updated", { detail: goal }));
             }
 
             function handleGoalCleared(order) {
                 if (!applyGoalOrder(order)) return;
-                setGoal("");
+                document.dispatchEvent(new CustomEvent("hitch:goal-updated", { detail: null }));
             }
 
             function handlePlanUpdated(payload, order) {

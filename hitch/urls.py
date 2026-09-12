@@ -12,6 +12,7 @@ from hitch.main.views import (
     proposals,
     session_actions,
     session_detail,
+    session_goals,
     session_list,
 )
 from hitch.main.views import settings as settings_views
@@ -58,6 +59,7 @@ urlpatterns = [
         name="session_history",
     ),
     path("sessions/<str:session_id>/", session_detail.session, name="session"),
+    path("sessions/<str:session_id>/goal/", session_goals.update_goal, name="set_session_goal"),
     path("sessions/<str:session_id>/agents/", session_detail.session_agents, name="session_agents"),
     path(
         "sessions/<str:session_id>/intermediate/<int:entry_index>/",

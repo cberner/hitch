@@ -69,7 +69,7 @@ from hitch.main.models import (
     SessionMetadata,
     UserInputRequest,
 )
-from hitch.main.runtime import codex_events, codex_pool, reconciliation, streaming, systemd_isolation
+from hitch.main.runtime import codex_events, codex_pool, reconciliation, session_goals, streaming, systemd_isolation
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -4887,10 +4887,27 @@ class CodexWorkerCommandTests(TestCase):
             lease.home = home
             mock_acquire.return_value = lease
             instance = self._make_instance(Path(raw))
+            preserve = session_goals.preserve_worker_goal
+            preserved_while_reserved = False
+
+            def preserve_while_reserved(thread_id: str, source: str) -> None:
+                nonlocal preserved_while_reserved
+                self.assertFalse(session_goals.sqlite_home(thread_id).exists())
+                with self.assertRaisesMessage(ValueError, "Another worker"):
+                    session_goals.acquire_home(thread_id)
+                preserve(thread_id, source)
+                preserved_while_reserved = True
+
             # TESTING=False takes the real lease path (the app-server is still
             # mocked, and disk cleanup is patched out).
-            with override_settings(TESTING=False):
+            with (
+                override_settings(TESTING=False, CODEX_SQLITE_HOME_BASE=Path(raw)),
+                patch.object(session_goals, "preserve_worker_goal", side_effect=preserve_while_reserved) as saved,
+            ):
                 call_command("codex_worker", "--instance-id", str(instance.pk))
+                saved.assert_called_once_with(instance.thread_id, str(home))
+                self.assertTrue(preserved_while_reserved)
+                session_goals.acquire_home(instance.thread_id).release()
 
         mock_acquire.assert_called_once_with(instance.pk)
         lease.release.assert_called_once_with()
@@ -4910,8 +4927,7 @@ class CodexWorkerCommandTests(TestCase):
         _mock_notify: MagicMock,
         _mock_cleanup: MagicMock,
     ) -> None:
-        # A broken state-dir filesystem degrades to $CODEX_HOME, not the web home
-        # under the same (just-failed) base.
+        # A pooled-home lease failure degrades to $CODEX_HOME, not the web home.
         mock_acquire.side_effect = OSError("read-only file system")
         mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
         with tempfile.TemporaryDirectory() as raw:

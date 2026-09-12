@@ -20,7 +20,11 @@ defaults. Service tiers are outside this feature's scope.
 - `MODEL-live`: Forward changes to the owning worker's current turn through
   `turn/settings/update`. Never resume a second writer to change live settings.
   Require Codex's applied acknowledgement before reporting a live update.
-  Already captured model calls and existing subagents retain their settings.
+  Between native goal continuation turns, leave the pair pending without blocking
+  goal controls. The worker's control loop applies the saved pair for each new
+  continuation before processing live model changes, so an older selection
+  cannot overwrite an acknowledged change. Already captured model calls and
+  existing subagents retain their settings.
 - `MODEL-pending`: If live updates are unsupported, rejected, unacknowledged, or
   race turn completion, retain the selection for the next turn and explain
   that the running turn has not confirmed it. Display the active settings

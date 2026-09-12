@@ -79,7 +79,7 @@ from openai_codex.models import JsonObject, Notification
 from pydantic import BaseModel
 
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
-from hitch.main.runtime import disk_cleanup
+from hitch.main.runtime import disk_cleanup, session_goals
 from hitch.main.runtime.app_server_pool import open_codex_resumed
 from hitch.main.runtime.codex_events import (
     GOAL_METHODS,
@@ -174,6 +174,7 @@ _CANCELLATION_POLL_INTERVAL = 0.1
 # single-attribute reads/writes atomic, and the signal handler is intentionally
 # minimal (it must not make a blocking JSON-RPC call itself).
 _cancel_requested = False
+_goal_pause_requested = False
 
 # Set by the active turn so the SIGUSR1 handler can wake the control-file
 # forwarder without doing blocking JSON-RPC work from inside the handler.
@@ -257,9 +258,12 @@ class Command(BaseCommand):
         parser.add_argument("--enable-memories", action="store_true")
         parser.add_argument("--collaboration-mode", type=str, default=None)
         parser.add_argument("--plan-mode", action="store_true")
+        parser.add_argument("--resume-goal", action="store_true")
 
     @override
     def handle(self, *args: Any, **options: Any) -> None:
+        global _goal_pause_requested
+        _goal_pause_requested = False
         instance_id: int = options["instance_id"]
         reasoning_effort: str | None = options.get("reasoning_effort")
         model: str | None = options.get("model")
@@ -276,18 +280,9 @@ class Command(BaseCommand):
         # Skipped under tests, where the app-server is mocked and a real home
         # would only create stray state directories.
         sqlite_lease: WorkerSqliteHome | None = None
+        session_lease: WorkerSqliteHome | None = None
         sqlite_home: str | None = None
-        if not getattr(settings, "TESTING", False):
-            try:
-                sqlite_lease = acquire_worker_sqlite_home(instance_id)
-                sqlite_home = str(sqlite_lease.home)
-            except OSError:
-                # A broken state-dir filesystem should degrade to Codex's default
-                # $CODEX_HOME, not the web home (which lives under the same base
-                # that just failed). Pass it explicitly so it overrides any
-                # CODEX_SQLITE_HOME the deployment exported.
-                _worker_log(instance_id, "failed to lease sqlite_home; using CODEX_HOME")
-                sqlite_home = str(codex_home_dir())
+        goal_home = session_goals.sqlite_home(instance.thread_id)
 
         # Install the signal handlers before flipping to RUNNING so a Stop or
         # Steer request that lands the instant we transition can still be
@@ -317,6 +312,21 @@ class Command(BaseCommand):
         )
 
         try:
+            if not getattr(settings, "TESTING", False):
+                # Home selection must wait for the previous worker's goal preservation.
+                session_lease = session_goals.acquire_home(instance.thread_id, wait_seconds=10)
+                if goal_home.is_dir():
+                    sqlite_lease = session_lease
+                    sqlite_home = str(sqlite_lease.home)
+                else:
+                    try:
+                        sqlite_lease = acquire_worker_sqlite_home(instance_id)
+                        sqlite_home = str(sqlite_lease.home)
+                    except OSError:
+                        # Only pooled homes may fall back; a goal lease failure
+                        # must not start a worker against stale goal accounting.
+                        _worker_log(instance_id, "failed to lease sqlite_home; using CODEX_HOME")
+                        sqlite_home = str(codex_home_dir())
             with open(instance.events_path, "a", buffering=1, encoding="utf-8") as events_file:
                 final_turn = _run_turn(
                     instance=instance,
@@ -335,6 +345,7 @@ class Command(BaseCommand):
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
                     sqlite_home=sqlite_home,
+                    resume_goal=options["resume_goal"],
                 )
         except BaseException as exc:  # noqa: BLE001 - record any failure, then re-raise
             _worker_log(instance_id, f"failed with {type(exc).__name__}: {exc!r}")
@@ -355,13 +366,22 @@ class Command(BaseCommand):
             # the list ordered by real activity. Best-effort: a failed bump must
             # not fail an already-finished turn.
             _record_session_activity(instance)
+            if sqlite_home is not None:
+                try:
+                    session_goals.preserve_worker_goal(instance.thread_id, sqlite_home)
+                except Exception:
+                    logger.exception("failed to preserve native goal for %s", instance.thread_id)
             # _run_turn has closed the app-server (and its log-DB handle) by the
             # time it returns or raises, so pruning only unlinks a released file;
             # releasing then frees the leased slot (or removes an overflow home).
             if sqlite_lease is not None:
                 with contextlib.suppress(Exception):
                     prune_worker_logs_db(sqlite_lease.home)
+                    if sqlite_lease.home == goal_home:
+                        session_goals.compact_cleared_home(instance.thread_id)
                 sqlite_lease.release()
+            if session_lease is not None and session_lease is not sqlite_lease:
+                session_lease.release()
 
         instance.ended_at = timezone.now()
         instance.codex_error_info = None
@@ -371,7 +391,10 @@ class Command(BaseCommand):
         if final_turn is None:
             instance.status = CodexInstance.STATUS_FAILED
             instance.error = "stream ended without a turn/completed notification"
-        elif final_turn.status == TurnStatus.completed:
+        elif final_turn.status == TurnStatus.completed or (
+            final_turn.status == TurnStatus.interrupted
+            and _goal_pause_requested and not _cancel_requested
+        ):
             instance.status = CodexInstance.STATUS_COMPLETED
         else:
             instance.status = CodexInstance.STATUS_FAILED
@@ -387,7 +410,9 @@ class Command(BaseCommand):
             f"finished status={instance.status} error={instance.error!r}",
         )
         _commit_terminal_status(instance)
-        if instance.status == CodexInstance.STATUS_FAILED:
+        if instance.status == CodexInstance.STATUS_FAILED or (
+            final_turn is not None and final_turn.status == TurnStatus.interrupted
+        ):
             resolve_dangling_requests_for_instance(instance.pk)
         _update_completed_turn_pr(instance)
         cleanup_requested_input_images_for(instance)
@@ -470,6 +495,7 @@ def _run_turn(
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     sqlite_home: str | None = None,
+    resume_goal: bool = False,
 ) -> Turn | None:
     from hitch.main.sessions.model_settings import session_model_override
 
@@ -553,6 +579,22 @@ def _run_turn(
         resume_kwargs["developer_instructions"] = combined_developer_instructions(
             instance.developer_instructions, instance.hitch_extra_instructions,
         )
+    if resume_goal:
+        goal_config: dict[str, Any] = {"features.goals": True}
+        if model:
+            resume_kwargs["model"] = model
+        if normalized_effort:
+            goal_config["model_reasoning_effort"] = normalized_effort
+        if sandbox_policy:
+            goal_config["sandbox_mode"] = {
+                "readOnly": "read-only", "workspaceWrite": "workspace-write",
+                "dangerFullAccess": "danger-full-access",
+            }[sandbox_policy]
+        if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
+            goal_config.update(approval_policy="on-request", approvals_reviewer="user")
+        elif (mode := _build_approval_mode(approval_mode)) is not None:
+            resume_kwargs["approval_mode"] = mode
+        resume_kwargs["config"] = goal_config
     def _configure(codex: CodexApi) -> None:
         # Runs once per app-server open attempt (``open_codex_resumed`` retries
         # the whole open+configure+resume when the resume races the CODEX_HOME
@@ -580,6 +622,15 @@ def _run_turn(
                 if isinstance(codex._client, QuestionClient) else lambda: False
             ),
         )
+        goal = None
+        if not resume_goal:
+            goal = cast(dict[str, Any], codex._client._request_raw(
+                "thread/goal/get", {"threadId": instance.thread_id},
+            )).get("goal")
+        if resume_goal or (goal and goal.get("status") == "active"):
+            # Loading an active goal starts work. Activation must wait for an
+            # explicit goal resume with its continuation handle subscribed.
+            codex._client.pause_goal(instance.thread_id)
         goal_forwarder = _start_goal_event_forwarder(
             codex._client,
             thread_id=instance.thread_id,
@@ -594,7 +645,7 @@ def _run_turn(
             resume_kwargs=resume_kwargs,
             configure=_configure,
         ) as (codex, thread):
-            client_message_id = f"hitch-instance-{instance.pk}"
+            client_message_id = None if resume_goal else f"hitch-instance-{instance.pk}"
             submission = (
                 notification_sequencer.begin_submission(
                     instance.thread_id,
@@ -604,21 +655,24 @@ def _run_turn(
                 else None
             )
             try:
-                turn = _start_turn(
-                    codex,
-                    thread,
-                    prompt=prompt,
-                    input_image_paths=_instance_input_image_paths(instance),
-                    model=model,
-                    effort=effort,
-                    sandbox_policy=policy,
-                    approval_mode=approval_mode,
-                    collaboration_mode=collaboration_mode,
-                    plan_mode=plan_mode,
-                    client_user_message_id=client_message_id,
-                    submission=submission,
-                    notification_sequencer=notification_sequencer,
-                )
+                if resume_goal:
+                    turn: TurnHandle = session_goals.GoalTurn(codex._client, instance.thread_id)
+                else:
+                    turn = _start_turn(
+                        codex,
+                        thread,
+                        prompt=prompt,
+                        input_image_paths=_instance_input_image_paths(instance),
+                        model=model,
+                        effort=effort,
+                        sandbox_policy=policy,
+                        approval_mode=approval_mode,
+                        collaboration_mode=collaboration_mode,
+                        plan_mode=plan_mode,
+                        client_user_message_id=client_message_id,
+                        submission=submission,
+                        notification_sequencer=notification_sequencer,
+                    )
                 if submission is not None:
                     assert notification_sequencer is not None
                     returned_turn_id = turn.id
@@ -665,7 +719,7 @@ def _run_turn(
                     payload = event.payload
                     if (
                         isinstance(payload, TurnCompletedNotification)
-                        and payload.turn.id == turn.id
+                        and (isinstance(turn, session_goals.GoalTurn) or payload.turn.id == turn.id)
                     ):
                         final_turn = payload.turn
                     if _cancel_requested:
@@ -862,14 +916,33 @@ def _forward_steer_requests(
     STARTING. The final drain catches requests appended after the last stream
     event but before the worker records a terminal row status.
     """
+    from hitch.main.sessions.model_settings import session_model_override
+
     control_offset = 0
+    model_turn_id: str | None = None
+    pending_steers: list[dict[str, Any]] = []
     while not stop.is_set():
+        if isinstance(turn, session_goals.GoalTurn):
+            turn_id = turn.state.current_turn()
+            if turn_id is not None and turn_id != model_turn_id:
+                model_turn_id = turn_id
+                # Keep continuation settings and acknowledged user changes ordered.
+                if selected := session_model_override(instance.thread_id):
+                    _apply_turn_model_settings(turn, instance, {"model": selected[0], "effort": selected[1]})
         control_offset = _drain_steer_requests(
             turn,
             instance=instance,
             control_path=control_path,
             control_offset=control_offset,
+            pending_steers=pending_steers,
         )
+        if (
+            not isinstance(turn, session_goals.GoalTurn)
+            or turn.state.current_turn() is not None or turn.state.is_finished()
+        ):
+            for request in pending_steers:
+                _deliver_steer_request(turn, instance, control_path, request)
+            pending_steers.clear()
         wakeup.wait(_STEER_CONTROL_POLL_INTERVAL)
         wakeup.clear()
     _drain_steer_requests(
@@ -877,7 +950,10 @@ def _forward_steer_requests(
         instance=instance,
         control_path=control_path,
         control_offset=control_offset,
+        pending_steers=pending_steers,
     )
+    for request in pending_steers:
+        _deliver_steer_request(turn, instance, control_path, request)
 
 
 def _drain_steer_requests(
@@ -886,12 +962,14 @@ def _drain_steer_requests(
     instance: CodexInstance,
     control_path: Path,
     control_offset: int,
+    pending_steers: list[dict[str, Any]] | None = None,
 ) -> int:
     """Read new complete control-file lines and apply steer requests.
 
     The control file is append-only JSONL. Incomplete trailing bytes are left
     for the next drain so a concurrent writer cannot produce a corrupt request.
     """
+    global _goal_pause_requested
     try:
         with control_path.open("rb") as fh:
             fh.seek(control_offset)
@@ -915,6 +993,32 @@ def _drain_steer_requests(
             continue
         if not isinstance(request, dict):
             continue
+        if request.get("op") == "goal":
+            reply: dict[str, Any] = {"op": "goal_ack", "id": request.get("id")}
+            try:
+                if time.time() >= request.get("expiresAt", 0):
+                    raise ValueError("The goal request expired. Try again.")
+                change = request["change"]
+                goal = None
+                if change["action"] != "clear":
+                    goal = cast(dict[str, Any], turn._client._request_raw(
+                        "thread/goal/get", {"threadId": turn.thread_id},
+                    )).get("goal")
+                    if not goal:
+                        raise ValueError("This session no longer has a goal. Refresh the page.")
+                    if goal.get("status") == "complete":
+                        raise ValueError("This goal is complete. Clear it before setting a new goal.")
+                reply["goal"] = session_goals.apply_goal(turn._client, turn.thread_id, change)
+                if change["action"] == "pause" and (
+                    isinstance(turn, session_goals.GoalTurn) or goal and goal.get("status") == "active"
+                ):
+                    _goal_pause_requested = True
+                    turn.interrupt()
+            except Exception as exc:
+                reply["error"] = str(exc)
+            with control_path.open("ab") as fh:
+                fh.write((json.dumps(reply) + "\n").encode())
+            continue
         if request.get("op") == "model_settings":
             applied = _apply_turn_model_settings(turn, instance, request)
             _append_steer_ack(
@@ -924,14 +1028,23 @@ def _drain_steer_requests(
             continue
         if request.get("op") != "steer":
             continue
-        text = request.get("input")
-        input_image_paths = _control_input_image_paths(request.get("inputImagePaths"))
-        if isinstance(text, str) and (text.strip() or input_image_paths):
-            sent = _try_steer(turn, text, input_image_paths=input_image_paths)
-            if not sent:
-                discard_input_attachment_paths(instance, input_image_paths)
-            _append_steer_ack(control_path, request.get("id"), delivered=sent)
+        if pending_steers is not None:
+            pending_steers.append(request)
+        else:
+            _deliver_steer_request(turn, instance, control_path, request)
     return control_offset + len(complete)
+
+
+def _deliver_steer_request(
+    turn: TurnHandle, instance: CodexInstance, control_path: Path, request: dict[str, Any],
+) -> None:
+    text = request.get("input")
+    input_image_paths = _control_input_image_paths(request.get("inputImagePaths"))
+    if isinstance(text, str) and (text.strip() or input_image_paths):
+        sent = _try_steer(turn, text, input_image_paths=input_image_paths)
+        if not sent:
+            discard_input_attachment_paths(instance, input_image_paths)
+        _append_steer_ack(control_path, request.get("id"), delivered=sent)
 
 
 def _apply_turn_model_settings(
@@ -942,8 +1055,12 @@ def _apply_turn_model_settings(
     if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
         return False
     try:
+        turn_id = turn.state.current_turn() if isinstance(turn, session_goals.GoalTurn) else turn.id
+        if turn_id is None:
+            return False
         response = turn._client._request_raw("turn/settings/update", {
-            "threadId": turn.thread_id, "turnId": turn.id,
+            "threadId": turn.thread_id,
+            "turnId": turn_id,
             "model": model, "effort": effort,
         })
         if not isinstance(response, dict) or response.get("status") != "applied":
