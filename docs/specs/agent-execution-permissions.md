@@ -74,7 +74,29 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 
 ### 4.4 User Escalation Flow
 
-- `PERM-escalation-triggers`: Hitch handles Codex command-execution and file-change approval requests.
+- `PERM-escalation-triggers`: Hitch handles Codex command-execution, file-change,
+  and MCP tool confirmation requests. MCP confirmations arrive through
+  `mcpServer/elicitation/request` as form requests tagged
+  `_meta.codex_approval_kind: mcp_tool_call` with an empty object schema.
+  They use the same live approval modes and durable interactive prompts,
+  displaying the server, tool, message, and arguments. Replies use MCP's
+  `action`, `content`, and `_meta` fields; acceptance applies to this call only
+  and never requests session or persistent permission. Automatic MCP outcomes
+  persist resolved approval rows and emit resolved events with enough context
+  to render audit entries without briefly showing actionable controls.
+  Session details also render the latest 100 saved MCP decisions independently
+  of worker activity and event-file availability, including after a reload.
+  Saved decisions seed the live approval state before replay, so historical
+  request/resolution events cannot duplicate them or restore their controls.
+  Pending MCP confirmations for active workers load separately from durable
+  rows, without the history limit or dependence on SSE replay. Stream replay
+  does not duplicate these controls. HTTP success settles them even while
+  disconnected; a conflicting answer never displays the attempted choice as
+  the recorded decision.
+  Data-entry and URL/auth
+  elicitations are unsupported and receive an explicit decline with a diagnostic.
+  Waiting leaves the transport free for progress, live settings, and cancellation;
+  resolved server requests and completed turns close matching pending approvals.
 - `PERM-pending-request`: Interactive escalations create durable pending requests and emit session events.
 - `PERM-pending-replay`: Session views render unresolved pending requests from durable state on load; live events are only notifications.
 - `PERM-prompt-detail`: Prompts show enough command/file-change, session, project, and workspace/target context for an informed decision.

@@ -525,7 +525,7 @@ class SystemAgentRun(models.Model):
 
 
 class ApprovalRequest(models.Model):
-    """One row per ``item/{commandExecution,fileChange}/requestApproval``.
+    """Interactive approvals and automatic MCP tool decision audit records.
 
     The worker subprocess receives the JSON-RPC request on its SDK reader
     thread, creates this row in the ``pending`` state, and then blocks

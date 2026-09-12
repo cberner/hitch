@@ -1150,6 +1150,12 @@
             // ``approval/resolved`` event can find and finalize the matching
             // node without re-rendering the whole turn.
             const approvals = new Map();
+            for (const node of document.querySelectorAll("[data-saved-approval-id]")) {
+                const id = Number(node.dataset.savedApprovalId);
+                if (Number.isSafeInteger(id) && id > 0) {
+                    approvals.set(id, {node, box: node, actions: null, resolved: true});
+                }
+            }
             const inputRequests = new Map();
             const questionItemIds = new Set();
             function removeHistoricalQuestionMessages(root = document) {
@@ -1182,10 +1188,16 @@
             const APPROVAL_LABELS = {
                 "item/commandExecution/requestApproval": "Run command?",
                 "item/fileChange/requestApproval": "Apply file change?",
+                "mcpServer/elicitation/request": "Allow tool call?",
             };
 
             function approvalDetail(method, params) {
                 const item = (params && params.item) || params || {};
+                if (method === "mcpServer/elicitation/request") {
+                    const meta = item._meta || {};
+                    return [item.serverName, meta.tool_title || meta.tool_name, item.message,
+                        JSON.stringify(meta.tool_params || {}, null, 2)].filter(Boolean).join("\n");
+                }
                 if (method === "item/commandExecution/requestApproval") {
                     return item.command || JSON.stringify(item, null, 2);
                 }
@@ -1930,7 +1942,7 @@
                 detail.className = "approval-detail";
                 detail.textContent = approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
-                if (READ_ONLY) {
+                if (READ_ONLY || payload.automatic) {
                     wrap.appendChild(box);
                     insertBeforeLive(wrap);
                     approvals.set(id, { node: wrap, box, actions: null, resolved: false });
@@ -2160,17 +2172,17 @@
                 // contain a ``0`` doesn't accidentally substitute there.
                 const url = entry.url || APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
                 window.hitch.postForm(url, body).then((response) => {
-                    // ``fetch`` resolves on HTTP errors (403 CSRF, 409
-                    // race-with-another-tab), so a non-2xx response would
-                    // otherwise leave the buttons permanently disabled
-                    // with no retry path. The 409 case is intentional —
-                    // the row is already decided, and the matching
-                    // ``approval/resolved`` SSE frame will fold the UI;
-                    // for everything else, re-enable so the user can try
-                    // again.
+                    // HTTP acknowledgement must settle controls even when SSE
+                    // is disconnected. A conflicting decision belongs to the
+                    // other writer; don't display our attempted choice as fact.
                     if (response.ok && entry.reloadOnResolve) {
                         window.location.reload();
                         return;
+                    }
+                    if (response.ok) {
+                        handleApprovalResolved({id, decision: decisionPayload || decision});
+                    } else if (response.status === 409) {
+                        handleApprovalResolved({id, message: "Already resolved. Reload to see the recorded decision."});
                     }
                     if (!response.ok && response.status !== 409) reenable();
                 }).catch(() => {
@@ -2205,6 +2217,7 @@
 
             function handleApprovalResolved(payload) {
                 const id = payload.id;
+                if (!approvals.has(id) && payload.automatic) handleApprovalRequested(payload);
                 const entry = approvals.get(id);
                 if (!entry) return;
                 if (entry.resolved) return;
@@ -2213,7 +2226,7 @@
                 if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
-                note.textContent = "Decision: " + approvalDecisionText(payload.decision);
+                note.textContent = payload.message || "Decision: " + approvalDecisionText(payload.decision);
                 entry.box.appendChild(note);
                 followRenderedContent();
             }
@@ -2347,6 +2360,12 @@
                 source.addEventListener("error", markConnectionProblem);
             }
 
+            const savedApprovals = document.getElementById("pending-mcp-approvals");
+            if (savedApprovals) {
+                for (const approval of JSON.parse(savedApprovals.textContent || "[]") || []) {
+                    handleApprovalRequested(approval);
+                }
+            }
             connect();
         })();
     </script>

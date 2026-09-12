@@ -156,6 +156,21 @@
             <div data-agent-entries></div>
         </section>
         <div class="session-body" data-main-agent-transcript>
+        {{ pending_mcp_approvals|json_script:"pending-mcp-approvals" }}
+        {% if mcp_approval_history %}
+        <details class="system-prompt" data-tool-approval-history>
+            <summary>Recent tool approval history</summary>
+            <p>Up to 100 most recent decisions, newest first.</p>
+            {% for approval in mcp_approval_history %}
+            <div class="approval resolved" data-saved-approval-id="{{ approval.id }}">
+                <div class="approval-header">{{ approval.server }}{% if approval.tool %} · {{ approval.tool }}{% endif %}</div>
+                <p>{{ approval.message }}</p>
+                <pre class="approval-detail">{{ approval.arguments }}</pre>
+                <div class="approval-resolution">Decision: {{ approval.decision }} · {{ approval.decided_at }}</div>
+            </div>
+            {% endfor %}
+        </details>
+        {% endif %}
         {% if system_prompt or instruction_instance or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
         <section class="thread" data-thread id="history-start">
             {% if instruction_instance %}
