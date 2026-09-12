@@ -6635,6 +6635,24 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"item/completed", body)
         self.assertIn(b"Checking the implementation", body)
 
+    def test_warning_replay_keeps_item_starts_but_compacts_text(self) -> None:
+        for warning in ("error", "model/safetyBuffering/updated"):
+            with self.subTest(warning=warning), tempfile.TemporaryDirectory() as raw:
+                events_path = str(Path(raw) / "events.jsonl")
+                item = {"id": "reply", "type": "agentMessage", "text": "Done"}
+                events = [
+                    {"method": warning, "payload": {"turnId": "turn"}},
+                    {"method": "item/started", "payload": {"item": item}},
+                    {"method": "item/agentMessage/delta", "payload": {"itemId": "reply", "delta": "Done"}},
+                    {"method": "item/completed", "payload": {"item": item}},
+                ]
+                Path(events_path).write_text("".join(json.dumps(event) + "\n" for event in events))
+                instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
+                body = b"".join(streaming.stream_for_instance(instance))
+                self.assertLess(body.index(warning.encode()), body.index(b"item/started"))
+                self.assertLess(body.index(b"item/started"), body.index(b"item/completed"))
+                self.assertNotIn(b"item/agentMessage/delta", body)
+
     def test_initial_backlog_skips_only_method_output_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")

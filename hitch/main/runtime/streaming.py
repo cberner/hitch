@@ -236,6 +236,9 @@ def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
     """
     lines, trailing = _split_complete_lines(buffer)
     methods = [_event_line_method(line) for line in lines]
+    # Item starts distinguish new model work from background tool completions
+    # when restoring a transient notice. Keep that ordering on warning replays.
+    has_turn_notices = any(method in {"error", "model/safetyBuffering/updated"} for method in methods)
     events: list[dict[str, Any] | None] = [
         _decode_backlog_event_line(method, line)
         for method, line in zip(methods, lines, strict=True)
@@ -285,7 +288,7 @@ def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
             continue
         if method == "item/started":
             item_id = _event_item_id(payload)
-            if item_id in completed_item_ids:
+            if item_id in completed_item_ids and not has_turn_notices:
                 continue
         elif method in _COMPACTABLE_TEXT_DELTA_METHODS:
             item_id = _event_payload_item_id(payload)

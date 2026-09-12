@@ -175,14 +175,15 @@
             {% include "_settings_effort_script.html" %}
             const modelDialog = document.querySelector("[data-model-settings-dialog]");
             const modelForm = document.querySelector("[data-model-settings-form]");
-            const modelButton = document.querySelector("[data-model-settings-open]");
-            if (modelButton && modelDialog && modelForm) {
+            if (modelDialog && modelForm) {
                 const modelError = modelForm.querySelector("[data-model-settings-error]");
-                modelButton.addEventListener("click", () => {
-                    closeMenu();
-                    modelError.hidden = true;
-                    showDialog(modelDialog);
-                });
+                for (const button of document.querySelectorAll("[data-model-settings-open]")) {
+                    button.addEventListener("click", () => {
+                        closeMenu();
+                        modelError.hidden = true;
+                        showDialog(modelDialog);
+                    });
+                }
                 modelForm.querySelector("[data-model-settings-cancel]").addEventListener("click", () => hideDialog(modelDialog));
                 modelForm.addEventListener("submit", async (event) => {
                     event.preventDefault();
@@ -777,8 +778,63 @@
             const liveWork = document.querySelector("[data-live-work]");
             const liveGoal = document.querySelector("[data-live-goal]");
             const liveGoalText = document.querySelector("[data-live-goal-text]");
+            const turnNotice = document.querySelector("[data-turn-notice]");
+            const noticeTitle = document.querySelector("[data-turn-notice-title]");
+            const noticeBody = document.querySelector("[data-turn-notice-body]");
+            let noticeTurn = null;
             const streamUrl = streamSource && streamSource.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
+
+            function clearTurnNotice() {
+                turnNotice.hidden = true;
+                turnNotice.open = false;
+                noticeTitle.textContent = "";
+                noticeBody.textContent = "";
+                noticeTurn = null;
+            }
+
+            function showTurnNotice(kind, title, body, turnId) {
+                if (turnNotice.dataset.kind !== kind || noticeTurn !== turnId) turnNotice.open = false;
+                turnNotice.dataset.kind = kind;
+                // Repeated buffering updates should not repeatedly announce the same status.
+                if (noticeTitle.textContent !== title) noticeTitle.textContent = title;
+                noticeBody.textContent = body;
+                noticeTurn = turnId;
+                turnNotice.hidden = false;
+            }
+
+            function handleTurnNotice(method, payload) {
+                if (payload.threadId && payload.threadId !== turnNotice.dataset.threadId) return;
+                const turnId = payload.turnId || (payload.turn && payload.turn.id);
+                if (method === "error" && payload.willRetry === true) {
+                    const error = payload.error || {};
+                    showTurnNotice("retry", "Codex is retrying…", [
+                        "A temporary error interrupted this turn. Codex is retrying automatically.",
+                        error.message, error.additionalDetails,
+                    ].filter(Boolean).join("\n\n"), turnId);
+                } else if (method === "model/safetyBuffering/updated" && payload.showBufferingUi === true) {
+                    showTurnNotice("buffering", "Checking response…",
+                        "Codex is checking this response before releasing it.", turnId);
+                } else if (method === "turn/started") {
+                    clearTurnNotice();
+                } else if (noticeTurn === turnId) {
+                    // Tool output and heartbeats can continue while the model is stalled.
+                    // Completed messages also clear notices during compacted SSE replay.
+                    const item = payload.item || {};
+                    const retryResumed = turnNotice.dataset.kind === "retry" && (
+                        ["item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta"].includes(method) ||
+                        (["item/started", "item/completed"].includes(method) && ["reasoning", "plan"].includes(item.type))
+                    );
+                    const resumed = method === "item/agentMessage/delta" ||
+                        (method === "item/completed" && item.type === "agentMessage") ||
+                        (method === "item/started" && ["agentMessage", "commandExecution", "fileChange",
+                            "webSearch", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall",
+                            "imageView", "imageGeneration"].includes(item.type));
+                    if (resumed || retryResumed || method === "error" || method === "turn/completed" ||
+                        (method === "model/safetyBuffering/updated" && payload.showBufferingUi === false &&
+                            turnNotice.dataset.kind === "buffering")) clearTurnNotice();
+                }
+            }
 
             function timestampElement(seconds, className) {
                 if (typeof window.__hitchTimestampElement === "function") {
@@ -1021,7 +1077,7 @@
                         const page = documentFragment.querySelector("[data-history-page]");
                         if (!page) throw new Error("history response was invalid");
                         formatTimestamps(page);
-                        renderSessionMath(page);
+                        window.hitchMath?.render(page);
                         const nextUrl = page.dataset.nextUrl || "";
                         const entries = document.createDocumentFragment();
                         while (page.firstChild) entries.appendChild(page.firstChild);
@@ -1745,7 +1801,7 @@
                         const role = entry.node.querySelector(".role");
                         if (role) role.textContent = "Agent (thinking)";
                     }
-                    renderSessionMath(entry.message);
+                    window.hitchMath?.render(entry.message);
                     followRenderedContent();
                     return;
                 }
@@ -2184,6 +2240,7 @@
                     workingText = payload.statusText.trim();
                 }
                 setState(payload && payload.working ? "working" : "idle");
+                if (!payload || !payload.working) clearTurnNotice();
             }
 
             // Stream message router: maps each SSE method to its handler,
@@ -2221,6 +2278,7 @@
                     seenEvents.add(key);
                 }
                 const payload = parsed.payload || {};
+                handleTurnNotice(parsed.method, payload);
                 const order = eventOrder(parsed, streamFallbackOrder);
                 // Look up by own property only: method strings come straight
                 // off the wire, so an inherited name like "constructor" or
@@ -2232,6 +2290,7 @@
             }
 
             function handleEnd() {
+                clearTurnNotice();
                 streamEnded = true;
                 clearRetryTimer();
                 if (source) source.close();

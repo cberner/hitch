@@ -66,6 +66,22 @@ space used by repetitive reasoning, command, and web-search activity.
 - `ST-startup-failure`: A tracked session whose worker failed before creating
   readable history still displays its saved prompt and failure instead of
   returning a server error.
+- `ST-turn-notices`: The main agent's live work strip shows a compact,
+  expandable notice while Codex retries a model connection or checks a response
+  before releasing it. Repeated updates replace the current notice. Retries end
+  when model output resumes, including reasoning and plan generation. Response
+  checks end when a message or new tool call is released, or buffering explicitly
+  ends; reasoning and plan generation alone do not end a response check. Both
+  notices clear when the turn ends. Heartbeats and background command output do
+  not imply recovery. Replaying a worker log restores the current notice without
+  leaving recovered warnings.
+  These notices remain separate from Hitch's browser connection status and
+  are hidden while viewing a subagent.
+- `ST-turn-failures`: Terminal model-capacity, cybersecurity-policy, and model
+  connection failures use a clear title and next-step guidance, with the original
+  Codex message in expandable details. Other failures retain their original
+  message. Capacity failures offer the existing model-and-effort dialog on
+  writable sessions. Actions never resend a prompt or change the model automatically.
 - `ST-archive-missing-history`: A saved session without a rollout can be
   archived and restored in Hitch when Codex reports that its rollout is missing.
   Preserve its saved details and usage, and retain the local archive state
