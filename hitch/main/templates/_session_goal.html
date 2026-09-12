@@ -1,0 +1,25 @@
+<details class="live-goal" data-live-goal data-goal-url="{{ set_session_goal_url }}"
+         data-writable="{% if not read_only and not is_archived %}true{% else %}false{% endif %}"
+         data-running="{{ active_worker|yesno:'true,false' }}" {% if not session_goal %}hidden{% endif %}>
+    <summary>
+        <span class="live-goal-label">Goal</span>
+        <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
+        <span class="goal-status" data-goal-status></span>
+        <span class="goal-chevron" aria-hidden="true">⌃</span>
+    </summary>
+    <div class="goal-body">
+        <p class="goal-objective" data-goal-objective>{{ goal_objective }}</p>
+        <p class="goal-usage" data-goal-usage></p>
+        <progress data-goal-budget-progress aria-label="Goal token budget used" hidden></progress>
+        <p class="goal-hint" data-goal-hint></p>
+        {% if not read_only and not is_archived %}
+        <div class="goal-actions">
+            <button type="button" class="button secondary" data-goal-action="pause" hidden>Pause</button>
+            <button type="button" class="button" data-goal-action="resume" hidden>Resume</button>
+            <button type="button" class="button secondary" data-goal-edit>Edit budget</button>
+            <button type="button" class="button secondary" data-goal-action="clear">Clear</button>
+        </div>
+        {% endif %}
+        <p class="goal-error" data-goal-error role="alert" hidden></p>
+    </div>
+</details>

@@ -1,0 +1,181 @@
+const goalPanel = document.querySelector("[data-live-goal]");
+const goalDialog = document.querySelector("[data-goal-dialog]");
+const goalForm = document.querySelector("[data-goal-form]");
+let sessionGoal = JSON.parse(document.getElementById("session-goal-data").textContent);
+let goalBusy = false;
+let goalDialogAction = "start";
+let goalRunning = goalPanel.dataset.running === "true";
+let goalReloadPending = false;
+const goalExpandedKey = "hitch:goal-expanded:" + goalPanel.dataset.goalUrl;
+const goalDraftKey = "hitch:goal-draft:" + goalPanel.dataset.goalUrl;
+const goalControlsReady = !!sessionGoal;
+const goalWritable = goalPanel.dataset.writable === "true";
+const goalStatuses = {
+    active: "Active", paused: "Paused", blocked: "Blocked", complete: "Complete",
+    usageLimited: "Usage limit reached", budgetLimited: "Token budget reached",
+};
+
+function updateGoalPanel(goal) {
+    sessionGoal = goal && goal.objective ? goal : null;
+    goalPanel.hidden = !sessionGoal;
+    const newButton = document.querySelector("[data-goal-new]");
+    if (newButton) {
+        newButton.hidden = !!sessionGoal;
+        newButton.disabled = goalBusy || goalRunning || !goalWritable;
+        newButton.title = !goalWritable ? "Unarchive this session to set a goal."
+            : goalRunning ? "Finish the current turn to set a goal." : "";
+    }
+    if (!sessionGoal) { goalPanel.open = false; return; }
+    const status = sessionGoal.status || "active";
+    const budget = sessionGoal.tokenBudget;
+    const tokens = sessionGoal.tokensUsed || 0;
+    const seconds = sessionGoal.timeUsedSeconds || 0;
+    const minutes = Math.floor(seconds / 60);
+    const duration = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : minutes ? `${minutes}m` : `${seconds}s`;
+    const exhausted = budget != null && tokens >= budget;
+    goalPanel.querySelector("[data-live-goal-text]").textContent = sessionGoal.objective;
+    goalPanel.querySelector("[data-goal-objective]").textContent = sessionGoal.objective;
+    goalPanel.querySelector("[data-goal-status]").textContent = goalStatuses[status] || status;
+    goalPanel.querySelector("[data-goal-usage]").textContent = `${duration} worked · ${tokens.toLocaleString()}${budget != null ? " / " + budget.toLocaleString() : ""} tokens`;
+    const progress = goalPanel.querySelector("[data-goal-budget-progress]");
+    progress.hidden = budget == null;
+    progress.max = budget || 1;
+    progress.value = Math.min(tokens, budget || 0);
+    let hint = {
+        active: goalRunning ? "Codex is working toward this goal." : "The goal is saved. Resume to continue working.",
+        paused: "Work is paused. Resume when you’re ready.",
+        blocked: "Codex marked this goal blocked. Review its last message before resuming.",
+        complete: "Codex marked this goal complete. Clear it to set a new goal.",
+        usageLimited: "Account usage stopped this goal. Resume when usage is available again.",
+        budgetLimited: "Increase or remove the token budget to continue.",
+    }[status] || "";
+    if (exhausted && status !== "complete") hint = "Increase or remove the token budget to continue.";
+    if (!goalControlsReady && goalWritable) hint = "Goal controls will be available after this turn finishes.";
+    goalPanel.querySelector("[data-goal-hint]").textContent = hint;
+    for (const button of goalPanel.querySelectorAll("button")) button.disabled = goalBusy;
+    if (!goalWritable) return;
+    goalPanel.querySelector(".goal-actions").hidden = !goalControlsReady;
+    if (!goalControlsReady) return;
+    const pause = goalPanel.querySelector('[data-goal-action="pause"]');
+    pause.hidden = status !== "active";
+    const resume = goalPanel.querySelector('[data-goal-action="resume"]');
+    resume.hidden = status === "complete" || (status === "active" && goalRunning);
+    resume.disabled = goalBusy || goalRunning || exhausted;
+    resume.title = goalRunning ? "Wait for the current turn to finish." : exhausted ? "Edit the token budget first." : "";
+    goalPanel.querySelector("[data-goal-edit]").hidden = status === "complete";
+}
+
+function openGoalDialog(action) {
+    closeMenu();
+    goalDialogAction = action;
+    const clearing = action === "clear";
+    const editing = action === "budget";
+    const fields = goalForm.querySelector("[data-goal-fields]");
+    fields.hidden = clearing;
+    fields.disabled = clearing;
+    goalForm.querySelector("[data-goal-dialog-title]").textContent = clearing ? "Clear goal?" : editing ? "Edit token budget" : "Set goal";
+    goalForm.querySelector("[data-goal-description]").textContent = clearing
+        ? "This removes the goal and its accounting. The current turn can finish."
+        : editing ? "Adjust the token limit without resetting usage."
+        : "Give the main agent an objective to keep working toward.";
+    goalForm.elements.objective.value = "";
+    goalForm.elements.objective.disabled = editing || clearing;
+    goalForm.elements.objective.closest("label").hidden = editing;
+    goalForm.elements.token_budget.value = editing && sessionGoal.tokenBudget != null ? sessionGoal.tokenBudget : "";
+    goalForm.querySelector("[data-goal-edit-hint]").textContent = editing
+        ? "Leave empty for no token limit."
+        : "Codex continues until the goal is completed, blocked, paused, or reaches a limit.";
+    goalForm.querySelector("[data-goal-submit]").textContent = clearing ? "Clear goal" : editing ? "Save changes" : "Start goal";
+    goalForm.querySelector("[data-goal-form-error]").hidden = true;
+    showDialog(goalDialog);
+}
+
+function reloadAfterGoalDialog() {
+    if (!goalReloadPending || goalBusy || goalDialog.open) return;
+    goalReloadPending = false;
+    if (document.dispatchEvent(new Event("hitch:session-ended", { cancelable: true }))) {
+        window.location.reload();
+    }
+}
+
+function saveGoalComposerDraft() {
+    const input = document.querySelector("[data-composer-input]");
+    try { if (input) sessionStorage.setItem(goalDraftKey, input.value); } catch (_) {}
+}
+
+async function changeGoal(action, formData, errorNode) {
+    if (goalBusy) return;
+    goalBusy = true;
+    updateGoalPanel(sessionGoal);
+    errorNode.hidden = true;
+    goalForm.querySelector("[data-goal-submit]").disabled = true;
+    formData.set("action", action);
+    try {
+        const response = await fetch(goalPanel.dataset.goalUrl, {
+            method: "POST", body: formData, headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        const data = await response.json().catch(() => ({error: "Could not change the goal. Refresh and try again."}));
+        if (!response.ok || !("goal" in data)) throw new Error(data.error || "Could not change the goal.");
+        updateGoalPanel(data.goal);
+        hideDialog(goalDialog);
+        if (data.started) {
+            saveGoalComposerDraft();
+            window.location.reload();
+        }
+    } catch (error) {
+        errorNode.textContent = error.message || "Could not change the goal. Try again.";
+        errorNode.hidden = false;
+    } finally {
+        goalBusy = false;
+        updateGoalPanel(sessionGoal);
+        goalForm.querySelector("[data-goal-submit]").disabled = false;
+        reloadAfterGoalDialog();
+    }
+}
+
+updateGoalPanel(sessionGoal);
+try { goalPanel.open = !!sessionGoal && sessionStorage.getItem(goalExpandedKey) === "true"; } catch (_) {}
+document.addEventListener("hitch:goal-updated", (event) => updateGoalPanel(event.detail));
+goalPanel.addEventListener("toggle", () => {
+    try { sessionStorage.setItem(goalExpandedKey, String(goalPanel.open)); } catch (_) {}
+    if (goalPanel.open) {
+        const notice = document.querySelector("[data-turn-notice]");
+        if (notice) notice.open = false;
+    }
+});
+document.querySelector("[data-turn-notice]").addEventListener("toggle", (event) => {
+    if (event.target.open) goalPanel.open = false;
+});
+if (goalForm) {
+    try {
+        const draft = sessionStorage.getItem(goalDraftKey);
+        if (draft != null) document.querySelector("[data-composer-input]").value = draft;
+        sessionStorage.removeItem(goalDraftKey);
+    } catch (_) {}
+    document.addEventListener("hitch:session-ended", (event) => {
+        if (sessionGoal || goalReloadPending) saveGoalComposerDraft();
+        goalRunning = false;
+        updateGoalPanel(sessionGoal);
+        if (goalDialog.open || goalBusy) {
+            event.preventDefault();
+            goalReloadPending = true;
+        }
+    });
+    goalDialog.addEventListener("close", reloadAfterGoalDialog);
+    for (const button of document.querySelectorAll("[data-goal-new], [data-goal-edit]")) {
+        button.addEventListener("click", () => openGoalDialog(button.hasAttribute("data-goal-edit") ? "budget" : "start"));
+    }
+    goalForm.querySelector("[data-goal-cancel]").addEventListener("click", () => hideDialog(goalDialog));
+    goalForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        changeGoal(goalDialogAction, new FormData(goalForm), goalForm.querySelector("[data-goal-form-error]"));
+    });
+    for (const button of goalPanel.querySelectorAll("[data-goal-action]")) {
+        button.addEventListener("click", () => {
+            if (button.dataset.goalAction === "clear") { openGoalDialog("clear"); return; }
+            const data = new FormData();
+            data.set("csrfmiddlewaretoken", goalForm.elements.csrfmiddlewaretoken.value);
+            changeGoal(button.dataset.goalAction, data, goalPanel.querySelector("[data-goal-error]"));
+        });
+    }
+}
