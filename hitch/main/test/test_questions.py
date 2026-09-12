@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, override
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.template.loader import render_to_string
 from django.test import SimpleTestCase, TestCase
@@ -51,9 +51,11 @@ def question_transport() -> Iterator[tuple[QuestionClient, Any, Any, Any, Any]]:
             assert not reader.is_alive()
 
 
-def question(request_id: int, *, blocking: bool = False, turn_id: str = "turn") -> dict[str, Any]:
+def question(
+    request_id: int, *, blocking: bool = False, turn_id: str = "turn", dynamic_tool: bool = False,
+) -> dict[str, Any]:
     return {
-        "id": request_id, "method": "item/tool/requestUserInput",
+        "id": request_id, "method": "item/tool/call" if dynamic_tool else "item/tool/requestUserInput",
         "params": {
             "threadId": "thread", "turnId": turn_id, "itemId": str(request_id),
             "isBlocking": blocking,
@@ -82,7 +84,99 @@ class QuestionRuntimeTests(SimpleTestCase):
 
 
 class QuestionTransportTests(SimpleTestCase):
-    def test_multiple_questions_leave_progress_and_rpc_responses_live(self) -> None:
+    def test_close_waits_for_started_tool_cleanup(self) -> None:
+        with question_transport() as (client, incoming, outgoing, _events, _responses):
+            entered = threading.Event()
+            cancelled = threading.Event()
+            release = threading.Event()
+            closed = threading.Event()
+
+            def handler(method: str, params: Any) -> dict[str, Any]:
+                entered.set()
+                while not client.question_cancelled():
+                    cancelled.wait(0.01)
+                cancelled.set()
+                release.wait(5)
+                return {"success": True}
+
+            def close() -> None:
+                client.close()
+                closed.set()
+
+            client._approval_handler = handler
+            incoming.put(question(1, dynamic_tool=True))
+            self.assertTrue(entered.wait(2))
+            closer = threading.Thread(target=close, daemon=True)
+            closer.start()
+            try:
+                self.assertTrue(cancelled.wait(2))
+                self.assertFalse(closed.wait(2.1))
+            finally:
+                release.set()
+                closer.join(timeout=2)
+            self.assertTrue(closed.is_set())
+            self.assertTrue(outgoing.empty())
+
+    def test_tool_delivery_requires_a_successful_transport_write(self) -> None:
+        for outcome in ("sent", "cancelled", "write_failed", "callback_failed"):
+            with (
+                self.subTest(outcome=outcome),
+                question_transport() as (client, incoming, outgoing, events, _responses),
+            ):
+                entered = threading.Event()
+                release = threading.Event()
+                delivered = MagicMock()
+                if outcome == "callback_failed":
+                    delivered.side_effect = RuntimeError("database is locked")
+
+                def handler(
+                    method: str, params: Any, entered: threading.Event = entered,
+                    release: threading.Event = release, delivered: MagicMock = delivered,
+                ) -> dict[str, Any]:
+                    client.on_response_sent(delivered)
+                    entered.set()
+                    release.wait(2)
+                    return {"success": True}
+
+                client._approval_handler = handler
+                incoming.put(question(1, dynamic_tool=True))
+                self.assertTrue(entered.wait(2))
+                with client._questions_lock:
+                    worker = client._questions[1].worker
+                assert worker is not None
+                if outcome == "cancelled":
+                    incoming.put({"method": "turn/completed", "params": {
+                        "threadId": "thread", "turn": {"id": "turn"},
+                    }})
+                    events.get(timeout=2)
+
+                def write(message: Any, delivered: MagicMock = delivered, outcome: str = outcome) -> None:
+                    delivered.assert_not_called()
+                    if outcome == "write_failed":
+                        raise TransportClosedError("write failed")
+                    outgoing.put(message)
+
+                with (
+                    patch.object(client, "_write_message", side_effect=write),
+                    patch("hitch.main.runtime.question_transport.logger.exception") as log_error,
+                ):
+                    release.set()
+                    worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                if outcome in ("sent", "callback_failed"):
+                    delivered.assert_called_once()
+                    self.assertEqual(outgoing.get(timeout=2)["result"], {"success": True})
+                else:
+                    delivered.assert_not_called()
+                    self.assertTrue(outgoing.empty())
+                if outcome == "callback_failed":
+                    log_error.assert_called_once()
+                    self.assertFalse(client.question_cancelled())
+                    client._approval_handler = lambda *_args: {"success": True}
+                    incoming.put(question(2, dynamic_tool=True))
+                    self.assertEqual(outgoing.get(timeout=2)["id"], 2)
+
+    def test_tools_and_questions_leave_progress_and_rpc_responses_live(self) -> None:
         with question_transport() as (client, incoming, outgoing, notifications, responses):
             entered: queue.Queue[str] = queue.Queue()
             answers = {"1": threading.Event(), "2": threading.Event()}
@@ -96,8 +190,8 @@ class QuestionTransportTests(SimpleTestCase):
                 return {"answers": {"choice": {"answers": [key]}}}
 
             client._approval_handler = handler
-            incoming.put(question(1, blocking=True))
-            incoming.put(question(2))
+            incoming.put(question(1, dynamic_tool=True))
+            incoming.put(question(2, blocking=True))
             self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
             incoming.put({"method": "item/agentMessage/delta", "params": {
                 "threadId": "thread", "turnId": "turn", "itemId": "message", "delta": "Still working",
@@ -112,37 +206,44 @@ class QuestionTransportTests(SimpleTestCase):
                     "id": int(key), "result": {"answers": {"choice": {"answers": [key]}}},
                 })
 
-    def test_server_resolution_and_turn_end_cancel_only_matching_questions(self) -> None:
-        with question_transport() as (client, incoming, outgoing, notifications, _responses):
-            entered: queue.Queue[str] = queue.Queue()
-            cancelled: queue.Queue[str] = queue.Queue()
+    def test_server_resolution_and_turn_end_cancel_only_matching_requests(self) -> None:
+        for dynamic_tool in (False, True):
+            with (
+                self.subTest(dynamic_tool=dynamic_tool),
+                question_transport() as (client, incoming, outgoing, notifications, _responses),
+            ):
+                entered: queue.Queue[str] = queue.Queue()
+                cancelled: queue.Queue[str] = queue.Queue()
 
-            def handler(method: str, params: Any) -> dict[str, Any]:
-                entered.put(params["itemId"])
-                while not client.question_cancelled():
-                    threading.Event().wait(0.01)
-                cancelled.put(params["itemId"])
-                return {"answers": {}}
+                def handler(
+                    method: str, params: Any, entered: queue.Queue[str] = entered,
+                    cancelled: queue.Queue[str] = cancelled,
+                ) -> dict[str, Any]:
+                    entered.put(params["itemId"])
+                    while not client.question_cancelled():
+                        threading.Event().wait(0.01)
+                    cancelled.put(params["itemId"])
+                    return {"answers": {}}
 
-            client._approval_handler = handler
-            incoming.put(question(1))
-            incoming.put(question(2, turn_id="other-turn"))
-            self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
-            incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "other", "requestId": 1}})
-            notifications.get(timeout=2)
-            self.assertTrue(cancelled.empty())
-            incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "thread", "requestId": 1}})
-            self.assertEqual(cancelled.get(timeout=2), "1")
-            incoming.put({"method": "turn/completed", "params": {
-                "threadId": "other", "turn": {"id": "other-turn"},
-            }})
-            incoming.put({"method": "turn/completed", "params": {
-                "threadId": "thread", "turn": {"id": "other-turn"},
-            }})
-            self.assertEqual(cancelled.get(timeout=2), "2")
-            self.assertTrue(outgoing.empty())
+                client._approval_handler = handler
+                incoming.put(question(1, dynamic_tool=dynamic_tool))
+                incoming.put(question(2, turn_id="other-turn", dynamic_tool=dynamic_tool))
+                self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
+                incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "other", "requestId": 1}})
+                notifications.get(timeout=2)
+                self.assertTrue(cancelled.empty())
+                incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "thread", "requestId": 1}})
+                self.assertEqual(cancelled.get(timeout=2), "1")
+                incoming.put({"method": "turn/completed", "params": {
+                    "threadId": "other", "turn": {"id": "other-turn"},
+                }})
+                incoming.put({"method": "turn/completed", "params": {
+                    "threadId": "thread", "turn": {"id": "other-turn"},
+                }})
+                self.assertEqual(cancelled.get(timeout=2), "2")
+                self.assertTrue(outgoing.empty())
 
-    def test_close_or_eof_releases_question_handlers_without_sending_answers(self) -> None:
+    def test_close_or_eof_releases_tool_handlers_without_sending_answers(self) -> None:
         for eof in (True, False):
             with self.subTest(eof=eof), question_transport() as (client, incoming, outgoing, _events, _responses):
                 entered = threading.Event()
@@ -159,7 +260,7 @@ class QuestionTransportTests(SimpleTestCase):
                     return {"answers": {}}
 
                 client._approval_handler = handler
-                incoming.put(question(1))
+                incoming.put(question(1, dynamic_tool=True))
                 self.assertTrue(entered.wait(2))
                 if eof:
                     incoming.put(TransportClosedError("disconnected"))

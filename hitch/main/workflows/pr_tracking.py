@@ -279,6 +279,25 @@ def record_pr_watch_result(
         _maybe_auto_pull_default_repo_after_pr_merge(registration)
 
 
+def acknowledge_pr_watch_result(
+    registration: PrWatchRegistration | None, result: dict[str, Any],
+) -> None:
+    """Advance delivery cursors without replaying observation side effects."""
+    if registration is None or not _compact_pr_handoff(result.get("pr")):
+        return
+    with transaction.atomic():
+        record = SessionPullRequest.objects.select_for_update().filter(pk=registration.record_id).first()
+        if record is None or not _registration_owns_record(record, registration):
+            return
+        _validate_pr_identity(pr_handoff_for_record(record), _compact_pr_handoff(result.get("pr")))
+        record.state = {
+            **record.state,
+            WATCH_DELIVERED_STATE_KEY: pr_watch.event_fingerprint(result),
+            WATCH_FEEDBACK_STATE_KEY: result.get("feedback_fingerprint", ""),
+        }
+        record.save(update_fields=["state", "updated_at"])
+
+
 def _registration_owns_record(
     record: SessionPullRequest, registration: PrWatchRegistration
 ) -> bool:

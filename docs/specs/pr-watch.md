@@ -67,6 +67,17 @@ explicitly unwatched.
 - `PRWATCH-bounded`: An invocation polls while gates remain pending for at most
   30 minutes and bounds every individual GitHub command. Normal turn
   cancellation interrupts the polling wait without deleting the subscription.
+  Dynamic watch calls leave the transport reader free to receive request
+  cancellation and turn completion. Cancelled calls do not acknowledge feedback
+  that was never returned to the agent.
+  Feedback acknowledgement runs after the transport writes the response, so
+  cancellation while preparing the response or a failed write leaves evidence
+  available for background delivery.
+  Acknowledgement failures do not disable the transport or later tool calls.
+  Observation processing, including post-merge Auto-pull, finishes before the
+  response is sent; the post-send callback only advances delivery cursors.
+  Normal worker shutdown cancels polling and waits for already-started tool
+  operations, including Auto-pull, to finish cleanup before exiting.
 - `PRWATCH-results`: The tool returns structured JSON with `status`, `summary`,
   `feedback`, `feedback_fingerprint`, `pr`, `gates`, `blockers`, and Hitch-authored
   `next_action` guidance. Status is
@@ -87,6 +98,8 @@ explicitly unwatched.
   feedback fingerprint so a repeated invocation does not immediately return
   the same pending feedback in a hot loop. Background notifications compare
   feedback, head commit, and gates with the last evidence delivered to the tool.
+  Feedback includes every fetched unresolved review thread, including threads
+  beyond the compact PR display's five-item limit.
 
 ### 3.2 Registration and Ownership
 

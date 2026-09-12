@@ -579,6 +579,10 @@ def _run_turn(
                 codex._client.question_cancelled
                 if isinstance(codex._client, QuestionClient) else lambda: False
             ),
+            on_response_sent=(
+                codex._client.on_response_sent
+                if isinstance(codex._client, QuestionClient) else None
+            ),
         )
         goal_forwarder = _start_goal_event_forwarder(
             codex._client,
@@ -1775,6 +1779,7 @@ def _make_approval_handler(
     write_event: WriteEvent,
     approval_mode: str | None,
     question_cancelled: Callable[[], bool] = lambda: False,
+    on_response_sent: Callable[[Callable[[], None]], None] | None = None,
 ) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
     """Return an approval-handler closure bound to a single CodexInstance.
 
@@ -1790,7 +1795,7 @@ def _make_approval_handler(
     captured at worker startup.
 
     The handler runs on the SDK reader thread for approvals and independent
-    transport threads for questions, so it must:
+    transport threads for questions and dynamic tools, so it must:
 
     * Be safe to call from a non-Django-request thread — Django's ORM is
       thread-safe but does not auto-cleanup connections; we close after each
@@ -1817,7 +1822,8 @@ def _make_approval_handler(
                     agent_kind=instance.agent_kind,
                     purpose=instance.purpose,
                     user_message_index=instance.user_message_index,
-                    cancel_requested=lambda: _cancel_requested,
+                    cancel_requested=lambda: _cancel_requested or question_cancelled(),
+                    on_response_sent=on_response_sent,
                     enable_memories=instance.enable_memories,
                     web_search_mode=instance.web_search_mode or None,
                 ),

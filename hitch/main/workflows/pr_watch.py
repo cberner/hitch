@@ -157,6 +157,7 @@ def watch_pr(
             if monotonic() >= deadline:
                 return _result_from_observation("timed_out", last_observation)
             raise PrWatchError(str(exc)) from exc
+        _raise_if_cancelled(cancel_requested)
         last_observation = observation
         result = _watch_result(
             observation,

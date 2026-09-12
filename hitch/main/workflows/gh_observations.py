@@ -468,7 +468,7 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
     unresolved = [
         thread for thread in threads if thread.get("isResolved") is not True
     ]
-    for thread in unresolved[:5]:
+    for thread in unresolved:
         parts = []
         path = string_from_any(thread.get("path"))
         if path:
