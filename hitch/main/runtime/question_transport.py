@@ -11,9 +11,62 @@ from typing import override
 from openai_codex import Codex, CodexConfig
 from openai_codex._initialize_metadata import validate_initialize_metadata
 from openai_codex.client import CodexClient
+from openai_codex.errors import JsonRpcError
 from openai_codex.models import JsonValue
 
 logger = logging.getLogger(__name__)
+
+
+def async_question_params(message: dict[str, JsonValue]) -> dict[str, JsonValue] | None:
+    if message.get("method") != "item/completed" or "id" in message:
+        return None
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return None
+    item = params.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agentMessage" or item.get("delivery") != "async":
+        return None
+    if not all(isinstance(value, str) and value for value in (
+        params.get("threadId"), params.get("turnId"), item.get("id"),
+    )):
+        return None
+    questions = item.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+    normalized: list[JsonValue] = []
+    for index, question in enumerate(questions):
+        if not isinstance(question, dict) or not isinstance(question.get("title"), str):
+            return None
+        options = question.get("options") or []
+        if not isinstance(options, list) or not all(isinstance(option, str) for option in options):
+            return None
+        normalized.append({
+            "id": str(index), "question": question["title"],
+            "options": [{"label": option} for option in options],
+        })
+    return {
+        "threadId": params["threadId"], "turnId": params["turnId"], "itemId": item["id"],
+        "delivery": "async", "isBlocking": False, "questions": normalized,
+    }
+
+
+def async_question_answer(params: dict[str, JsonValue], response: dict[str, JsonValue]) -> str:
+    answers = response.get("answers")
+    questions = params.get("questions")
+    if not isinstance(answers, dict) or not isinstance(questions, list):
+        return ""
+    parts = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = question.get("id")
+        if not isinstance(question_id, str):
+            continue
+        answer = answers.get(question_id)
+        values = answer.get("answers") if isinstance(answer, dict) else None
+        if isinstance(values, list) and values:
+            parts.append(f"{question['question']}\n" + "\n".join(str(value) for value in values))
+    return "Answers to your questions:\n\n" + "\n\n".join(parts) if parts else ""
 
 
 def is_user_input_request(method: str) -> bool:
@@ -29,6 +82,7 @@ class _Question:
     cancelled: threading.Event = field(default_factory=threading.Event)
     worker: threading.Thread | None = None
     on_response_sent: list[Callable[[], None]] = field(default_factory=list)
+    on_async_answer_settled: Callable[[str | None], None] | None = None
 
 
 class QuestionClient(CodexClient):
@@ -38,6 +92,7 @@ class QuestionClient(CodexClient):
         self._questions_lock = threading.Lock()
         self._question_context = threading.local()
         self._questions_closed = threading.Event()
+        self._async_items: set[tuple[str, str, str]] = set()
 
     def question_cancelled(self) -> bool:
         question = getattr(self._question_context, "question", None)
@@ -49,6 +104,10 @@ class QuestionClient(CodexClient):
         """Acknowledge tool evidence only after its response is written."""
         question = self._question_context.question
         question.on_response_sent.append(callback)
+
+    def on_async_answer_settled(self, callback: Callable[[str | None], None]) -> None:
+        question = self._question_context.question
+        question.on_async_answer_settled = callback
 
     @override
     def _read_message(self) -> dict[str, JsonValue]:
@@ -70,6 +129,14 @@ class QuestionClient(CodexClient):
                 self._defer_question(request_id, message)
                 continue
             self._observe_resolution(message)
+            params = async_question_params(message)
+            if params is not None:
+                key = (str(params["threadId"]), str(params["turnId"]), str(params["itemId"]))
+                if key not in self._async_items:
+                    self._async_items.add(key)
+                    self._defer_question(f"async:{key[2]}", {
+                        "method": "item/tool/requestUserInput", "params": params,
+                    })
             return message
 
     def _defer_question(self, request_id: str | int, message: dict[str, JsonValue]) -> None:
@@ -91,10 +158,25 @@ class QuestionClient(CodexClient):
         self, request_id: str | int, message: dict[str, JsonValue], question: _Question,
     ) -> None:
         self._question_context.question = question
+        delivery_error = None
         try:
             response = self._handle_server_request(message)
             if not self.question_cancelled():
-                self._write_message({"id": request_id, "result": response})
+                params = message.get("params")
+                if isinstance(params, dict) and params.get("delivery") == "async":
+                    # Async messages have no server request to resolve. Their
+                    # answers are ordinary user input to the originating turn.
+                    answer = async_question_answer(params, response)
+                    if answer:
+                        try:
+                            self.turn_steer(str(question.thread_id), str(question.turn_id), answer)
+                        except JsonRpcError as exc:
+                            # A rejected answer does not invalidate other RPCs
+                            # or questions sharing this transport.
+                            delivery_error = str(exc)
+                            return
+                else:
+                    self._write_message({"id": request_id, "result": response})
                 for callback in question.on_response_sent:
                     try:
                         callback()
@@ -105,9 +187,13 @@ class QuestionClient(CodexClient):
                 self._router.fail_all(exc)
                 self._questions_closed.set()
         finally:
-            with self._questions_lock:
-                self._questions.pop(request_id, None)
-            del self._question_context.question
+            try:
+                if question.on_async_answer_settled is not None:
+                    question.on_async_answer_settled(delivery_error)
+            finally:
+                with self._questions_lock:
+                    self._questions.pop(request_id, None)
+                del self._question_context.question
 
     def _observe_resolution(self, message: dict[str, JsonValue]) -> None:
         if "id" in message:

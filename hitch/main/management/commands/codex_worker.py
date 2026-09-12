@@ -583,6 +583,10 @@ def _run_turn(
                 codex._client.on_response_sent
                 if isinstance(codex._client, QuestionClient) else None
             ),
+            on_async_answer_settled=(
+                codex._client.on_async_answer_settled
+                if isinstance(codex._client, QuestionClient) else None
+            ),
         )
         goal_forwarder = _start_goal_event_forwarder(
             codex._client,
@@ -1780,6 +1784,7 @@ def _make_approval_handler(
     approval_mode: str | None,
     question_cancelled: Callable[[], bool] = lambda: False,
     on_response_sent: Callable[[Callable[[], None]], None] | None = None,
+    on_async_answer_settled: Callable[[Callable[[str | None], None]], None] | None = None,
 ) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
     """Return an approval-handler closure bound to a single CodexInstance.
 
@@ -1835,6 +1840,7 @@ def _make_approval_handler(
                 method=method,
                 params=params or {},
                 cancelled=question_cancelled,
+                on_async_answer_settled=on_async_answer_settled,
             )
         if method not in _APPROVAL_METHODS:
             return {}
@@ -1939,6 +1945,7 @@ def _handle_user_input_request(
     method: str,
     params: dict[str, Any],
     cancelled: Callable[[], bool] = lambda: False,
+    on_async_answer_settled: Callable[[Callable[[str | None], None]], None] | None = None,
 ) -> dict[str, Any]:
     request_id = _create_pending_user_input(
         instance_id=instance.pk,
@@ -1954,10 +1961,20 @@ def _handle_user_input_request(
         },
     )
     response = _wait_for_user_input_response(request_id, cancelled=cancelled)
-    write_event(
-        "input/resolved",
-        {"id": request_id, "method": method, "response": response, "cancelled": cancelled() or _cancel_requested},
-    )
+
+    def resolve(error: str | None) -> None:
+        payload = {
+            "id": request_id, "method": method, "response": response,
+            "cancelled": cancelled() or _cancel_requested,
+        }
+        if error is not None:
+            payload["error"] = error
+        write_event("input/resolved", payload)
+
+    if params.get("delivery") == "async" and on_async_answer_settled is not None:
+        on_async_answer_settled(resolve)
+    else:
+        resolve(None)
     return _wire_user_input_response(response)
 
 

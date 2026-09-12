@@ -863,6 +863,8 @@ def _normalize_completed_message(entry: dict[str, Any]) -> dict[str, Any]:
             "message": ("\n" if is_user else "").join(parts),
             "phase": item.get("phase"),
             "client_id": item.get("client_id"),
+            **({"async_question_item_id": item.get("id")}
+               if item.get("delivery") == "async" and item.get("questions") else {}),
         },
     }
 
@@ -994,6 +996,9 @@ def _entry_from_event(
             "timestamp": timestamp,
             "phase": phase if isinstance(phase, str) else None,
         }
+        question_item_id = payload.get("async_question_item_id")
+        if isinstance(question_item_id, str):
+            entry["async_question_item_id"] = question_item_id
         citation = _pop_memory_citation(
             memory_citations_by_text, _agent_dedupe_key(text, payload)
         )

@@ -197,6 +197,10 @@ def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
             else:
                 display_entry = _make_tool_call_entry(item, timestamp)
 
+            if (item.type == "agentMessage" and string_value(value_for(item, "delivery")) == "async"
+                    and value_for(item, "questions")):
+                display_entry["async_question_item_id"] = string_value(value_for(item, "id"))
+
             if _is_collapsible_activity(display_entry):
                 activity.append(display_entry)
                 continue
