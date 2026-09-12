@@ -16,10 +16,37 @@ from django.shortcuts import redirect
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from hitch.main.models import ApprovalRequest, UserInputRequest
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime import codex_pool
+from hitch.main.runtime.mcp_approval import MCP_ELICITATION_METHOD
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
 from hitch.main.sessions.user_input import wire_user_input_response
+
+
+def mcp_approval_history(session_id: str) -> list[dict[str, Any]]:
+    rows = ApprovalRequest.objects.filter(
+        instance__thread_id=session_id, method=MCP_ELICITATION_METHOD,
+    ).exclude(decision="").order_by("-created_at", "-pk")[:100]
+    history = []
+    for row in rows:
+        meta = row.params.get("_meta")
+        meta = meta if isinstance(meta, dict) else {}
+        history.append({
+            "id": row.pk, "decision": row.decision, "decided_at": row.decided_at,
+            "server": row.params.get("serverName", ""),
+            "tool": meta.get("tool_title") or meta.get("tool_name", ""),
+            "message": row.params.get("message", ""),
+            "arguments": json.dumps(meta.get("tool_params", {}), indent=2),
+        })
+    return history
+
+
+def pending_mcp_approvals(session_id: str) -> list[dict[str, Any]]:
+    rows = ApprovalRequest.objects.filter(
+        instance__thread_id=session_id, instance__status__in=CodexInstance.ACTIVE_STATUSES,
+        method=MCP_ELICITATION_METHOD, decision="",
+    ).order_by("created_at", "pk").values("id", "method", "params")
+    return [dict(row) for row in rows]
 
 
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:

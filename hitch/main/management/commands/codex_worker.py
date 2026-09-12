@@ -103,6 +103,11 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     is_dynamic_tool_call,
 )
+from hitch.main.runtime.mcp_approval import (
+    MCP_ELICITATION_METHOD,
+    elicitation_response,
+    is_tool_confirmation,
+)
 from hitch.main.runtime.question_transport import QuestionClient, is_user_input_request
 from hitch.main.runtime.question_transport import QuestionCodex as Codex
 from hitch.main.sessions.hitch_instructions import combined_developer_instructions
@@ -1788,14 +1793,14 @@ def _make_approval_handler(
 ) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
     """Return an approval-handler closure bound to a single CodexInstance.
 
-    ``approve_all`` mode auto-answers command/file escalations with
+    ``approve_all`` mode auto-answers command/file and MCP tool escalations with
     ``accept``. Any other mode creates an ``ApprovalRequest`` row, emits an
     ``approval/requested`` event so the SSE stream surfaces it, and blocks
     polling the row until the Django view records a decision via
     ``POST /approval/<id>/``.
 
     The approval mode can be changed from the session UI while this worker is
-    already running, so command/file approval handling reads the current
+    already running, so approval handling reads the current
     ``CodexInstance.approval_mode`` instead of relying solely on the mode
     captured at worker startup.
 
@@ -1809,7 +1814,7 @@ def _make_approval_handler(
     * Block synchronously: the SDK is waiting on the return value to write
       the JSON-RPC response back to codex.
 
-    Methods outside ``_APPROVAL_METHODS`` fall through to an empty object,
+    Unknown methods other than MCP elicitations fall through to an empty object,
     matching the SDK's previous default-handler behaviour for unknown
     server-to-client requests.
     """
@@ -1842,15 +1847,46 @@ def _make_approval_handler(
                 cancelled=question_cancelled,
                 on_async_answer_settled=on_async_answer_settled,
             )
-        if method not in _APPROVAL_METHODS:
+        is_mcp = method == MCP_ELICITATION_METHOD
+
+        def automatic_mcp_response(decision: str, request_id: int | None = None) -> dict[str, Any]:
+            from django.db import connection
+
+            if request_id is None:
+                try:
+                    request_id = ApprovalRequest.objects.create(
+                        instance_id=instance.pk, method=method, params=params or {},
+                        decision=decision, decided_at=timezone.now(),
+                    ).pk
+                finally:
+                    connection.close()
+                recorded: str | dict[str, Any] = decision
+            else:
+                recorded = _record_live_approval_decision(request_id, decision)
+            write_event("approval/resolved", {
+                "id": request_id, "method": method, "params": params or {},
+                "decision": recorded, "automatic": True,
+            })
+            return elicitation_response(recorded)
+
+        if is_mcp and not is_tool_confirmation(params or {}):
+            logger.warning("Declining unsupported MCP elicitation for instance %s", instance.pk)
+            return automatic_mcp_response("decline")
+        if not is_mcp and method not in _APPROVAL_METHODS:
             return {}
+
+        def response(decision: Any) -> dict[str, Any]:
+            return elicitation_response(decision) if is_mcp else {"decision": decision}
+
         current_approval_mode = _current_approval_mode(
             instance=instance,
             fallback=approval_mode,
         )
         live_decision = _approval_decision_for_mode(current_approval_mode)
         if live_decision is not None:
-            return {"decision": live_decision}
+            if is_mcp:
+                return automatic_mcp_response(live_decision)
+            return response(live_decision)
         request_id = _create_pending_approval(
             instance_id=instance.pk,
             method=method,
@@ -1860,7 +1896,9 @@ def _make_approval_handler(
             _current_approval_mode(instance=instance, fallback=approval_mode)
         )
         if live_decision is not None:
-            return {"decision": _record_live_approval_decision(request_id, live_decision)}
+            if is_mcp:
+                return automatic_mcp_response(live_decision, request_id)
+            return response(_record_live_approval_decision(request_id, live_decision))
         # Surface the pending approval through the events file so the SSE
         # stream pushes it to the browser without a separate transport.
         # The ``id`` we emit is the row pk the POST endpoint expects.
@@ -1872,12 +1910,12 @@ def _make_approval_handler(
                 "params": params or {},
             },
         )
-        decision = _wait_for_decision(request_id)
+        decision = _wait_for_decision(request_id, cancelled=question_cancelled)
         write_event(
             "approval/resolved",
             {"id": request_id, "method": method, "decision": decision},
         )
-        return {"decision": decision}
+        return response(decision)
 
     return _handler
 
@@ -2080,7 +2118,9 @@ def _stored_approval_decision(decision: str, payload: Any) -> str | dict[str, An
     return ApprovalRequest.normalize_decision(decision)
 
 
-def _wait_for_decision(request_id: int) -> str | dict[str, Any]:
+def _wait_for_decision(
+    request_id: int, *, cancelled: Callable[[], bool] = lambda: False,
+) -> str | dict[str, Any]:
     """Poll the row for a recorded decision; default to ``decline`` on timeout.
 
     Polling (rather than a Postgres ``LISTEN``/``NOTIFY``-style wakeup)
@@ -2120,7 +2160,7 @@ def _wait_for_decision(request_id: int) -> str | dict[str, Any]:
         # in this wait: decline the pending action and return so codex unblocks
         # and the main loop can issue turn.interrupt(). Without this the first
         # Stop click is a silent no-op until a second click escalates to SIGKILL.
-        if _cancel_requested or time.monotonic() >= deadline:
+        if _cancel_requested or cancelled() or time.monotonic() >= deadline:
             try:
                 updated = ApprovalRequest.objects.filter(
                     pk=request_id, decision=""

@@ -277,7 +277,7 @@ class QuestionTransportTests(SimpleTestCase):
     def test_tools_and_questions_leave_progress_and_rpc_responses_live(self) -> None:
         with question_transport() as (client, incoming, outgoing, notifications, responses):
             entered: queue.Queue[str] = queue.Queue()
-            answers = {"1": threading.Event(), "2": threading.Event()}
+            answers = {key: threading.Event() for key in ("1", "2", "3")}
 
             def handler(method: str, params: Any) -> dict[str, Any]:
                 key = params["itemId"]
@@ -290,7 +290,10 @@ class QuestionTransportTests(SimpleTestCase):
             client._approval_handler = handler
             incoming.put(question(1, dynamic_tool=True))
             incoming.put(question(2, blocking=True))
-            self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
+            elicitation = question(3)
+            elicitation["method"] = "mcpServer/elicitation/request"
+            incoming.put(elicitation)
+            self.assertEqual({entered.get(timeout=2) for _ in range(3)}, {"1", "2", "3"})
             incoming.put({"method": "item/agentMessage/delta", "params": {
                 "threadId": "thread", "turnId": "turn", "itemId": "message", "delta": "Still working",
             }})
@@ -298,16 +301,16 @@ class QuestionTransportTests(SimpleTestCase):
             incoming.put({"id": "steer", "result": {"turnId": "turn"}})
             self.assertEqual(responses.get(timeout=2)["id"], "steer")
             self.assertTrue(outgoing.empty())
-            for key in ("2", "1"):
+            for key in ("3", "2", "1"):
                 answers[key].set()
                 self.assertEqual(outgoing.get(timeout=2), {
                     "id": int(key), "result": {"answers": {"choice": {"answers": [key]}}},
                 })
 
     def test_server_resolution_and_turn_end_cancel_only_matching_requests(self) -> None:
-        for dynamic_tool in (False, True):
+        for method in ("item/tool/requestUserInput", "item/tool/call", "mcpServer/elicitation/request"):
             with (
-                self.subTest(dynamic_tool=dynamic_tool),
+                self.subTest(method=method),
                 question_transport() as (client, incoming, outgoing, notifications, _responses),
             ):
                 entered: queue.Queue[str] = queue.Queue()
@@ -324,8 +327,9 @@ class QuestionTransportTests(SimpleTestCase):
                     return {"answers": {}}
 
                 client._approval_handler = handler
-                incoming.put(question(1, dynamic_tool=dynamic_tool))
-                incoming.put(question(2, turn_id="other-turn", dynamic_tool=dynamic_tool))
+                for request in (question(1), question(2, turn_id="other-turn")):
+                    request["method"] = method
+                    incoming.put(request)
                 self.assertEqual({entered.get(timeout=2), entered.get(timeout=2)}, {"1", "2"})
                 incoming.put({"method": "serverRequest/resolved", "params": {"threadId": "other", "requestId": 1}})
                 notifications.get(timeout=2)
@@ -489,17 +493,28 @@ class QuestionBrowserTests(SimpleTestCase):
                 window.IntersectionObserver = class { observe() {} disconnect() {} };
                 window.fetch = async () => ({ok: true, text: async () => window.earlierHistory});
                 window.hitch = { postForm(url, body) {
+                    if (body.has('decision')) {
+                        window.posts.push({url, decision: body.get('decision')});
+                        const status = url === '/approval/44/' ? 409 : 200;
+                        return Promise.resolve({ok: status === 200, status});
+                    }
                     window.posts.push({url, answers: JSON.parse(body.get('answers'))});
                     return Promise.resolve({ok: true});
                 }};
                 window.emit = (event) => window.stream.handlers.message({data: JSON.stringify(event)});
             </script>
+            <script id="pending-mcp-approvals" type="application/json">[
+                {"id":43,"method":"mcpServer/elicitation/request","params":{"message":"Saved confirmation"}},
+                {"id":44,"method":"mcpServer/elicitation/request","params":{"message":"Another tab answered"}}
+            ]</script>
             <main data-session-main data-stream-url="/events">
+                <div class="approval resolved" data-saved-approval-id="40">Saved automatic decision: accept</div>
+                <div class="approval resolved" data-saved-approval-id="41">Saved interactive decision: decline</div>
                 <span data-live-status data-state="working"></span>
                 <details data-turn-notice data-thread-id="thread" hidden>
                     <summary data-turn-notice-title></summary><div data-turn-notice-body></div>
                 </details>
-                <div data-live-root data-input-url-template="/input/0/"></div>
+                <div data-live-root data-input-url-template="/input/0/" data-approval-url-template="/approval/0/"></div>
             </main>
             <div data-pending-question-bar hidden><button data-pending-questions></button></div>
             <textarea data-composer-input>Keep my draft</textarea>
@@ -514,6 +529,25 @@ class QuestionBrowserTests(SimpleTestCase):
                 errors: list[str] = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.set_content(html)
+                for _ in range(2):
+                    page.evaluate("window.emit", {"method": "approval/resolved", "payload": {
+                        "id": 40, "method": "mcpServer/elicitation/request", "automatic": True, "decision": "accept",
+                    }})
+                    page.evaluate("window.emit", {"method": "approval/requested", "payload": {
+                        "id": 41, "method": "mcpServer/elicitation/request",
+                    }})
+                    self.assertEqual(page.locator('[data-approval-id="41"]').count(), 0)
+                    page.evaluate("window.emit", {"method": "approval/resolved", "payload": {
+                        "id": 41, "method": "mcpServer/elicitation/request", "decision": "decline",
+                    }})
+                self.assertEqual(page.locator('[data-approval-id="40"]').count(), 0)
+                self.assertEqual(page.locator('[data-saved-approval-id="40"]').inner_text(),
+                                 "Saved automatic decision: accept")
+                self.assertEqual(page.locator('[data-saved-approval-id="41"]').inner_text(),
+                                 "Saved interactive decision: decline")
+                saved = page.locator('[data-approval-id="43"]')
+                self.assertIn("Saved confirmation", saved.inner_text())
+                self.assertEqual(saved.locator("button").count(), 3)
                 for request_id in (1, 2):
                     params: Any = {
                         "isBlocking": request_id == 1,
@@ -557,6 +591,31 @@ class QuestionBrowserTests(SimpleTestCase):
                 page.evaluate("window.emit", {"method": "input/resolved", "payload": {"id": 1, "cancelled": True}})
                 self.assertIn("Question closed", first.inner_text())
                 self.assertTrue(page.locator("[data-pending-question-bar]").is_hidden())
+                audit = {"method": "approval/resolved", "payload": {
+                    "id": 42, "method": "mcpServer/elicitation/request", "automatic": True,
+                    "decision": "accept", "params": {"serverName": "GitHub", "_meta": {
+                        "tool_title": "Create pull request", "tool_params": {"title": "A < B"},
+                    }},
+                }}
+                for _ in range(2):
+                    page.evaluate("window.emit", audit)
+                approval = page.locator('[data-approval-id="42"]')
+                self.assertEqual(approval.count(), 1)
+                self.assertIn("Create pull request", approval.inner_text())
+                self.assertIn("Decision: accept", approval.inner_text())
+                self.assertIn("A < B", approval.inner_text())
+                self.assertEqual(approval.locator("button").count(), 0)
+                page.evaluate("window.emit", {"method": "approval/requested", "payload": {"id": 43}})
+                self.assertEqual(saved.count(), 1)
+                saved.get_by_role("button", name="Run", exact=True).click()
+                self.assertIn("Decision: accept", saved.inner_text())
+                self.assertEqual(saved.locator("button").count(), 0)
+                self.assertEqual(page.evaluate("window.posts.at(-1)"), {"url": "/approval/43/", "decision": "accept"})
+                conflict = page.locator('[data-approval-id="44"]')
+                conflict.get_by_role("button", name="Run", exact=True).click()
+                self.assertIn("Already resolved", conflict.inner_text())
+                self.assertNotIn("Decision: accept", conflict.inner_text())
+                self.assertEqual(page.locator("[data-composer-input]").input_value(), "Keep my draft")
 
                 item = async_question()["params"]["item"]
                 with TemporaryDirectory() as directory:

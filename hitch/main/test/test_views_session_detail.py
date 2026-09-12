@@ -18,6 +18,7 @@ from django.urls import reverse
 from openai_codex.errors import InternalRpcError, InvalidRequestError
 
 from hitch.main.models import (
+    ApprovalRequest,
     CodexInstance,
     SessionMetadata,
     SessionPullRequest,
@@ -48,6 +49,71 @@ from hitch.main.views import common as common_views
 
 
 class SessionDetailFastPathTests(TestCase):
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    def test_completed_session_keeps_mcp_approval_history_without_worker_events(self, _refresh: MagicMock) -> None:
+        path = _make_rollout(self, _basic_session_rollout_lines("Open a PR", "Done"))
+        SessionMetadata.objects.create(thread_id="saved-approval", codex_path=str(path))
+        instance = CodexInstance.objects.create(
+            pid=12345, thread_id="saved-approval", status=CodexInstance.STATUS_COMPLETED,
+            events_path="/missing/events.jsonl",
+        )
+        for decision in ("accept", "decline", ""):
+            ApprovalRequest.objects.create(
+                instance=instance, method="mcpServer/elicitation/request", decision=decision,
+                params={"serverName": "GitHub", "message": "Allow tool?", "_meta": {
+                    "tool_title": "Create pull request", "tool_params": {"title": "<script>unsafe</script>"},
+                }},
+            )
+        other = CodexInstance.objects.create(
+            pid=12346, thread_id="other-session", status=CodexInstance.STATUS_COMPLETED,
+        )
+        ApprovalRequest.objects.create(instance=other, method="mcpServer/elicitation/request", decision="cancel")
+        for query in ({}, {"history": "all"}):
+            response = self.client.get(reverse("session", args=[instance.thread_id]), query)
+            self.assertContains(response, 'data-saved-approval-id="', count=2)
+            self.assertContains(response, "Create pull request")
+            self.assertContains(response, "Decision: accept")
+            self.assertContains(response, "Decision: decline")
+            self.assertNotContains(response, "Decision: cancel")
+            self.assertNotContains(response, "<script>unsafe</script>")
+            self.assertContains(response, "&lt;script&gt;unsafe&lt;/script&gt;")
+            self.assertFalse(response.context["active_worker"])
+
+    @patch("hitch.main.caches._start_models_refresh_thread")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
+    def test_pending_mcp_approvals_load_without_events(self, mock_codex: MagicMock, *_mocks: MagicMock) -> None:
+        path = _make_rollout(self, _basic_session_rollout_lines("Open a PR", "Preparing"))
+        client = _setup_codex(mock_codex)
+        client._client.thread_read.return_value = SimpleNamespace(thread=_session("pending-mcp", path=str(path)))
+        SessionMetadata.objects.create(thread_id="pending-mcp", codex_path=str(path))
+        instance = CodexInstance.objects.create(
+            pid=os.getpid(), thread_id="pending-mcp", status=CodexInstance.STATUS_RUNNING,
+            events_path="/missing/events.jsonl",
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=instance, method="mcpServer/elicitation/request",
+            params={"message": "Allow <tool>?", "_meta": {"tool_params": {"title": "</script>"}}},
+        )
+        ApprovalRequest.objects.bulk_create([
+            ApprovalRequest(instance=instance, method=pending.method, decision="accept") for _ in range(101)
+        ])
+        for status, thread_id in ((CodexInstance.STATUS_COMPLETED, instance.thread_id),
+                                  (CodexInstance.STATUS_RUNNING, "other-session")):
+            other = CodexInstance.objects.create(pid=os.getpid(), thread_id=thread_id, status=status)
+            ApprovalRequest.objects.create(instance=other, method=pending.method)
+        url = reverse("session", args=[instance.thread_id])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["pending_mcp_approvals"], [
+            {"id": pending.pk, "method": pending.method, "params": pending.params},
+        ])
+        self.assertEqual(len(response.context["mcp_approval_history"]), 100)
+        self.assertContains(response, r"\u003C/script\u003E")
+        answer = self.client.post(reverse("resolve_approval", args=[pending.pk]), {"decision": "accept"})
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(self.client.get(url).context["pending_mcp_approvals"], [])
+
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)

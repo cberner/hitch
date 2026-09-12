@@ -83,6 +83,7 @@ from hitch.main.sessions.project_visibility import (
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
+from hitch.main.sessions.session_approval import mcp_approval_history, pending_mcp_approvals
 from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
@@ -982,6 +983,8 @@ def _render_session_detail(
             "read_only": read_only,
             "system_prompt": system_prompt,
             "instruction_instance": instruction_instance,
+            "mcp_approval_history": mcp_approval_history(session_id),
+            "pending_mcp_approvals": pending_mcp_approvals(session_id),
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,
