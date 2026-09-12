@@ -442,6 +442,10 @@
             text-transform: uppercase;
         }
         .message.turn-failure .body { color: inherit; }
+        .turn-failure-details { margin-top: 0.75rem; font-size: 0.85rem; }
+        .turn-failure-details summary { cursor: pointer; }
+        .turn-failure-details .body { margin-top: 0.5rem; }
+        .turn-failure-action { margin-top: 0.75rem; }
         .message .body {
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -1199,6 +1203,36 @@
             pointer-events: none;
         }
         .live-work[data-state="idle"] { display: none; }
+        .live-work:has(.turn-notice:not([hidden])) .live-status[data-state="working"] { display: none; }
+        .live-work:has(.turn-notice[open]) { flex-wrap: wrap; }
+        .turn-notice {
+            min-width: 0;
+            max-width: 100%;
+            flex: 0 1 auto;
+            padding: 0.45rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface-2);
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            box-shadow: var(--shadow);
+            pointer-events: auto;
+        }
+        .turn-notice[hidden] { display: none; }
+        .turn-notice[open] { flex-basis: 100%; }
+        .turn-notice[data-kind="retry"] {
+            background: var(--status-warn-bg);
+            border-color: var(--status-warn-fg);
+            color: var(--status-warn-fg);
+        }
+        .turn-notice summary { cursor: pointer; font-weight: 600; }
+        .turn-notice-body {
+            margin-top: 0.5rem;
+            max-height: 8rem;
+            overflow: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
         .live-work[data-slash-menu-open="true"] {
             bottom: calc(var(--composer-height) + 3rem + var(--composer-keyboard-offset));
             justify-content: flex-end;

@@ -305,7 +305,7 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
             thread_id=session_id,
             purpose=CodexInstance.PURPOSE_USER,
         )
-        .only("status", "error", "started_at", "ended_at")
+        .only("status", "error", "codex_error_info", "started_at", "ended_at")
         # User turns may overlap. A later-ending older turn must supersede a
         # newer-started turn that already finished, while a newly started active
         # turn should supersede failures that ended before it began.
@@ -315,8 +315,32 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
     if latest is None or latest.status != CodexInstance.STATUS_FAILED:
         return None
     timestamp = latest.ended_at or latest.started_at
+    code = latest.codex_error_info
+    if isinstance(code, dict):
+        code = next(iter(code), "")
+    title = "Agent turn failed"
+    message = latest.error.strip() or "The agent turn ended without an error message."
+    details = ""
+    if code == "serverOverloaded":
+        title = "Model at capacity"
+        details = message
+        message = "Choose another model, or try again later. Send a message to continue this session."
+    elif code == "cyberPolicy":
+        title = "Request blocked"
+        details = message
+        message = "Codex stopped this turn after a safety check. Review your request before continuing."
+    elif code in (
+        "httpConnectionFailed", "responseStreamDisconnected", "responseStreamConnectionFailed",
+        "responseTooManyFailedAttempts",
+    ):
+        title = "Connection to model lost"
+        details = message
+        message = "Codex could not finish this turn. Send a follow-up message to continue this session."
     return {
-        "message": latest.error.strip() or "The agent turn ended without an error message.",
+        "title": title,
+        "message": message,
+        "details": details,
+        "change_model": code == "serverOverloaded",
         "timestamp": int(timestamp.timestamp()),
     }
 

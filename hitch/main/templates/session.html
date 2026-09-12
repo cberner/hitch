@@ -185,8 +185,17 @@
                     <time data-ts="{{ latest_user_turn_failure.timestamp }}">{{ latest_user_turn_failure.timestamp }}</time>
                 </div>
                 <div class="message turn-failure" role="alert">
-                    <div class="turn-failure-title">Agent turn failed</div>
+                    <div class="turn-failure-title">{{ latest_user_turn_failure.title }}</div>
                     <div class="body">{{ latest_user_turn_failure.message }}</div>
+                    {% if latest_user_turn_failure.details %}
+                    <details class="turn-failure-details">
+                        <summary>Details from Codex</summary>
+                        <div class="body">{{ latest_user_turn_failure.details }}</div>
+                    </details>
+                    {% endif %}
+                    {% if latest_user_turn_failure.change_model and not read_only %}
+                    <button type="button" class="button secondary turn-failure-action" data-model-settings-open>Change model</button>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}
@@ -226,6 +235,10 @@
                   {% if live_status_text %}data-working-text="{{ live_status_text }}"{% endif %}
                   role="status"
                   aria-live="polite">{% if live_status_text %}{{ live_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+            <details class="turn-notice" data-turn-notice data-thread-id="{{ main_agent_id }}" hidden>
+                <summary><span data-turn-notice-title role="status" aria-live="polite"></span></summary>
+                <div class="turn-notice-body" data-turn-notice-body></div>
+            </details>
             <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
                 <span class="live-goal-label">Goal</span>
                 <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>

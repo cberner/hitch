@@ -986,6 +986,26 @@ class SessionViewActiveWorkerTests(TestCase):
         )
         self.assertContains(response, f'data-ts="{int(ended_at.timestamp())}"')
 
+        for code, title in (
+            ("serverOverloaded", "Model at capacity"),
+            ("cyberPolicy", "Request blocked"),
+            ({"responseStreamDisconnected": {"httpStatusCode": None}}, "Connection to model lost"),
+            ({"responseStreamConnectionFailed": {"httpStatusCode": 503}}, "Connection to model lost"),
+            ({"httpConnectionFailed": {"httpStatusCode": 502}}, "Connection to model lost"),
+            ({"responseTooManyFailedAttempts": {"httpStatusCode": None}}, "Connection to model lost"),
+            ("other", "Agent turn failed"),
+        ):
+            with self.subTest(code=code):
+                instance.codex_error_info = code
+                instance.error = "Original <script>message</script>"
+                instance.save(update_fields=["codex_error_info", "error"])
+                response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+                self.assertContains(response, title)
+                self.assertContains(response, "Original &lt;script&gt;message&lt;/script&gt;")
+                failure = response.context["latest_user_turn_failure"]
+                self.assertEqual(bool(failure["details"]), code != "other")
+                self.assertEqual(failure["change_model"], code == "serverOverloaded")
+
 
     @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
