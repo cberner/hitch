@@ -1,9 +1,9 @@
 """Shape a Codex thread's turns/items for the session transcript.
 
 User, final-agent, and Thinking messages remain top-level entries. Consecutive
-runs of command, reasoning, and web-search entries are grouped so the transcript
-can show only the latest activity by default without hiding the agent's
-narration. The same shaping is applied to rollout-parser entries and SDK
+runs of command, file-change, reasoning, and web-search entries are grouped so
+the transcript can show only the latest activity by default without hiding the
+agent's narration. The same shaping is applied to rollout-parser entries and SDK
 fallback entries.
 """
 
@@ -32,7 +32,7 @@ _NON_MESSAGE_LABELS = {
     "contextCompaction": "Context compaction",
 }
 
-_COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "reasoning", "webSearch"}
+_COLLAPSIBLE_ACTIVITY_TYPES = {"commandExecution", "fileChange", "reasoning", "webSearch"}
 
 
 def collapse_flat_entries(
@@ -325,14 +325,16 @@ def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
         1 for entry in items if entry["type"] == "commandExecution"
     )
     web_search_count = sum(1 for entry in items if entry["type"] == "webSearch")
+    file_change_count = sum(1 for entry in items if entry["type"] == "fileChange")
     return {
         "kind": "intermediate",
         "summary": _activity_summary(
-            reasoning_count, command_count, web_search_count
+            reasoning_count, command_count, web_search_count, file_change_count
         ),
         "reasoning_count": reasoning_count,
         "command_count": command_count,
         "web_search_count": web_search_count,
+        "file_change_count": file_change_count,
         "item_count": len(items),
         "items": items,
         "earlier_items": items[:-1],
@@ -341,7 +343,7 @@ def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _activity_summary(
-    reasoning_count: int, command_count: int, web_search_count: int
+    reasoning_count: int, command_count: int, web_search_count: int, file_change_count: int
 ) -> str:
     parts: list[str] = []
     if reasoning_count:
@@ -353,6 +355,9 @@ def _activity_summary(
     if web_search_count:
         suffix = "" if web_search_count == 1 else "es"
         parts.append(f"{web_search_count} web search{suffix}")
+    if file_change_count:
+        suffix = "" if file_change_count == 1 else "s"
+        parts.append(f"{file_change_count} file change{suffix}")
     if len(parts) < 3:
         return " and ".join(parts)
     return f"{', '.join(parts[:-1])}, and {parts[-1]}"

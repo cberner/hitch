@@ -704,7 +704,7 @@ class RolloutFileViewTests(TestCase):
 
 
 class IntermediateCollapseTests(TestCase):
-    """Consecutive command/reasoning/web-search activity collapses."""
+    """Consecutive command/file-change/reasoning/web-search activity collapses."""
 
     @patch("hitch.main.views.common.Codex")
     def test_thinking_messages_stay_visible_and_split_activity_groups(self, mock_codex: MagicMock) -> None:
@@ -741,15 +741,17 @@ class IntermediateCollapseTests(TestCase):
         self.assertLess(body.index("./scripts/check.sh"), body.index("Trying something else."))
 
     @patch("hitch.main.views.common.Codex")
-    def test_web_search_collapses_with_commands_and_reasoning(self, mock_codex: MagicMock) -> None:
+    def test_file_changes_collapse_with_commands_reasoning_and_web_search(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
                 _turn(
                     [
                         _user_message("Research it"),
+                        _tool_call("fileChange"),
                         _command("check local sources"),
                         _web_search("current documentation"),
                         _reasoning("Compare the results"),
+                        _tool_call("fileChange"),
                         _agent_message("Done."),
                     ]
                 )
@@ -763,9 +765,72 @@ class IntermediateCollapseTests(TestCase):
         self.assertContains(response, '<details class="intermediate">', count=1)
         self.assertContains(
             response,
-            "1 reasoning message, 1 command message, and 1 web search",
+            "1 reasoning message, 1 command message, 1 web search, and 2 file changes",
         )
         self.assertContains(response, "current documentation")
+
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.common.Codex")
+    def test_live_file_changes_share_activity_group(self, mock_codex: MagicMock, _alive: MagicMock) -> None:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import Route, sync_playwright
+
+        _patch_thread(self, mock_codex, _thread([]))
+        CodexInstance.objects.create(thread_id="thread-1", status=CodexInstance.STATUS_RUNNING, pid=_LIVE_PID)
+        html = _get_session(self.client).content.decode()
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                errors: list[str] = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.add_init_script("""
+                    window.EventSource = class {
+                        constructor() { window.streamHandlers = {}; }
+                        addEventListener(name, callback) { window.streamHandlers[name] = callback; }
+                        close() {}
+                    };
+                """)
+                def route_request(route: Route) -> None:
+                    if "/static/" in route.request.url:
+                        path = route.request.url.split("/static/", 1)[1]
+                        route.fulfill(path=str(Path(__file__).parent.parent / "static" / path))
+                    else:
+                        route.fulfill(content_type="text/html", body=html)
+
+                page.route("**/*", route_request)
+                page.goto("http://hitch.test" + reverse("session", args=["thread-1"]))
+
+                def emit(item_type: str, item_id: str) -> None:
+                    page.evaluate("item => streamHandlers.message({data: JSON.stringify({"
+                                  "method: 'item/started', payload: {threadId: 'thread-1', turnId: 'turn', item}})})",
+                                  {"type": item_type, "id": item_id, "changes": [{"path": item_id}],
+                                   "command": item_id, "text": item_id, "phase": "commentary"})
+
+                emit("fileChange", "first.py")
+                self.assertEqual(page.locator(".intermediate-group").count(), 0)
+                emit("commandExecution", "check")
+                emit("fileChange", "latest.py")
+                group = page.locator(".intermediate-group")
+                self.assertEqual(group.count(), 1)
+                self.assertIn("1 command message and 2 file changes", group.locator("summary").inner_text())
+                self.assertFalse(group.locator(".intermediate-body").is_visible())
+                self.assertEqual(group.locator(".intermediate-latest .entry").count(), 1)
+                self.assertIn("latest.py", group.locator(".intermediate-latest").inner_text())
+                group.locator("summary").click()
+                self.assertTrue(group.locator(".intermediate-body").is_visible())
+                self.assertEqual(group.locator(".entry").count(), 3)
+                emit("agentMessage", "Thinking")
+                emit("fileChange", "next.py")
+                emit("fileChange", "last.py")
+                self.assertEqual(page.locator(".intermediate-group").count(), 2)
+                self.assertIn("2 file changes", page.locator(".intermediate-group").last.inner_text())
+                self.assertEqual(errors, [])
+            finally:
+                browser.close()
 
     @patch("hitch.main.views.common.Codex")
     def test_commentary_phase_is_never_final(self, mock_codex: MagicMock) -> None:

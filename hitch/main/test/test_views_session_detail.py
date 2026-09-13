@@ -858,13 +858,9 @@ class SessionDetailFastPathTests(TestCase):
                     {"type": "user_message", "message": "Run a command"},
                 ),
                 _rollout_line(
-                    "response_item",
-                    {
-                        "type": "function_call",
-                        "name": "exec_command",
-                        "arguments": json.dumps({"cmd": "printf lazy-loaded-first"}),
-                        "call_id": "call-lazy-first",
-                    },
+                    "event_msg",
+                    {"type": "patch_apply_end", "success": True,
+                     "changes": {"lazy-loaded-first.py": {"type": "update", "diff": ""}}},
                 ),
                 _rollout_line(
                     "response_item",
@@ -912,7 +908,7 @@ class SessionDetailFastPathTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "2 command messages")
+        self.assertContains(response, "1 command message and 1 file change")
         self.assertContains(
             response, '<details class="intermediate" data-lazy-intermediate', html=False
         )
@@ -923,10 +919,10 @@ class SessionDetailFastPathTests(TestCase):
                 kwargs={"session_id": "lazy-intermediate", "entry_index": 1},
             ),
         )
-        self.assertNotContains(response, "printf lazy-loaded-first")
+        self.assertNotContains(response, "lazy-loaded-first.py")
         self.assertContains(response, "printf lazy-loaded-latest")
         self.assertEqual(fragment.status_code, 200)
-        self.assertContains(fragment, "printf lazy-loaded-first")
+        self.assertContains(fragment, "lazy-loaded-first.py")
         self.assertContains(fragment, "printf lazy-loaded-latest")
         self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()

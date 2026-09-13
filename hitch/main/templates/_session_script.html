@@ -1242,7 +1242,7 @@
                 placeBeforeLive(node);
             }
 
-            function activitySummary(reasoningCount, commandCount, webSearchCount) {
+            function activitySummary(reasoningCount, commandCount, webSearchCount, fileChangeCount) {
                 const parts = [];
                 if (reasoningCount) {
                     parts.push(reasoningCount + " reasoning message" + (reasoningCount === 1 ? "" : "s"));
@@ -1252,6 +1252,9 @@
                 }
                 if (webSearchCount) {
                     parts.push(webSearchCount + " web search" + (webSearchCount === 1 ? "" : "es"));
+                }
+                if (fileChangeCount) {
+                    parts.push(fileChangeCount + " file change" + (fileChangeCount === 1 ? "" : "s"));
                 }
                 if (parts.length < 3) return parts.join(" and ");
                 return parts.slice(0, -1).join(", ") + ", and " + parts[parts.length - 1];
@@ -1296,10 +1299,12 @@
                 if (nextType === "reasoning") run.reasoningCount += 1;
                 if (nextType === "commandExecution") run.commandCount += 1;
                 if (nextType === "webSearch") run.webSearchCount += 1;
+                if (nextType === "fileChange") run.fileChangeCount += 1;
                 summaryText.textContent = activitySummary(
                     run.reasoningCount,
                     run.commandCount,
-                    run.webSearchCount
+                    run.webSearchCount,
+                    run.fileChangeCount
                 );
             }
 
@@ -1315,6 +1320,7 @@
                         reasoningCount: itemType === "reasoning" ? 1 : 0,
                         commandCount: itemType === "commandExecution" ? 1 : 0,
                         webSearchCount: itemType === "webSearch" ? 1 : 0,
+                        fileChangeCount: itemType === "fileChange" ? 1 : 0,
                     };
                     return;
                 }
@@ -1328,10 +1334,12 @@
                 if (itemType === "reasoning") liveActivityRun.reasoningCount += 1;
                 if (itemType === "commandExecution") liveActivityRun.commandCount += 1;
                 if (itemType === "webSearch") liveActivityRun.webSearchCount += 1;
+                if (itemType === "fileChange") liveActivityRun.fileChangeCount += 1;
                 liveActivityRun.summaryText.textContent = activitySummary(
                     liveActivityRun.reasoningCount,
                     liveActivityRun.commandCount,
-                    liveActivityRun.webSearchCount
+                    liveActivityRun.webSearchCount,
+                    liveActivityRun.fileChangeCount
                 );
             }
 
@@ -1528,6 +1536,7 @@
                     item.type === "commandExecution"
                     || item.type === "reasoning"
                     || item.type === "webSearch"
+                    || item.type === "fileChange"
                 ) {
                     insertActivityBeforeLive(wrap, item.type);
                 } else {
