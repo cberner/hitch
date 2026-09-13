@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings
+from django.template.loader import render_to_string
 from django.test import TestCase
 from django.urls import reverse
 
@@ -49,6 +50,12 @@ class SessionNoticeTests(TestCase):
         active_html = self.client.get(url).content.decode()
 
         def route_request(route: Route) -> None:
+            if "/assets/" in route.request.url:
+                asset = route.request.url.split("/assets/", 1)[1]
+                route.fulfill(body=render_to_string("assets/" + asset), content_type=(
+                    "text/css" if asset.endswith(".css") else "text/javascript"
+                ))
+                return
             if "/static/" in route.request.url:
                 path = route.request.url.split("/static/", 1)[1]
                 route.fulfill(path=str(Path(settings.BASE_DIR) / "hitch/main/static" / path))

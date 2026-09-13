@@ -7,6 +7,7 @@ from django.urls import path
 from hitch.main.sessions import session_approval
 from hitch.main.views import (
     account,
+    assets,
     messages,
     new_session,
     proposals,
@@ -17,6 +18,7 @@ from hitch.main.views import (
 from hitch.main.views import settings as settings_views
 
 urlpatterns = [
+    path("assets/<str:asset>", assets.session_asset, name="session_asset"),
     path("", session_list.index, name="index"),
     path("register/", account.register, name="register"),
     path("login/", account.login, name="login"),
@@ -58,6 +60,10 @@ urlpatterns = [
         name="session_history",
     ),
     path("sessions/<str:session_id>/", session_detail.session, name="session"),
+    path("sessions/<str:session_id>/diff/", session_detail.session_diff, name="session_diff"),
+    path(
+        "sessions/<str:session_id>/command/", session_detail.session_command, name="session_command",
+    ),
     path("sessions/<str:session_id>/agents/", session_detail.session_agents, name="session_agents"),
     path(
         "sessions/<str:session_id>/intermediate/<int:entry_index>/",

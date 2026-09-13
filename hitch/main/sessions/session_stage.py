@@ -70,9 +70,9 @@ def derive_stage(
     if terminal_stage := _terminal_pr_stage(pr_snapshot):
         return terminal_stage
 
-    entries_list = list(entries)
     if _has_pr_identity(pr_snapshot):
         return PR
+    entries_list = list(entries)
     if _latest_agent_task_stage(entries_list) == "qa":
         return QA
     if _entries_are_waiting_on_plan(entries_list):

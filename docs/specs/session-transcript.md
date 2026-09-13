@@ -9,6 +9,10 @@ space used by repetitive reasoning, command, file-change, and web-search activit
 
 ## Requirements
 
+- `ST-shared-assets`: Session styles and scripts load as external shared assets.
+  Browsers must revalidate them on reuse; validators cover the current complete
+  rendered content, including shared snippets. Session-specific configuration
+  stays in the HTML and assets do not include request or user data.
 - `ST-agent-picker`: Visible session detail pages offer an Agent drop-down with
   Main agent and its native Codex subagents, including nested and archived
   descendants. Use nicknames and roles when available. Unrelated threads and
@@ -112,6 +116,14 @@ space used by repetitive reasoning, command, file-change, and web-search activit
 - `ST-latest-default`: Activity groups are collapsed by default. A collapsed
   group shows its count, its toggle, and only its latest message; expanding the
   group reveals the earlier messages without duplicating the latest message.
+- `ST-command-preview`: Persisted long commands initially include only a short
+  preview, including the latest command in an activity group. Expanding a command
+  fetches its full text with HTTP caching disabled; collapsing restores the short
+  preview. Failed loads are retryable and obsolete responses cannot overwrite a
+  later expansion. Command links identify the source call, so appended activity
+  cannot change which command expands. This also applies to subagent and
+  unindexed transcripts. SDK-only history and legacy commands without source
+  identities stay inline.
 - `ST-live-consistency`: Completed transcripts and live-streamed transcript
   updates use the same grouping boundaries and default state.
 - `ST-replay-compaction`: Initial stream replay omits historical text deltas
@@ -120,9 +132,15 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   clients can recover their current text.
 - `ST-bounded-diff-spool`: Live worker event logs omit cumulative
   `turn/diff/updated` snapshots because the active page does not expose a diff
-  preview. After the turn, the page reload builds its stable preview directly
+  preview. After the turn, opening the diff builds its preview directly
   from the worktree. Disk-pressure cleanup removes these obsolete snapshots
   from oversized logs created by older Hitch versions.
+- `ST-diff-on-demand`: Inactive session pages offer View diff without building
+  or rendering a diff during the initial page request. Each dialog opening reads
+  the current worktree with HTTP caching disabled. Show loading, empty, and
+  retryable failure states; an older request must not overwrite a newer opening.
+  Unreadable working trees and failed Git reads must never appear as a clean
+  diff. A running turn keeps the diff unavailable.
 - `ST-agent-math`: Agent and Thinking messages render TeX enclosed by explicit
   `\(...\)`, `\[...\]`, or `$$...$$` delimiters as mathematical notation.
   Rendering applies consistently to persisted history, lazily loaded entries,

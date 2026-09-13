@@ -1,0 +1,45 @@
+{% if diff_view.has_changes %}
+    <div class="diff-summary" aria-label="Diff summary">
+        <span>{{ diff_view.file_count }} file{{ diff_view.file_count|pluralize }}</span>
+        <span class="diff-stat add">+{{ diff_view.additions }}</span>
+        <span class="diff-stat remove">-{{ diff_view.deletions }}</span>
+    </div>
+{% if diff_view.truncated %}
+<p class="diff-warning">Diff preview truncated.</p>
+{% endif %}
+<div class="diff-layout">
+    <nav class="diff-file-nav" aria-label="Changed files">
+        {% for file in diff_view.files %}
+        <a href="#diff-file-{{ forloop.counter }}">{{ file.path }}</a>
+        {% endfor %}
+    </nav>
+    <div class="diff-content">
+        {% for file in diff_view.files %}
+        <section class="diff-file" id="diff-file-{{ forloop.counter }}">
+            <div class="diff-file-header">
+                <span class="diff-file-status">{{ file.status }}</span>
+                <span class="diff-file-name">{{ file.path }}</span>
+                <span class="diff-file-counts" aria-label="File change counts">
+                    <span class="diff-stat add">+{{ file.additions }}</span>
+                    <span class="diff-stat remove">-{{ file.deletions }}</span>
+                </span>
+            </div>
+            <table class="diff-table" aria-label="Diff for {{ file.path }}">
+                <tbody>
+                    {% for line in file.lines %}
+                    <tr class="diff-line diff-line-{{ line.kind }}">
+                        <td class="diff-lineno diff-lineno-old">{% if line.old_lineno %}{{ line.old_lineno }}{% endif %}</td>
+                        <td class="diff-lineno diff-lineno-new">{% if line.new_lineno %}{{ line.new_lineno }}{% endif %}</td>
+                        <td class="diff-marker" data-mobile-lineno="{% firstof line.new_lineno line.old_lineno %}">{% if line.kind == "add" %}+{% elif line.kind == "remove" %}-{% endif %}</td>
+                        <td class="diff-code">{{ line.html|safe }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+        {% endfor %}
+    </div>
+</div>
+{% else %}
+<p class="diff-warning">No changes in this working tree.</p>
+{% endif %}

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from django.conf import settings
 from django.core.cache import cache
+from django.template.loader import render_to_string
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
@@ -67,9 +68,10 @@ class SubagentViewTests(TestCase):
     @patch("hitch.main.sessions.subagents.list_subagents")
     def test_transcript_discovery_errors_and_unrelated_selection(self, listing: MagicMock) -> None:
         lines = _basic_session_rollout_lines("Review the code", "<script>unsafe</script> **Result**")
+        command = "git status " + "long argument " * 100 + "command end"
         lines.insert(1, _rollout_line("response_item", {
             "type": "function_call", "name": "exec_command", "call_id": "command",
-            "arguments": json.dumps({"cmd": "git status"}),
+            "arguments": json.dumps({"cmd": command}),
         }))
         path = _make_rollout(self, lines)
         listing.return_value = [subagents.Subagent("child", "parent", "Ada", "reviewer", str(path))]
@@ -79,6 +81,11 @@ class SubagentViewTests(TestCase):
         data = response.json()
         self.assertContains(response, "Review the code")
         self.assertIn("git status", data["html"])
+        self.assertNotIn("command end", data["html"])
+        self.assertIn('data-command-url="/sessions/child/command/?id=command"', data["html"])
+        with patch("hitch.main.sessions.session_resume._stored_rollout_path_for_thread", return_value=path):
+            full = self.client.get(reverse("session_command", args=["child"]), {"id": "command"})
+            self.assertEqual(full.content.decode(), command)
         self.assertNotIn("<script>", data["html"])
         self.assertNotIn("send_message_url", data["html"])
         self.assertEqual(data["selected"], "child")
@@ -161,6 +168,12 @@ class SubagentViewTests(TestCase):
         }
 
         def route_request(route: Route) -> None:
+            if "/assets/" in route.request.url:
+                asset = route.request.url.split("/assets/", 1)[1]
+                route.fulfill(body=render_to_string("assets/" + asset), content_type=(
+                    "text/css" if asset.endswith(".css") else "text/javascript"
+                ))
+                return
             url = route.request.url
             if "/agents/" in url:
                 if state["fail"]:
@@ -179,8 +192,8 @@ class SubagentViewTests(TestCase):
                         data.update(next_url="", html="Command: git status", partial=False)
                 route.fulfill(json=data)
             elif "/static/" in url:
-                asset = Path(settings.BASE_DIR) / "hitch/main/static" / url.split("/static/", 1)[1]
-                route.fulfill(path=str(asset))
+                asset_path = Path(settings.BASE_DIR) / "hitch/main/static" / url.split("/static/", 1)[1]
+                route.fulfill(path=str(asset_path))
             elif "/stream/" in url:
                 route.fulfill(content_type="text/event-stream", body="")
             else:
@@ -295,7 +308,7 @@ class SubagentViewTests(TestCase):
                             page.locator("[data-agent-latest]").click()
                     page.wait_for_load_state()
                     if return_to == "main":
-                        self.assertTrue(composer.is_visible())
+                        composer.wait_for(state="visible")
                         page.locator('[data-agent-select] option[value="child"]').wait_for(state="attached")
                         page.locator("[data-agent-select]").select_option("child")
                     page.get_by_text("Updated child response", exact=True).wait_for()

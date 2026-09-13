@@ -9,6 +9,7 @@ from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings
+from django.template.loader import render_to_string
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
@@ -137,6 +138,12 @@ class SessionModelTests(TestCase):
         submissions: list[str] = []
 
         def route_request(route: Route) -> None:
+            if "/assets/" in route.request.url:
+                asset = route.request.url.split("/assets/", 1)[1]
+                route.fulfill(body=render_to_string("assets/" + asset), content_type=(
+                    "text/css" if asset.endswith(".css") else "text/javascript"
+                ))
+                return
             url = route.request.url
             if "/static/" in url:
                 route.fulfill(path=str(Path(settings.BASE_DIR) / "hitch/main/static" / url.split("/static/", 1)[1]))

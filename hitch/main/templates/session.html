@@ -4,9 +4,7 @@
 {% block title %}HITCH — {{ display_title }}{% endblock %}
 {% block head %}
     <link rel="stylesheet" href="{% static 'vendor/katex/katex.min.css' %}">
-    <style>
-        {% include "_session_styles.html" %}
-    </style>
+    <link rel="stylesheet" href="{% url 'session_asset' 'session.css' %}">
     <noscript>
         <style>.edit-title[hidden] { display: block; }</style>
     </noscript>
@@ -23,7 +21,7 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
-                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes or active_worker %}disabled{% endif %}>View diff</button>
+                    <button type="button" role="menuitem" data-diff-open {% if active_worker %}disabled{% endif %}>View diff</button>
                     {% endif %}
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
                     {% if not read_only %}
@@ -271,10 +269,9 @@
         </div>
     </main>
 
-    {% if diff_view.has_changes and not active_worker %}
+    {% if not active_worker %}
     <button type="button" class="diff-fab" data-diff-open aria-label="View diff">
         <span>Diff</span>
-        <span class="diff-fab-count">{{ diff_view.file_count }}</span>
     </button>
     {% endif %}
 
@@ -341,55 +338,15 @@
     </dialog>
     {% endif %}
 
-    {# A running turn can change the diff continuously; render it after the stream reloads the completed session. #}
-    {% if diff_view.has_changes and not active_worker %}
-    <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
+    {% if not active_worker %}
+    <dialog class="diff-modal" data-diff-modal data-diff-url="{{ session_diff_url }}" aria-labelledby="diff-modal-title">
         <div class="diff-shell">
             <header class="diff-modal-header">
                 <h2 class="diff-modal-title" id="diff-modal-title">Working tree diff</h2>
-                <div class="diff-summary" aria-label="Diff summary">
-                    <span>{{ diff_view.file_count }} file{{ diff_view.file_count|pluralize }}</span>
-                    <span class="diff-stat add">+{{ diff_view.additions }}</span>
-                    <span class="diff-stat remove">-{{ diff_view.deletions }}</span>
-                </div>
                 <button type="button" class="diff-close" data-diff-close aria-label="Close diff">×</button>
             </header>
-            {% if diff_view.truncated %}
-            <p class="diff-warning">Diff preview truncated.</p>
-            {% endif %}
-            <div class="diff-layout">
-                <nav class="diff-file-nav" aria-label="Changed files">
-                    {% for file in diff_view.files %}
-                    <a href="#diff-file-{{ forloop.counter }}">{{ file.path }}</a>
-                    {% endfor %}
-                </nav>
-                <div class="diff-content">
-                    {% for file in diff_view.files %}
-                    <section class="diff-file" id="diff-file-{{ forloop.counter }}">
-                        <div class="diff-file-header">
-                            <span class="diff-file-status">{{ file.status }}</span>
-                            <span class="diff-file-name">{{ file.path }}</span>
-                            <span class="diff-file-counts" aria-label="File change counts">
-                                <span class="diff-stat add">+{{ file.additions }}</span>
-                                <span class="diff-stat remove">-{{ file.deletions }}</span>
-                            </span>
-                        </div>
-                        <table class="diff-table" aria-label="Diff for {{ file.path }}">
-                            <tbody>
-                                {% for line in file.lines %}
-                                <tr class="diff-line diff-line-{{ line.kind }}">
-                                    <td class="diff-lineno diff-lineno-old">{% if line.old_lineno %}{{ line.old_lineno }}{% endif %}</td>
-                                    <td class="diff-lineno diff-lineno-new">{% if line.new_lineno %}{{ line.new_lineno }}{% endif %}</td>
-                                    <td class="diff-marker" data-mobile-lineno="{% firstof line.new_lineno line.old_lineno %}">{% if line.kind == "add" %}+{% elif line.kind == "remove" %}-{% endif %}</td>
-                                    <td class="diff-code">{{ line.html|safe }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </section>
-                    {% endfor %}
-                </div>
-            </div>
+            <div data-diff-body aria-live="polite"></div>
+            <button type="button" class="button" data-diff-retry hidden>Retry</button>
         </div>
     </dialog>
     {% endif %}
@@ -408,6 +365,9 @@
           enctype="multipart/form-data"
           action="{{ send_message_url }}"
           data-composer
+          data-pr-prompt="{{ pr_slash_prompt }}"
+          data-fix-pr-prompt="{{ fix_pr_slash_command }}"
+          data-qa-prompt="{{ qa_slash_prompt }}"
           data-stream-url="{{ stream_url }}"
           data-plan-mode="{{ default_plan_mode|yesno:'true,false' }}"
           data-initial-plan-mode="{{ default_plan_mode|yesno:'true,false' }}">
@@ -476,6 +436,6 @@
     <script src="{% static 'vendor/katex/katex.min.js' %}"></script>
     <script src="{% static 'vendor/katex/contrib/auto-render.min.js' %}"></script>
     <script src="{% static 'session_math.js' %}"></script>
-    {% include "_session_script.html" %}
+    <script src="{% url 'session_asset' 'session.js' %}"></script>
     <script src="{% static 'session_agents.js' %}"></script>
 {% endblock %}

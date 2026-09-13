@@ -11,6 +11,17 @@ from hitch.main.test.support import _git
 
 
 class WorktreeDiffTests(SimpleTestCase):
+    def test_unavailable_worktrees_and_unreadable_files_are_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            for cwd in (None, str(repo / "missing"), str(repo)):
+                with self.subTest(cwd=cwd):
+                    self.assertTrue(build_worktree_diff(cwd).error)
+            _git(repo, "init")
+            (repo / "unreadable.txt").write_text("unreadable content")
+            with patch.object(Path, "open", side_effect=PermissionError("unreadable")):
+                self.assertTrue(build_worktree_diff(raw).error)
+
     def test_session_preview_bounds_raw_diff_characters(self) -> None:
         raw_diff = "x" * (diffs_module._MAX_DIFF_PREVIEW_CHARS + 1)
         with (
@@ -126,9 +137,7 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.file_count, 1)
         self.assertEqual(diff.files[0].path, "example.py")
 
-    def test_merge_base_execution_error_falls_back_to_ref(self) -> None:
-        # A merge-base failure that is not "no common ancestor" (e.g. a timeout
-        # or lock, surfaced as None) must not be treated as disjoint history.
+    def test_base_discovery_failures_are_distinct_from_disjoint_history(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             subprocess.run(
@@ -145,38 +154,64 @@ class WorktreeDiffTests(SimpleTestCase):
 
             real_git_output = diffs_module._git_output
 
-            def fake_git_output(
-                repo_arg: Path,
-                args: list[str],
-                *,
-                allow_statuses: set[int] | None = None,
-            ) -> str | None:
-                if args[:1] == ["merge-base"]:
-                    return None  # simulate a timeout / lock, not a clean status 1
-                return real_git_output(repo_arg, args, allow_statuses=allow_statuses)
+            for disjoint in (False, True):
+                if disjoint:
+                    _git(repo, "checkout", "--orphan", "unrelated")
+                    _git(repo, "commit", "-m", "Create disjoint history")
+                commands = (
+                    [["rev-parse", "--is-shallow-repository"], ["hash-object"]]
+                    if disjoint else [["merge-base"], ["rev-list"]]
+                )
+                for command in commands:
+                    def fake_git_output(
+                        repo_arg: Path, args: list[str], *, command: list[str] = command,
+                        allow_statuses: set[int] | None = None,
+                    ) -> str | None:
+                        if args[:len(command)] == command:
+                            return None
+                        return real_git_output(repo_arg, args, allow_statuses=allow_statuses)
 
-            with patch.object(
-                diffs_module, "_git_output", side_effect=fake_git_output
-            ):
-                diff = build_worktree_diff(str(repo))
+                    with self.subTest(command=command), patch.object(
+                        diffs_module, "_git_output", side_effect=fake_git_output,
+                    ):
+                        self.assertTrue(build_worktree_diff(str(repo)).error)
 
-        # Falls back to diffing against origin/master, so only the changed file
-        # shows -- not the whole tree as additions (the empty-tree path).
-        paths = {file.path for file in diff.files}
-        self.assertIn("base.py", paths)
-        self.assertNotIn("shared.py", paths)
+                recovered = build_worktree_diff(str(repo))
+                self.assertFalse(recovered.error)
+                self.assertEqual(
+                    {file.path for file in recovered.files},
+                    {"base.py", "shared.py"} if disjoint else {"base.py"},
+                )
 
     def test_unborn_repo_still_shows_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
             (repo / "new_file.py").write_text("def created():\n    return 3\n")
+            (repo / "staged.py").write_text("staged = True\n")
+            _git(repo, "add", "staged.py")
 
             diff = build_worktree_diff(str(repo))
 
         self.assertTrue(diff.has_changes)
-        self.assertEqual(diff.files[0].path, "new_file.py")
-        self.assertEqual(diff.files[0].status, "Added")
+        self.assertFalse(diff.error)
+        self.assertEqual({file.path: file.status for file in diff.files}, {
+            "new_file.py": "Added", "staged.py": "Added",
+        })
+
+    def test_unborn_head_with_a_remote_default_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            _git(repo, "init")
+            (repo / "file.txt").write_text("original\n")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "Create remote base")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "checkout", "--orphan", "unborn")
+            (repo / "file.txt").write_text("changed\n")
+            diff = build_worktree_diff(raw)
+            self.assertFalse(diff.error)
+            self.assertEqual((diff.file_count, diff.additions, diff.deletions), (1, 1, 1))
 
     def test_git_output_returns_none_on_spawn_failure(self) -> None:
         with patch(

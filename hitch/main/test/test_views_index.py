@@ -40,6 +40,7 @@ from hitch.main.models import (
 )
 from hitch.main.sessions import (
     session_index,
+    session_stage_refresh,
     settings_cookies,
     token_usage,
 )
@@ -68,6 +69,37 @@ from hitch.main.views import common as common_views
 
 
 class IndexViewTests(TestCase):
+    def test_stage_reads_history_only_when_current_state_needs_it(self) -> None:
+        path = _make_rollout(self, [_rollout_line("event_msg", {"type": "user_message", "message": "Work"})])
+        SessionMetadata.objects.create(thread_id="stages", codex_path=str(path))
+        instance = CodexInstance.objects.create(thread_id="stages", status=CodexInstance.STATUS_RUNNING, pid=1)
+        record = SessionPullRequest.objects.create(thread_id="stages", state={
+            "pr_handoff": {"url": "https://github.com/cberner/hitch/pull/94", "state": "open"},
+        })
+        rows: list[dict[str, Any]] = [{"id": "stages", "codex_path": str(path)}]
+        with patch("hitch.main.runtime.rollout.session_stage_data") as read:
+            session_stage_refresh._attach_session_stage_context(rows)
+            self.assertEqual(rows[0]["stage"]["key"], "implementation")
+            approval = ApprovalRequest.objects.create(instance=instance)
+            session_stage_refresh._attach_session_stage_context(rows)
+            self.assertEqual(rows[0]["stage"]["key"], "awaiting_input")
+            approval.delete()
+            instance.status = CodexInstance.STATUS_COMPLETED
+            instance.save()
+            session_stage_refresh._attach_session_stage_context(rows)
+            self.assertEqual(rows[0]["stage"]["key"], "pr")
+            record.state["pr_handoff"]["state"] = "closed"
+            record.save()
+            session_stage_refresh._attach_session_stage_context(rows)
+            self.assertEqual(rows[0]["stage"]["key"], "done_closed")
+            read.assert_not_called()
+        record.delete()
+        session_stage_refresh._attach_session_stage_context(rows)
+        self.assertEqual(rows[0]["stage"]["key"], "implementation")
+        path.write_text("")
+        session_stage_refresh._attach_session_stage_context(rows)
+        self.assertEqual(rows[0]["stage"]["key"], "new")
+
     def _load_more_url(self, response: Any) -> str:
         match = re.search(
             r'<div class="load-more"><a[^>]+href="([^"]+)"',

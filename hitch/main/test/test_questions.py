@@ -518,7 +518,7 @@ class QuestionBrowserTests(SimpleTestCase):
             </main>
             <div data-pending-question-bar hidden><button data-pending-questions></button></div>
             <textarea data-composer-input>Keep my draft</textarea>
-        """ + render_to_string("_session_script.html")
+        """ + "<script>" + render_to_string("assets/session.js") + "</script>"
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)

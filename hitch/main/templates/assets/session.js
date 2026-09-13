@@ -1,4 +1,3 @@
-    <script>
         (function () {
             const dateTime = new Intl.DateTimeFormat(undefined, {
                 year: "numeric",
@@ -30,13 +29,41 @@
                 formatTimestamps(event.detail.root);
                 renderSessionMath(event.detail.root);
             });
-            document.addEventListener("click", (event) => {
+            const commandRequests = new WeakMap();
+            document.addEventListener("click", async (event) => {
                 if (!(event.target instanceof Element)) return;
                 const command = event.target.closest("[data-expandable-command]");
                 if (!command) return;
                 const expanded = command.getAttribute("aria-expanded") !== "true";
                 command.setAttribute("aria-expanded", expanded ? "true" : "false");
                 command.title = expanded ? "Collapse command" : "Expand command";
+                if (!command.dataset.commandUrl) return;
+                const previous = commandRequests.get(command);
+                if (previous) previous.controller.abort();
+                const state = {
+                    preview: previous ? previous.preview : command.textContent,
+                    controller: new AbortController(),
+                };
+                commandRequests.set(command, state);
+                command.textContent = state.preview;
+                command.removeAttribute("aria-busy");
+                if (!expanded) return;
+                command.setAttribute("aria-busy", "true");
+                try {
+                    const response = await fetch(command.dataset.commandUrl, {
+                        cache: "no-store", signal: state.controller.signal,
+                    });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const text = await response.text();
+                    if (commandRequests.get(command) === state) command.textContent = text;
+                } catch (error) {
+                    if (commandRequests.get(command) !== state || error.name === "AbortError") return;
+                    command.setAttribute("aria-expanded", "false");
+                    command.textContent = "Unable to load command. Click to retry. " + state.preview;
+                    command.title = "Retry loading command";
+                } finally {
+                    if (commandRequests.get(command) === state) command.removeAttribute("aria-busy");
+                }
             });
             function timestampElement(seconds, className) {
                 const el = document.createElement("time");
@@ -59,6 +86,7 @@
                 try {
                     const response = await fetch(url, {
                         headers: { "X-Requested-With": "XMLHttpRequest" },
+                        cache: "no-store",
                     });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     body.innerHTML = await response.text();
@@ -229,6 +257,44 @@
             const diffModal = document.querySelector("[data-diff-modal]");
             const diffOpeners = document.querySelectorAll("[data-diff-open]");
             const diffClose = document.querySelector("[data-diff-close]");
+            const diffBody = document.querySelector("[data-diff-body]");
+            const diffRetry = document.querySelector("[data-diff-retry]");
+            let diffRequest = 0;
+            let diffController = null;
+            const clearDiff = () => {
+                diffRequest += 1;
+                if (diffController) diffController.abort();
+                if (diffBody) {
+                    diffBody.replaceChildren();
+                    diffBody.removeAttribute("aria-busy");
+                }
+                if (diffRetry) diffRetry.hidden = true;
+            };
+            const loadDiff = async () => {
+                if (!diffModal || !diffBody) return;
+                clearDiff();
+                const request = diffRequest;
+                diffController = new AbortController();
+                diffBody.textContent = "Loading diff…";
+                diffBody.setAttribute("aria-busy", "true");
+                try {
+                    const response = await fetch(diffModal.dataset.diffUrl, {
+                        cache: "no-store", signal: diffController.signal,
+                    });
+                    if (!response.ok) throw new Error(response.status === 409
+                        ? "The diff is available after the running turn finishes."
+                        : "Unable to load the diff. Try again.");
+                    const html = await response.text();
+                    if (request !== diffRequest) return;
+                    diffBody.innerHTML = html;
+                } catch (error) {
+                    if (request !== diffRequest || error.name === "AbortError") return;
+                    diffBody.textContent = error.message || "Unable to load the diff. Try again.";
+                    if (diffRetry) diffRetry.hidden = false;
+                } finally {
+                    if (request === diffRequest) diffBody.removeAttribute("aria-busy");
+                }
+            };
             const openDiff = () => {
                 if (!diffModal) return;
                 if (diffModal.open) return;
@@ -238,9 +304,11 @@
                 } else {
                     diffModal.setAttribute("open", "");
                 }
+                loadDiff();
             };
             const closeDiff = () => {
                 if (!diffModal) return;
+                clearDiff();
                 if (typeof diffModal.close === "function") {
                     diffModal.close();
                 } else {
@@ -254,7 +322,11 @@
                 });
             }
             if (diffClose) diffClose.addEventListener("click", closeDiff);
+            if (diffRetry) diffRetry.addEventListener("click", loadDiff);
             if (diffModal) {
+                diffModal.addEventListener("close", () => {
+                    if (!diffModal.open) clearDiff();
+                });
                 diffModal.addEventListener("click", (event) => {
                     if (event.target === diffModal) closeDiff();
                 });
@@ -405,10 +477,10 @@
                 // Re-measure the keyboard offset at a few delays so the composer
                 // settles correctly as the mobile virtual keyboard animates in.
                 const composerKeyboardSettleDelays = [50, 150, 300, 500];
-                const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const prPrompt = composer.dataset.prPrompt || "/pr";
                 const prNowCommand = "/pr-now";
-                const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
-                const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
+                const fixPrPrompt = composer.dataset.fixPrPrompt || "/fix-pr";
+                const qaPrompt = composer.dataset.qaPrompt || "/qa";
                 let composerKeyboardFrame = 0;
                 let composerKeyboardSettleTimers = [];
                 const hasImages = () => imageInput && (imageInput.files || []).length > 0;
@@ -753,9 +825,7 @@
                 });
             }
         })();
-    </script>
 
-    <script>
         // Subscribe to the session SSE feed.
         //
         // The live work strip (fixed above the composer) shows the live
@@ -2377,4 +2447,3 @@
             }
             connect();
         })();
-    </script>
