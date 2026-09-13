@@ -92,10 +92,12 @@ class DiffView:
 def build_worktree_diff(cwd: str | None) -> DiffView:
     """Return the current git session diff for ``cwd``.
 
-    The viewer is informational, so git failures degrade to an empty/error
-    state instead of blocking the session page render.
+    Read failures are distinct from a successful diff of a clean worktree.
     """
-    text = _worktree_diff_text(cwd)
+    try:
+        text = _worktree_diff_text(cwd)
+    except (GitCommandError, OSError):
+        return DiffView(files=[], error="Unable to read the working tree. Try again.")
     truncated = len(text) > _MAX_DIFF_PREVIEW_CHARS
     if truncated:
         text = text[:_MAX_DIFF_PREVIEW_CHARS]
@@ -109,10 +111,8 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
 
 def _worktree_diff_text(cwd: str | None) -> str:
     if not cwd:
-        return ""
+        raise GitCommandError("Working directory unavailable")
     repo = _repo_root(Path(cwd))
-    if repo is None:
-        return ""
 
     return "\n".join(
         part
@@ -126,14 +126,10 @@ def _worktree_diff_text(cwd: str | None) -> str:
 
 def _tracked_diff(repo: Path) -> str:
     diff_base = _branch_diff_base_ref(repo)
-    if diff_base is not None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
-        if raw_diff is not None:
-            return raw_diff
-    raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
-    if raw_diff is not None:
-        return raw_diff
-    return _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
+    if diff_base is None:
+        # The empty tree includes staged files before the first commit.
+        diff_base = "HEAD" if _ref_exists(repo, "HEAD") else _empty_tree_hash(repo)
+    return _required_git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
 
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
@@ -144,20 +140,20 @@ def _branch_diff_base_ref(repo: Path) -> str | None:
     saw_no_common_ancestor = False
     closest_merge_base = None
     closest_distance = None
+    head_exists = _ref_exists(repo, "HEAD")
     for index, base_ref in enumerate(
         (_BRANCH_DIFF_DEFAULT_REF, *_BRANCH_DIFF_FALLBACK_REFS)
     ):
         if not _ref_exists(repo, base_ref):
             continue
+        if not head_exists:
+            return base_ref
         if fallback_ref is None:
             fallback_ref = base_ref
-        # Allow status 1 (no common ancestor) so it stays distinguishable from
-        # an execution failure (timeout / lock), which returns None.
-        merge_base = _git_output(
+        # No common ancestor is a valid result; failed reads must be retried.
+        merge_base = _required_git_output(
             repo, ["merge-base", "HEAD", base_ref], allow_statuses={0, 1}
         )
-        if merge_base is None:
-            continue
         merge_base = merge_base.strip()
         if not merge_base:
             saw_no_common_ancestor = True
@@ -165,8 +161,6 @@ def _branch_diff_base_ref(repo: Path) -> str | None:
         if index == 0:
             return merge_base
         distance = _commit_distance_from_head(repo, merge_base)
-        if distance is None:
-            continue
         if closest_distance is None or distance < closest_distance:
             closest_merge_base = merge_base
             closest_distance = distance
@@ -177,54 +171,58 @@ def _branch_diff_base_ref(repo: Path) -> str | None:
     # re-pointed at an unrelated repo): diff against the empty tree so the
     # branch's content shows as additions rather than the unrelated ref's files
     # as spurious deletions. In a shallow clone the shared ancestor may simply
-    # be unfetched, so keep diffing against the ref directly; likewise fall back
-    # to the ref when merge-base could not be computed at all.
+    # be unfetched, so keep diffing against the ref directly.
     if saw_no_common_ancestor and not _is_shallow_repo(repo):
-        empty_tree = _empty_tree_hash(repo)
-        if empty_tree is not None:
-            return empty_tree
+        return _empty_tree_hash(repo)
     return fallback_ref
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
-    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", ref])
-    return bool(output and output.strip())
+    output = _required_git_output(
+        repo, ["rev-parse", "--verify", "--quiet", ref], allow_statuses={0, 1},
+    )
+    return bool(output.strip())
 
 
 def _is_shallow_repo(repo: Path) -> bool:
-    output = _git_output(repo, ["rev-parse", "--is-shallow-repository"])
-    return output is not None and output.strip() == "true"
+    output = _required_git_output(repo, ["rev-parse", "--is-shallow-repository"]).strip()
+    if output not in {"true", "false"}:
+        raise GitCommandError("Invalid shallow repository status")
+    return output == "true"
 
 
-def _empty_tree_hash(repo: Path) -> str | None:
+def _empty_tree_hash(repo: Path) -> str:
     # Compute the empty-tree object id for the repo's object format (sha1 vs
     # sha256) instead of hard-coding the sha1 value, which is not a valid object
     # name in a sha256 repository.
-    output = _git_output(repo, ["hash-object", "-t", "tree", "/dev/null"])
-    if output is None:
-        return None
+    output = _required_git_output(repo, ["hash-object", "-t", "tree", "/dev/null"])
     value = output.strip()
-    return value or None
+    if not value:
+        raise GitCommandError("Empty tree hash unavailable")
+    return value
 
 
-def _commit_distance_from_head(repo: Path, commit: str) -> int | None:
-    output = _git_output(repo, ["rev-list", "--count", f"{commit}..HEAD"])
-    if output is None:
-        return None
+def _commit_distance_from_head(repo: Path, commit: str) -> int:
+    output = _required_git_output(repo, ["rev-list", "--count", f"{commit}..HEAD"])
     try:
         return int(output.strip())
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise GitCommandError("Invalid commit distance") from exc
 
 
-def _repo_root(cwd: Path) -> Path | None:
-    if not cwd.exists():
-        return None
-    output = _git_output(cwd, ["rev-parse", "--show-toplevel"])
-    if output is None:
-        return None
+def _repo_root(cwd: Path) -> Path:
+    output = _required_git_output(cwd, ["rev-parse", "--show-toplevel"])
     root = output.strip()
-    return Path(root) if root else None
+    if not root:
+        raise GitCommandError("Repository root unavailable")
+    return Path(root)
+
+
+def _required_git_output(cwd: Path, args: list[str], *, allow_statuses: set[int] | None = None) -> str:
+    output = _git_output(cwd, args, allow_statuses=allow_statuses)
+    if output is None:
+        raise GitCommandError("Unable to read repository")
+    return output
 
 
 def _git_output(cwd: Path, args: list[str], *, allow_statuses: set[int] | None = None) -> str | None:
@@ -239,7 +237,7 @@ def _git_output(cwd: Path, args: list[str], *, allow_statuses: set[int] | None =
 
 
 def _untracked_diff(repo: Path) -> str:
-    raw = _git_output(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
+    raw = _required_git_output(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
     if not raw:
         return ""
     pieces: list[str] = []
@@ -267,11 +265,8 @@ def _synthetic_new_file_diff(repo: Path, relpath: str) -> str:
         return _synthetic_notice_diff(relpath, "Symlink not shown")
     if not path.is_file():
         return ""
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(_MAX_UNTRACKED_FILE_BYTES + 1)
-    except OSError:
-        return ""
+    with path.open("rb") as fh:
+        data = fh.read(_MAX_UNTRACKED_FILE_BYTES + 1)
     if b"\0" in data:
         return (
             f"diff --git a/{relpath} b/{relpath}\n"

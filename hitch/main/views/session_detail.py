@@ -16,8 +16,10 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import CodexError
+from openai_codex.errors import InvalidRequestError
 
-from hitch.main.runtime import codex_pool, reconciliation, rollout, streaming
+from hitch.main.diffs import build_worktree_diff
+from hitch.main.runtime import app_server_pool, codex_pool, reconciliation, rollout, streaming
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _RolloutFileState,
@@ -42,6 +44,7 @@ from hitch.main.sessions.session_resume import (
     _session_detail_metadata,
     _stored_rollout_path_for_thread,
 )
+from hitch.main.sessions.session_settings import _stored_settings
 from hitch.main.views import common
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,35 @@ logger = logging.getLogger(__name__)
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
     return common._render_session_detail(request, session_id)
+
+
+@require_http_methods(["GET"])
+def session_diff(request: HttpRequest, session_id: str) -> HttpResponse:
+    reconciliation.reconcile_dead_for_thread(session_id)
+    if _active_instance_for(session_id) is not None:
+        return common._prevent_stale_cache(HttpResponse(
+            "The diff is available after the running turn finishes.", status=409,
+        ))
+    metadata = _session_detail_metadata(session_id)
+    cwd: str | None
+    if metadata is not None:
+        cwd = metadata.cwd
+    else:
+        try:
+            resumed = app_server_pool.run_borrowed_op_with_retry(
+                common.Codex,
+                lambda codex: codex._client.thread_read(session_id, include_turns=False),
+                enable_memories=_stored_settings(request).enable_memories,
+            )
+        except InvalidRequestError as exc:
+            raise Http404("session not found") from exc
+        cwd = common._thread_cwd(resumed.thread)
+    diff_view = build_worktree_diff(cwd)
+    if diff_view.error:
+        return common._prevent_stale_cache(HttpResponse(diff_view.error, status=503))
+    return common._prevent_stale_cache(render(
+        request, "_session_diff.html", {"diff_view": diff_view},
+    ))
 
 
 @require_http_methods(["GET"])
@@ -117,6 +149,9 @@ def session_agents(request: HttpRequest, session_id: str) -> HttpResponse:
             if page.partial_record_end is not None:
                 params["record_end"] = page.partial_record_end
             next_url = f"{reverse('session_agents', args=[session_id])}?{urlencode(params)}"
+        # Subagent activity groups stay inline; their commands use the same
+        # stable source identities as the main transcript.
+        entries = [common._lazy_command_preview(entry, agent.id) for entry in collapse_flat_entries(flat_entries)]
         data.update(
             selected=agent.id,
             name=agent.name,
@@ -125,7 +160,7 @@ def session_agents(request: HttpRequest, session_id: str) -> HttpResponse:
             partial=page is not None,
             html=render_to_string(
                 "_session_entries.html",
-                {"entries": list(collapse_flat_entries(flat_entries))},
+                {"entries": entries},
                 request=request,
             ),
         )
@@ -244,25 +279,60 @@ def session_intermediate(
 ) -> HttpResponse:
     if entry_index < 0:
         raise Http404("intermediate entry not found")
-    entry = _rollout_intermediate_entry_for_detail(
-        session_id,
+    entry = _rollout_entry_for_detail(
+        request, session_id,
         entry_index=entry_index,
     )
-    response = render(request, "_session_intermediate_body.html", {"entry": entry})
+    if entry.get("kind") != "intermediate":
+        raise Http404("intermediate entry not found")
+    response = render(request, "_session_intermediate_body.html", {
+        "entry": common._lazy_command_preview(entry, session_id),
+    })
     # The body depends on the current rollout contents; with no validators a
     # browser may heuristically cache this lazily-fetched fragment and show a
     # stale block after the rollout entry changes.
     return common._prevent_stale_cache(response)
 
-def _rollout_intermediate_entry_for_detail(
-    session_id: str, *, entry_index: int
-) -> dict[str, Any]:
+
+@require_http_methods(["GET"])
+def session_command(request: HttpRequest, session_id: str) -> HttpResponse:
+    command_id = request.GET.get("id", "")
+    if not command_id:
+        raise Http404("command not found")
+    state = _detail_rollout_state(request, session_id)
+    data = rollout.session_stage_data(state.path)
+    if data is not None:
+        for entry in data.entries:
+            if entry.get("type") == "commandExecution" and entry.get("command_id") == command_id:
+                return common._prevent_stale_cache(HttpResponse(
+                    entry["detail"], content_type="text/plain; charset=utf-8",
+                ))
+    raise Http404("command not found")
+
+
+def _detail_rollout_state(request: HttpRequest, session_id: str) -> _RolloutFileState:
     metadata = _session_detail_metadata(session_id)
-    if metadata is None:
+    path = _rollout_path_for_session_detail(session_id, metadata)
+    state = _rollout_file_state_from_value(str(path) if path is not None else None)
+    if state is None:
+        try:
+            snapshot = app_server_pool.run_borrowed_op_with_retry(
+                common.Codex,
+                lambda codex: codex._client.thread_read(session_id, include_turns=False),
+                enable_memories=_stored_settings(request).enable_memories,
+            )
+        except InvalidRequestError as exc:
+            raise Http404("session not found") from exc
+        state = _rollout_file_state_from_value(getattr(snapshot.thread, "path", None))
+    if state is None:
         raise Http404("session not found")
-    rollout_state = _rollout_file_state_from_value(metadata.codex_path)
-    if rollout_state is None:
-        raise Http404("session not found")
+    return state
+
+
+def _rollout_entry_for_detail(
+    request: HttpRequest, session_id: str, *, entry_index: int
+) -> dict[str, Any]:
+    rollout_state = _detail_rollout_state(request, session_id)
     cached = _cached_intermediate_detail(
         session_id=session_id,
         rollout_state=rollout_state,
@@ -283,17 +353,16 @@ def _rollout_intermediate_entry_for_detail(
     if not _entries_include_transcript(entries):
         raise Http404("session not found")
     entries = _apply_system_authors(entries, session_id)
-    if entry_index >= len(entries):
+    if entry_index < 0 or entry_index >= len(entries):
         raise Http404("intermediate entry not found")
     entry = entries[entry_index]
-    if entry.get("kind") != "intermediate":
-        raise Http404("intermediate entry not found")
-    common._cache_intermediate_detail(
-        session_id=session_id,
-        rollout_state=rollout_state,
-        entry_index=entry_index,
-        entry=entry,
-    )
+    if entry.get("kind") == "intermediate":
+        common._cache_intermediate_detail(
+            session_id=session_id,
+            rollout_state=rollout_state,
+            entry_index=entry_index,
+            entry=entry,
+        )
     return entry
 
 @require_http_methods(["GET"])

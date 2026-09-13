@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -68,16 +68,13 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             session["stage"] = _session_list_stage_context(cached_stage)
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
-        entries = _session_stage_data_for_rollout_path(rollout_path)
-        if not entries and session.get("has_activity"):
-            entries = [{"kind": "user"}]
         pr_snapshot = (
             {}
             if publishing_before_registration
             else pr_tracking.pr_handoff_for_record(registered_pr)
         )
         stage = session_stage.derive_stage(
-            entries=entries,
+            entries=_session_stage_entries(rollout_path, has_activity=bool(session.get("has_activity"))),
             active_instance=active_instance,
             awaiting_user_input=awaiting_user_input,
             pr_snapshot=pr_snapshot,
@@ -196,16 +193,17 @@ def _cached_stage_for_session_row(
     )
 
 
-def _session_stage_data_for_rollout_path(
-    rollout_path: Path | None,
-) -> list[dict[str, Any]]:
-    if rollout_path is None:
-        return []
-    try:
-        stage_data = rollout.session_stage_data(rollout_path)
-    except Exception:
-        logger.exception("failed to parse rollout %s for session stage", rollout_path)
-        return []
-    if stage_data is None:
-        return []
-    return list(stage_data.entries)
+def _session_stage_entries(
+    rollout_path: Path | None, *, has_activity: bool,
+) -> Iterator[dict[str, Any]]:
+    # Derivation consumes history only if live worker/input/PR state is insufficient.
+    stage_data = None
+    if rollout_path is not None:
+        try:
+            stage_data = rollout.session_stage_data(rollout_path)
+        except Exception:
+            logger.exception("failed to parse rollout %s for session stage", rollout_path)
+    if stage_data is not None and stage_data.entries:
+        yield from stage_data.entries
+    elif has_activity:
+        yield {"kind": "user"}

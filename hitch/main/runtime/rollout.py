@@ -1101,6 +1101,8 @@ def _entry_from_response_item(
             status,
             timestamp,
         )
+        if isinstance(call_id, str) and call_id:
+            tool_entry["command_id"] = call_id
         approval_entry = _approval_declined_entry(command, output_payload, timestamp)
         if approval_entry is not None:
             return [tool_entry, approval_entry]
@@ -1111,13 +1113,17 @@ def _entry_from_response_item(
             return None
         parts = action.get("command") or []
         command = " ".join(str(p) for p in parts)
-        return _tool_call(
+        tool_entry = _tool_call(
             "commandExecution",
             "Command",
             command,
             _non_completed_status(payload.get("status")),
             timestamp,
         )
+        command_id = payload.get("id") or payload.get("call_id")
+        if isinstance(command_id, str) and command_id:
+            tool_entry["command_id"] = command_id
+        return tool_entry
     return None
 
 

@@ -1585,18 +1585,6 @@
             background: var(--accent-hover);
             border-color: var(--accent-hover);
         }
-        .diff-fab .diff-fab-count {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 1.45rem;
-            height: 1.45rem;
-            padding: 0 0.35rem;
-            border-radius: 999px;
-            background: color-mix(in srgb, var(--accent-fg) 20%, transparent);
-            font-size: 0.74rem;
-            font-variant-numeric: tabular-nums;
-        }
 
         .diff-modal {
             width: min(1120px, calc(100vw - 1.5rem));
@@ -1637,6 +1625,15 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        [data-diff-body] {
+            display: flex;
+            flex: 1;
+            flex-direction: column;
+            min-height: 0;
+        }
+        [data-diff-body] > .diff-summary { padding: 0.55rem 1rem; }
+        [data-diff-retry] { align-self: flex-start; margin: 0.75rem; }
+        [data-diff-retry][hidden] { display: none; }
         .diff-summary {
             display: flex;
             flex-wrap: wrap;

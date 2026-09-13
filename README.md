@@ -100,3 +100,24 @@ container. The container uses an isolated `HOME`, `HITCH_HOME_DIR`, and
 `CODEX_HOME`, keeps worker isolation set to `direct`, and does not mount the
 host's Hitch state. Integration tests use host networking so they can reach the
 local Ollama service on `127.0.0.1:11434`.
+
+## Response compression
+
+When proxying Hitch through nginx, enable gzip in Hitch's `server` block for
+HTML and its text assets:
+
+```nginx
+gzip on;
+gzip_comp_level 5;
+gzip_min_length 256;
+gzip_vary on;
+gzip_proxied any;
+gzip_types text/css text/javascript application/javascript application/json image/svg+xml text/plain;
+```
+
+HTML is included automatically. Keep `text/event-stream` out of the list so
+compression does not buffer live session events. These settings compress the
+current response without caching session data. Session CSS and JavaScript use
+content ETags and `Cache-Control: no-cache` so browsers revalidate every reuse.
+Validate with `nginx -t` before reloading nginx. See the
+[nginx gzip directives](https://nginx.org/en/docs/http/ngx_http_gzip_module.html).

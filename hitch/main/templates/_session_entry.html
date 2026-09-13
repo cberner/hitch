@@ -60,6 +60,7 @@ per-item layout stays identical in both contexts.
                 type="button"
                 class="detail command-detail"
                 data-expandable-command
+                {% if entry.command_url %}data-command-url="{{ entry.command_url }}"{% endif %}
                 aria-expanded="false"
                 title="Expand command"
             >{{ entry.detail }}</button>

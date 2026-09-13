@@ -8,13 +8,13 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from django.http import HttpResponse
+from django.template.loader import render_to_string
 from django.test import Client, TestCase
 from django.urls import reverse
 from django.utils import timezone
 from openai_codex.generated.v2_all import ReasoningThreadItem
 
 from hitch.main import caches
-from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
     SessionMetadata,
@@ -174,27 +174,6 @@ def _get_session(client: Client, session_id: str = "thread-1") -> HttpResponse:
     response = client.get(reverse("session", kwargs={"session_id": session_id}))
     assert isinstance(response, HttpResponse)
     return response
-
-
-def _diff_view() -> DiffView:
-    return DiffView(
-        files=[
-            DiffFile(
-                path="hitch/main/views.py",
-                old_path="hitch/main/views.py",
-                status="Modified",
-                additions=1,
-                deletions=1,
-                lines=[
-                    DiffLine("hunk", None, None, "@@ -1 +1 @@"),
-                    DiffLine("remove", 1, None, '<span class="k">return</span> 1'),
-                    DiffLine("add", None, 1, '<span class="k">return</span> 2'),
-                ],
-            )
-        ],
-        additions=1,
-        deletions=1,
-    )
 
 
 class PrUrlDetectionTests(TestCase):
@@ -387,8 +366,9 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "MEMORY.md:1-2")
         self.assertContains(response, "project convention")
         self.assertContains(response, "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4")
-        self.assertContains(response, "function renderMemoryCitation")
-        self.assertContains(response, "item.memoryCitation || item.memory_citation")
+        script = self.client.get(reverse("session_asset", args=["session.js"]))
+        self.assertContains(script, "function renderMemoryCitation")
+        self.assertContains(script, "item.memoryCitation || item.memory_citation")
 
 
 class RolloutFileViewTests(TestCase):
@@ -795,7 +775,12 @@ class IntermediateCollapseTests(TestCase):
                     };
                 """)
                 def route_request(route: Route) -> None:
-                    if "/static/" in route.request.url:
+                    if "/assets/" in route.request.url:
+                        asset = route.request.url.split("/assets/", 1)[1]
+                        route.fulfill(body=render_to_string("assets/" + asset), content_type=(
+                            "text/css" if asset.endswith(".css") else "text/javascript"
+                        ))
+                    elif "/static/" in route.request.url:
                         path = route.request.url.split("/static/", 1)[1]
                         route.fulfill(path=str(Path(__file__).parent.parent / "static" / path))
                     else:
@@ -1072,13 +1057,11 @@ class SessionViewActiveWorkerTests(TestCase):
                 self.assertEqual(failure["change_model"], code == "serverOverloaded")
 
 
-    @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
-    def test_finished_worker_rebuilds_task_plan_on_page_load(self, mock_codex: MagicMock, mock_diff: MagicMock) -> None:
+    def test_finished_worker_rebuilds_task_plan_on_page_load(self, mock_codex: MagicMock) -> None:
         # The task-plan widget must rebuild from the thread's persisted worker
         # logs after a reload, when no worker is running, just as the goal
         # objective does.
-        mock_diff.return_value = _diff_view()
         _patch_thread(self, mock_codex, _thread([]))
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
             fh.write(
@@ -1124,12 +1107,10 @@ class SessionViewActiveWorkerTests(TestCase):
             html=False,
         )
 
-    @patch("hitch.main.views.common.build_worktree_diff")
     @patch("hitch.main.views.common.Codex")
     def test_active_worker_preserves_cleared_task_plan_order_after_refresh(
-        self, mock_codex: MagicMock, mock_diff: MagicMock
+        self, mock_codex: MagicMock
     ) -> None:
-        mock_diff.return_value = _diff_view()
         _patch_thread(self, mock_codex, _thread([]))
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
             fh.write(

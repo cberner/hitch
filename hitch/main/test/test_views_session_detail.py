@@ -478,12 +478,13 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["entries"])
         self.assertContains(response, "data-history-loader")
+        script = self.client.get(reverse("session_asset", args=["session.js"]))
         self.assertContains(
-            response,
+            script,
             "const loadEarlierHistory = async (emptyPageBudget = 1) => {",
         )
         self.assertContains(
-            response,
+            script,
             "await loadEarlierHistory(emptyPageBudget - 1);",
         )
         next_url = response.context["history_next_url"]
@@ -2309,5 +2310,6 @@ class SessionViewApprovalContextTests(TestCase):
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
         )
-        self.assertContains(response, "requires_explicit_choice")
-        self.assertContains(response, "requiredQuestionIds")
+        script = self.client.get(reverse("session_asset", args=["session.js"]))
+        self.assertContains(script, "requires_explicit_choice")
+        self.assertContains(script, "requiredQuestionIds")

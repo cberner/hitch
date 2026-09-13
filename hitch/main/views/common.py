@@ -37,7 +37,6 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import caches
 from hitch.main import repos as repos_module
-from hitch.main.diffs import DiffView, build_worktree_diff
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -849,8 +848,7 @@ def _render_session_detail(
         session_id=session_id,
         # SDK-fallback details must stay inline: the fragment endpoint cannot
         # reconstruct entries from the rollout when the same parser failed.
-        enabled=rollout_data is not None
-        or (entries_backed_by_rollout and metadata is not None),
+        enabled=rollout_data is not None or entries_backed_by_rollout,
         cache_entries=rollout_data is not None,
         rollout_state=detail_rollout_state,
     )
@@ -870,14 +868,6 @@ def _render_session_detail(
         )
     )
     thread_cwd = _thread_cwd(thread)
-    # A running worker can change the diff continuously. The stream
-    # reload after completion supplies a stable preview; until then, avoid
-    # parsing and highlighting a large snapshot that the page does not expose.
-    diff_view = (
-        DiffView(files=[])
-        if active_instance is not None
-        else build_worktree_diff(thread_cwd)
-    )
     settings_context = _settings_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     latest_user_turn_failure = _latest_user_turn_failure(session_id)
@@ -1061,7 +1051,7 @@ def _render_session_detail(
             "session_stage": stage_context,
             "goal_objective": goal_objective,
             "task_plan": task_plan,
-            "diff_view": diff_view,
+            "session_diff_url": reverse("session_diff", args=[session_id]),
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
@@ -1198,6 +1188,7 @@ def _attach_lazy_intermediate_context(
         return
     for entry_index, entry in enumerate(entries):
         if entry.get("kind") != "intermediate":
+            entries[entry_index] = _lazy_command_preview(entry, session_id)
             continue
         # An active rollout changes throughout the turn. Caching its full
         # intermediate blocks would retain a new, potentially very large copy
@@ -1218,6 +1209,28 @@ def _attach_lazy_intermediate_context(
         entry["item_count"] = len(entry.get("items", []))
         entry["items"] = []
         entry["earlier_items"] = []
+        latest = entry.get("latest_item")
+        if isinstance(latest, dict):
+            entry["latest_item"] = _lazy_command_preview(latest, session_id)
+
+
+def _lazy_command_preview(entry: dict[str, Any], session_id: str) -> dict[str, Any]:
+    if entry.get("kind") == "intermediate":
+        items = [_lazy_command_preview(item, session_id) for item in entry.get("items", [])]
+        return {**entry, "items": items, "earlier_items": items[:-1], "latest_item": items[-1] if items else None}
+    detail = entry.get("detail")
+    command_id = entry.get("command_id")
+    if (
+        entry.get("type") != "commandExecution" or not isinstance(detail, str) or len(detail) <= 240
+        or not isinstance(command_id, str) or not command_id
+    ):
+        return entry
+    # Preserve the full entry in any rollout-keyed intermediate snapshot.
+    return {
+        **entry,
+        "detail": detail[:240] + "…",
+        "command_url": f"{reverse('session_command', args=[session_id])}?{urlencode({'id': command_id})}",
+    }
 
 def _intermediate_detail_cache_key(
     *,

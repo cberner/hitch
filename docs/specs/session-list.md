@@ -20,3 +20,5 @@ Status: Implemented
   Failed requests retain the current list and retry on the next interval.
 - `LIST-pr-authority`: List refreshes use the registered PR snapshot and do not
   independently poll GitHub; the PR watch specification remains authoritative.
+- `LIST-stage-reads`: When current worker, input, or registered PR state determines
+  a stage, deriving its badge must not read the session transcript.
