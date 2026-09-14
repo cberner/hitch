@@ -7,13 +7,16 @@ import fcntl
 import hashlib
 import os
 import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from django.conf import settings
 
-from hitch.main.models import CodexInstance
+from hitch.main.models import CodexInstance, SessionMetadata
+
+_worktree_locks = threading.local()
 
 
 @dataclass
@@ -49,6 +52,10 @@ def _acquire(thread_id: str, *, blocking: bool) -> _Lease | None:
         os.O_CREAT | os.O_RDWR | os.O_CLOEXEC,
         0o600,
     )
+    return _lock_fd(fd, blocking=blocking)
+
+
+def _lock_fd(fd: int, *, blocking: bool) -> _Lease | None:
     operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     try:
         fcntl.flock(fd, operation)
@@ -63,14 +70,67 @@ def _acquire(thread_id: str, *, blocking: bool) -> _Lease | None:
 
 
 @contextlib.contextmanager
-def hold(thread_id: str, *, blocking: bool = True) -> Iterator[bool]:
+def hold(thread_id: str, *, blocking: bool = True, observed_cwd: str = "") -> Iterator[bool]:
     """Hold the thread lock, yielding false when a nonblocking claim loses."""
     lease = _acquire(thread_id, blocking=blocking)
     if lease is None:
         yield False
         return
     try:
+        cwd = SessionMetadata.objects.filter(thread_id=thread_id).values_list("cwd", flat=True).first()
+        if not cwd:
+            cwd = (
+                CodexInstance.objects.filter(thread_id=thread_id).order_by("-pk")
+                .values_list("cwd", flat=True).first()
+            )
+        paths = sorted({str(Path(value).expanduser().resolve()) for value in (cwd, observed_cwd) if value})
+        with contextlib.ExitStack() as stack:
+            for path in paths:
+                if not stack.enter_context(hold_worktree(path, blocking=blocking)):
+                    yield False
+                    return
+            yield True
+    finally:
+        lease.release()
+
+
+@contextlib.contextmanager
+def hold_worktree(cwd: str, *, blocking: bool = True, require_exists: bool = False) -> Iterator[bool]:
+    """Coordinate managed-checkout removal with startup, including shared checkouts."""
+    path = Path(cwd).expanduser().resolve()
+    base = Path(settings.HITCH_WORKTREES_DIR).expanduser().resolve()
+    if not cwd or not path.is_relative_to(base):
         yield True
+        return
+    held = getattr(_worktree_locks, "held", None)
+    if held is None:
+        held = _worktree_locks.held = set()
+    # Session lifecycle callers may create a worker while holding this lease.
+    if path in held:
+        if require_exists and not path.is_dir():
+            raise FileNotFoundError(f"session worktree no longer exists: {path}")
+        yield True
+        return
+    # Lock the existing directory inode so disk-full recovery needs no lock files.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if require_exists:
+            raise
+        yield True
+        return
+    lease = _lock_fd(fd, blocking=blocking)
+    if lease is None:
+        yield False
+        return
+    try:
+        if require_exists and not path.is_dir():
+            raise FileNotFoundError(f"session worktree no longer exists: {path}")
+        held.add(path)
+        try:
+            yield True
+        finally:
+            held.remove(path)
     finally:
         lease.release()
 

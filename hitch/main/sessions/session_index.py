@@ -173,7 +173,7 @@ def upsert_thread(
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
         return None
-    with session_lifecycle.hold(thread_id, blocking=False) as acquired:
+    with session_lifecycle.hold(thread_id, blocking=False, observed_cwd=_thread_cwd(thread) or "") as acquired:
         if not acquired:
             return SessionMetadata.objects.filter(thread_id=thread_id).first()
         return _upsert_thread_locked(
