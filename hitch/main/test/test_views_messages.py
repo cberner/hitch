@@ -1308,6 +1308,18 @@ class SendMessageViewTests(TestCase):
             approval_mode="deny_all",
         )
 
+        # A new request uses its own default, even after a reset captured another mode.
+        self.client.post(
+            reverse("set_session_approval_mode", args=["abc"]), data={"approval_mode": ""},
+        )
+        _seed_cookies(self.client, hitch_approval_mode="auto_review")
+        mock_spawn.reset_mock()
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}), data={"prompt": "next"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_spawn.call_args.kwargs["approval_mode"], "auto_review")
+
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.runtime.codex_pool.spawn_turn")
     @patch("hitch.main.views.common.Codex")

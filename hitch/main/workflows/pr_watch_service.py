@@ -11,7 +11,8 @@ from typing import Any
 from hitch.main.models import CodexInstance, SessionMetadata, SessionPullRequest
 from hitch.main.runtime import codex_pool, rate_limit, server_lifecycle
 from hitch.main.sessions import agent_tasks, lifecycle
-from hitch.main.sessions.session_settings import _is_allowed_session_cwd, _session_approval_mode_override
+from hitch.main.sessions.execution_settings import PreviousTurnApproval, resolve_approval
+from hitch.main.sessions.session_settings import _is_allowed_session_cwd
 from hitch.main.workflows import pr_tracking, pr_watch
 
 logger = logging.getLogger(__name__)
@@ -127,15 +128,12 @@ def _resume_watch(record: SessionPullRequest, previous: CodexInstance) -> None:
             "hitch_extra_instructions",
         )
     }
-    kwargs["approval_mode"] = (
-        _session_approval_mode_override(record.thread_id)
-        or (
-            record.state.get(pr_tracking.WATCH_APPROVAL_MODE_STATE_KEY)
-            if record.state.get(pr_tracking.WATCH_APPROVAL_OWNER_STATE_KEY) == previous.pk
-            else None
-        )
-        or previous.approval_mode
-    )
+    kwargs["approval_mode"] = resolve_approval(
+        SessionMetadata.objects.filter(thread_id=record.thread_id).only(
+            "approval_mode", "approval_snapshot_mode", "approval_snapshot_instance_id",
+        ).first(),
+        PreviousTurnApproval(previous.pk, previous.approval_mode),
+    ).mode
     codex_pool.spawn_turn(
         thread_id=record.thread_id,
         cwd=record.cwd,

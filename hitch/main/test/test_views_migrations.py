@@ -1548,3 +1548,64 @@ class RemoveAutonomousGoalsMigrationTests(TransactionTestCase):
                 [*git, "for-each-ref", "--format=%(refname)"], check=True, capture_output=True, text=True
             )
             self.assertEqual(set(refs.stdout.splitlines()), {"refs/heads/main", unrelated})
+
+
+class SessionApprovalSnapshotMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0083_cleanup_protection_indexes")]
+    migrate_to = [("main", "0084_session_approval_snapshots")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor
+
+    def test_moves_snapshots_preserving_pr_state_and_supports_rollback(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        old_apps = self._migrate(self.migrate_from).loader.project_state(self.migrate_from).apps
+        metadata_model = old_apps.get_model("main", "SessionMetadata")
+        pr_model = old_apps.get_model("main", "SessionPullRequest")
+        worker_model = old_apps.get_model("main", "CodexInstance")
+        worker = worker_model.objects.create(pid=0, thread_id="watched", cwd="/repo", approval_mode="approve_all")
+        metadata_model.objects.create(thread_id="watched", cwd="/repo", approval_mode="deny_all")
+        pr_state = {"watch_active": True, "pr_handoff": {"url": "https://github.com/cberner/hitch/pull/682"}}
+        pr_model.objects.create(thread_id="watched", cwd="/repo", state={
+            **pr_state, "watch_approval_mode": "prompt_user", "watch_approval_owner_id": worker.pk,
+        })
+        pr_model.objects.create(thread_id="placeholder", cwd="/other", state={
+            "watch_approval_mode": "deny_all", "watch_approval_owner_id": None,
+        })
+        pr_model.objects.create(thread_id="unrelated", cwd="/repo", state=pr_state)
+        pr_model.objects.create(thread_id="invalid-owner", cwd="/repo", state={
+            "watch_approval_mode": "deny_all", "watch_approval_owner_id": True,
+        })
+        pr_model.objects.create(thread_id="invalid-mode", cwd="/repo", state={
+            **pr_state, "watch_approval_mode": ["invalid"],
+        })
+
+        apps = self._migrate(self.migrate_to).loader.project_state(self.migrate_to).apps
+        metadata_model = apps.get_model("main", "SessionMetadata")
+        pr_model = apps.get_model("main", "SessionPullRequest")
+        metadata = metadata_model.objects.get(thread_id="watched")
+        self.assertEqual(metadata.approval_mode, "deny_all")
+        self.assertEqual(metadata.approval_snapshot_mode, "prompt_user")
+        self.assertEqual(metadata.approval_snapshot_instance_id, worker.pk)
+        placeholder = metadata_model.objects.get(thread_id="placeholder")
+        self.assertEqual((placeholder.cwd, placeholder.approval_snapshot_mode), ("/other", "deny_all"))
+        self.assertIsNone(placeholder.approval_snapshot_instance_id)
+        self.assertFalse(pr_model.objects.filter(thread_id="placeholder").exists())
+        for thread in ("watched", "unrelated", "invalid-mode"):
+            self.assertEqual(pr_model.objects.get(thread_id=thread).state, pr_state)
+        self.assertIsNone(metadata_model.objects.get(thread_id="invalid-owner").approval_snapshot_instance_id)
+        self.assertEqual(apps.get_model("main", "CodexInstance").objects.get(pk=worker.pk).approval_mode, "approve_all")
+        metadata_model.objects.filter(pk=metadata.pk).update(approval_snapshot_mode="auto_review")
+
+        apps = self._migrate(self.migrate_from).loader.project_state(self.migrate_from).apps
+        pr_model = apps.get_model("main", "SessionPullRequest")
+        self.assertEqual(pr_model.objects.get(thread_id="watched").state, {
+            **pr_state, "watch_approval_mode": "auto_review", "watch_approval_owner_id": worker.pk,
+        })
+        self.assertEqual(pr_model.objects.get(thread_id="placeholder").state, {
+            "watch_approval_mode": "deny_all", "watch_approval_owner_id": None,
+        })
+        self.assertEqual(pr_model.objects.get(thread_id="unrelated").state, pr_state)

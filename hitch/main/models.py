@@ -198,6 +198,8 @@ class SessionMetadata(models.Model):
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
     approval_mode = models.CharField(max_length=32, blank=True, default="")
+    approval_snapshot_mode = models.CharField(max_length=32, blank=True, default="")
+    approval_snapshot_instance_id = models.PositiveBigIntegerField(null=True, blank=True)
     model = models.CharField(max_length=256, blank=True, default="")
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     codex_display_title = models.CharField(max_length=200, blank=True, default="")
