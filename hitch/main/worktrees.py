@@ -13,6 +13,7 @@ from pathlib import Path
 
 from django.conf import settings
 
+from . import checkouts
 from .git_support import GitCommandError, hermetic_git_env, resolved_path, run_git
 
 _resolved_path = resolved_path
@@ -203,34 +204,28 @@ def _is_managed_worktree_path(path: Path) -> bool:
     return _is_under_managed_worktree_base(path) and (path / ".git").exists()
 
 
-def _is_under_managed_worktree_base(path: Path) -> bool:
-    resolved_path = _resolved_path(path)
-    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
+def _managed_relative_path(path: Path) -> Path | None:
     try:
-        resolved_path.relative_to(resolved_base)
-    except ValueError:
-        return False
-    return True
+        checkout = checkouts.identity(path)
+    except (OSError, ValueError):
+        return None
+    return checkout.relative_path if checkout is not None else None
+
+
+def _is_under_managed_worktree_base(path: Path) -> bool:
+    return _managed_relative_path(path) is not None
 
 
 def _is_managed_worktree_leaf(path: Path) -> bool:
     """Whether ``path`` is a branch-addressable ``<base>/<slug>/<suffix>`` leaf."""
-    resolved_path = _resolved_path(path)
-    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
-    try:
-        relative = resolved_path.relative_to(resolved_base)
-    except ValueError:
-        return False
-    return len(relative.parts) == 2
+    relative = _managed_relative_path(path)
+    return relative is not None and len(relative.parts) == 2
 
 
 def _managed_branch_for_path(path: Path) -> str:
-    resolved_path = _resolved_path(path)
-    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
-    try:
-        relative = resolved_path.relative_to(resolved_base)
-    except ValueError as exc:
-        raise WorktreeCleanupError("path is not under managed worktree root") from exc
+    relative = _managed_relative_path(path)
+    if relative is None:
+        raise WorktreeCleanupError("path is not under managed worktree root")
     if len(relative.parts) != 2:
         raise WorktreeCleanupError("managed worktree path is not branch-addressable")
     repo_slug, suffix = relative.parts

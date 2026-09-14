@@ -8,26 +8,23 @@ import shutil
 import stat
 import threading
 import time
-from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from django.conf import settings
-from django.db import close_old_connections, models
+from django.db import close_old_connections
 from django.utils import timezone
 
+from hitch.main import checkouts
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
-    ProposedSession,
     SessionMetadata,
-    SessionPullRequest,
-    SystemAgentRun,
 )
 from hitch.main.runtime import codex_events
-from hitch.main.sessions import lifecycle
-from hitch.main.workflows import system_agents
+from hitch.main.sessions import checkout_protection
+from hitch.main.sessions.checkout_protection import ARCHIVED_USER_SESSION_MIN_AGE
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     cleanup_managed_worktree_path,
@@ -37,14 +34,8 @@ from hitch.main.worktrees import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT = 20.0
-ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=1)
 LEGACY_DIFF_EVENT_COMPACTION_MIN_BYTES = 512 * 1024 * 1024
 _WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
-_PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
-_PROPOSAL_SESSION_ID_FIELDS = (
-    "source_session_id",
-    "accepted_session_id",
-)
 _DISK_USAGE_SNAPSHOT_TTL = timedelta(minutes=5)
 _DISK_USAGE_INVALIDATION_FILE = ".disk-usage-cache-token"
 
@@ -114,7 +105,7 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
                 break
             bytes_to_free = used_bytes - limit_bytes
             successful_bytes = 0
-        normalized_path = _normalized_managed_path(candidate.cwd)
+        normalized_path = checkouts.managed_key(candidate.cwd)
         if normalized_path is None or normalized_path in attempted_paths:
             continue
         usage_bytes = usage_by_path.get(normalized_path, 0)
@@ -122,11 +113,10 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
             continue
         attempted_paths.add(normalized_path)
         try:
-            with lifecycle.hold_worktree(candidate.cwd, blocking=False) as acquired:
+            with checkout_protection.removal_lease(
+                candidate.cwd, aliases=candidate.aliases, changed_since=protection_snapshot_at,
+            ) as acquired:
                 if not acquired:
-                    continue
-                # The size scan can outlive a resume, a new worker, or watch registration.
-                if _worktree_has_current_protection(candidate, changed_since=protection_snapshot_at):
                     continue
                 removed = cleanup_managed_worktree_path(candidate.cwd)
         except (WorktreeCleanupError, OSError):
@@ -141,54 +131,6 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
         cleaned += 1
         successful_bytes += usage_bytes
     return cleaned
-
-
-def _worktree_has_current_protection(candidate: _CleanupCandidate, *, changed_since: datetime) -> bool:
-    normalized = _normalized_managed_path(candidate.cwd)
-    if normalized is None:
-        return True
-    active = list(CodexInstance.objects.filter(
-        status__in=CodexInstance.ACTIVE_STATUSES,
-    ).values_list("thread_id", "cwd"))
-    matching_paths = models.Q(cwd__in=(*candidate.aliases, candidate.cwd, normalized))
-    watched_paths = SessionPullRequest.objects.filter(
-        matching_paths | models.Q(updated_at__gte=changed_since),
-        models.Q(state__watch_active=True) | models.Q(state__watch_terminal_pending=True),
-    ).values_list("cwd", flat=True)
-    if any(_normalized_managed_path(path) == normalized for _, path in active if path) or any(
-        _normalized_managed_path(path) == normalized for path in watched_paths if path
-    ):
-        return True
-    # Retain known aliases, and resolve only metadata changed since the snapshot
-    # to catch newly registered aliases without rescanning the full session index.
-    rows = SessionMetadata.objects.filter(
-        matching_paths | models.Q(updated_at__gte=changed_since)
-    ).only("thread_id", "cwd", "codex_archived", "codex_archived_at", "derived_stage", "is_hidden_system_session")
-    metadata_rows = [row for row in rows if row.cwd and _normalized_managed_path(row.cwd) == normalized]
-    active_thread_ids = {thread_id for thread_id, _ in active}
-    if any(row.thread_id in active_thread_ids for row in metadata_rows):
-        return True
-    ids = [row.pk for row in metadata_rows]
-    if ProposedSession.objects.filter(outcome_status=ProposedSession.OUTCOME_UNSET).filter(
-        models.Q(source_session_id__in=ids) | models.Q(accepted_session_id__in=ids)
-    ).exists():
-        return True
-    thread_ids = [row.thread_id for row in metadata_rows]
-    promoted = frozenset(ProposedSession.objects.filter(
-        outcome_status=ProposedSession.OUTCOME_ACCEPTED, accepted_session_id__in=ids,
-    ).values_list("accepted_session__thread_id", flat=True))
-    hidden = set(SystemAgentRun.objects.filter(thread_id__in=thread_ids).values_list("thread_id", flat=True))
-    hidden.update(CodexInstance.objects.filter(
-        thread_id__in=thread_ids, purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-    ).values_list("thread_id", flat=True))
-    context = _CleanupContext(promoted, frozenset(hidden), frozenset(), frozenset(), frozenset())
-    now = timezone.now()
-    return any(
-        _is_user_session(row, context)
-        and not _archived_pr_done_user_session(row, context)
-        and not _old_archived_user_session(row, context, now=now)
-        for row in metadata_rows
-    )
 
 
 def _prune_oversized_finished_event_logs() -> int:
@@ -391,26 +333,21 @@ def _publish_disk_usage_invalidation() -> None:
 
 
 def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
-    context = _cleanup_context(now=now)
+    context = checkout_protection.snapshot(now=now)
     candidates: list[_CleanupCandidate] = []
     metadata_paths: set[str] = set()
     aliases_by_path: dict[str, set[str]] = {}
     for metadata in _session_metadata_rows():
-        normalized_path = _normalized_managed_path(metadata.cwd)
+        normalized_path = checkouts.managed_key(metadata.cwd)
         if normalized_path is None:
             continue
         metadata_paths.add(normalized_path)
         aliases_by_path.setdefault(normalized_path, set()).add(metadata.cwd)
-        if not _safe_to_remove_worktree(metadata, context):
+        if context.protects(metadata):
             continue
-        is_system = _is_system_session(metadata, context)
-        is_legacy_promoted = metadata.thread_id in context.legacy_promoted_thread_ids
-        if is_system and not is_legacy_promoted:
-            candidates.append(_metadata_cleanup_candidate(metadata, reason="system"))
-        elif _archived_pr_done_user_session(metadata, context):
-            candidates.append(_metadata_cleanup_candidate(metadata, reason="archived_pr"))
-        elif _old_archived_user_session(metadata, context, now=now):
-            candidates.append(_metadata_cleanup_candidate(metadata, reason="archived_old"))
+        reason = context.retention.removal_reason(metadata, now=now)
+        if reason is not None:
+            candidates.append(_metadata_cleanup_candidate(metadata, cwd=normalized_path, reason=reason))
     candidates.extend(
         _orphaned_worktree_candidates(
             context=context,
@@ -420,58 +357,9 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
     )
     return sorted(
         (replace(candidate, aliases=tuple(aliases_by_path.get(
-            _normalized_managed_path(candidate.cwd) or "", set(),
+            checkouts.managed_key(candidate.cwd) or "", set(),
         ))) for candidate in candidates),
         key=_candidate_sort_key,
-    )
-
-
-@dataclass(frozen=True)
-class _CleanupContext:
-    legacy_promoted_thread_ids: frozenset[str]
-    hidden_system_thread_ids: frozenset[str]
-    protected_proposal_session_ids: frozenset[int]
-    active_thread_ids: frozenset[str]
-    protected_worktree_paths: frozenset[str]
-
-
-def _cleanup_context(*, now: datetime) -> _CleanupContext:
-    legacy_promoted_thread_ids = system_agents.legacy_promoted_system_thread_ids()
-    hidden_system_thread_ids = _hidden_system_thread_ids()
-    protected_proposal_session_ids = _protected_proposal_session_ids()
-    active_thread_ids = frozenset(
-        CodexInstance.objects.filter(status__in=CodexInstance.ACTIVE_STATUSES)
-        .exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-    )
-    active_codex_paths = set(
-        CodexInstance.objects.filter(status__in=CodexInstance.ACTIVE_STATUSES)
-        .exclude(cwd="")
-        .values_list("cwd", flat=True)
-    )
-    watched_paths = set(
-        SessionPullRequest.objects.filter(
-            models.Q(state__watch_active=True) | models.Q(state__watch_terminal_pending=True),
-        )
-        .exclude(cwd="")
-        .values_list("cwd", flat=True)
-    )
-    protected_paths = (
-        active_codex_paths
-        | watched_paths
-        | _pending_proposal_worktree_paths(protected_proposal_session_ids)
-        | _protected_visible_user_worktree_paths(
-            legacy_promoted_thread_ids,
-            hidden_system_thread_ids,
-            now=now,
-        )
-    )
-    return _CleanupContext(
-        legacy_promoted_thread_ids=frozenset(legacy_promoted_thread_ids),
-        hidden_system_thread_ids=frozenset(hidden_system_thread_ids),
-        protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
-        active_thread_ids=active_thread_ids,
-        protected_worktree_paths=frozenset(_normalized_managed_paths(path for path in protected_paths if path)),
     )
 
 
@@ -491,46 +379,9 @@ def _session_metadata_rows() -> list[SessionMetadata]:
     )
 
 
-def _safe_to_remove_worktree(metadata: SessionMetadata, context: _CleanupContext) -> bool:
-    if metadata.pk in context.protected_proposal_session_ids:
-        return False
-    if metadata.thread_id in context.active_thread_ids:
-        return False
-    normalized = _normalized_managed_path(metadata.cwd)
-    return normalized is not None and normalized not in context.protected_worktree_paths
-
-
-def _is_system_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
-    return metadata.is_hidden_system_session or metadata.thread_id in context.hidden_system_thread_ids
-
-
-def _archived_pr_done_user_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
-    return (
-        metadata.codex_archived
-        and _is_user_session(metadata, context)
-        and metadata.derived_stage in _PR_DONE_STAGE_KEYS
-    )
-
-
-def _old_archived_user_session(metadata: SessionMetadata, context: _CleanupContext, *, now: datetime) -> bool:
-    return (
-        metadata.codex_archived
-        and _is_user_session(metadata, context)
-        and metadata.codex_archived_at is not None
-        and metadata.codex_archived_at <= now - ARCHIVED_USER_SESSION_MIN_AGE
-    )
-
-
-def _is_user_session(metadata: SessionMetadata, context: _CleanupContext) -> bool:
-    return (
-        not _is_system_session(metadata, context)
-        or metadata.thread_id in context.legacy_promoted_thread_ids
-    )
-
-
-def _metadata_cleanup_candidate(metadata: SessionMetadata, *, reason: str) -> _CleanupCandidate:
+def _metadata_cleanup_candidate(metadata: SessionMetadata, *, cwd: str, reason: str) -> _CleanupCandidate:
     return _CleanupCandidate(
-        cwd=metadata.cwd,
+        cwd=cwd,
         reason=reason,
         thread_id=metadata.thread_id,
         timestamp=metadata.codex_archived_at or metadata.codex_updated_at or _EARLIEST,
@@ -540,27 +391,27 @@ def _metadata_cleanup_candidate(metadata: SessionMetadata, *, reason: str) -> _C
 
 def _orphaned_worktree_candidates(
     *,
-    context: _CleanupContext,
+    context: checkout_protection.ProtectionSnapshot,
     metadata_paths: set[str],
     now: datetime,
 ) -> list[_CleanupCandidate]:
     candidates: list[_CleanupCandidate] = []
     for path in discover_managed_worktrees():
-        normalized_path = _normalized_managed_path(str(path))
+        normalized_path = checkouts.managed_key(str(path))
         if normalized_path is None:
             continue
         if normalized_path in metadata_paths:
             continue
         if normalized_path in context.protected_worktree_paths:
             continue
-        created_at = _managed_worktree_created_at(path)
+        created_at = _managed_worktree_created_at(Path(normalized_path))
         if created_at is None:
             continue
         if created_at > now - ARCHIVED_USER_SESSION_MIN_AGE:
             continue
         candidates.append(
             _CleanupCandidate(
-                cwd=str(path),
+                cwd=normalized_path,
                 reason="orphaned",
                 thread_id="",
                 timestamp=created_at,
@@ -586,7 +437,7 @@ def _candidate_worktree_usage_by_path(
 ) -> dict[str, int]:
     usage_by_path: dict[str, int] = {}
     for candidate in candidates:
-        normalized_path = _normalized_managed_path(candidate.cwd)
+        normalized_path = checkouts.managed_key(candidate.cwd)
         if normalized_path is None or normalized_path in usage_by_path:
             continue
         usage_by_path[normalized_path] = _directory_size(Path(normalized_path))
@@ -606,94 +457,6 @@ def _candidate_sort_key(
 
 
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
-
-
-def _protected_proposal_session_ids() -> set[int]:
-    protected = ProposedSession.objects.filter(outcome_status=ProposedSession.OUTCOME_UNSET)
-    session_ids: set[int] = set()
-    for field in _PROPOSAL_SESSION_ID_FIELDS:
-        session_ids.update(
-            value
-            for value in protected.exclude(**{field: None}).values_list(field, flat=True)
-            if isinstance(value, int)
-        )
-    return session_ids
-
-
-def _hidden_system_thread_ids() -> set[str]:
-    thread_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    thread_ids.update(
-        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
-        .exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    return thread_ids - system_agents.legacy_promoted_system_thread_ids()
-
-
-def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
-    if not session_ids:
-        return set()
-    return set(SessionMetadata.objects.filter(pk__in=session_ids).exclude(cwd="").values_list("cwd", flat=True))
-
-
-def _protected_visible_user_worktree_paths(
-    legacy_promoted_thread_ids: set[str],
-    hidden_system_thread_ids: set[str],
-    *,
-    now: datetime,
-) -> set[str]:
-    paths: set[str] = set()
-    rows = (
-        SessionMetadata.objects.filter(
-            models.Q(is_hidden_system_session=False)
-            | models.Q(thread_id__in=legacy_promoted_thread_ids)
-        )
-        .exclude(cwd="")
-        .only(
-            "thread_id",
-            "cwd",
-            "codex_archived",
-            "codex_archived_at",
-            "is_hidden_system_session",
-            "derived_stage",
-        )
-    )
-    for metadata in rows:
-        is_system = metadata.is_hidden_system_session or metadata.thread_id in hidden_system_thread_ids
-        if is_system and metadata.thread_id not in legacy_promoted_thread_ids:
-            continue
-        if not metadata.codex_archived or (
-            metadata.derived_stage not in _PR_DONE_STAGE_KEYS
-            and (metadata.codex_archived_at is None or metadata.codex_archived_at > now - ARCHIVED_USER_SESSION_MIN_AGE)
-        ):
-            paths.add(metadata.cwd)
-    return paths
-
-
-def _normalized_managed_paths(paths: Iterable[str]) -> set[str]:
-    normalized: set[str] = set()
-    for path in paths:
-        normalized_path = _normalized_managed_path(path)
-        if normalized_path is not None:
-            normalized.add(normalized_path)
-    return normalized
-
-
-def _normalized_managed_path(raw_path: str) -> str | None:
-    path = Path(raw_path).expanduser()
-    base = Path(settings.HITCH_WORKTREES_DIR).expanduser()
-    try:
-        resolved_path = path.resolve(strict=False)
-        resolved_base = base.resolve(strict=False)
-        resolved_path.relative_to(resolved_base)
-    except (OSError, ValueError):
-        return None
-    return str(resolved_path)
 
 
 def _max_allowed_percent() -> float:

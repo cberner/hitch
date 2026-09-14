@@ -7,9 +7,9 @@ from pathlib import Path
 
 from django.utils import timezone
 
+from hitch.main import checkouts
 from hitch.main.models import Project, ProposedSession, SessionMetadata
 from hitch.main.repos import same_repo_or_worktree
-from hitch.main.sessions import lifecycle
 
 _TITLE_MAX_LEN = 200
 
@@ -51,7 +51,7 @@ def create_proposed_session(values: ProposedSessionInput) -> ProposedSession:
     source_thread_id = values.source_thread_id.strip()
     if source_thread_id:
         source_session = SessionMetadata.objects.filter(thread_id=source_thread_id).first()
-    with lifecycle.hold_worktree(source_session.cwd if source_session is not None else cwd):
+    with checkouts.hold(source_session.cwd if source_session is not None else cwd):
         return ProposedSession.objects.create(
             project=project,
             source_session=source_session,

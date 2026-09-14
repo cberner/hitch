@@ -12,6 +12,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 
+from hitch.main import checkouts
 from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata
 from hitch.main.proposals.proposed_sessions import (
     ProposedSessionError,
@@ -25,7 +26,6 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
-from hitch.main.sessions import lifecycle
 from hitch.main.test.support import _make_project
 
 
@@ -39,7 +39,7 @@ class ProposedSessionServiceTests(TestCase):
             create = ProposedSession.objects.create
 
             def competing_claim() -> bool:
-                with lifecycle.hold_worktree(raw, blocking=False) as acquired:
+                with checkouts.hold(raw, blocking=False) as acquired:
                     return acquired
 
             def register(**kwargs: Any) -> ProposedSession:

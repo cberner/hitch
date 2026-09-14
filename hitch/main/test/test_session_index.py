@@ -12,8 +12,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from openai_codex import Codex
 
+from hitch.main import checkouts
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
-from hitch.main.sessions import lifecycle, session_index
+from hitch.main.sessions import session_index
 
 
 def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
@@ -38,7 +39,7 @@ class SessionIndexRefreshTests(TestCase):
             upsert = session_index._upsert_thread_locked
 
             def competing_claim(cwd: str) -> bool:
-                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                with checkouts.hold(cwd, blocking=False) as acquired:
                     return acquired
 
             def register(thread: Any, **kwargs: Any) -> SessionMetadata:
