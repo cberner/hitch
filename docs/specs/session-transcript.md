@@ -72,6 +72,11 @@ space used by repetitive reasoning, command, file-change, and web-search activit
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.
+- `ST-concurrent-message-start`: Recheck active workers after acquiring the
+  session lifecycle lock before starting any follow-up, Plan, review, or PR turn.
+  If another worker has started and steering has not delivered the message,
+  return a retryable conflict instead of launching a competing writer. Dispose
+  of uploads owned by the rejected request.
 - `ST-archive-writer-conflict`: If another Codex process holds the session's
   writer lease, archiving or unarchiving preserves local state and asks the user
   to close the session in that process and retry. AJAX requests return 409;

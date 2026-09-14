@@ -296,6 +296,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # A fallback resume owns a private app-server that closes before spawning
         # the worker, releasing its exclusive thread writer lease.
         hold_lifecycle_lock()
+        # Another sender or the PR poller may have started a turn while we waited.
+        if codex_pool.latest_active_for_thread(session_id) is not None:
+            raise _TurnRejectedError(HttpResponse(
+                "This session has an active turn. Retry your message after it starts accepting input or finishes.",
+                status=409, content_type="text/plain",
+            ))
         metadata = _session_detail_metadata(session_id)
 
         def record_session_unarchived_for_accepted_turn(
