@@ -431,6 +431,15 @@ class IndexViewTests(TestCase):
         )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+        self.client.post(
+            reverse("set_session_approval_mode", args=["malformed-rollout"]),
+            {"approval_mode": ""},
+        )
+        with patch("hitch.main.sessions.session_stage_refresh._session_stage_entries") as entries:
+            response = self.client.get(reverse("index"))
+        self.assertEqual(response.status_code, 200)
+        entries.assert_not_called()
+
 
 
     @patch("hitch.main.workflows.gh_cli._gh_pr_view_payload")

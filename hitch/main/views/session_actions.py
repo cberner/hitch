@@ -39,6 +39,7 @@ from hitch.main.sessions.settings_cookies import (
     _VALID_APPROVAL_MODES,
 )
 from hitch.main.views import common
+from hitch.main.workflows import pr_tracking
 
 _ARCHIVE_ACTIVE_WORK_MESSAGE = (
     "Stop the active turn before archiving this session."
@@ -111,24 +112,26 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
     approval_mode = request.POST.get("approval_mode", "").strip()
     if approval_mode and approval_mode not in _VALID_APPROVAL_MODES:
         return HttpResponseBadRequest("invalid approval mode")
-    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
-    cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
-    if not cwd:
-        stored_cwd = _read_thread_cwd(request, session_id)
-        if stored_cwd is None:
-            return HttpResponseBadRequest("session is archived or unknown")
-        cwd = stored_cwd
-    SessionMetadata.objects.update_or_create(
-        thread_id=session_id,
-        defaults={
-            "cwd": cwd,
-            "approval_mode": approval_mode,
-        },
-    )
-    effective_approval_mode = approval_mode or _effective_approval_mode(
-        _stored_settings(request)
-    )
-    _apply_live_session_approval_mode(session_id, effective_approval_mode)
+    with session_lifecycle.hold(session_id):
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+        cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
+        if not cwd:
+            stored_cwd = _read_thread_cwd(request, session_id)
+            if stored_cwd is None:
+                return HttpResponseBadRequest("session is archived or unknown")
+            cwd = stored_cwd
+        SessionMetadata.objects.update_or_create(
+            thread_id=session_id,
+            defaults={
+                "cwd": cwd,
+                "approval_mode": approval_mode,
+            },
+        )
+        effective_approval_mode = approval_mode or _effective_approval_mode(
+            _stored_settings(request)
+        )
+        pr_tracking.remember_watch_approval_mode(session_id, cwd, effective_approval_mode)
+        _apply_live_session_approval_mode(session_id, effective_approval_mode)
     return redirect("session", session_id=session_id)
 
 @require_http_methods(["POST"])
