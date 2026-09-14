@@ -60,6 +60,22 @@ def watch_pr_task(url: str) -> AgentTask:
     )
 
 
+def terminal_pr_task(url: str, *, merged: bool) -> AgentTask:
+    state = "merged" if merged else "closed without merging"
+    return AgentTask(
+        prompt=(
+            f"Hitch observed that {url} was {state}. Watching this PR has stopped. "
+            "Continue from the existing conversation and follow the user's latest instructions. "
+            "If the user requested a sequence of PRs and this merge completes the current step, "
+            "proceed to the next requested step, publish its PR, and call `hitch.watch_pr` "
+            "with the new URL. A closure without merging does not complete a merge-dependent step. "
+            "If no requested work remains, report the result."
+        ),
+        agent_kind=PR_WATCH_AGENT_KIND,
+        requires_pr_watch=False,
+    )
+
+
 def stage_for_agent_kind(agent_kind: str) -> str:
     if agent_kind == REVIEW_AGENT_KIND:
         return "qa"

@@ -30,7 +30,7 @@ from hitch.main.sessions import lifecycle
 
 class DiskCleanupTests(TestCase):
     def test_rechecks_protections_after_worktree_size_scan(self) -> None:
-        for protection in ("unarchived", "worker", "watch", "proposal", "alias", "watch_alias"):
+        for protection in ("unarchived", "worker", "watch", "terminal", "proposal", "alias", "watch_alias"):
             with self.subTest(protection=protection), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
                 cwd = self._managed_path(root, protection)
@@ -52,6 +52,10 @@ class DiskCleanupTests(TestCase):
                         )
                     elif protection == "watch":
                         SessionPullRequest.objects.create(thread_id=protection, cwd=cwd, state={"watch_active": True})
+                    elif protection == "terminal":
+                        SessionPullRequest.objects.create(
+                            thread_id=protection, cwd=cwd, state={"watch_terminal_pending": True},
+                        )
                     elif protection == "proposal":
                         ProposedSession.objects.create(source_session=metadata)
                     else:
@@ -685,23 +689,26 @@ class DiskCleanupTests(TestCase):
         )
 
     def test_active_watch_protects_archived_worktree_until_unwatched(self) -> None:
-        for active in (True, False):
+        for active, pending in ((True, False), (False, True), (False, False)):
             with (
-                self.subTest(active=active),
+                self.subTest(active=active, pending=pending),
                 tempfile.TemporaryDirectory() as raw,
                 patch("hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path", return_value=True) as cleanup,
             ):
                 root = Path(raw)
                 cwd = self._managed_path(root, "watched")
-                thread_id = f"watched-{active}"
+                thread_id = f"watched-{active}-{pending}"
                 self._session(
                     thread_id=thread_id, cwd=cwd, archived=True,
                     archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
                 )
-                SessionPullRequest.objects.create(thread_id=thread_id, cwd=cwd, state={"watch_active": active})
+                SessionPullRequest.objects.create(
+                    thread_id=thread_id, cwd=cwd,
+                    state={"watch_active": active, "watch_terminal_pending": pending},
+                )
                 cleaned = self._run_cleanup(root=root, sizes=[300, 150], mock_cleanup=cleanup)
-                self.assertEqual(cleaned, 0 if active else 1)
-                if active:
+                self.assertEqual(cleaned, 0 if active or pending else 1)
+                if active or pending:
                     cleanup.assert_not_called()
                 else:
                     cleanup.assert_called_once_with(cwd)

@@ -153,7 +153,7 @@ def _worktree_has_current_protection(candidate: _CleanupCandidate, *, changed_si
     matching_paths = models.Q(cwd__in=(*candidate.aliases, candidate.cwd, normalized))
     watched_paths = SessionPullRequest.objects.filter(
         matching_paths | models.Q(updated_at__gte=changed_since),
-        state__watch_active=True,
+        models.Q(state__watch_active=True) | models.Q(state__watch_terminal_pending=True),
     ).values_list("cwd", flat=True)
     if any(_normalized_managed_path(path) == normalized for _, path in active if path) or any(
         _normalized_managed_path(path) == normalized for path in watched_paths if path
@@ -450,7 +450,9 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         .values_list("cwd", flat=True)
     )
     watched_paths = set(
-        SessionPullRequest.objects.filter(state__watch_active=True)
+        SessionPullRequest.objects.filter(
+            models.Q(state__watch_active=True) | models.Q(state__watch_terminal_pending=True),
+        )
         .exclude(cwd="")
         .values_list("cwd", flat=True)
     )

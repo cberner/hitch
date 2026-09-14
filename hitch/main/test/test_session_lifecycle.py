@@ -1,16 +1,19 @@
 import errno
 import os
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase, override_settings
+from django.db import connections
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.runtime import codex_pool
 from hitch.main.sessions import lifecycle
+from hitch.main.workflows import pr_tracking
 
 
 class SessionLifecycleLockTests(TestCase):
@@ -61,6 +64,8 @@ class SessionLifecycleLockTests(TestCase):
             self.assertTrue(acquired)
             with lifecycle.hold("thread-1", blocking=False) as competing:
                 self.assertFalse(competing)
+            with lifecycle.hold("thread-1", allow_nested=True) as nested:
+                self.assertTrue(nested)
 
         with lifecycle.hold("thread-1", blocking=False) as reacquired:
             self.assertTrue(reacquired)
@@ -77,3 +82,29 @@ class SessionLifecycleLockTests(TestCase):
             lifecycle._acquire("thread-1", blocking=True)
 
         close.assert_called_once_with(123)
+
+
+class PrCompletionLockTests(TransactionTestCase):
+    def test_completion_waits_for_terminal_delivery_lease(self) -> None:
+        instance = CodexInstance.objects.create(
+            thread_id="terminal-thread", pid=0, cwd="/tmp", status=CodexInstance.STATUS_COMPLETED,
+        )
+        acquiring = threading.Event()
+        acquire = lifecycle._acquire
+
+        def signal_acquire(thread_id: str, *, blocking: bool) -> lifecycle._Lease | None:
+            acquiring.set()
+            return acquire(thread_id, blocking=blocking)
+
+        def complete() -> None:
+            try:
+                pr_tracking.supersede_pr_after_turn(instance)
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with lifecycle.hold(instance.thread_id), patch.object(lifecycle, "_acquire", side_effect=signal_acquire):
+                future = executor.submit(complete)
+                self.assertTrue(acquiring.wait(timeout=5))
+                self.assertFalse(future.done())
+            future.result(timeout=5)

@@ -17,6 +17,7 @@ from django.conf import settings
 from hitch.main.models import CodexInstance, SessionMetadata
 
 _worktree_locks = threading.local()
+_session_locks = threading.local()
 
 
 @dataclass
@@ -70,13 +71,22 @@ def _lock_fd(fd: int, *, blocking: bool) -> _Lease | None:
 
 
 @contextlib.contextmanager
-def hold(thread_id: str, *, blocking: bool = True, observed_cwd: str = "") -> Iterator[bool]:
+def hold(
+    thread_id: str, *, blocking: bool = True, observed_cwd: str = "", allow_nested: bool = False,
+) -> Iterator[bool]:
     """Hold the thread lock, yielding false when a nonblocking claim loses."""
+    held = getattr(_session_locks, "held", None)
+    if held is None:
+        held = _session_locks.held = set()
+    if allow_nested and thread_id in held:
+        yield True
+        return
     lease = _acquire(thread_id, blocking=blocking)
     if lease is None:
         yield False
         return
     try:
+        held.add(thread_id)
         cwd = SessionMetadata.objects.filter(thread_id=thread_id).values_list("cwd", flat=True).first()
         if not cwd:
             cwd = (
@@ -91,6 +101,7 @@ def hold(thread_id: str, *, blocking: bool = True, observed_cwd: str = "") -> It
                     return
             yield True
     finally:
+        held.remove(thread_id)
         lease.release()
 
 
