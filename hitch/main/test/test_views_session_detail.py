@@ -577,6 +577,13 @@ class SessionDetailFastPathTests(TestCase):
             codex_name="Split explicit final",
             codex_created_at=now,
             codex_updated_at=now,
+            derived_stage="implementation",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+
+        self.client.post(
+            reverse("set_session_approval_mode", args=["split-explicit-final"]),
+            {"approval_mode": ""},
         )
 
         response = self.client.get(
@@ -585,6 +592,7 @@ class SessionDetailFastPathTests(TestCase):
         older = self.client.get(response.context["history_next_url"])
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="stage-badge" data-tone="active">Implementation</span>')
         self.assertEqual(
             [entry["kind"] for entry in response.context["entries"]],
             ["thinking", "thinking"],

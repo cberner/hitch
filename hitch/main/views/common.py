@@ -758,7 +758,7 @@ def _render_session_detail(
             history_paginated
             and metadata is not None
             and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
-            and registered_pr is None
+            and not pr_snapshot
             and active_instance is None
             and not awaiting_user_input
         ):

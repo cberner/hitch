@@ -166,6 +166,13 @@ explicitly unwatched.
 - `PRWATCH-setting-inheritance`: Publication/watch turns retain the coding
   session's model, reasoning effort, developer instructions, sandbox, approval,
   memory, and web-search settings.
+  Background follow-ups resolve the current session approval override at startup;
+  an override changed while idle takes precedence over the previous worker's mode.
+  Clearing an override records the requesting user's effective global mode for
+  the next background turn, including when the watch is registered afterward.
+  This snapshot is session-local; unrelated account/browser settings changes do
+  not rewrite idle watches. A newer user turn supplies fresh inherited settings.
+  Historical worker modes remain unchanged.
 - `PRWATCH-user-control`: Steering and Stop use normal visible-turn behavior;
   no durable framework steering queue is created.
 

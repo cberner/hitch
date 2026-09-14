@@ -5,13 +5,16 @@ from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
+from django.urls import reverse
 
 from hitch.main.management.commands import codex_worker
 from hitch.main.models import CodexInstance, RefreshThrottle, SessionMetadata, SessionPullRequest
 from hitch.main.runtime import maintenance
 from hitch.main.runtime.codex_tools import ToolContext, handle_dynamic_tool_call
 from hitch.main.sessions import agent_tasks
+from hitch.main.test.support import _seed_cookies
 from hitch.main.test.test_pr_watch import _PR_URL, _observation
+from hitch.main.views import settings as settings_views
 from hitch.main.workflows import pr_tracking, pr_watch, pr_watch_service
 from hitch.main.workflows.gh_observations import _gh_watch_feedback
 
@@ -178,6 +181,55 @@ class PersistentPrWatchTests(TestCase):
         observe.return_value = {**initial, "feedback": _gh_watch_feedback({}, threads, {})}
         pr_watch_service.poll_registered_prs()
         self.assertEqual(spawn.call_count, 2)
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
+    def test_idle_approval_changes_apply_to_background_followups(
+        self, observe: MagicMock, spawn: MagicMock,
+    ) -> None:
+        self.owner.approval_mode = "approve_all"
+        self.owner.save(update_fields=["approval_mode"])
+        SessionMetadata.objects.create(thread_id=self.owner.thread_id, cwd=self.owner.cwd)
+        _seed_cookies(self.client, hitch_approval_mode="deny_all")
+        self.record.delete()
+        observe.return_value = _observation(feedback="Please fix this")
+        for mode in ("deny_all", "prompt_user", "auto_review", "approve_all", ""):
+            with self.subTest(mode=mode):
+                response = self.client.post(
+                    reverse("set_session_approval_mode", args=[self.owner.thread_id]),
+                    {"approval_mode": mode},
+                )
+                self.assertEqual(response.status_code, 302)
+                registration, _ = pr_tracking.begin_pr_watch_invocation(
+                    thread_id=self.owner.thread_id, cwd=self.owner.cwd,
+                    instance_id=self.owner.pk, user_message_index=0,
+                    agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND, requested_pr={"url": _PR_URL},
+                )
+                assert registration is not None
+                self.record = SessionPullRequest.objects.get(pk=registration.record_id)
+                self._due()
+                spawn.reset_mock()
+                pr_watch_service.poll_registered_prs()
+                spawn.assert_called_once()
+                self.assertEqual(spawn.call_args.kwargs["approval_mode"], mode or "deny_all")
+        # A different browser's default does not change this idle watch.
+        settings_views._apply_live_global_approval_mode("approve_all")
+        self._due()
+        spawn.reset_mock()
+        pr_watch_service.poll_registered_prs()
+        self.assertEqual(spawn.call_args.kwargs["approval_mode"], "deny_all")
+        # A subsequent user turn supplies fresh settings instead of the reset snapshot.
+        newer = CodexInstance.objects.create(
+            thread_id=self.owner.thread_id, cwd=self.owner.cwd, pid=0,
+            events_path="/dev/null", status=CodexInstance.STATUS_COMPLETED,
+            approval_mode="auto_review",
+        )
+        self._due()
+        spawn.reset_mock()
+        pr_watch_service.poll_registered_prs()
+        self.assertEqual(spawn.call_args.kwargs["approval_mode"], newer.approval_mode)
+        self.owner.refresh_from_db()
+        self.assertEqual(self.owner.approval_mode, "approve_all")
 
     @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")

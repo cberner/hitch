@@ -55,7 +55,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
         if (
             active_instance is None
-            and stored_pr is None
+            and not pr_tracking.pr_handoff_for_record(stored_pr)
             and not awaiting_user_input
             and cached_stage is not None
             and cached_stage.key
