@@ -110,11 +110,21 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   leaving recovered warnings.
   These notices remain separate from Hitch's browser connection status and
   are hidden while viewing a subagent.
-- `ST-turn-failures`: Terminal model-capacity, cybersecurity-policy, and model
+- `ST-capacity-retries`: A turn that fails with `serverOverloaded` keeps its
+  worker active and automatically continues the existing task after 1 minute,
+  doubling the delay on each capacity failure up to 30 minutes. Further capacity
+  failures retry every 30 minutes until recovery or Stop. Show the next delay
+  in the live retry notice. Preserve the current model, effort, and session
+  policies; do not repeat the original prompt or attachments. Stop cancels the
+  wait promptly. Messages submitted during backoff are queued for the next
+  attempt, which reloads saved model and effort changes. Other errors retain
+  their existing terminal behavior.
+- `ST-turn-failures`: Terminal cybersecurity-policy and model
   connection failures use a clear title and next-step guidance, with the original
   Codex message in expandable details. Other failures retain their original
-  message. Capacity failures offer the existing model-and-effort dialog on
-  writable sessions. Actions never resend a prompt or change the model automatically.
+  message. Previously recorded capacity failures offer the existing model-and-effort
+  dialog on writable sessions. Dialog actions never resend a prompt or change
+  the model automatically.
 - `ST-archive-missing-history`: A saved session without a rollout can be
   archived and restored in Hitch when Codex reports that its rollout is missing.
   Preserve its saved details and usage, and retain the local archive state
