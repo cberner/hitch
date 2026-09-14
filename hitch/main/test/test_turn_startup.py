@@ -12,6 +12,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 
 from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.runtime import codex_pool
+from hitch.main.runtime.file_locks import FileLease
 from hitch.main.sessions import lifecycle, turn_startup
 from hitch.main.sessions.execution_settings import PreviousTurnApproval, RequestApproval
 
@@ -100,7 +101,7 @@ class ConcurrentTurnStartupTests(TransactionTestCase):
         acquiring = threading.Event()
         acquire = lifecycle._acquire
 
-        def signal_acquire(thread_id: str, *, blocking: bool) -> lifecycle._Lease | None:
+        def signal_acquire(thread_id: str, *, blocking: bool) -> FileLease | None:
             acquiring.set()
             return acquire(thread_id, blocking=blocking)
 

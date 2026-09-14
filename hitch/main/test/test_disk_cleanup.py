@@ -16,6 +16,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from hitch.main import checkouts
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -25,12 +26,15 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import disk_cleanup
-from hitch.main.sessions import lifecycle
+from hitch.main.sessions import checkout_protection
 
 
 class DiskCleanupTests(TestCase):
     def test_rechecks_protections_after_worktree_size_scan(self) -> None:
-        for protection in ("unarchived", "worker", "watch", "terminal", "proposal", "alias", "watch_alias"):
+        for protection in (
+            "unarchived", "worker", "watch", "terminal", "proposal", "alias", "watch_alias",
+            "descendant", "watch_descendant",
+        ):
             with self.subTest(protection=protection), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
                 cwd = self._managed_path(root, protection)
@@ -59,36 +63,72 @@ class DiskCleanupTests(TestCase):
                     elif protection == "proposal":
                         ProposedSession.objects.create(source_session=metadata)
                     else:
-                        alias = Path(cwd).with_name("new-alias")
-                        alias.parent.mkdir(parents=True, exist_ok=True)
-                        alias.symlink_to(cwd, target_is_directory=True)
-                        if protection == "watch_alias":
+                        if "descendant" in protection:
+                            alias = Path(cwd) / "src"
+                            alias.mkdir(parents=True)
+                        else:
+                            alias = Path(cwd).with_name("new-alias")
+                            alias.parent.mkdir(parents=True, exist_ok=True)
+                            alias.symlink_to(cwd, target_is_directory=True)
+                        if protection.startswith("watch_"):
                             SessionPullRequest.objects.create(
-                                thread_id="watch-alias", cwd=str(alias), state={"watch_active": True},
+                                thread_id=f"{protection}-watch", cwd=str(alias), state={"watch_active": True},
                             )
                         else:
-                            SessionMetadata.objects.create(thread_id="alias-protector", cwd=str(alias))
+                            SessionMetadata.objects.create(thread_id=f"{protection}-protector", cwd=str(alias))
                     return {cwd: 400}
 
                 with (
                     patch.object(disk_cleanup, "_candidate_worktree_usage_by_path", side_effect=protect_during_scan),
                     patch.object(disk_cleanup, "cleanup_managed_worktree_path") as remove,
-                    patch.object(disk_cleanup, "_cleanup_context", wraps=disk_cleanup._cleanup_context) as context,
+                    patch.object(checkout_protection, "snapshot", wraps=checkout_protection.snapshot) as context,
                     CaptureQueriesContext(connection) as queries,
                 ):
                     self.assertEqual(self._run_cleanup(root=root, sizes=[500], mock_cleanup=remove), 0)
                     remove.assert_not_called()
                     context.assert_called_once()
-                if protection == "watch_alias":
+                if protection in {"alias", "watch_alias"}:
+                    table = "main_sessionpullrequest" if protection == "watch_alias" else "main_sessionmetadata"
+                    prefix = "main_watch" if protection == "watch_alias" else "main_session"
                     recheck_sql = next(
                         query["sql"] for query in queries
-                        if 'FROM "main_sessionpullrequest"' in query["sql"] and '"updated_at" >=' in query["sql"]
+                        if f'FROM "{table}"' in query["sql"] and '"updated_at" >=' in query["sql"]
                     )
                     with connection.cursor() as cursor:
                         cursor.execute("EXPLAIN QUERY PLAN " + recheck_sql)
                         plan = str(cursor.fetchall())
-                    self.assertIn("main_watch_cwd_idx", plan)
-                    self.assertIn("main_watch_updated_idx", plan)
+                    self.assertIn(f"{prefix}_cwd_idx", plan)
+                    self.assertIn(f"{prefix}_updated_idx", plan)
+
+    def test_descendant_sessions_protect_the_root_and_old_archives_remove_the_root(self) -> None:
+        for protection in ("visible", "worker", "watch", "terminal", "proposal", "none"):
+            with self.subTest(protection=protection), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                timestamp = (timezone.now() - timedelta(hours=2)).strftime("%Y%m%d%H%M%S")
+                checkout = Path(self._managed_path(root, f"{timestamp}-abcdef12"))
+                cwd = checkout / "src"
+                cwd.mkdir(parents=True)
+                (checkout / ".git").touch()
+                metadata = self._session(
+                    thread_id=f"nested-{protection}", cwd=str(cwd), archived=protection != "visible",
+                    archived_at=timezone.now() - timedelta(hours=2),
+                )
+                if protection == "worker":
+                    CodexInstance.objects.create(
+                        pid=0, thread_id=metadata.thread_id, cwd=str(cwd), status=CodexInstance.STATUS_RUNNING,
+                    )
+                elif protection in {"watch", "terminal"}:
+                    key = "watch_active" if protection == "watch" else "watch_terminal_pending"
+                    SessionPullRequest.objects.create(thread_id=metadata.thread_id, cwd=str(cwd), state={key: True})
+                elif protection == "proposal":
+                    ProposedSession.objects.create(source_session=metadata)
+                with patch.object(disk_cleanup, "cleanup_managed_worktree_path", return_value=True) as remove:
+                    cleaned = self._run_cleanup(root=root, sizes=[500, 400], mock_cleanup=remove)
+                self.assertEqual(cleaned, int(protection == "none"))
+                if protection == "none":
+                    remove.assert_called_once_with(str(checkout))
+                else:
+                    remove.assert_not_called()
 
     def test_cleanup_holds_worktree_lease_during_removal(self) -> None:
         with tempfile.TemporaryDirectory() as raw, ThreadPoolExecutor(max_workers=1) as executor:
@@ -101,7 +141,7 @@ class DiskCleanupTests(TestCase):
             )
 
             def can_acquire() -> bool:
-                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                with checkouts.hold(cwd, blocking=False) as acquired:
                     return acquired
 
             def remove_worktree(_cwd: str) -> bool:
@@ -124,7 +164,7 @@ class DiskCleanupTests(TestCase):
             acquired, release = threading.Event(), threading.Event()
 
             def hold_checkout() -> None:
-                with lifecycle.hold_worktree(cwd):
+                with checkouts.hold(cwd):
                     acquired.set()
                     release.wait(timeout=5)
 
@@ -248,7 +288,7 @@ class DiskCleanupTests(TestCase):
                 thread_id="old",
                 cwd=old_path,
                 archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                archived_at=timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE,
             )
 
             cleaned = self._run_cleanup(
@@ -284,7 +324,7 @@ class DiskCleanupTests(TestCase):
                 thread_id="old",
                 cwd=old_path,
                 archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                archived_at=timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE,
             )
 
             cleaned = self._run_cleanup(
@@ -331,7 +371,7 @@ class DiskCleanupTests(TestCase):
                 cwd=old_path,
                 archived=True,
                 archived_at=(
-                    timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+                    timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE
                 ),
             )
 
@@ -482,7 +522,7 @@ class DiskCleanupTests(TestCase):
             managed.mkdir()
             first_path = self._managed_path(root, "first")
             second_path = self._managed_path(root, "second")
-            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            archived_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE
             self._session(
                 thread_id="first",
                 cwd=first_path,
@@ -525,7 +565,7 @@ class DiskCleanupTests(TestCase):
         ):
             root = Path(raw)
             shared_path = self._managed_path(root, "shared")
-            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            archived_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE
             self._session(
                 thread_id="first",
                 cwd=shared_path,
@@ -562,7 +602,7 @@ class DiskCleanupTests(TestCase):
                 thread_id="empty",
                 cwd=old_path,
                 archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                archived_at=timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE,
             )
 
             cleaned = self._run_cleanup(
@@ -586,7 +626,7 @@ class DiskCleanupTests(TestCase):
             first_blob = first / "blob"
             first_blob.write_bytes(b"x" * 4096)
             os.link(first_blob, second / "blob")
-            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            archived_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE
             self._session(
                 thread_id="first",
                 cwd=str(first),
@@ -655,7 +695,7 @@ class DiskCleanupTests(TestCase):
             managed.mkdir()
             old_path = self._managed_path(root, "old")
             fallback_path = self._managed_path(root, "fallback")
-            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            archived_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE
             self._session(
                 thread_id="old",
                 cwd=old_path,
@@ -700,7 +740,7 @@ class DiskCleanupTests(TestCase):
                 thread_id = f"watched-{active}-{pending}"
                 self._session(
                     thread_id=thread_id, cwd=cwd, archived=True,
-                    archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                    archived_at=timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE,
                 )
                 SessionPullRequest.objects.create(
                     thread_id=thread_id, cwd=cwd,
@@ -810,12 +850,14 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
+            old_created_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
             metadata_path = self._managed_path(root, "metadata")
             outside_path = root / "outside" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             bad_shape_path = root / "managed" / "repo" / "not-a-managed-name"
             bad_date_path = root / "managed" / "repo" / "20261301121212-abcdef12"
             valid_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-12345678"
+            alias = root / "alias"
+            alias.symlink_to(valid_path, target_is_directory=True)
             self._session(thread_id="visible", cwd=metadata_path)
             with patch(
                 "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
@@ -824,12 +866,13 @@ class DiskCleanupTests(TestCase):
                     Path(metadata_path),
                     bad_shape_path,
                     bad_date_path,
-                    valid_path,
+                    alias,
+                    alias,
                 ],
             ):
                 cleaned = self._run_cleanup(
                     root=root,
-                    sizes=[300, 150],
+                    sizes=[300, 150, 150],
                     mock_cleanup=mock_cleanup,
                 )
 
@@ -846,9 +889,11 @@ class DiskCleanupTests(TestCase):
         ):
             root = Path(raw)
             orphan_path = root / "managed" / "repo" / f"{timezone.now().strftime('%Y%m%d%H%M%S')}-abcdef12"
+            alias = root / "20000101000000-abcdef12"
+            alias.symlink_to(orphan_path, target_is_directory=True)
             with patch(
                 "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
-                return_value=[orphan_path],
+                return_value=[alias],
             ):
                 cleaned = self._run_cleanup(
                     root=root,
@@ -868,7 +913,7 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
         ):
             root = Path(raw)
-            old_created_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
+            old_created_at = timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE - timedelta(hours=1)
             orphan_path = root / "managed" / "repo" / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             CodexInstance.objects.create(
                 pid=123,
@@ -924,7 +969,7 @@ class DiskCleanupTests(TestCase):
                 thread_id="old",
                 cwd=old_path,
                 archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                archived_at=timezone.now() - checkout_protection.ARCHIVED_USER_SESSION_MIN_AGE,
             )
 
             cleaned = self._run_cleanup(

@@ -22,6 +22,15 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   Protection rechecks use indexed checkout and recent-update lookups for session
   metadata and PR watches, retaining path aliases without rebuilding the entire
   session protection snapshot per removal.
+  Cleanup, indexing, proposal registration, and startup share canonical checkout
+  identity and lease ordering. A cwd beneath `<base>/<repo>/<checkout>` shares
+  that checkout root's protection key and lease; eligible descendant sessions
+  are cleaned up by their checkout root. Orphan age is determined from the root
+  directory name, including when discovered through an alias. Startup still requires the requested cwd
+  to exist. Candidate selection and the leased recheck use the
+  same retention policy for visible, archived, and historical system sessions.
+  Unresolvable paths are ineligible for removal; startup must fail if it cannot
+  resolve a required checkout lease.
 - `ST-shared-assets`: Session styles and scripts load as external shared assets.
   Browsers must revalidate them on reuse; validators cover the current complete
   rendered content, including shared snippets. Session-specific configuration

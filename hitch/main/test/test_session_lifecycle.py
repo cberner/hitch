@@ -10,8 +10,10 @@ from unittest.mock import MagicMock, patch
 from django.db import connections
 from django.test import TestCase, TransactionTestCase, override_settings
 
+from hitch.main import checkouts
 from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.runtime import codex_pool
+from hitch.main.runtime.file_locks import FileLease
 from hitch.main.sessions import lifecycle, turn_startup
 from hitch.main.sessions.execution_settings import RequestApproval
 from hitch.main.workflows import pr_tracking
@@ -31,7 +33,7 @@ class SessionLifecycleLockTests(TestCase):
 
             with (
                 patch.object(os, "open", side_effect=open_without_space),
-                lifecycle.hold_worktree(str(path)) as acquired,
+                checkouts.hold(str(path)) as acquired,
             ):
                 self.assertTrue(acquired)
 
@@ -44,7 +46,7 @@ class SessionLifecycleLockTests(TestCase):
             SessionMetadata.objects.create(thread_id="thread-1", cwd=cwd)
 
             def competing_claim() -> bool:
-                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                with checkouts.hold(cwd, blocking=False) as acquired:
                     return acquired
 
             with turn_startup.claim("thread-1") as startup, patch.object(
@@ -78,7 +80,7 @@ class SessionLifecycleLockTests(TestCase):
             self.assertTrue(reacquired)
 
     @patch("hitch.main.sessions.lifecycle.os.close")
-    @patch("hitch.main.sessions.lifecycle.fcntl.flock")
+    @patch("hitch.main.runtime.file_locks.fcntl.flock")
     @patch("hitch.main.sessions.lifecycle.os.open", return_value=123)
     def test_acquire_closes_descriptor_when_flock_fails(
         self, _open: MagicMock, flock: MagicMock, close: MagicMock
@@ -99,7 +101,7 @@ class PrCompletionLockTests(TransactionTestCase):
         acquiring = threading.Event()
         acquire = lifecycle._acquire
 
-        def signal_acquire(thread_id: str, *, blocking: bool) -> lifecycle._Lease | None:
+        def signal_acquire(thread_id: str, *, blocking: bool) -> FileLease | None:
             acquiring.set()
             return acquire(thread_id, blocking=blocking)
 
