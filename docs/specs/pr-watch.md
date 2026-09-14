@@ -172,7 +172,9 @@ explicitly unwatched.
   the next background turn, including when the watch is registered afterward.
   This snapshot is session-local; unrelated account/browser settings changes do
   not rewrite idle watches. A newer user turn supplies fresh inherited settings.
-  Historical worker modes remain unchanged.
+  Historical worker modes remain unchanged. Approval snapshots belong to session
+  metadata and use the shared `PERM-approval-resolution` policy; PR records contain
+  no execution-setting snapshots.
 - `PRWATCH-user-control`: Steering and Stop use normal visible-turn behavior;
   no durable framework steering queue is created.
 

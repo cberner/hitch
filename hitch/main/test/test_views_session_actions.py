@@ -21,6 +21,7 @@ from hitch.main.models import (
     ArchivedSessionTokenUsage,
     CodexInstance,
     SessionMetadata,
+    SessionPullRequest,
 )
 from hitch.main.sessions import session_index
 from hitch.main.test.support import (
@@ -134,12 +135,16 @@ class SetSessionApprovalModeViewTests(TestCase):
         )
         metadata = SessionMetadata.objects.get(thread_id="abc")
         self.assertEqual(metadata.approval_mode, "prompt_user")
+        self.assertFalse(SessionPullRequest.objects.filter(thread_id="abc").exists())
 
         response = self.client.post(url, data={"approval_mode": ""})
 
         self.assertEqual(response.status_code, 302)
         metadata.refresh_from_db()
         self.assertEqual(metadata.approval_mode, "")
+        self.assertEqual(metadata.approval_snapshot_mode, "auto_review")
+        self.assertIsNone(metadata.approval_snapshot_instance_id)
+        self.assertFalse(SessionPullRequest.objects.filter(thread_id="abc").exists())
 
     def test_archived_session_without_cached_cwd_returns_400(self) -> None:
         # The cwd fallback resumes the thread; the app-server raises

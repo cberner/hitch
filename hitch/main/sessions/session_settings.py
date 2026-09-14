@@ -25,15 +25,14 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import disk_cleanup
 from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
+from hitch.main.sessions.execution_settings import RequestApproval, approval_override, resolve_approval
 from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.review_prompts import QA_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.settings_cookies import (
-    _DEFAULT_APPROVAL_MODE,
     _EFFORT_COOKIE,
     _MANAGED_WORKTREE_DEFAULT_SANDBOX_POLICY,
     _MODEL_COOKIE,
     _SETTING_SPECS,
-    _VALID_APPROVAL_MODES,
     _VALID_SANDBOX_POLICIES,
     _VALID_WEB_SEARCH_MODES,
     _WEB_SEARCH_MODE_OPTIONS,
@@ -158,24 +157,15 @@ def _is_managed_session_cwd(cwd: str) -> bool:
 
 
 def _effective_approval_mode(settings: SettingsValues) -> str:
-    if settings.approval_mode not in _VALID_APPROVAL_MODES:
-        return _DEFAULT_APPROVAL_MODE
-    return settings.approval_mode
+    return resolve_approval(None, RequestApproval(settings.approval_mode)).mode
 
 
 def _session_approval_mode_override(
     session_id: str, metadata: SessionMetadata | None = None
 ) -> str:
     if metadata is None:
-        value = (
-            SessionMetadata.objects.filter(thread_id=session_id)
-            .values_list("approval_mode", flat=True)
-            .first()
-            or ""
-        )
-    else:
-        value = metadata.approval_mode
-    return value if value in _VALID_APPROVAL_MODES else ""
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).only("approval_mode").first()
+    return approval_override(metadata)
 
 
 def _effective_approval_mode_for_session(
@@ -183,8 +173,9 @@ def _effective_approval_mode_for_session(
     session_id: str,
     metadata: SessionMetadata | None = None,
 ) -> str:
-    override = _session_approval_mode_override(session_id, metadata)
-    return override or _effective_approval_mode(settings)
+    if metadata is None:
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).only("approval_mode").first()
+    return resolve_approval(metadata, RequestApproval(settings.approval_mode)).mode
 
 
 def _selected_repo_for_dialog(
@@ -340,12 +331,10 @@ def _stored_settings_with_local_defaults(request: HttpRequest) -> SettingsValues
     """Apply only Hitch-owned static defaults, without provider reconciliation."""
     saved = _stored_settings(request)
     saved_sandbox = saved.sandbox_policy
-    saved_approval = saved.approval_mode
+    saved_approval = _effective_approval_mode(saved)
     saved_web_search = saved.web_search_mode
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
-    if saved_approval not in _VALID_APPROVAL_MODES:
-        saved_approval = _DEFAULT_APPROVAL_MODE
     if saved_web_search and saved_web_search not in _VALID_WEB_SEARCH_MODES:
         saved_web_search = ""
     return saved._replace(

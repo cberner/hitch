@@ -195,11 +195,16 @@ class PersistentPrWatchTests(TestCase):
         observe.return_value = _observation(feedback="Please fix this")
         for mode in ("deny_all", "prompt_user", "auto_review", "approve_all", ""):
             with self.subTest(mode=mode):
+                before = list(SessionPullRequest.objects.values("id", "state", "updated_at"))
                 response = self.client.post(
                     reverse("set_session_approval_mode", args=[self.owner.thread_id]),
                     {"approval_mode": mode},
                 )
                 self.assertEqual(response.status_code, 302)
+                self.assertEqual(list(SessionPullRequest.objects.values("id", "state", "updated_at")), before)
+                metadata = SessionMetadata.objects.get(thread_id=self.owner.thread_id)
+                self.assertEqual(metadata.approval_snapshot_mode, mode or "deny_all")
+                self.assertEqual(metadata.approval_snapshot_instance_id, self.owner.pk)
                 registration, _ = pr_tracking.begin_pr_watch_invocation(
                     thread_id=self.owner.thread_id, cwd=self.owner.cwd,
                     instance_id=self.owner.pk, user_message_index=0,

@@ -66,6 +66,14 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 ### 4.3 Scope and Inheritance
 
 - `PERM-global-defaults`: Settings-page sandbox and approval choices apply to new user sessions and future turns unless overridden.
+- `PERM-approval-resolution`: Request-driven turns resolve the session override,
+  then the requesting account/browser default. Background PR follow-ups resolve
+  the session override, then a saved reset snapshot tied to the previous user
+  instance, then that instance's mode. A newer user instance supersedes the
+  snapshot. Both paths share one typed approval resolver; its result identifies
+  the selected source. Invalid or absent defaults use Auto review.
+  Session metadata owns approval snapshots independently of PR registration;
+  changing permissions does not create or modify PR records or historical workers.
 - `PERM-session-approval-override`: A user session may override the global approval mode.
 - `PERM-proposal-accept-permissions`: Accepted Proposals re-resolve sandbox and approval as user sessions; system-only state must not carry over.
 - `PERM-live-approval-update`: Updating a running user session's approval mode affects future Hitch-routed escalations; non-routed server-side decisions use the new mode on the next turn or routed escalation.

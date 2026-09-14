@@ -44,8 +44,6 @@ WATCH_ACTIVE_STATE_KEY = "watch_active"
 WATCH_TOKEN_STATE_KEY = "watch_token"
 WATCH_DELIVERED_STATE_KEY = "watch_delivered_event"
 WATCH_FEEDBACK_STATE_KEY = "watch_delivered_feedback"
-WATCH_APPROVAL_MODE_STATE_KEY = "watch_approval_mode"
-WATCH_APPROVAL_OWNER_STATE_KEY = "watch_approval_owner_id"
 
 PR_HANDOFF_STATE_KEY = "pr_handoff"
 PR_GATES_STATE_KEY = "pr_gates"
@@ -376,23 +374,6 @@ def _previous_feedback_fingerprint(record: SessionPullRequest) -> str:
         return ""
     value = previous.get("feedback_fingerprint")
     return value if isinstance(value, str) else ""
-
-
-def remember_watch_approval_mode(thread_id: str, cwd: str, approval_mode: str) -> None:
-    """Capture a session action until a newer user turn supplies its settings."""
-    with transaction.atomic():
-        record, _ = SessionPullRequest.objects.select_for_update().get_or_create(
-            thread_id=thread_id, defaults={"cwd": cwd},
-        )
-        owner_id = CodexInstance.objects.filter(
-            thread_id=thread_id, purpose=CodexInstance.PURPOSE_USER,
-        ).order_by("-pk").values_list("pk", flat=True).first()
-        record.state = {
-            **record.state,
-            WATCH_APPROVAL_MODE_STATE_KEY: approval_mode,
-            WATCH_APPROVAL_OWNER_STATE_KEY: owner_id,
-        }
-        record.save(update_fields=["state", "updated_at"])
 
 
 def record_for_thread(thread_id: str) -> SessionPullRequest | None:

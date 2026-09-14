@@ -24,12 +24,12 @@ from hitch.main.runtime import app_server_pool, codex_pool, reconciliation
 from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.sessions import lifecycle as session_lifecycle
 from hitch.main.sessions import session_index
+from hitch.main.sessions.execution_settings import RequestApproval, save_session_approval
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_resume import _stored_rollout_path_for_thread
 from hitch.main.sessions.session_settings import (
-    _effective_approval_mode,
     _model_default_effort,
     _reasoning_effort_values,
     _stored_settings,
@@ -39,7 +39,6 @@ from hitch.main.sessions.settings_cookies import (
     _VALID_APPROVAL_MODES,
 )
 from hitch.main.views import common
-from hitch.main.workflows import pr_tracking
 
 _ARCHIVE_ACTIVE_WORK_MESSAGE = (
     "Stop the active turn before archiving this session."
@@ -120,17 +119,10 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
             if stored_cwd is None:
                 return HttpResponseBadRequest("session is archived or unknown")
             cwd = stored_cwd
-        SessionMetadata.objects.update_or_create(
-            thread_id=session_id,
-            defaults={
-                "cwd": cwd,
-                "approval_mode": approval_mode,
-            },
-        )
-        effective_approval_mode = approval_mode or _effective_approval_mode(
-            _stored_settings(request)
-        )
-        pr_tracking.remember_watch_approval_mode(session_id, cwd, effective_approval_mode)
+        effective_approval_mode = save_session_approval(
+            session_id, cwd=cwd, override=approval_mode,
+            defaults=RequestApproval(_stored_settings(request).approval_mode),
+        ).mode
         _apply_live_session_approval_mode(session_id, effective_approval_mode)
     return redirect("session", session_id=session_id)
 
