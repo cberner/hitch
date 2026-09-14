@@ -30,6 +30,7 @@ from hitch.main.sessions import (
     session_entry_display,
     session_pr_plan,
     session_resume,
+    session_stage_refresh,
 )
 from hitch.main.sessions.pr_prompts import PR_SLASH_PROMPT
 from hitch.main.test.support import (
@@ -602,6 +603,30 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(older, '<span class="role">Agent</span>')
         self.assertContains(older, "Canonical final")
         mock_codex.assert_not_called()
+        for key, stamp in (
+            ("implementation", rollout_path.stat().st_mtime_ns), ("", 0), ("plan", 1),
+            ("done_closed", rollout_path.stat().st_mtime_ns),
+        ):
+            with self.subTest(cached_stage=key):
+                SessionMetadata.objects.filter(thread_id="split-explicit-final").update(
+                    derived_stage=key, derived_stage_source_mtime_ns=stamp,
+                )
+                rows: list[dict[str, Any]] = [{
+                    "id": "split-explicit-final", "codex_path": str(rollout_path),
+                    "stage_cache_key": key, "stage_cache_mtime_ns": stamp,
+                }]
+                with patch(
+                    "hitch.main.runtime.rollout.session_stage_data", wraps=rollout_module.session_stage_data,
+                ) as stage_read:
+                    response = self.client.get(reverse("session", args=["split-explicit-final"]))
+                    session_stage_refresh._attach_session_stage_context(rows)
+                self.assertEqual(response.context["session_stage"]["key"], "implementation")
+                self.assertEqual(rows[0]["stage"]["key"], "implementation")
+                if key == "implementation":
+                    stage_read.assert_not_called()
+                else:
+                    stage_read.assert_called_once()
+
 
 
     @patch("hitch.main.worktrees.discover_managed_worktrees")
@@ -1516,19 +1541,18 @@ class SessionDetailFastPathTests(TestCase):
             },
         )
 
-        response = self.client.get(
-            reverse("session", kwargs={"session_id": "superseded-pr-detail"})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
-        )
-        self.assertNotContains(response, f'href="{pr_url}"')
-        self.assertNotContains(response, "Done: Closed")
-        metadata.refresh_from_db()
-        self.assertEqual(metadata.derived_stage, "implementation")
+        for history in ("all", ""):
+            with self.subTest(history=history), patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1):
+                SessionMetadata.objects.filter(pk=metadata.pk).update(derived_stage="done_closed")
+                response = self.client.get(
+                    reverse("session", kwargs={"session_id": "superseded-pr-detail"}), {"history": history},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '<span class="stage-badge" data-tone="active">Implementation</span>')
+                self.assertNotContains(response, f'href="{pr_url}"')
+                self.assertNotContains(response, "Done: Closed")
+                metadata.refresh_from_db()
+                self.assertEqual(metadata.derived_stage, "implementation" if history else "done_closed")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")

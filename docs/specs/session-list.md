@@ -22,3 +22,18 @@ Status: Implemented
   independently poll GitHub; the PR watch specification remains authoritative.
 - `LIST-stage-reads`: When current worker, input, or registered PR state determines
   a stage, deriving its badge must not read the session transcript.
+
+- `LIST-shared-stage-policy`: Session list and detail use the same PR visibility,
+  stage precedence, and cache policy. Pending input and active workers take
+  precedence over registered PR state, then valid cached rollout stages and
+  transcript-derived stages. A replacement publication hides the prior PR until
+  its own registration; historical and empty PR records supply no displayed PR.
+  Only New, Plan, Implementation, and QA caches with the current rollout mtime
+  may be reused. PR and input-derived stages require current authoritative state.
+  Partial detail history uses a valid cache or the bounded preview and its
+  leading user-message context when current worker/input/PR state cannot resolve
+  the stage. Stage resolution must not turn a paginated read into a full-rollout
+  load. Partial or unreadable history and transient worker/input stages must not
+  overwrite the cache.
+  Full-history and registered-PR stages remain available for durable classification.
+  Each view keeps its existing badge formatting.
