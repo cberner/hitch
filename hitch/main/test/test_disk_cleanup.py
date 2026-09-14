@@ -3,13 +3,17 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import override
 from unittest.mock import MagicMock, call, patch
 
+from django.db import connection
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from hitch.main.models import (
@@ -21,9 +25,120 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.runtime import disk_cleanup
+from hitch.main.sessions import lifecycle
 
 
 class DiskCleanupTests(TestCase):
+    def test_rechecks_protections_after_worktree_size_scan(self) -> None:
+        for protection in ("unarchived", "worker", "watch", "proposal", "alias", "watch_alias"):
+            with self.subTest(protection=protection), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                cwd = self._managed_path(root, protection)
+                metadata = self._session(
+                    thread_id=protection, cwd=cwd, archived=True,
+                    archived_at=timezone.now() - timedelta(hours=2),
+                )
+
+                def protect_during_scan(
+                    _candidates: object, *, protection: str = protection,
+                    cwd: str = cwd, metadata: SessionMetadata = metadata,
+                ) -> dict[str, int]:
+                    if protection == "unarchived":
+                        metadata.codex_archived = False
+                        metadata.save(update_fields=["codex_archived"])
+                    elif protection == "worker":
+                        CodexInstance.objects.create(
+                            pid=0, thread_id=protection, cwd=cwd, status=CodexInstance.STATUS_STARTING,
+                        )
+                    elif protection == "watch":
+                        SessionPullRequest.objects.create(thread_id=protection, cwd=cwd, state={"watch_active": True})
+                    elif protection == "proposal":
+                        ProposedSession.objects.create(source_session=metadata)
+                    else:
+                        alias = Path(cwd).with_name("new-alias")
+                        alias.parent.mkdir(parents=True, exist_ok=True)
+                        alias.symlink_to(cwd, target_is_directory=True)
+                        if protection == "watch_alias":
+                            SessionPullRequest.objects.create(
+                                thread_id="watch-alias", cwd=str(alias), state={"watch_active": True},
+                            )
+                        else:
+                            SessionMetadata.objects.create(thread_id="alias-protector", cwd=str(alias))
+                    return {cwd: 400}
+
+                with (
+                    patch.object(disk_cleanup, "_candidate_worktree_usage_by_path", side_effect=protect_during_scan),
+                    patch.object(disk_cleanup, "cleanup_managed_worktree_path") as remove,
+                    patch.object(disk_cleanup, "_cleanup_context", wraps=disk_cleanup._cleanup_context) as context,
+                    CaptureQueriesContext(connection) as queries,
+                ):
+                    self.assertEqual(self._run_cleanup(root=root, sizes=[500], mock_cleanup=remove), 0)
+                    remove.assert_not_called()
+                    context.assert_called_once()
+                if protection == "watch_alias":
+                    recheck_sql = next(
+                        query["sql"] for query in queries
+                        if 'FROM "main_sessionpullrequest"' in query["sql"] and '"updated_at" >=' in query["sql"]
+                    )
+                    with connection.cursor() as cursor:
+                        cursor.execute("EXPLAIN QUERY PLAN " + recheck_sql)
+                        plan = str(cursor.fetchall())
+                    self.assertIn("main_watch_cwd_idx", plan)
+                    self.assertIn("main_watch_updated_idx", plan)
+
+    def test_cleanup_holds_worktree_lease_during_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, ThreadPoolExecutor(max_workers=1) as executor:
+            root = Path(raw)
+            cwd = self._managed_path(root, "busy")
+            Path(cwd).mkdir(parents=True)
+            self._session(
+                thread_id="busy", cwd=cwd, archived=True,
+                archived_at=timezone.now() - timedelta(hours=2),
+            )
+
+            def can_acquire() -> bool:
+                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                    return acquired
+
+            def remove_worktree(_cwd: str) -> bool:
+                self.assertFalse(executor.submit(can_acquire).result(timeout=5))
+                return True
+
+            with patch.object(disk_cleanup, "cleanup_managed_worktree_path", side_effect=remove_worktree) as remove:
+                self.assertEqual(self._run_cleanup(root=root, sizes=[500, 400], mock_cleanup=remove), 1)
+                remove.assert_called_once_with(cwd)
+
+    def test_cleanup_skips_worktree_with_lifecycle_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, ThreadPoolExecutor(max_workers=1) as executor:
+            root = Path(raw)
+            cwd = self._managed_path(root, "busy")
+            Path(cwd).mkdir(parents=True)
+            self._session(
+                thread_id="busy", cwd=cwd, archived=True,
+                archived_at=timezone.now() - timedelta(hours=2),
+            )
+            acquired, release = threading.Event(), threading.Event()
+
+            def hold_checkout() -> None:
+                with lifecycle.hold_worktree(cwd):
+                    acquired.set()
+                    release.wait(timeout=5)
+
+            def measure(_candidates: object) -> dict[str, int]:
+                executor.submit(hold_checkout)
+                self.assertTrue(acquired.wait(timeout=5))
+                return {cwd: 400}
+
+            try:
+                with (
+                    patch.object(disk_cleanup, "_candidate_worktree_usage_by_path", side_effect=measure),
+                    patch.object(disk_cleanup, "cleanup_managed_worktree_path") as remove,
+                ):
+                    self.assertEqual(self._run_cleanup(root=root, sizes=[500], mock_cleanup=remove), 0)
+                    remove.assert_not_called()
+            finally:
+                release.set()
+
     def _managed_path(self, root: Path, name: str) -> str:
         return str(root / "managed" / "repo" / name)
 
@@ -61,7 +176,7 @@ class DiskCleanupTests(TestCase):
         hitch_home = root / ".hitch"
         managed = root / "managed"
         hitch_home.mkdir()
-        managed.mkdir()
+        managed.mkdir(exist_ok=True)
         with (
             override_settings(
                 HITCH_HOME_DIR=hitch_home,

@@ -229,6 +229,8 @@ class SessionMetadata(models.Model):
                 fields=["-codex_updated_at", "-id"],
                 name="main_sessio_codex_updated_idx",
             ),
+            models.Index(fields=["cwd"], name="main_session_cwd_idx"),
+            models.Index(fields=["updated_at"], name="main_session_updated_idx"),
             # Project-scoped, archive-filtered session list (see views). The
             # former ``["project", "-updated_at"]`` index was dropped: it sorted
             # on the local bookkeeping ``updated_at`` that no query orders by, so
@@ -272,6 +274,12 @@ class SessionPullRequest(models.Model):
     state = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["cwd"], name="main_watch_cwd_idx"),
+            models.Index(fields=["updated_at"], name="main_watch_updated_idx"),
+        ]
 
     @override
     def __str__(self) -> str:

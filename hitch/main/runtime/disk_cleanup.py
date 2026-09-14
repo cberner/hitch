@@ -9,7 +9,7 @@ import stat
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from hitch.main.models import (
     SystemAgentRun,
 )
 from hitch.main.runtime import codex_events
+from hitch.main.sessions import lifecycle
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -55,6 +56,7 @@ class _CleanupCandidate:
     thread_id: str
     timestamp: datetime
     sequence: int
+    aliases: tuple[str, ...] = ()
 
 
 def run_finished_session_disk_cleanup() -> None:
@@ -98,7 +100,8 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
             return 0
 
     cleaned = 0
-    candidates = _cleanup_candidates(now=timezone.now())
+    protection_snapshot_at = timezone.now()
+    candidates = _cleanup_candidates(now=protection_snapshot_at)
     usage_by_path = _candidate_worktree_usage_by_path(candidates)
     bytes_to_free = used_bytes - limit_bytes
     successful_bytes = 0
@@ -119,8 +122,14 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
             continue
         attempted_paths.add(normalized_path)
         try:
-            removed = cleanup_managed_worktree_path(candidate.cwd)
-        except WorktreeCleanupError:
+            with lifecycle.hold_worktree(candidate.cwd, blocking=False) as acquired:
+                if not acquired:
+                    continue
+                # The size scan can outlive a resume, a new worker, or watch registration.
+                if _worktree_has_current_protection(candidate, changed_since=protection_snapshot_at):
+                    continue
+                removed = cleanup_managed_worktree_path(candidate.cwd)
+        except (WorktreeCleanupError, OSError):
             logger.exception(
                 "failed to clean up %s worktree for %s",
                 candidate.reason,
@@ -132,6 +141,54 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
         cleaned += 1
         successful_bytes += usage_bytes
     return cleaned
+
+
+def _worktree_has_current_protection(candidate: _CleanupCandidate, *, changed_since: datetime) -> bool:
+    normalized = _normalized_managed_path(candidate.cwd)
+    if normalized is None:
+        return True
+    active = list(CodexInstance.objects.filter(
+        status__in=CodexInstance.ACTIVE_STATUSES,
+    ).values_list("thread_id", "cwd"))
+    matching_paths = models.Q(cwd__in=(*candidate.aliases, candidate.cwd, normalized))
+    watched_paths = SessionPullRequest.objects.filter(
+        matching_paths | models.Q(updated_at__gte=changed_since),
+        state__watch_active=True,
+    ).values_list("cwd", flat=True)
+    if any(_normalized_managed_path(path) == normalized for _, path in active if path) or any(
+        _normalized_managed_path(path) == normalized for path in watched_paths if path
+    ):
+        return True
+    # Retain known aliases, and resolve only metadata changed since the snapshot
+    # to catch newly registered aliases without rescanning the full session index.
+    rows = SessionMetadata.objects.filter(
+        matching_paths | models.Q(updated_at__gte=changed_since)
+    ).only("thread_id", "cwd", "codex_archived", "codex_archived_at", "derived_stage", "is_hidden_system_session")
+    metadata_rows = [row for row in rows if row.cwd and _normalized_managed_path(row.cwd) == normalized]
+    active_thread_ids = {thread_id for thread_id, _ in active}
+    if any(row.thread_id in active_thread_ids for row in metadata_rows):
+        return True
+    ids = [row.pk for row in metadata_rows]
+    if ProposedSession.objects.filter(outcome_status=ProposedSession.OUTCOME_UNSET).filter(
+        models.Q(source_session_id__in=ids) | models.Q(accepted_session_id__in=ids)
+    ).exists():
+        return True
+    thread_ids = [row.thread_id for row in metadata_rows]
+    promoted = frozenset(ProposedSession.objects.filter(
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED, accepted_session_id__in=ids,
+    ).values_list("accepted_session__thread_id", flat=True))
+    hidden = set(SystemAgentRun.objects.filter(thread_id__in=thread_ids).values_list("thread_id", flat=True))
+    hidden.update(CodexInstance.objects.filter(
+        thread_id__in=thread_ids, purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+    ).values_list("thread_id", flat=True))
+    context = _CleanupContext(promoted, frozenset(hidden), frozenset(), frozenset(), frozenset())
+    now = timezone.now()
+    return any(
+        _is_user_session(row, context)
+        and not _archived_pr_done_user_session(row, context)
+        and not _old_archived_user_session(row, context, now=now)
+        for row in metadata_rows
+    )
 
 
 def _prune_oversized_finished_event_logs() -> int:
@@ -337,11 +394,13 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
     context = _cleanup_context(now=now)
     candidates: list[_CleanupCandidate] = []
     metadata_paths: set[str] = set()
+    aliases_by_path: dict[str, set[str]] = {}
     for metadata in _session_metadata_rows():
         normalized_path = _normalized_managed_path(metadata.cwd)
         if normalized_path is None:
             continue
         metadata_paths.add(normalized_path)
+        aliases_by_path.setdefault(normalized_path, set()).add(metadata.cwd)
         if not _safe_to_remove_worktree(metadata, context):
             continue
         is_system = _is_system_session(metadata, context)
@@ -359,7 +418,12 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
             now=now,
         )
     )
-    return sorted(candidates, key=_candidate_sort_key)
+    return sorted(
+        (replace(candidate, aliases=tuple(aliases_by_path.get(
+            _normalized_managed_path(candidate.cwd) or "", set(),
+        ))) for candidate in candidates),
+        key=_candidate_sort_key,
+    )
 
 
 @dataclass(frozen=True)

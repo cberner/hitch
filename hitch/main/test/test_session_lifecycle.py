@@ -1,11 +1,61 @@
+import errno
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
+from hitch.main.models import CodexInstance, SessionMetadata
+from hitch.main.runtime import codex_pool
 from hitch.main.sessions import lifecycle
 
 
 class SessionLifecycleLockTests(TestCase):
+    def test_worktree_lease_needs_no_new_files_when_disk_is_full(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, override_settings(HITCH_WORKTREES_DIR=Path(raw)):
+            path = Path(raw) / "checkout"
+            path.mkdir()
+            original_open = os.open
+
+            def open_without_space(path: str | Path, flags: int, mode: int = 0o777) -> int:
+                if flags & os.O_CREAT:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                return original_open(path, flags, mode)
+
+            with (
+                patch.object(os, "open", side_effect=open_without_space),
+                lifecycle.hold_worktree(str(path)) as acquired,
+            ):
+                self.assertTrue(acquired)
+
+    def test_session_lease_protects_worktree_and_allows_nested_worker_start(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, override_settings(
+            HITCH_WORKTREES_DIR=Path(raw), CODEX_EVENTS_DIR=Path(raw) / "events",
+        ), ThreadPoolExecutor(max_workers=1) as executor:
+            cwd = str(Path(raw) / "checkout")
+            Path(cwd).mkdir()
+            SessionMetadata.objects.create(thread_id="thread-1", cwd=cwd)
+
+            def competing_claim() -> bool:
+                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                    return acquired
+
+            with lifecycle.hold("thread-1"), patch.object(
+                codex_pool, "_launch_worker_process", return_value=SimpleNamespace(pid=0),
+            ):
+                self.assertFalse(executor.submit(competing_claim).result(timeout=5))
+                worker = codex_pool.spawn_turn(thread_id="thread-1", cwd=cwd, prompt="Continue")
+                self.assertEqual(worker.status, CodexInstance.STATUS_STARTING)
+            self.assertTrue(executor.submit(competing_claim).result(timeout=5))
+
+            with self.assertRaises(FileNotFoundError), patch.object(codex_pool, "_launch_worker_process") as launch:
+                codex_pool.spawn_turn(thread_id="removed", cwd=str(Path(raw) / "removed"), prompt="Continue")
+            launch.assert_not_called()
+            self.assertFalse(CodexInstance.objects.filter(thread_id="removed").exists())
+
     def test_nonblocking_claim_reports_busy_lock(self) -> None:
         with lifecycle.hold("thread-1") as acquired:
             self.assertTrue(acquired)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata
 from hitch.main.proposals.proposed_sessions import (
@@ -22,10 +25,34 @@ from hitch.main.runtime.codex_tools import (
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
+from hitch.main.sessions import lifecycle
 from hitch.main.test.support import _make_project
 
 
 class ProposedSessionServiceTests(TestCase):
+    def test_registration_protects_the_source_checkout(self) -> None:
+        _make_project()
+        with tempfile.TemporaryDirectory() as raw, override_settings(
+            HITCH_WORKTREES_DIR=Path(raw),
+        ), ThreadPoolExecutor(max_workers=1) as executor:
+            source = SessionMetadata.objects.create(thread_id="source", cwd=raw)
+            create = ProposedSession.objects.create
+
+            def competing_claim() -> bool:
+                with lifecycle.hold_worktree(raw, blocking=False) as acquired:
+                    return acquired
+
+            def register(**kwargs: Any) -> ProposedSession:
+                self.assertFalse(executor.submit(competing_claim).result(timeout=5))
+                return create(**kwargs)
+
+            with patch.object(ProposedSession.objects, "create", side_effect=register):
+                proposal = create_proposed_session(ProposedSessionInput(
+                    title="Follow up", summary="Summary", prompt="Continue", cwd="/repo",
+                    source_thread_id=source.thread_id, relevant_files=[],
+                ))
+            self.assertEqual(proposal.source_session, source)
+
     def test_create_proposed_session_rejects_unknown_project(self) -> None:
         with self.assertRaisesRegex(
             ProposedSessionError, "cwd does not match a Hitch project"

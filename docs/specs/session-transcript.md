@@ -9,6 +9,19 @@ space used by repetitive reasoning, command, file-change, and web-search activit
 
 ## Requirements
 
+- `ST-cleanup-resume-coordination`: Disk-pressure cleanup serializes removal of
+  each managed worktree with session lifecycle operations and worker startup,
+  including sessions sharing that checkout. Recheck current session, worker,
+  proposal, and PR-watch protections after acquiring the removal lease; skip
+  busy checkouts. Starting a worker in a managed checkout already removed by
+  cleanup fails before creating its worker row.
+  Proposal registration and indexing observed sessions participate in the same
+  coordination. Indexing a changed cwd holds both old and incoming checkout leases
+  in stable path order. Removal locks use existing directory inodes so a full
+  filesystem cannot prevent cleanup by blocking creation of new lock files.
+  Protection rechecks use indexed checkout and recent-update lookups for session
+  metadata and PR watches, retaining path aliases without rebuilding the entire
+  session protection snapshot per removal.
 - `ST-shared-assets`: Session styles and scripts load as external shared assets.
   Browsers must revalidate them on reuse; validators cover the current complete
   rendered content, including shared snippets. Session-specific configuration

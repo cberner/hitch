@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import MagicMock
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from openai_codex import Codex
 
 from hitch.main.models import SessionIndexSyncState, SessionMetadata
-from hitch.main.sessions import session_index
+from hitch.main.sessions import lifecycle, session_index
 
 
 def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
@@ -25,6 +28,37 @@ def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
 
 
 class SessionIndexRefreshTests(TestCase):
+    def test_indexing_protects_both_stored_and_observed_checkouts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, override_settings(
+            HITCH_WORKTREES_DIR=Path(raw),
+        ), ThreadPoolExecutor(max_workers=1) as executor:
+            incoming, old = Path(raw) / "incoming", Path(raw) / "old"
+            incoming.mkdir()
+            old.mkdir()
+            upsert = session_index._upsert_thread_locked
+
+            def competing_claim(cwd: str) -> bool:
+                with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
+                    return acquired
+
+            def register(thread: Any, **kwargs: Any) -> SessionMetadata:
+                paths = [str(incoming), str(old)] if thread.id == "moved" else [str(incoming)]
+                for path in paths:
+                    self.assertFalse(executor.submit(competing_claim, path).result(timeout=5))
+                return upsert(thread, **kwargs)
+
+            SessionMetadata.objects.create(thread_id="moved", cwd=str(old))
+            for thread_id in ("unseen", "moved"):
+                with self.subTest(thread_id=thread_id):
+                    thread = _thread(thread_id)
+                    thread.cwd = str(incoming)
+                    with patch.object(session_index, "_upsert_thread_locked", side_effect=register):
+                        result = session_index.upsert_thread(thread, projects=[])
+                    self.assertIsNotNone(result)
+                    self.assertEqual(SessionMetadata.objects.get(thread_id=thread_id).cwd, str(incoming))
+                    for path in (incoming, old):
+                        self.assertTrue(executor.submit(competing_claim, str(path)).result(timeout=5))
+
     def test_stale_active_observation_does_not_undo_archive(self) -> None:
         SessionMetadata.objects.create(
             thread_id="archive-race",

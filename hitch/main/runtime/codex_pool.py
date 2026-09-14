@@ -49,7 +49,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
 from hitch.main.runtime.instruction_baseline import configured_developer_instructions, recorded_developer_instructions
-from hitch.main.sessions import session_index
+from hitch.main.sessions import lifecycle, session_index
 from hitch.main.sessions.hitch_instructions import combined_developer_instructions
 
 logger = logging.getLogger(__name__)
@@ -1697,7 +1697,7 @@ def _spawn_worker(
             "too many image attachments are retained for this session"
         )
 
-    with transaction.atomic():
+    with lifecycle.hold_worktree(cwd, require_exists=True), transaction.atomic():
         instance = CodexInstance.objects.create(
             thread_id=thread_id,
             cwd=cwd,
