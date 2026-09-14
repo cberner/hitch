@@ -557,7 +557,11 @@ def _watch_next_action(status: str) -> str:
             "or closed, or you explicitly call hitch.unwatch_pr."
         )
     if status == "terminal":
-        return "Report the PR result; the PR is terminal and watching has stopped."
+        return (
+            "Report the PR result; watching this PR has stopped. Continue any remaining "
+            "work already requested by the user, including the next PR if they asked "
+            "for a sequence after merge. Otherwise report completion."
+        )
     if status == "timed_out":
         return (
             "Report the timeout and remaining gates. The registered watch remains "
@@ -579,6 +583,9 @@ def event_fingerprint(observation: dict[str, Any]) -> str:
         "head": pr.get("head_sha", ""),
         "gates": observation.get("gates", []),
     }
+    if _pr_handoff_is_terminal(pr):
+        merged = pr.get("merged") or pr.get("merged_at") or str(pr.get("state", "")).lower() == "merged"
+        evidence["terminal"] = "merged" if merged else "closed"
     return hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
 
 

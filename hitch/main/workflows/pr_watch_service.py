@@ -65,6 +65,11 @@ def poll_registered_prs() -> None:
                 _record_observation(record, observation)
             except Exception:
                 logger.exception("PR watch delivery failed for %s; will retry", record.thread_id)
+    for record in SessionPullRequest.objects.filter(state__watch_terminal_pending=True):
+        try:
+            _deliver_terminal(record)
+        except Exception:
+            logger.exception("PR terminal delivery failed for %s; will retry", record.thread_id)
 
 
 def _thread_is_busy(thread_id: str) -> bool:
@@ -95,26 +100,46 @@ def _record_observation(record: SessionPullRequest, observation: dict[str, Any])
             return
         if pr_watch.event_fingerprint(result) == record.state.get(pr_tracking.WATCH_DELIVERED_STATE_KEY):
             return
-        if SessionMetadata.objects.filter(thread_id=record.thread_id, codex_archived=True).exists():
-            return
-        previous = (
-            CodexInstance.objects.filter(
-                thread_id=record.thread_id,
-                purpose=CodexInstance.PURPOSE_USER,
-            )
-            .order_by("-pk")
-            .first()
-        )
-        if previous is None:
-            return
-        _resume_watch(record, previous)
+        _resume_watch(record, agent_tasks.watch_pr_task(pr_tracking.pr_handoff_for_record(record)["url"]))
 
 
-def _resume_watch(record: SessionPullRequest, previous: CodexInstance) -> None:
+def _deliver_terminal(record: SessionPullRequest) -> None:
+    registration = pr_tracking.registration_for_record(record)
+    with lifecycle.hold(record.thread_id, blocking=False) as acquired:
+        if not acquired:
+            return
+        record.refresh_from_db()
+        if (
+            not pr_tracking._registration_owns_record(record, registration)
+            or record.state.get(pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY) is not True
+            or _thread_is_busy(record.thread_id)
+        ):
+            return
+        newer = CodexInstance.objects.filter(
+            thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER, workflow_id__isnull=True,
+            pk__gt=record.state.get(pr_tracking.WATCH_TERMINAL_INSTANCE_STATE_KEY, registration.owner_instance_id),
+        ).exclude(agent_kind=agent_tasks.PR_WATCH_AGENT_KIND).order_by("-pk").first()
+        if newer is not None:
+            pr_tracking.supersede_pr_after_turn(newer)
+            return
+        result = record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY]
+        handoff = pr_tracking.pr_handoff_for_record(record)
+        task = agent_tasks.terminal_pr_task(handoff["url"], merged=pr_tracking._pr_handoff_is_merged(handoff))
+        if _resume_watch(record, task):
+            pr_tracking.acknowledge_pr_watch_result(registration, result)
+
+
+def _resume_watch(record: SessionPullRequest, task: agent_tasks.AgentTask) -> bool:
+    if SessionMetadata.objects.filter(thread_id=record.thread_id, codex_archived=True).exists():
+        return False
+    previous = CodexInstance.objects.filter(
+        thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER,
+    ).order_by("-pk").first()
+    if previous is None:
+        return False
     if not _is_allowed_session_cwd(record.cwd):
         logger.warning("PR watch cannot resume %s: checkout is no longer allowed", record.thread_id)
-        return
-    task = agent_tasks.watch_pr_task(pr_tracking.pr_handoff_for_record(record)["url"])
+        return False
     kwargs: dict[str, Any] = {
         key: getattr(previous, key)
         for key in (
@@ -141,3 +166,4 @@ def _resume_watch(record: SessionPullRequest, previous: CodexInstance) -> None:
         agent_kind=task.agent_kind,
         **kwargs,
     )
+    return True

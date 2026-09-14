@@ -431,6 +431,44 @@ class PrWatchToolTests(TestCase):
         )
 
     @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
+    def test_watch_turn_can_publish_next_pr_only_after_terminal_and_checkout_validation(
+        self, mock_watch: MagicMock,
+    ) -> None:
+        mock_watch.return_value = pr_watch._result_from_observation("ready", _observation())
+        self.assertTrue(self._call(agent_kind=agent_tasks.PR_WATCH_AGENT_KIND)["success"])
+        next_url = "https://github.com/openai/hitch/pull/43"
+
+        def watch_next() -> dict[str, object]:
+            return handle_dynamic_tool_call(
+                {"namespace": "hitch", "tool": "watch_pr", "arguments": {"url": next_url}},
+                ToolContext(
+                    cwd=self.cwd, thread_id="main-thread", instance_id=8,
+                    agent_kind=agent_tasks.PR_WATCH_AGENT_KIND,
+                ),
+            )
+
+        with patch("hitch.main.runtime.codex_tools.pr_watch.validate_published_pr_checkout") as validate:
+            self.assertFalse(watch_next()["success"])
+            validate.assert_not_called()
+            mock_watch.return_value = pr_watch._result_from_observation(
+                "terminal", _observation({"state": "merged", "merged": True}),
+            )
+            self.assertTrue(self._call(agent_kind=agent_tasks.PR_WATCH_AGENT_KIND)["success"])
+            validate.side_effect = pr_watch.PrWatchError("checkout does not match")
+            self.assertFalse(watch_next()["success"])
+            record = SessionPullRequest.objects.get(thread_id="main-thread")
+            self.assertEqual(pr_tracking.pr_handoff_for_record(record)["url"], _PR_URL)
+            validate.side_effect = None
+            mock_watch.return_value = pr_watch._result_from_observation(
+                "ready", _observation({"url": next_url, "pr_number": 43}),
+            )
+            self.assertTrue(watch_next()["success"])
+            validate.assert_called_with(cwd=self.cwd, url=next_url)
+        record.refresh_from_db()
+        self.assertEqual(pr_tracking.pr_handoff_for_record(record)["url"], next_url)
+        self.assertTrue(record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+
+    @patch("hitch.main.runtime.codex_tools.pr_watch.watch_pr")
     def test_ordinary_turn_registers_verified_current_checkout_pr(
         self, mock_watch: MagicMock
     ) -> None:

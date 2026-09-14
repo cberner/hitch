@@ -26,6 +26,7 @@ from hitch.main.repos import (
     repo_root,
     same_repo_or_worktree,
 )
+from hitch.main.sessions import lifecycle
 from hitch.main.sessions.agent_tasks import (
     PR_AGENT_KINDS,
     PR_PUBLISH_AGENT_KIND,
@@ -41,6 +42,8 @@ from hitch.main.workflows.pr_handoff import (
 logger = logging.getLogger(__name__)
 
 WATCH_ACTIVE_STATE_KEY = "watch_active"
+WATCH_TERMINAL_PENDING_STATE_KEY = "watch_terminal_pending"
+WATCH_TERMINAL_INSTANCE_STATE_KEY = "watch_terminal_instance_id"
 WATCH_TOKEN_STATE_KEY = "watch_token"
 WATCH_DELIVERED_STATE_KEY = "watch_delivered_event"
 WATCH_FEEDBACK_STATE_KEY = "watch_delivered_feedback"
@@ -167,6 +170,8 @@ def begin_pr_watch_invocation(
                 current_pr, requested_pr
             )
         state[WATCH_ACTIVE_STATE_KEY] = True
+        state.pop(WATCH_TERMINAL_PENDING_STATE_KEY, None)
+        state.pop(WATCH_TERMINAL_INSTANCE_STATE_KEY, None)
         state[WATCH_TOKEN_STATE_KEY] = uuid.uuid4().hex
         if identity_changed:
             state.pop(WATCH_DELIVERED_STATE_KEY, None)
@@ -270,6 +275,17 @@ def record_pr_watch_result(
             state[WATCH_FEEDBACK_STATE_KEY] = result.get("feedback_fingerprint", "")
         if _pr_handoff_is_terminal(state.get(PR_HANDOFF_STATE_KEY, {})):
             state[WATCH_ACTIVE_STATE_KEY] = False
+            if result.get("status") == "terminal" and WATCH_TERMINAL_INSTANCE_STATE_KEY not in state:
+                state[WATCH_TERMINAL_INSTANCE_STATE_KEY] = (
+                    CodexInstance.objects.filter(thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER)
+                    .order_by("-pk").values_list("pk", flat=True).first()
+                    or registration.owner_instance_id
+                )
+            state[WATCH_TERMINAL_PENDING_STATE_KEY] = (
+                result.get("status") == "terminal"
+                and not delivered
+                and pr_watch.event_fingerprint(result) != state.get(WATCH_DELIVERED_STATE_KEY)
+            )
         record.state = state
         record.save(update_fields=["state", "updated_at"])
         merged = result.get("status") == "terminal" and _pr_handoff_is_merged(
@@ -295,6 +311,8 @@ def acknowledge_pr_watch_result(
             WATCH_DELIVERED_STATE_KEY: pr_watch.event_fingerprint(result),
             WATCH_FEEDBACK_STATE_KEY: result.get("feedback_fingerprint", ""),
         }
+        if result.get("status") == "terminal":
+            record.state.pop(WATCH_TERMINAL_PENDING_STATE_KEY, None)
         record.save(update_fields=["state", "updated_at"])
 
 
@@ -323,6 +341,7 @@ def unwatch_pr(*, thread_id: str, instance_id: int, requested_pr: dict[str, Any]
         record.state = {
             **record.state,
             WATCH_ACTIVE_STATE_KEY: False,
+            WATCH_TERMINAL_PENDING_STATE_KEY: False,
             WATCH_TOKEN_STATE_KEY: uuid.uuid4().hex,
         }
         record.save(update_fields=["state", "updated_at"])
@@ -463,7 +482,7 @@ def supersede_pr_after_turn(instance: CodexInstance) -> None:
     ):
         return
     instance_id = instance.pk
-    with transaction.atomic():
+    with lifecycle.hold(instance.thread_id, allow_nested=True), transaction.atomic():
         record = (
             SessionPullRequest.objects.select_for_update()
             .filter(thread_id=instance.thread_id)
@@ -473,6 +492,9 @@ def supersede_pr_after_turn(instance: CodexInstance) -> None:
             return
         owner_id = record.state.get(_WATCH_OWNER_INSTANCE_STATE_KEY)
         if owner_id == instance_id:
+            return
+        terminal_instance_id = record.state.get(WATCH_TERMINAL_INSTANCE_STATE_KEY)
+        if isinstance(terminal_instance_id, int) and terminal_instance_id >= instance_id:
             return
         if (
             isinstance(owner_id, int)
@@ -492,6 +514,7 @@ def supersede_pr_after_turn(instance: CodexInstance) -> None:
             **record.state,
             _SUPERSEDED_BY_INSTANCE_STATE_KEY: instance_id,
             _SUPERSEDED_AT_STATE_KEY: int(ended_at.timestamp()),
+            WATCH_TERMINAL_PENDING_STATE_KEY: False,
         }
         record.save(update_fields=["state", "updated_at"])
 

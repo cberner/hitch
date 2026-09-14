@@ -119,7 +119,10 @@ explicitly unwatched.
   after an absent-record snapshot, the older call fails safely and asks the
   agent to retry instead of replacing newer state.
 - `PRWATCH-follow-up-identity`: A PR watch/fix turn may update only the PR
-  already registered to its session. A publication turn or validated ordinary
+  already registered to its session while it is open. After a terminal observation,
+  it may register the next PR through the same checkout validation and exact
+  registration snapshot checks as an ordinary coding turn.
+  A publication turn or validated ordinary
   coding turn may replace an older identity after passing checkout validation.
 - `PRWATCH-register-before-poll`: The eligible invocation atomically records
   the PR URL and number for the Hitch UI before entering the polling loop.
@@ -161,6 +164,24 @@ explicitly unwatched.
   do not launch visible turns until unarchived. Active watches protect their
   managed worktrees from disk cleanup until terminal or explicitly unwatched. User Stop interrupts the active
   turn; the subscription remains active.
+- `PRWATCH-terminal-delivery`: A merged/closed observation stops GitHub polling
+  but durably retains an undelivered terminal notification. The scheduler resumes
+  an ordinary visible follow-up turn with the observed outcome and instructions to
+  continue any work already requested by the user, including the next PR in a
+  requested sequence after merge. Closure without merge does not satisfy a
+  merge-dependent step. The agent decides what work remains from the conversation.
+  Successful tool delivery or notification startup acknowledges the outcome;
+  subsequent ticks do not repeat it. Busy/archived sessions, unavailable checkouts,
+  and startup failures defer notification without another GitHub read. Pending
+  notifications protect managed worktrees. Explicit unwatch, a replacement
+  registration, or superseding user activity cancels stale notifications.
+  Notification startup and completion supersession share the session lifecycle
+  lock. A notification turn retains the terminal PR display when it finishes
+  without registering another PR.
+  Terminal observations retain the latest user-turn identity. Delivery checks
+  for newer superseding turns even if their completion hook has not run yet;
+  delayed hooks from turns preceding the observation do not retire its result.
+  Historical stopped watches are not reactivated on upgrade.
 - `PRWATCH-no-framework-loop`: Follow-ups use ordinary visible coding turns;
   no hidden monitor, verdict parser, or PR/QA wrapper is created.
 - `PRWATCH-setting-inheritance`: Publication/watch turns retain the coding

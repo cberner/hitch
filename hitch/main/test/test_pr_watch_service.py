@@ -334,7 +334,155 @@ class PersistentPrWatchTests(TestCase):
         self._due()
         pr_watch_service.poll_registered_prs()
         self.assertEqual(observe.call_count, 2)
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.kwargs["agent_kind"], agent_tasks.PR_WATCH_AGENT_KIND)
+        self.assertIn("closed without merging", spawn.call_args.kwargs["prompt"])
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_merge_resumes_requested_sequence_once_without_polling_again(
+        self, observe: MagicMock, spawn: MagicMock,
+    ) -> None:
+        initial = pr_watch._result_from_observation("ready", _observation())
+        pr_tracking.record_pr_watch_result(self.registration, initial)
+        observe.return_value = _observation({"state": "merged", "merged": True})
+        pr_watch_service.poll_registered_prs()
+        spawn.assert_called_once()
+        kwargs = spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], self.owner.thread_id)
+        self.assertEqual(kwargs["agent_kind"], agent_tasks.PR_WATCH_AGENT_KIND)
+        self.assertIn("was merged", kwargs["prompt"])
+        self.assertIn("next requested step", kwargs["prompt"])
+        self.assertEqual(kwargs["developer_instructions"], self.owner.developer_instructions)
+        self.record.refresh_from_db()
+        self.assertFalse(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+        self.assertFalse(self.record.state.get(pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY))
+        self.assertNotEqual(
+            self.record.state[pr_tracking.WATCH_DELIVERED_STATE_KEY], pr_watch.event_fingerprint(initial),
+        )
+        self._due()
+        pr_watch_service.poll_registered_prs()
+        observe.assert_called_once()
+        spawn.assert_called_once()
+        continuation = CodexInstance.objects.create(
+            pid=0, events_path="/dev/null", status=CodexInstance.STATUS_COMPLETED, **kwargs,
+        )
+        pr_tracking.supersede_pr_after_turn(continuation)
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.is_current)
+        self.assertEqual(pr_tracking.pr_handoff_for_record(self.record)["state"], "merged")
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_terminal_delivery_survives_archive_busy_turn_and_spawn_failure(
+        self, observe: MagicMock, spawn: MagicMock,
+    ) -> None:
+        metadata = SessionMetadata.objects.create(thread_id=self.owner.thread_id, codex_archived=True)
+        observe.return_value = _observation({"state": "merged", "merged": True})
+        pr_watch_service.poll_registered_prs()
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.state[pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY])
+        self.assertFalse(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
         spawn.assert_not_called()
+        metadata.codex_archived = False
+        metadata.save()
+        self.owner.status = CodexInstance.STATUS_RUNNING
+        self.owner.save()
+        pr_watch_service.poll_registered_prs()
+        spawn.assert_not_called()
+        self.owner.status = CodexInstance.STATUS_COMPLETED
+        self.owner.save()
+        self.mock_allowed.return_value = False
+        with self.assertLogs(pr_watch_service.logger, level="WARNING"):
+            pr_watch_service.poll_registered_prs()
+        spawn.assert_not_called()
+        self.mock_allowed.return_value = True
+        def fail_startup(**kwargs: Any) -> None:
+            CodexInstance.objects.create(
+                pid=0, status=CodexInstance.STATUS_FAILED, error="failed to launch worker process", **kwargs,
+            )
+            raise RuntimeError("Worker launch failed")
+
+        spawn.side_effect = fail_startup
+        with self.assertLogs(pr_watch_service.logger, level="ERROR"):
+            pr_watch_service.poll_registered_prs()
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.state[pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY])
+        spawn.side_effect = None
+        pr_watch_service.poll_registered_prs()
+        self.assertEqual(spawn.call_count, 2)
+        pr_watch_service.poll_registered_prs()
+        self.assertEqual(spawn.call_count, 2)
+        observe.assert_called_once()
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    def test_completed_turn_cancels_terminal_before_its_completion_hook(self, spawn: MagicMock) -> None:
+        preceding = CodexInstance.objects.create(
+            thread_id=self.owner.thread_id, cwd=self.owner.cwd, pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        terminal = pr_watch._result_from_observation("terminal", _observation({"state": "merged", "merged": True}))
+        pr_tracking.record_pr_watch_result(self.registration, terminal, delivered=False)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.state[pr_tracking.WATCH_TERMINAL_INSTANCE_STATE_KEY], preceding.pk)
+        pr_tracking.supersede_pr_after_turn(preceding)
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.is_current)
+        newer = CodexInstance.objects.create(
+            thread_id=self.owner.thread_id, cwd=self.owner.cwd, pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        pr_watch_service._deliver_terminal(self.record)
+        spawn.assert_not_called()
+        self.record.refresh_from_db()
+        self.assertFalse(self.record.state[pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY])
+        self.assertEqual(self.record.state[SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY], newer.pk)
+
+    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.workflows.pr_watch.observe_pr")
+    def test_tool_delivery_and_unwatch_cancel_pending_terminal_notification(
+        self, observe: MagicMock, spawn: MagicMock,
+    ) -> None:
+        terminal = pr_watch._result_from_observation("terminal", _observation({"state": "merged", "merged": True}))
+        for action in ("acknowledge", "unwatch", "replace", "supersede"):
+            with self.subTest(action=action):
+                registration, _ = pr_tracking.begin_pr_watch_invocation(
+                    thread_id=self.owner.thread_id, cwd=self.owner.cwd,
+                    instance_id=self.owner.pk, user_message_index=0,
+                    agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND, requested_pr={"url": _PR_URL},
+                )
+                self.record.refresh_from_db()
+                self.record.state.pop(pr_tracking.WATCH_DELIVERED_STATE_KEY, None)
+                self.record.save()
+                pr_tracking.record_pr_watch_result(registration, terminal, delivered=False)
+                self.record.refresh_from_db()
+                self.assertTrue(self.record.state[pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY])
+                stale = SessionPullRequest.objects.get(pk=self.record.pk)
+                if action == "acknowledge":
+                    pr_tracking.acknowledge_pr_watch_result(registration, terminal)
+                elif action == "unwatch":
+                    self._unwatch()
+                elif action == "replace":
+                    pr_tracking.begin_pr_watch_invocation(
+                        thread_id=self.owner.thread_id, cwd=self.owner.cwd,
+                        instance_id=self.owner.pk, user_message_index=0,
+                        agent_kind=agent_tasks.PR_PUBLISH_AGENT_KIND,
+                        requested_pr={"url": "https://github.com/openai/hitch/pull/43"},
+                    )
+                    pr_tracking.acknowledge_pr_watch_result(registration, terminal)
+                    self.record.refresh_from_db()
+                    self.assertTrue(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+                    self._unwatch("https://github.com/openai/hitch/pull/43")
+                else:
+                    newer = CodexInstance.objects.create(
+                        thread_id=self.owner.thread_id, cwd=self.owner.cwd,
+                        pid=0, status=CodexInstance.STATUS_COMPLETED,
+                    )
+                    pr_tracking.supersede_pr_after_turn(newer)
+                pr_watch_service._deliver_terminal(stale)
+                pr_watch_service.poll_registered_prs()
+                spawn.assert_not_called()
+                observe.assert_not_called()
 
     @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
@@ -377,6 +525,13 @@ class PersistentPrWatchTests(TestCase):
         self.assertEqual(pr_tracking._previous_feedback_fingerprint(self.record), initial["feedback_fingerprint"])
         self.assertEqual(pr_tracking.previous_event_fingerprint(self.registration), pr_watch.event_fingerprint(initial))
         self.assertTrue(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
+        terminal = pr_watch._result_from_observation("terminal", _observation({"state": "merged", "merged": True}))
+        pr_tracking.record_pr_watch_result(self.registration, terminal)
+        pr_tracking.record_pr_watch_result(
+            self.registration, pr_watch._result_from_observation("timed_out", {}), delivered=False,
+        )
+        self.record.refresh_from_db()
+        self.assertFalse(self.record.state.get(pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY))
 
     def test_active_watch_requires_unwatch_before_replacement(self) -> None:
         with self.assertRaisesRegex(pr_watch.PrWatchError, "unwatch_pr"):

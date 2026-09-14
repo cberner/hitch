@@ -23,10 +23,10 @@ from hitch.main.proposals.proposed_sessions import (
     update_proposed_session,
 )
 from hitch.main.sessions import session_index
-from hitch.main.sessions.agent_tasks import PR_AGENT_KINDS, PR_PUBLISH_AGENT_KIND
+from hitch.main.sessions.agent_tasks import PR_AGENT_KINDS, PR_PUBLISH_AGENT_KIND, PR_WATCH_AGENT_KIND
 from hitch.main.workflows import pr_tracking, pr_watch
 from hitch.main.workflows.gh_observations import _pr_handoff_from_github_url
-from hitch.main.workflows.pr_handoff import _compact_pr_handoff
+from hitch.main.workflows.pr_handoff import _compact_pr_handoff, _pr_handoff_is_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -247,10 +247,17 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
     )
     requested_pr = _compact_pr_handoff(_pr_handoff_from_github_url(url, source_tool="hitch_watch_pr"))
     ordinary_preflight = None
+    registration_agent_kind = context.agent_kind
+    if context.agent_kind == PR_WATCH_AGENT_KIND:
+        preflight = pr_tracking.ordinary_pr_watch_preflight(thread_id=context.thread_id, requested_pr=requested_pr)
+        current_pr = (preflight.record_state or {}).get(pr_tracking.PR_HANDOFF_STATE_KEY, {})
+        if _pr_handoff_is_terminal(current_pr) and not pr_watch.pr_identity_matches(current_pr, requested_pr):
+            ordinary_preflight = preflight
+            registration_agent_kind = ""
     if context.agent_kind == PR_PUBLISH_AGENT_KIND:
         pr_watch.validate_published_pr_checkout(cwd=context.cwd, url=url)
-    elif not context.agent_kind:
-        ordinary_preflight = pr_tracking.ordinary_pr_watch_preflight(
+    elif not registration_agent_kind:
+        ordinary_preflight = ordinary_preflight or pr_tracking.ordinary_pr_watch_preflight(
             thread_id=context.thread_id,
             requested_pr=requested_pr,
         )
@@ -261,7 +268,7 @@ def _handle_watch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
         cwd=context.cwd,
         instance_id=context.instance_id,
         user_message_index=context.user_message_index,
-        agent_kind=context.agent_kind,
+        agent_kind=registration_agent_kind,
         requested_pr=requested_pr,
         ordinary_preflight=ordinary_preflight,
     )
