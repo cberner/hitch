@@ -5072,6 +5072,165 @@ class CodexWorkerCommandTests(TestCase):
             self.assertEqual(instance.input_attachment_paths, [])
             self.assertFalse(instance.input_attachment_cleanup_requested)
 
+    @patch("hitch.main.management.commands.codex_worker._wait_for_capacity_retry", return_value=True)
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_capacity_retries_back_off_and_continue_without_repeating_input(
+        self, mock_codex: MagicMock, wait: MagicMock,
+    ) -> None:
+        thread = MagicMock()
+        mock_codex.return_value.__enter__.return_value.thread_resume.return_value = thread
+        events = [
+            _completed_event(
+                f"turn-{i}", TurnStatus.failed,
+                "Selected model is at capacity. Please try a different model.", "serverOverloaded",
+            )
+            for i in range(8)
+        ]
+        events.append(_completed_event("turn-8", TurnStatus.completed))
+        thread.turn.side_effect = [
+            SimpleNamespace(id=event.payload.turn.id, stream=lambda event=event: iter([event]))
+            for event in events
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw), prompt="Keep working on the proof")
+            instance.input_image_paths = ["/tmp/input.png"]
+            instance.save(update_fields=["input_image_paths"])
+
+            def waiting(_delay: int) -> bool:
+                instance.refresh_from_db()
+                self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
+                self.assertIsNone(instance.ended_at)
+                return True
+
+            wait.side_effect = waiting
+            with patch.object(codex_worker_module, "_start_turn", wraps=codex_worker_module._start_turn) as start:
+                call_command("codex_worker", "--instance-id", str(instance.pk), "--model", "test-model",
+                             "--reasoning-effort", "high", "--sandbox-policy", "readOnly")
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+            self.assertIsNone(instance.codex_error_info)
+            self.assertEqual(instance.error, "")
+            notices = [json.loads(line) for line in Path(instance.events_path).read_text().splitlines()
+                       if json.loads(line)["method"] == "error"]
+        delays = [60, 120, 240, 480, 960, 1800, 1800, 1800]
+        self.assertEqual(wait.call_args_list, [call(delay) for delay in delays])
+        self.assertEqual(len(notices), len(delays))
+        for notice, delay in zip(notices, delays, strict=True):
+            self.assertTrue(notice["payload"]["willRetry"])
+            self.assertIn(f"{delay // 60} minute", notice["payload"]["error"]["message"])
+        starts = [invocation.kwargs for invocation in start.call_args_list]
+        self.assertEqual(starts[0]["prompt"], instance.prompt)
+        self.assertEqual(starts[0]["input_image_paths"], ["/tmp/input.png"])
+        self.assertEqual(len({args["client_user_message_id"] for args in starts}), 9)
+        for args in starts[1:]:
+            self.assertEqual(args["prompt"], codex_worker_module._CAPACITY_RETRY_PROMPT)
+            self.assertIsNone(args["input_image_paths"])
+            self.assertEqual(args["model"], "test-model")
+            self.assertEqual(args["effort"], ReasoningEffort.high)
+            self.assertEqual(args["sandbox_policy"].root.type, "readOnly")
+
+    @patch("hitch.main.management.commands.codex_worker._wait_for_capacity_retry")
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_capacity_retry_stops_on_cancellation_or_a_different_failure(
+        self, mock_codex: MagicMock, wait: MagicMock,
+    ) -> None:
+        thread = MagicMock()
+        mock_codex.return_value.__enter__.return_value.thread_resume.return_value = thread
+        capacity = _completed_event("turn-1", TurnStatus.failed, "At capacity", "serverOverloaded")
+        for outcome in ("cancelled", "other_error", "missing_completion"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as raw:
+                instance = self._make_instance(Path(raw))
+                other = _completed_event("turn-2", TurnStatus.failed, "Policy failure", "cyberPolicy")
+                thread.turn.reset_mock()
+                thread.turn.side_effect = [
+                    SimpleNamespace(id="turn-1", stream=lambda: iter([capacity])),
+                    SimpleNamespace(id="turn-2", stream=lambda outcome=outcome, other=other: iter(
+                        [] if outcome == "missing_completion" else [other],
+                    )),
+                ]
+                wait.reset_mock()
+                wait.return_value = outcome != "cancelled"
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+                instance.refresh_from_db()
+                self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+                self.assertIn({"cancelled": "interrupted", "other_error": "Policy failure",
+                               "missing_completion": "stream ended"}[outcome], instance.error)
+                self.assertEqual(thread.turn.call_count, 1 if outcome == "cancelled" else 2)
+                wait.assert_called_once_with(60)
+
+    @patch("hitch.main.management.commands.codex_worker._wait_for_capacity_retry")
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_capacity_backoff_queues_messages_and_reloads_saved_model(
+        self, mock_codex: MagicMock, wait: MagicMock,
+    ) -> None:
+        thread = mock_codex.return_value.__enter__.return_value.thread_resume.return_value
+        failed = MagicMock(id="turn-1")
+        failed.stream.return_value = iter([
+            _completed_event("turn-1", TurnStatus.failed, "At capacity", "serverOverloaded"),
+        ])
+        recovered = MagicMock(id="turn-2")
+        recovered.stream.return_value = iter([_completed_event("turn-2", TurnStatus.completed)])
+        thread.turn.side_effect = [failed, recovered]
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            metadata = SessionMetadata.objects.create(
+                thread_id=instance.thread_id, model="old-model", reasoning_effort="high",
+            )
+            control_path = codex_pool.control_path_for(instance)
+
+            def while_waiting(_delay: int) -> bool:
+                self.assertIsNone(codex_worker_module._steer_wakeup)
+                control_path.write_text(json.dumps({
+                    "op": "steer", "id": "during-backoff", "input": "Updated instructions",
+                }) + "\n")
+                metadata.model, metadata.reasoning_effort = "new-model", "low"
+                metadata.save(update_fields=["model", "reasoning_effort"])
+                return True
+
+            wait.side_effect = while_waiting
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+            self.assertEqual((instance.model, instance.reasoning_effort), ("new-model", "low"))
+            self.assertTrue(codex_pool._read_steer_ack(control_path, "during-backoff"))
+        failed.steer.assert_not_called()
+        recovered.steer.assert_called_once()
+        self.assertEqual(recovered.steer.call_args.args[0].text, "Updated instructions")
+        self.assertEqual(thread.turn.call_args.kwargs["model"], "new-model")
+        self.assertEqual(thread.turn.call_args.kwargs["effort"], ReasoningEffort.low)
+
+    def test_capacity_wait_observes_deadline_and_stop(self) -> None:
+        with (
+            patch.object(codex_worker_module, "_cancel_requested", False),
+            patch("hitch.main.management.commands.codex_worker.time.monotonic", side_effect=[0, 0, 60]),
+            patch("hitch.main.management.commands.codex_worker.time.sleep") as sleep,
+        ):
+            self.assertTrue(codex_worker_module._wait_for_capacity_retry(60))
+            sleep.assert_called_once_with(codex_worker_module._CANCELLATION_POLL_INTERVAL)
+        with (
+            patch.object(codex_worker_module, "_cancel_requested", False),
+            patch("hitch.main.management.commands.codex_worker.time.sleep", side_effect=lambda _: (
+                codex_worker_module._on_sigterm(signal.SIGTERM, None)
+            )),
+        ):
+            self.assertFalse(codex_worker_module._wait_for_capacity_retry(1800))
+
+    def test_capacity_retry_control_cursor_does_not_replay_steering(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            control_path = codex_pool.control_path_for(instance)
+            control_path.write_text(json.dumps({"op": "steer", "id": "s1", "input": "New direction"}) + "\n")
+            cursor = codex_worker_module._SteerControlCursor()
+            stop = threading.Event()
+            stop.set()
+            with patch.object(codex_worker_module, "_try_steer", return_value=True) as steer:
+                for _ in range(2):
+                    codex_worker_module._forward_steer_requests(
+                        turn=MagicMock(), instance=instance, control_path=control_path,
+                        wakeup=threading.Event(), stop=stop, cursor=cursor,
+                    )
+                steer.assert_called_once()
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_failed_for_non_completed_outcomes(self, mock_codex: MagicMock) -> None:
         """Failed / interrupted turn statuses and a stream that ends without
@@ -5086,11 +5245,11 @@ class CodexWorkerCommandTests(TestCase):
                         "turn-1",
                         TurnStatus.failed,
                         error_message="model said no",
-                        error_info=CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
+                        error_info="cyberPolicy",
                     )
                 ],
                 "model said no",
-                CodexInstance.CODEX_ERROR_SERVER_OVERLOADED,
+                "cyberPolicy",
             ),
             (
                 [_completed_event("turn-1", TurnStatus.interrupted)],

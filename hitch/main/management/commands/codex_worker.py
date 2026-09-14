@@ -34,6 +34,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import IO, Any, Protocol, TypedDict, cast, override
 
@@ -173,6 +174,12 @@ _DENY_ALL = "deny_all"
 _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _DEFAULT_COLLABORATION_MODE = "default"
 _CANCELLATION_POLL_INTERVAL = 0.1
+_CAPACITY_RETRY_INITIAL_SECONDS = 60
+_CAPACITY_RETRY_MAX_SECONDS = 30 * 60
+_CAPACITY_RETRY_PROMPT = (
+    "Continue the interrupted task from where you stopped. "
+    "The previous turn ended because the model was temporarily at capacity."
+)
 
 # Set by the SIGTERM handler so the turn-control paths know to call
 # ``turn.interrupt()``. Plain module-level bool is fine — CPython makes
@@ -478,12 +485,6 @@ def _run_turn(
 ) -> Turn | None:
     from hitch.main.sessions.model_settings import session_model_override
 
-    if instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
-        override = session_model_override(instance.thread_id)
-        if override is not None:
-            model, reasoning_effort = override
-            instance.model, instance.reasoning_effort = override
-            instance.save(update_fields=["model", "reasoning_effort"])
     os.environ["HITCH_THREAD_ID"] = instance.thread_id
     os.environ["HITCH_CWD"] = instance.cwd
     project_dir = Path(settings.BASE_DIR)
@@ -607,100 +608,132 @@ def _run_turn(
             resume_kwargs=resume_kwargs,
             configure=_configure,
         ) as (codex, thread):
-            client_message_id = f"hitch-instance-{instance.pk}"
-            submission = (
-                notification_sequencer.begin_submission(
-                    instance.thread_id,
-                    client_message_id,
-                )
-                if notification_sequencer is not None and client_message_id is not None
-                else None
-            )
-            try:
-                turn = _start_turn(
-                    codex,
-                    thread,
-                    prompt=prompt,
-                    input_image_paths=_instance_input_image_paths(instance),
-                    model=model,
-                    effort=effort,
-                    sandbox_policy=policy,
-                    approval_mode=approval_mode,
-                    collaboration_mode=collaboration_mode,
-                    plan_mode=plan_mode,
-                    client_user_message_id=client_message_id,
-                    submission=submission,
-                    notification_sequencer=notification_sequencer,
-                )
-                if submission is not None:
-                    assert notification_sequencer is not None
-                    returned_turn_id = turn.id
-                    if _supports_submission_binding(turn):
-                        interrupt_forwarder = _start_interrupt_forwarder(
-                            turn,
-                            target_turn_ids=lambda: (
-                                notification_sequencer.interrupt_turn_ids(submission)
-                            ),
-                        )
-                    _bind_submitted_turn_handle(
-                        turn,
-                        submission,
-                        notification_sequencer,
+            retry_delay = _CAPACITY_RETRY_INITIAL_SECONDS
+            control_cursor = _SteerControlCursor()
+            for attempt in itertools.count():
+                if instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
+                    override = session_model_override(instance.thread_id)
+                    if override is not None:
+                        model, reasoning_effort = override
+                        effort = ReasoningEffort(reasoning_effort) if reasoning_effort else None
+                        instance.model, instance.reasoning_effort = override
+                        instance.save(update_fields=["model", "reasoning_effort"])
+                final_turn = None
+                client_message_id = f"hitch-instance-{instance.pk}"
+                if attempt:
+                    client_message_id += f"-capacity-retry-{attempt}"
+                submission = (
+                    notification_sequencer.begin_submission(
+                        instance.thread_id,
+                        client_message_id,
                     )
-                    if turn.id != returned_turn_id:
-                        _worker_log(
-                            instance.pk,
-                            "bound submitted message from turn/start id "
-                            f"{returned_turn_id} to execution id {turn.id}",
-                        )
-            finally:
-                if submission is not None and notification_sequencer is not None:
-                    notification_sequencer.finish_submission(submission)
-            if interrupt_forwarder is None:
-                interrupt_forwarder = _start_interrupt_forwarder(turn)
-            steer_forwarder = _start_steer_control_forwarder(
-                turn,
-                instance=instance,
-                control_path=control_path,
-            )
-            try:
-                # A Stop click that landed before the turn handle existed sets the
-                # flag without us being able to call interrupt yet; act on it now
-                # that the handle is ready.
-                _forward_interrupt_if_requested(
-                    turn,
-                    target_turn_ids=interrupt_forwarder.target_turn_ids,
-                    sent_turn_ids=interrupt_forwarder.sent_turn_ids,
-                    send_lock=interrupt_forwarder.send_lock,
+                    if notification_sequencer is not None and client_message_id is not None
+                    else None
                 )
-                for event in turn.stream():
-                    _write_notification(event)
-                    payload = event.payload
-                    if (
-                        isinstance(payload, TurnCompletedNotification)
-                        and payload.turn.id == turn.id
-                    ):
-                        final_turn = payload.turn
-                    if _cancel_requested:
-                        # SDK-level interrupt is the graceful cancellation path:
-                        # the app-server stops the model, emits the remaining
-                        # events (including a turn/completed with status=interrupted),
-                        # and the worker's normal status-update code at the end
-                        # records that as a failed turn. SIGKILL is the next
-                        # escalation if the user clicks Stop again.
-                        _forward_interrupt_if_requested(
+                try:
+                    turn = _start_turn(
+                        codex,
+                        thread,
+                        prompt=prompt,
+                        input_image_paths=_instance_input_image_paths(instance) if attempt == 0 else None,
+                        model=model,
+                        effort=effort,
+                        sandbox_policy=policy,
+                        approval_mode=approval_mode,
+                        collaboration_mode=collaboration_mode,
+                        plan_mode=plan_mode,
+                        client_user_message_id=client_message_id,
+                        submission=submission,
+                        notification_sequencer=notification_sequencer,
+                    )
+                    if submission is not None:
+                        assert notification_sequencer is not None
+                        returned_turn_id = turn.id
+                        if _supports_submission_binding(turn):
+                            interrupt_forwarder = _start_interrupt_forwarder(
+                                turn,
+                                target_turn_ids=partial(notification_sequencer.interrupt_turn_ids, submission),
+                            )
+                        _bind_submitted_turn_handle(
                             turn,
-                            target_turn_ids=interrupt_forwarder.target_turn_ids,
-                            sent_turn_ids=interrupt_forwarder.sent_turn_ids,
-                            send_lock=interrupt_forwarder.send_lock,
+                            submission,
+                            notification_sequencer,
                         )
-            finally:
-                if steer_forwarder is not None:
-                    _stop_steer_control_forwarder(steer_forwarder)
-                    steer_forwarder = None
-                if interrupt_forwarder is not None:
-                    _stop_interrupt_forwarder(interrupt_forwarder)
-                    interrupt_forwarder = None
+                        if turn.id != returned_turn_id:
+                            _worker_log(
+                                instance.pk,
+                                "bound submitted message from turn/start id "
+                                f"{returned_turn_id} to execution id {turn.id}",
+                            )
+                finally:
+                    if submission is not None and notification_sequencer is not None:
+                        notification_sequencer.finish_submission(submission)
+                if interrupt_forwarder is None:
+                    interrupt_forwarder = _start_interrupt_forwarder(turn)
+                steer_forwarder = _start_steer_control_forwarder(
+                    turn,
+                    instance=instance,
+                    control_path=control_path,
+                    cursor=control_cursor,
+                )
+                try:
+                    # A Stop click that landed before the turn handle existed sets the
+                    # flag without us being able to call interrupt yet; act on it now
+                    # that the handle is ready.
+                    _forward_interrupt_if_requested(
+                        turn,
+                        target_turn_ids=interrupt_forwarder.target_turn_ids,
+                        sent_turn_ids=interrupt_forwarder.sent_turn_ids,
+                        send_lock=interrupt_forwarder.send_lock,
+                    )
+                    for event in turn.stream():
+                        _write_notification(event)
+                        payload = event.payload
+                        if (
+                            isinstance(payload, TurnCompletedNotification)
+                            and payload.turn.id == turn.id
+                        ):
+                            final_turn = payload.turn
+                        if _cancel_requested:
+                            # SDK-level interrupt is the graceful cancellation path:
+                            # the app-server stops the model, emits the remaining
+                            # events (including a turn/completed with status=interrupted),
+                            # and the worker's normal status-update code at the end
+                            # records that as a failed turn. SIGKILL is the next
+                            # escalation if the user clicks Stop again.
+                            _forward_interrupt_if_requested(
+                                turn,
+                                target_turn_ids=interrupt_forwarder.target_turn_ids,
+                                sent_turn_ids=interrupt_forwarder.sent_turn_ids,
+                                send_lock=interrupt_forwarder.send_lock,
+                            )
+                finally:
+                    if steer_forwarder is not None:
+                        _stop_steer_control_forwarder(steer_forwarder)
+                        steer_forwarder = None
+                    if interrupt_forwarder is not None:
+                        _stop_interrupt_forwarder(interrupt_forwarder)
+                        interrupt_forwarder = None
+                if not _is_capacity_failure(final_turn) or _cancel_requested:
+                    break
+                assert final_turn is not None
+                _write_event("error", {
+                    "threadId": instance.thread_id,
+                    "turnId": final_turn.id,
+                    "willRetry": True,
+                    "error": {
+                        "codexErrorInfo": "serverOverloaded",
+                        "message": f"Model at capacity. Retrying in {retry_delay // 60} minute(s).",
+                        "additionalDetails": final_turn.error.message if final_turn.error else None,
+                    },
+                })
+                if not _wait_for_capacity_retry(retry_delay):
+                    return Turn(id=final_turn.id, items=[], status=TurnStatus.interrupted)
+                retry_delay = min(retry_delay * 2, _CAPACITY_RETRY_MAX_SECONDS)
+                prompt = _CAPACITY_RETRY_PROMPT
+                # Live model edits apply to subsequent attempts as well.
+                model = instance.model or model
+                effort = ReasoningEffort(instance.reasoning_effort) if instance.reasoning_effort else effort
     finally:
         if steer_forwarder is not None:
             _stop_steer_control_forwarder(steer_forwarder)
@@ -709,6 +742,24 @@ def _run_turn(
         if goal_forwarder is not None:
             goal_forwarder.join(timeout=0.5)
     return final_turn
+
+
+def _is_capacity_failure(turn: Turn | None) -> bool:
+    return (
+        turn is not None
+        and turn.status == TurnStatus.failed
+        and _serialized_codex_error_info(turn.error) == "serverOverloaded"
+    )
+
+
+def _wait_for_capacity_retry(delay: int) -> bool:
+    deadline = time.monotonic() + delay
+    while not _cancel_requested:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, _CANCELLATION_POLL_INTERVAL))
+    return False
 
 
 def _try_interrupt(turn: TurnHandle) -> bool:
@@ -815,6 +866,12 @@ def _forward_interrupt_if_requested(
 
 
 @dataclasses.dataclass(slots=True)
+class _SteerControlCursor:
+    # A worker may span several capacity retries; never replay delivered input.
+    offset: int = 0
+
+
+@dataclasses.dataclass(slots=True)
 class _SteerControlForwarder:
     thread: threading.Thread
     wakeup: threading.Event
@@ -826,6 +883,7 @@ def _start_steer_control_forwarder(
     *,
     instance: CodexInstance,
     control_path: Path,
+    cursor: _SteerControlCursor | None = None,
 ) -> _SteerControlForwarder:
     """Start a side drain for per-turn steer payloads."""
     global _steer_wakeup
@@ -840,6 +898,7 @@ def _start_steer_control_forwarder(
                 "control_path": control_path,
                 "wakeup": wakeup,
                 "stop": stop,
+                "cursor": cursor,
             },
             daemon=True,
         ),
@@ -868,6 +927,7 @@ def _forward_steer_requests(
     control_path: Path,
     wakeup: threading.Event,
     stop: threading.Event,
+    cursor: _SteerControlCursor | None = None,
 ) -> None:
     """Forward complete JSONL steer requests into the active turn.
 
@@ -875,21 +935,22 @@ def _forward_steer_requests(
     STARTING. The final drain catches requests appended after the last stream
     event but before the worker records a terminal row status.
     """
-    control_offset = 0
+    if cursor is None:
+        cursor = _SteerControlCursor()
     while not stop.is_set():
-        control_offset = _drain_steer_requests(
+        cursor.offset = _drain_steer_requests(
             turn,
             instance=instance,
             control_path=control_path,
-            control_offset=control_offset,
+            control_offset=cursor.offset,
         )
         wakeup.wait(_STEER_CONTROL_POLL_INTERVAL)
         wakeup.clear()
-    _drain_steer_requests(
+    cursor.offset = _drain_steer_requests(
         turn,
         instance=instance,
         control_path=control_path,
-        control_offset=control_offset,
+        control_offset=cursor.offset,
     )
 
 
