@@ -9,9 +9,9 @@ import time
 from typing import Any
 
 from hitch.main.models import CodexInstance, SessionMetadata, SessionPullRequest
-from hitch.main.runtime import codex_pool, rate_limit, server_lifecycle
-from hitch.main.sessions import agent_tasks, lifecycle
-from hitch.main.sessions.execution_settings import PreviousTurnApproval, resolve_approval
+from hitch.main.runtime import rate_limit, server_lifecycle
+from hitch.main.sessions import agent_tasks, turn_startup
+from hitch.main.sessions.execution_settings import PreviousTurnApproval
 from hitch.main.sessions.session_settings import _is_allowed_session_cwd
 from hitch.main.workflows import pr_tracking, pr_watch
 
@@ -78,16 +78,14 @@ def _thread_is_busy(thread_id: str) -> bool:
 
 def _record_observation(record: SessionPullRequest, observation: dict[str, Any]) -> None:
     registration = pr_tracking.registration_for_record(record)
-    with lifecycle.hold(record.thread_id, blocking=False) as acquired:
-        if not acquired:
+    with turn_startup.claim(record.thread_id, blocking=False) as startup:
+        if startup is None:
             return
         record.refresh_from_db()
         if (
             not pr_tracking._registration_owns_record(record, registration)
             or record.state.get(pr_tracking.WATCH_ACTIVE_STATE_KEY) is not True
         ):
-            return
-        if _thread_is_busy(record.thread_id):
             return
         result = pr_watch._watch_result(
             observation,
@@ -100,19 +98,18 @@ def _record_observation(record: SessionPullRequest, observation: dict[str, Any])
             return
         if pr_watch.event_fingerprint(result) == record.state.get(pr_tracking.WATCH_DELIVERED_STATE_KEY):
             return
-        _resume_watch(record, agent_tasks.watch_pr_task(pr_tracking.pr_handoff_for_record(record)["url"]))
+        _resume_watch(record, agent_tasks.watch_pr_task(pr_tracking.pr_handoff_for_record(record)["url"]), startup)
 
 
 def _deliver_terminal(record: SessionPullRequest) -> None:
     registration = pr_tracking.registration_for_record(record)
-    with lifecycle.hold(record.thread_id, blocking=False) as acquired:
-        if not acquired:
+    with turn_startup.claim(record.thread_id, blocking=False) as startup:
+        if startup is None:
             return
         record.refresh_from_db()
         if (
             not pr_tracking._registration_owns_record(record, registration)
             or record.state.get(pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY) is not True
-            or _thread_is_busy(record.thread_id)
         ):
             return
         newer = CodexInstance.objects.filter(
@@ -125,11 +122,13 @@ def _deliver_terminal(record: SessionPullRequest) -> None:
         result = record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY]
         handoff = pr_tracking.pr_handoff_for_record(record)
         task = agent_tasks.terminal_pr_task(handoff["url"], merged=pr_tracking._pr_handoff_is_merged(handoff))
-        if _resume_watch(record, task):
+        if _resume_watch(record, task, startup):
             pr_tracking.acknowledge_pr_watch_result(registration, result)
 
 
-def _resume_watch(record: SessionPullRequest, task: agent_tasks.AgentTask) -> bool:
+def _resume_watch(
+    record: SessionPullRequest, task: agent_tasks.AgentTask, startup: turn_startup.TurnStartup,
+) -> bool:
     if SessionMetadata.objects.filter(thread_id=record.thread_id, codex_archived=True).exists():
         return False
     previous = CodexInstance.objects.filter(
@@ -146,21 +145,14 @@ def _resume_watch(record: SessionPullRequest, task: agent_tasks.AgentTask) -> bo
             "model",
             "reasoning_effort",
             "sandbox_policy",
-            "approval_mode",
             "web_search_mode",
             "enable_memories",
             "developer_instructions",
             "hitch_extra_instructions",
         )
     }
-    kwargs["approval_mode"] = resolve_approval(
-        SessionMetadata.objects.filter(thread_id=record.thread_id).only(
-            "approval_mode", "approval_snapshot_mode", "approval_snapshot_instance_id",
-        ).first(),
-        PreviousTurnApproval(previous.pk, previous.approval_mode),
-    ).mode
-    codex_pool.spawn_turn(
-        thread_id=record.thread_id,
+    startup.spawn(
+        approval=PreviousTurnApproval(previous.pk, previous.approval_mode),
         cwd=record.cwd,
         prompt=task.prompt,
         agent_kind=task.agent_kind,

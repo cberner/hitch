@@ -181,7 +181,7 @@ class CodexIntegrationTests(TestCase):
     def test_plan_approval_spawns_default_collaboration_worker(self) -> None:
         """Plan approval must enqueue a default collaboration turn.
 
-        This exercises the real view and ``codex_pool.spawn_turn`` path, while
+        This exercises the real view and ``codex_pool._spawn_turn`` path, while
         stubbing only the final detached subprocess launch. That is the boundary
         where Hitch must preserve the SDK mode switch for the worker.
         """

@@ -12,7 +12,8 @@ from django.test import TestCase, TransactionTestCase, override_settings
 
 from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.runtime import codex_pool
-from hitch.main.sessions import lifecycle
+from hitch.main.sessions import lifecycle, turn_startup
+from hitch.main.sessions.execution_settings import RequestApproval
 from hitch.main.workflows import pr_tracking
 
 
@@ -46,16 +47,22 @@ class SessionLifecycleLockTests(TestCase):
                 with lifecycle.hold_worktree(cwd, blocking=False) as acquired:
                     return acquired
 
-            with lifecycle.hold("thread-1"), patch.object(
+            with turn_startup.claim("thread-1") as startup, patch.object(
                 codex_pool, "_launch_worker_process", return_value=SimpleNamespace(pid=0),
             ):
                 self.assertFalse(executor.submit(competing_claim).result(timeout=5))
-                worker = codex_pool.spawn_turn(thread_id="thread-1", cwd=cwd, prompt="Continue")
+                assert startup is not None
+                worker = startup.spawn(cwd=cwd, prompt="Continue", approval=RequestApproval("deny_all"))
                 self.assertEqual(worker.status, CodexInstance.STATUS_STARTING)
             self.assertTrue(executor.submit(competing_claim).result(timeout=5))
 
-            with self.assertRaises(FileNotFoundError), patch.object(codex_pool, "_launch_worker_process") as launch:
-                codex_pool.spawn_turn(thread_id="removed", cwd=str(Path(raw) / "removed"), prompt="Continue")
+            with (
+                self.assertRaises(FileNotFoundError),
+                patch.object(codex_pool, "_launch_worker_process") as launch,
+                turn_startup.claim("removed") as startup,
+            ):
+                assert startup is not None
+                startup.spawn(cwd=str(Path(raw) / "removed"), prompt="Continue", approval=RequestApproval("deny_all"))
             launch.assert_not_called()
             self.assertFalse(CodexInstance.objects.filter(thread_id="removed").exists())
 

@@ -320,7 +320,7 @@ def _thread_path_value(thread: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def spawn_turn(
+def _spawn_turn(
     *,
     thread_id: str,
     cwd: str,
@@ -343,7 +343,7 @@ def spawn_turn(
     agent_kind: str = "",
     user_message_index: int | None = None,
 ) -> CodexInstance:
-    """Detach a worker that resumes an existing thread to run one prompt.
+    """Backend for turn_startup; the caller owns a checked startup claim.
 
     Per-turn settings are owned by the caller. Only thread-scoped instruction
     text is copied from prior rows; omitted tool/config values mean Codex

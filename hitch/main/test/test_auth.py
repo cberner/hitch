@@ -424,7 +424,7 @@ class AuthenticatedSettingsTests(TestCase):
 
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_send_message_uses_account_settings_without_cookies(
         self,

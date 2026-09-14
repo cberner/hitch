@@ -66,7 +66,7 @@ from hitch.main.views import messages as message_views
 
 class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.runtime.codex_pool.steer_instance", return_value=None)
     def test_rechecks_active_worker_after_acquiring_lifecycle_lock(
         self, steer: MagicMock, spawn: MagicMock, codex: MagicMock,
@@ -79,8 +79,8 @@ class SendMessageViewTests(TestCase):
             thread_id = f"concurrent-{index}"
 
             @contextmanager
-            def start_competing_turn(session_id: str) -> Iterator[bool]:
-                with hold(session_id) as acquired:
+            def start_competing_turn(session_id: str, *, blocking: bool = True) -> Iterator[bool]:
+                with hold(session_id, blocking=blocking) as acquired:
                     CodexInstance.objects.create(
                         thread_id=session_id, cwd="/repo", pid=0, status=CodexInstance.STATUS_STARTING,
                     )
@@ -102,7 +102,7 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.common._cleanup_saved_input_images")
     @patch("hitch.main.views.common._save_posted_input_images", return_value=(["/tmp/upload.png"], None))
     @patch("hitch.main.runtime.codex_pool.latest_active_for_thread", side_effect=[None, MagicMock()])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     def test_conflicting_send_cleans_up_its_saved_images(
         self, spawn: MagicMock, _active: MagicMock, _save: MagicMock, cleanup: MagicMock,
     ) -> None:
@@ -325,7 +325,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_called_once_with(**expected)
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_steers_posted_active_instance_without_spawning(
         self,
@@ -358,7 +358,7 @@ class SendMessageViewTests(TestCase):
 
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_active_instance(
         self,
@@ -377,7 +377,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     @patch("hitch.main.views.common.Codex")
     def test_dead_posted_active_instance_is_reconciled_before_follow_up_spawn(
@@ -410,7 +410,7 @@ class SendMessageViewTests(TestCase):
         self._assert_follow_up_spawn(mock_spawn, prompt="still there?")
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.common.Codex")
     def test_image_steer_attachment_cap_returns_bad_request_without_fallback(
@@ -467,7 +467,7 @@ class SendMessageViewTests(TestCase):
         return_value=True,
     )
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_review_and_pr_shortcuts_spawn_ordinary_visible_turns(
         self,
@@ -529,7 +529,7 @@ class SendMessageViewTests(TestCase):
                     SystemWorkflow.objects.filter(main_thread_id="abc").exists()
                 )
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_review_and_pr_shortcuts_reject_image_uploads_before_side_effects(
         self,
@@ -561,7 +561,7 @@ class SendMessageViewTests(TestCase):
         return_value=True,
     )
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_uses_registered_session_pr(
         self,
@@ -597,7 +597,7 @@ class SendMessageViewTests(TestCase):
         self.assertIn(pr_url, kwargs["prompt"])
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_fix_pr_requires_registered_pr(
         self,
@@ -621,7 +621,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_qa_shortcut_forwards_web_search_setting(
         self,
@@ -648,7 +648,7 @@ class SendMessageViewTests(TestCase):
         return_value=False,
     )
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_pr_shortcut_requires_watch_tool(
         self,
@@ -671,7 +671,7 @@ class SendMessageViewTests(TestCase):
                 mock_spawn.assert_not_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_first_follow_up_uses_project_developer_prompt(
         self,
@@ -712,7 +712,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_rejects_disallowed_cached_cwd_before_unarchive(
         self,
@@ -755,7 +755,7 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_archived_live_resume_retry_unarchives_before_spawning(
         self,
@@ -800,7 +800,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_archived_live_resume_retry_rejects_cached_cwd_before_unarchive(
         self,
@@ -837,7 +837,7 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_archived_follow_up_rearchives_when_default_model_missing(
         self,
@@ -879,7 +879,7 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_disk_resume_plan_turn_recovers_thread_model(
         self,
@@ -942,7 +942,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_called()
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_spawns_turn_with_multiple_uploaded_image_formats(
         self,
@@ -986,7 +986,7 @@ class SendMessageViewTests(TestCase):
             )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_send_message_cleans_uploaded_images_when_spawn_handoff_fails(
         self,
@@ -1020,7 +1020,7 @@ class SendMessageViewTests(TestCase):
             )
 
     @patch("hitch.main.runtime.codex_pool.steer_instance")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_send_message_rejects_invalid_image_uploads_before_side_effects(
         self,
@@ -1095,7 +1095,7 @@ class SendMessageViewTests(TestCase):
 
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_forwards_follow_up_cookie_options_to_spawn_turn(
         self,
@@ -1173,7 +1173,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.messages.thread_has_dynamic_tool", return_value=True)
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_hitch_instructions_are_separate_from_follow_up_prompts(
         self,
@@ -1238,7 +1238,7 @@ class SendMessageViewTests(TestCase):
                 self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_follow_up_uses_current_hitch_instructions_instead_of_previous_turn(
         self,
@@ -1276,7 +1276,7 @@ class SendMessageViewTests(TestCase):
                 self.assertEqual(previous.hitch_extra_instructions, "Stale Hitch guidance.")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_follow_up_uses_session_approval_mode_override(
         self,
@@ -1321,7 +1321,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(mock_spawn.call_args.kwargs["approval_mode"], "auto_review")
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch(
         "hitch.main.views.messages.thread_has_dynamic_tool",
@@ -1580,7 +1580,7 @@ class SendMessageViewTests(TestCase):
         return_value=False,
     )
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_auto_pr_follow_up_stays_ordinary_without_watch_tool(
         self,
@@ -1610,7 +1610,7 @@ class SendMessageViewTests(TestCase):
                 mock_has_watch_tool.assert_any_call("abc", namespace="hitch", name=missing)
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_follow_up_after_plan_mode_discussion_stays_in_plan_mode(
         self,
@@ -1658,7 +1658,7 @@ class SendMessageViewTests(TestCase):
 
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_plan_mode_model_resolution_matrix(
         self,
@@ -1712,7 +1712,7 @@ class SendMessageViewTests(TestCase):
                     )
 
     @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     def test_rejects_invalid_input(
         self,

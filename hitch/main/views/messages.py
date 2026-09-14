@@ -30,8 +30,8 @@ from hitch.main.runtime.input_images import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
-from hitch.main.sessions import agent_tasks
-from hitch.main.sessions import lifecycle as session_lifecycle
+from hitch.main.sessions import agent_tasks, turn_startup
+from hitch.main.sessions.execution_settings import RequestApproval
 from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.message_intent import (
     _message_intent,
@@ -64,7 +64,6 @@ from hitch.main.sessions.session_resume import (
     thread_has_dynamic_tool,
 )
 from hitch.main.sessions.session_settings import (
-    _effective_approval_mode_for_session,
     _effective_sandbox_policy_for_cwd,
     _stored_settings,
 )
@@ -252,19 +251,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     input_images_owned = False
     session_unarchived_for_turn = False
     session_unarchive_recorded = False
-    lifecycle_lock_held = False
-    lifecycle_stack = ExitStack()
+    startup_stack = ExitStack()
 
     def restore_archived_session_for_rejected_turn() -> None:
         if session_unarchived_for_turn:
             _restore_archived_session_for_rejected_turn(session_id, settings)
-
-    def hold_lifecycle_lock() -> None:
-        nonlocal lifecycle_lock_held
-        if lifecycle_lock_held:
-            return
-        lifecycle_stack.enter_context(session_lifecycle.hold(session_id))
-        lifecycle_lock_held = True
 
     try:
         steer_instance_id: int | None = None
@@ -295,9 +286,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # rollout read (and its lazy state-DB migration) on the request path.
         # A fallback resume owns a private app-server that closes before spawning
         # the worker, releasing its exclusive thread writer lease.
-        hold_lifecycle_lock()
-        # Another sender or the PR poller may have started a turn while we waited.
-        if codex_pool.latest_active_for_thread(session_id) is not None:
+        startup = startup_stack.enter_context(turn_startup.claim(session_id))
+        if startup is None:
             raise _TurnRejectedError(HttpResponse(
                 "This session has an active turn. Retry your message after it starts accepting input or finishes.",
                 status=409, content_type="text/plain",
@@ -331,15 +321,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
 
         should_unarchive_for_turn = _metadata_indicates_archived(metadata)
         force_live_resume = _metadata_rollout_path_indicates_archived(metadata)
-        if should_unarchive_for_turn:
-            if _metadata_cwd_is_disallowed(metadata):
-                raise _TurnRejectedError(
-                    HttpResponseBadRequest("thread cwd is not an allowed repository")
-                )
-            hold_lifecycle_lock()
-            metadata = _session_detail_metadata(session_id)
-            should_unarchive_for_turn = _metadata_indicates_archived(metadata)
-            force_live_resume = _metadata_rollout_path_indicates_archived(metadata)
+        if should_unarchive_for_turn and _metadata_cwd_is_disallowed(metadata):
+            raise _TurnRejectedError(
+                HttpResponseBadRequest("thread cwd is not an allowed repository")
+            )
         if should_unarchive_for_turn:
             _unarchive_session_for_turn(session_id, settings)
             session_unarchived_for_turn = True
@@ -384,7 +369,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                                 "thread cwd is not an allowed repository"
                             )
                         ) from exc
-                    hold_lifecycle_lock()
                     _unarchive_session_for_turn(session_id, settings, codex=codex)
                     session_unarchived_for_turn = True
                     resumed = codex._client.thread_resume(session_id)
@@ -481,9 +465,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # defaults — which breaks multi-turn sessions that depend on
         # elevated permissions or stricter escalation handling.
         sandbox_policy = _effective_sandbox_policy_for_cwd(settings, cwd)
-        approval_mode = _effective_approval_mode_for_session(
-            settings, session_id, metadata
-        )
         previous_instance = codex_pool.latest_for_thread(session_id)
         session_project = None
         if previous_instance is None:
@@ -551,12 +532,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                         "start a new session before publishing or watching a PR"
                     )
                 )
-            task_kwargs: dict[str, Any] = {
-                "thread_id": session_id,
+            task_kwargs: turn_startup.TurnOptions = {
                 "cwd": cwd,
                 "prompt": task.prompt,
                 "sandbox_policy": sandbox_policy or None,
-                "approval_mode": approval_mode,
                 "model": task_model or None,
                 "reasoning_effort": task_reasoning_effort or None,
                 "developer_instructions": developer_instructions or None,
@@ -567,7 +546,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             }
             if should_forward_web_search_mode:
                 task_kwargs["web_search_mode"] = web_search_mode
-            codex_pool.spawn_turn(**task_kwargs)
+            startup.spawn(approval=RequestApproval(settings.approval_mode), **task_kwargs)
             record_session_unarchived_for_accepted_turn()
             remember_prompt(request.POST.get("prompt", ""), session_id, cwd=cwd)
             return redirect("session", session_id=session_id)
@@ -579,8 +558,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 for name in ("watch_pr", "unwatch_pr")
             )
         )
-        spawn_kwargs: dict[str, Any] = {
-            "thread_id": session_id,
+        spawn_kwargs: turn_startup.TurnOptions = {
             "cwd": cwd,
             "prompt": prompt,
             "hitch_extra_instructions": hitch_instructions_for_turn(
@@ -590,7 +568,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 plan_mode=plan_mode,
             ),
             "sandbox_policy": sandbox_policy or None,
-            "approval_mode": approval_mode,
         }
         if automatic_pr_available and spawn_kwargs["hitch_extra_instructions"]:
             spawn_kwargs["agent_kind"] = agent_tasks.PR_PUBLISH_AGENT_KIND
@@ -619,7 +596,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["collaboration_mode"] = collaboration_mode
-        codex_pool.spawn_turn(**spawn_kwargs)
+        startup.spawn(approval=RequestApproval(settings.approval_mode), **spawn_kwargs)
         # Ownership transfers the moment the spawn succeeds (matching
         # new_session): any bookkeeping failure after this point must not
         # delete files the worker was handed.
@@ -641,7 +618,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             common._cleanup_saved_input_images(input_image_paths)
         raise
     finally:
-        lifecycle_stack.close()
+        startup_stack.close()
 
 
 def _duplicate_saved_input_images(paths: Iterable[str]) -> list[str]:

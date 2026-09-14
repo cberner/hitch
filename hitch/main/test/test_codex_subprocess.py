@@ -843,7 +843,7 @@ class SpawnFailureTests(TestCase):
             image_path.parent.mkdir(parents=True)
             image_path.write_bytes(b"image")
             with self.assertRaises(OSError):
-                codex_pool.spawn_turn(
+                codex_pool._spawn_turn(
                     thread_id="t",
                     cwd="/repo",
                     prompt="hi",
@@ -882,7 +882,7 @@ class SpawnFailureTests(TestCase):
             )
             with patch("hitch.main.runtime.app_server_pool.borrow_codex") as borrowed:
                 borrowed.return_value.__enter__.return_value = codex
-                manual = codex_pool.spawn_turn(
+                manual = codex_pool._spawn_turn(
                     thread_id="new-manual", cwd="/repo", prompt="Review", new_thread=True,
                     hitch_extra_instructions="Hitch guidance",
                 )
@@ -901,14 +901,14 @@ class SpawnFailureTests(TestCase):
                     },
                 }}) + "\n")
                 SessionMetadata.objects.create(thread_id=thread_id, cwd="/repo", codex_path=str(path))
-                instance = codex_pool.spawn_turn(
+                instance = codex_pool._spawn_turn(
                     thread_id=thread_id, cwd="/repo", prompt="Follow up", hitch_extra_instructions="Hitch guidance",
                 )
                 self.assertEqual(instance.developer_instructions, baseline or "")
                 self.assertEqual(instance.hitch_extra_instructions, None if baseline is None else "Hitch guidance")
                 if baseline is not None:
                     path.write_text("history no longer needed")
-                    cleared = codex_pool.spawn_turn(
+                    cleared = codex_pool._spawn_turn(
                         thread_id=thread_id, cwd="/repo", prompt="Follow up", hitch_extra_instructions="",
                     )
                     self.assertEqual(cleared.developer_instructions, baseline)
@@ -932,7 +932,7 @@ class SpawnFailureTests(TestCase):
                     _events_dir() as events_dir,
                     override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
                 ):
-                    instance = codex_pool.spawn_turn(
+                    instance = codex_pool._spawn_turn(
                         thread_id=f"thread-{approval_mode or 'default'}",
                         cwd="/repo",
                         prompt="follow-up",
@@ -951,7 +951,7 @@ class SpawnFailureTests(TestCase):
             _events_dir() as events_dir,
             override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
         ):
-            instance = codex_pool.spawn_turn(
+            instance = codex_pool._spawn_turn(
                 thread_id="thread-xyz",
                 cwd="/repo",
                 prompt="make a plan",
@@ -987,7 +987,7 @@ class SpawnFailureTests(TestCase):
             _events_dir() as events_dir,
             override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
         ):
-            instance = codex_pool.spawn_turn(
+            instance = codex_pool._spawn_turn(
                 thread_id="thread-xyz",
                 cwd="/repo",
                 prompt="follow-up",
@@ -1020,7 +1020,7 @@ class SpawnFailureTests(TestCase):
                 _events_dir() as events_dir,
                 override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
             ):
-                instance = codex_pool.spawn_turn(
+                instance = codex_pool._spawn_turn(
                     thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
                 )
 
