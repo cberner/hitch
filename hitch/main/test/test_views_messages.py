@@ -4,6 +4,8 @@
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +35,7 @@ from hitch.main.models import (
 )
 from hitch.main.runtime import codex_pool
 from hitch.main.runtime import rollout as rollout_module
-from hitch.main.sessions import agent_tasks
+from hitch.main.sessions import agent_tasks, lifecycle
 from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.settings_cookies import (
     _HITCH_EXTRA_INSTRUCTIONS_COOKIE,
@@ -63,6 +65,52 @@ from hitch.main.views import messages as message_views
 
 
 class SendMessageViewTests(TestCase):
+    @patch("hitch.main.views.common.Codex")
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool.steer_instance", return_value=None)
+    def test_rechecks_active_worker_after_acquiring_lifecycle_lock(
+        self, steer: MagicMock, spawn: MagicMock, codex: MagicMock,
+    ) -> None:
+        hold = lifecycle.hold
+        submissions: tuple[dict[str, str], ...] = (
+            {}, {"plan_mode": "true"}, {"prompt": _QA_PROMPT}, {"active_instance": "42"},
+        )
+        for index, extra in enumerate(submissions):
+            thread_id = f"concurrent-{index}"
+
+            @contextmanager
+            def start_competing_turn(session_id: str) -> Iterator[bool]:
+                with hold(session_id) as acquired:
+                    CodexInstance.objects.create(
+                        thread_id=session_id, cwd="/repo", pid=0, status=CodexInstance.STATUS_STARTING,
+                    )
+                    yield acquired
+
+            with self.subTest(extra=extra), (
+                patch.object(lifecycle, "hold", side_effect=start_competing_turn)
+            ):
+                response = self.client.post(
+                    reverse("send_message", args=[thread_id]), {"prompt": "Continue", **extra},
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertContains(response, "Retry your message", status_code=409)
+                self.assertEqual(CodexInstance.objects.filter(thread_id=thread_id).count(), 1)
+        spawn.assert_not_called()
+        codex.assert_not_called()
+        steer.assert_called_once_with(42, expected_thread_id="concurrent-3", prompt="Continue")
+
+    @patch("hitch.main.views.common._cleanup_saved_input_images")
+    @patch("hitch.main.views.common._save_posted_input_images", return_value=(["/tmp/upload.png"], None))
+    @patch("hitch.main.runtime.codex_pool.latest_active_for_thread", side_effect=[None, MagicMock()])
+    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    def test_conflicting_send_cleans_up_its_saved_images(
+        self, spawn: MagicMock, _active: MagicMock, _save: MagicMock, cleanup: MagicMock,
+    ) -> None:
+        response = self.client.post(reverse("send_message", args=["abc"]), {"prompt": "Continue"})
+        self.assertEqual(response.status_code, 409)
+        cleanup.assert_called_once_with(["/tmp/upload.png"])
+        spawn.assert_not_called()
+
     def test_stored_model_and_effort_uses_atomic_recorded_or_settings_pair(
         self,
     ) -> None:
