@@ -31,7 +31,8 @@ from hitch.main.runtime import codex_pool, reconciliation
 from hitch.main.runtime.input_images import (
     _limit_input_image_uploads,
 )
-from hitch.main.sessions import agent_tasks, session_index
+from hitch.main.sessions import agent_tasks, session_index, turn_startup
+from hitch.main.sessions.execution_settings import RequestApproval
 from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
 from hitch.main.sessions.message_intent import (
     _message_intent,
@@ -742,12 +743,10 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 ),
             )
         )
-        task_kwargs: dict[str, Any] = {
-            "thread_id": thread_id,
+        task_kwargs: turn_startup.TurnOptions = {
             "cwd": session_cwd,
             "prompt": task.prompt,
             "sandbox_policy": sandbox_policy or None,
-            "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": source_developer_instructions or None,
@@ -759,30 +758,36 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         }
         if web_search_mode:
             task_kwargs["web_search_mode"] = web_search_mode
+        turn_started = False
         try:
-            codex_pool.spawn_turn(**task_kwargs)
+            with turn_startup.claim(thread_id) as startup:
+                if startup is None:
+                    raise RuntimeError("new session already has an active turn")
+                startup.spawn(approval=RequestApproval(settings.approval_mode), **task_kwargs)
+                turn_started = True
+                # Persist the proposal-derived auto-review configuration so subsequent
+                # turns keep honoring it instead of reverting to manual review.
+                session_metadata = session_index.upsert_local_session(
+                    thread_id=thread_id,
+                    cwd=session_cwd,
+                    project=source_project,
+                    project_cleared=target.project_cleared,
+                    name=thread_name,
+                    auto_pr_enabled=session_auto_pr_enabled,
+                    auto_qa_enabled=session_auto_qa_enabled,
+                )
+                _finish_new_session_proposal_start_claim(
+                    proposed_session,
+                    session_metadata,
+                )
+                return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
         except Exception:
-            if proposal_claimed:
-                assert proposed_session is not None
-                _reset_new_session_proposal_start_claim(proposed_session)
-            _cleanup_worktree_quietly(managed_worktree)
+            if not turn_started:
+                if proposal_claimed:
+                    assert proposed_session is not None
+                    _reset_new_session_proposal_start_claim(proposed_session)
+                _cleanup_worktree_quietly(managed_worktree)
             raise
-        # Persist the proposal-derived auto-review configuration so subsequent
-        # turns keep honoring it instead of reverting to manual review.
-        session_metadata = session_index.upsert_local_session(
-            thread_id=thread_id,
-            cwd=session_cwd,
-            project=source_project,
-            project_cleared=target.project_cleared,
-            name=thread_name,
-            auto_pr_enabled=session_auto_pr_enabled,
-            auto_qa_enabled=session_auto_qa_enabled,
-        )
-        _finish_new_session_proposal_start_claim(
-            proposed_session,
-            session_metadata,
-        )
-        return _remember_repo_and_redirect(request, cookie_updates, cwd=cwd, thread_id=thread_id)
 
     if use_worktrees and managed_worktree is None:
         try:

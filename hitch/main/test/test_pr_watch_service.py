@@ -67,7 +67,7 @@ class PersistentPrWatchTests(TestCase):
         )
 
     @patch("hitch.main.sessions.session_resume.thread_has_dynamic_tool", return_value=True)
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_cancelled_tool_leaves_later_feedback_for_background_delivery(
         self, observe: MagicMock, spawn: MagicMock, _capability: MagicMock,
@@ -155,7 +155,7 @@ class PersistentPrWatchTests(TestCase):
         deliveries[0]()
         self.assertEqual(SessionPullRequest.objects.get(pk=self.record.pk).state, state)
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_feedback_beyond_five_threads_resumes_watch(self, observe: MagicMock, spawn: MagicMock) -> None:
         threads: list[dict[str, Any]] = [
@@ -182,7 +182,7 @@ class PersistentPrWatchTests(TestCase):
         pr_watch_service.poll_registered_prs()
         self.assertEqual(spawn.call_count, 2)
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_idle_approval_changes_apply_to_background_followups(
         self, observe: MagicMock, spawn: MagicMock,
@@ -236,7 +236,7 @@ class PersistentPrWatchTests(TestCase):
         self.owner.refresh_from_db()
         self.assertEqual(self.owner.approval_mode, "approve_all")
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_later_comments_after_readiness_resume_with_inherited_settings(
         self,
@@ -279,7 +279,7 @@ class PersistentPrWatchTests(TestCase):
         pr_watch_service.poll_registered_prs()
         self.assertEqual(spawn.call_count, 2)
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_unwatch_invalidates_inflight_result_and_rewatch_restarts(
         self,
@@ -316,7 +316,7 @@ class PersistentPrWatchTests(TestCase):
         self.record.refresh_from_db()
         self.assertTrue(self.record.state[pr_tracking.WATCH_ACTIVE_STATE_KEY])
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_terminal_stops_but_errors_and_timeout_do_not(self, observe: MagicMock, spawn: MagicMock) -> None:
         pr_tracking.record_pr_watch_result(self.registration, pr_watch._result_from_observation("timed_out", {}))
@@ -338,7 +338,7 @@ class PersistentPrWatchTests(TestCase):
         self.assertEqual(spawn.call_args.kwargs["agent_kind"], agent_tasks.PR_WATCH_AGENT_KIND)
         self.assertIn("closed without merging", spawn.call_args.kwargs["prompt"])
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_merge_resumes_requested_sequence_once_without_polling_again(
         self, observe: MagicMock, spawn: MagicMock,
@@ -372,7 +372,7 @@ class PersistentPrWatchTests(TestCase):
         self.assertTrue(self.record.is_current)
         self.assertEqual(pr_tracking.pr_handoff_for_record(self.record)["state"], "merged")
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_terminal_delivery_survives_archive_busy_turn_and_spawn_failure(
         self, observe: MagicMock, spawn: MagicMock,
@@ -415,7 +415,7 @@ class PersistentPrWatchTests(TestCase):
         self.assertEqual(spawn.call_count, 2)
         observe.assert_called_once()
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     def test_completed_turn_cancels_terminal_before_its_completion_hook(self, spawn: MagicMock) -> None:
         preceding = CodexInstance.objects.create(
             thread_id=self.owner.thread_id, cwd=self.owner.cwd, pid=0,
@@ -438,7 +438,7 @@ class PersistentPrWatchTests(TestCase):
         self.assertFalse(self.record.state[pr_tracking.WATCH_TERMINAL_PENDING_STATE_KEY])
         self.assertEqual(self.record.state[SessionPullRequest.SUPERSEDED_BY_INSTANCE_STATE_KEY], newer.pk)
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch.observe_pr")
     def test_tool_delivery_and_unwatch_cancel_pending_terminal_notification(
         self, observe: MagicMock, spawn: MagicMock,
@@ -484,7 +484,7 @@ class PersistentPrWatchTests(TestCase):
                 spawn.assert_not_called()
                 observe.assert_not_called()
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_active_turn_defers_poll_and_archive_defers_delivery(self, observe: MagicMock, spawn: MagicMock) -> None:
         self.owner.status = CodexInstance.STATUS_RUNNING
@@ -554,7 +554,7 @@ class PersistentPrWatchTests(TestCase):
         )
         self.assertIsNotNone(registration)
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_gate_progress_with_old_feedback_does_not_resume(self, observe: MagicMock, spawn: MagicMock) -> None:
         initial = pr_watch._result_from_observation(
@@ -568,7 +568,7 @@ class PersistentPrWatchTests(TestCase):
         self.record.refresh_from_db()
         self.assertEqual(self.record.state[pr_watch.PR_WATCH_RESULT_STATE_KEY]["status"], "ready")
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_disallowed_checkout_defers_delivery(self, observe: MagicMock, spawn: MagicMock) -> None:
         self.mock_allowed.return_value = False
@@ -583,7 +583,7 @@ class PersistentPrWatchTests(TestCase):
         pr_watch_service.poll_registered_prs()
         spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.pr_watch_service.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.workflows.pr_watch_service.pr_watch.observe_pr")
     def test_duplicate_pr_registrations_share_poll_and_throttle(self, observe: MagicMock, spawn: MagicMock) -> None:
         other = CodexInstance.objects.create(

@@ -83,7 +83,7 @@ class SessionModelTests(TestCase):
         with tempfile.TemporaryDirectory() as raw, override_settings(CODEX_EVENTS_DIR=Path(raw)):
             for extra in ({}, {"plan_mode": True}, {"agent_kind": "code_review"}):
                 with self.subTest(extra=extra):
-                    instance = codex_pool.spawn_turn(
+                    instance = codex_pool._spawn_turn(
                         thread_id="session", cwd="/repo", prompt="Continue", model="old",
                         reasoning_effort="low", stored_model="stale", stored_reasoning_effort="medium", **extra,
                     )

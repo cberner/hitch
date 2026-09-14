@@ -90,6 +90,11 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   If another worker has started and steering has not delivered the message,
   return a retryable conflict instead of launching a competing writer. Dispose
   of uploads owned by the rejected request.
+  Message submissions, review/PR starts, and background PR follow-ups use one
+  startup service that owns the lifecycle lease and active-worker check through
+  settings resolution, worker creation, and acceptance or rollback bookkeeping.
+  A busy background claim defers delivery; startup claims permit only one launch
+  attempt and cannot be reused after their lease ends.
 - `ST-archive-writer-conflict`: If another Codex process holds the session's
   writer lease, archiving or unarchiving preserves local state and asks the user
   to close the session in that process and retry. AJAX requests return 409;

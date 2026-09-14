@@ -475,7 +475,7 @@ class NewSessionViewTests(TestCase):
         self.assertNotIn("/tmp/private", error)
 
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.repos.discover_repos")
@@ -510,7 +510,7 @@ class NewSessionViewTests(TestCase):
                 mock_create_thread.assert_not_called()
                 mock_spawn.assert_not_called()
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.repos.discover_repos")
@@ -1241,7 +1241,7 @@ class NewSessionViewTests(TestCase):
             input_image_paths=image_paths,
         )
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.views.common.create_worktree_for_session")
@@ -1367,7 +1367,7 @@ class NewSessionViewTests(TestCase):
                     **task_settings,
                 )
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.pull_default_branch_from_origin")
@@ -1393,7 +1393,7 @@ class NewSessionViewTests(TestCase):
         mock_create_thread.assert_called_once()
         mock_turn.assert_called_once()
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -1436,7 +1436,7 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(metadata.auto_qa_enabled)
         self.assertFalse(metadata.auto_pr_enabled)
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -1475,11 +1475,11 @@ class NewSessionViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
-    @patch("hitch.main.runtime.codex_pool.spawn_turn")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
-    def test_proposal_qa_turn_start_failure_resets_start_claim(
+    def test_proposal_qa_start_claim_tracks_worker_handoff(
         self,
         mock_discover: MagicMock,
         mock_create_thread: MagicMock,
@@ -1494,25 +1494,35 @@ class NewSessionViewTests(TestCase):
             title="Tidy up logging",
         )
         mock_create_thread.return_value = "proposal-qa-thread"
-        mock_turn.side_effect = RuntimeError("turn failed")
+        for failure_target, started in (
+            ("hitch.main.runtime.codex_pool._spawn_turn", False),
+            ("hitch.main.sessions.lifecycle._acquire", False),
+            ("hitch.main.sessions.session_index.upsert_local_session", True),
+        ):
+            with (
+                self.subTest(failure_target=failure_target),
+                patch(failure_target, side_effect=RuntimeError("start failed")),
+                self.assertRaisesRegex(RuntimeError, "start failed"),
+            ):
+                self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "/qa",
+                        "cwd": self.REPO,
+                        "proposed_session": str(proposal.pk),
+                    },
+                )
 
-        with self.assertRaises(RuntimeError):
-            self.client.post(
-                reverse("new_session"),
-                data={
-                    "prompt": "/qa",
-                    "cwd": self.REPO,
-                    "proposed_session": str(proposal.pk),
-                },
+            proposal.refresh_from_db()
+            self.assertEqual(
+                proposal.outcome_status,
+                ProposedSession.OUTCOME_ACCEPTED if started else ProposedSession.OUTCOME_UNSET,
             )
-
-        proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertIsNone(proposal.accepted_session)
-        self.assertNotIn(
-            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
-            proposal.outcome_metadata,
-        )
+            self.assertIsNone(proposal.accepted_session)
+            self.assertEqual(
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY in proposal.outcome_metadata,
+                started,
+            )
 
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
