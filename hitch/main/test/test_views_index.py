@@ -431,11 +431,15 @@ class IndexViewTests(TestCase):
         )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+        self.assertEqual(SessionMetadata.objects.get(thread_id="malformed-rollout").derived_stage, "")
+        # Once readable, the rollout can populate a cache that approval changes preserve.
+        rollout_path.write_text(_rollout_line("event_msg", {"type": "user_message", "message": "Implement"}) + "\n")
+        self.assertEqual(self.client.get(reverse("index")).status_code, 200)
         self.client.post(
             reverse("set_session_approval_mode", args=["malformed-rollout"]),
             {"approval_mode": ""},
         )
-        with patch("hitch.main.sessions.session_stage_refresh._session_stage_entries") as entries:
+        with patch("hitch.main.runtime.rollout.session_stage_data") as entries:
             response = self.client.get(reverse("index"))
         self.assertEqual(response.status_code, 200)
         entries.assert_not_called()

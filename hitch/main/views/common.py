@@ -70,7 +70,7 @@ from hitch.main.runtime.rollout_state import (
 from hitch.main.runtime.sdk_values import (
     string_value,
 )
-from hitch.main.sessions import agent_tasks, session_index, session_stage, token_usage
+from hitch.main.sessions import session_index, stage_resolution, token_usage
 from hitch.main.sessions.hitch_instructions import DEFAULT_HITCH_EXTRA_INSTRUCTIONS
 from hitch.main.sessions.message_intent import (
     _FIX_PR_SLASH_COMMAND,
@@ -731,54 +731,25 @@ def _render_session_detail(
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     stored_pr = pr_tracking.stored_record_for_thread(session_id)
-    registered_pr = stored_pr if pr_tracking.record_is_current(stored_pr) else None
-    publishing_before_registration = bool(
-        active_instance is not None
-        and active_instance.agent_kind == agent_tasks.PR_PUBLISH_AGENT_KIND
-        and not pr_tracking.watch_registered_by_instance(
-            registered_pr, active_instance.pk
-        )
-    )
-    pr_url = None if publishing_before_registration else _registered_pr_url(registered_pr)
+    pr = stage_resolution.pr_display_state(stored_pr, active_instance)
+    pr_url = _registered_pr_url(pr.record)
     stage_context: dict[str, Any] | None = None
     if not read_only:
-        awaiting_user_input = session_id in _thread_ids_awaiting_input([session_id])
-        pr_snapshot = (
-            {}
-            if publishing_before_registration
-            else pr_tracking.pr_handoff_for_record(registered_pr)
+        resolution = stage_resolution.resolve_stage(
+            entries=entries, history_complete=not history_paginated,
+            pr=pr, active_instance=active_instance,
+            awaiting_user_input=session_id in _thread_ids_awaiting_input([session_id]),
+            cache=(
+                stage_resolution.StageCache(metadata.derived_stage, metadata.derived_stage_source_mtime_ns)
+                if metadata is not None and (rollout_data is not None or history_paginated or entries_backed_by_rollout)
+                else None
+            ),
+            source_mtime_ns=detail_rollout_state.mtime_ns if detail_rollout_state is not None else None,
+            leading_user_text=history_page.leading_user_text if history_page is not None else None,
         )
-        stage = session_stage.derive_stage(
-            entries=entries,
-            active_instance=active_instance,
-            awaiting_user_input=awaiting_user_input,
-            pr_snapshot=pr_snapshot,
-        )
-        if (
-            history_paginated
-            and metadata is not None
-            and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
-            and not pr_snapshot
-            and active_instance is None
-            and not awaiting_user_input
-        ):
-            cached_stage = session_stage.stage_for_key(metadata.derived_stage)
-            if cached_stage is not None:
-                stage = cached_stage
-        # Only persist a rollout-derived stage; see _attach_session_stage_context
-        # for why active-instance-forced stages must not enter the
-        # mtime-keyed cache. Active turns and pending input remain transient and
-        # therefore cannot be cached under a rollout-only key.
-        if (
-            active_instance is None
-            and not awaiting_user_input
-            and not history_paginated
-        ):
-            # Best-effort like the session-list path: this runs while rendering
-            # the session detail page, so a contended write lock must skip the
-            # cache refresh rather than 500 the page (the next render retries).
-            pr_stage._update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
-        stage_context = dict(stage.as_context())
+        if resolution.should_persist:
+            pr_stage._update_cached_stage_best_effort(session_id, resolution.stage, stage_cache_mtime_ns)
+        stage_context = dict(resolution.stage.as_context())
     # While a worker is running, drop the entries that belong to its
     # in-progress turn when SSE has claimed that turn. A worker kept alive
     # across a deploy can lack the user item in its event log even while its
@@ -872,9 +843,7 @@ def _render_session_detail(
     active_worker_status_text = _active_worker_status_text(active_instance)
     latest_user_turn_failure = _latest_user_turn_failure(session_id)
     pr_watch_progress = pr_tracking.pr_watch_progress(
-        registered_pr.state
-        if registered_pr is not None and not publishing_before_registration
-        else None
+        pr.record.state if pr.record is not None else None
     )
     live_status_text = active_worker_status_text
     debug_chat_url = _debug_chat_new_session_url(

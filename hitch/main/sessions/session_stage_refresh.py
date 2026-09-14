@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterable, Iterator, Mapping
-from pathlib import Path
+from collections.abc import Iterable, Mapping
+from functools import partial
 from typing import Any
 
 from django.db.models import Q
@@ -14,17 +13,13 @@ from hitch.main.models import (
     CodexInstance,
     UserInputRequest,
 )
-from hitch.main.runtime import rollout
 from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
-    _RolloutFileState,
 )
 from hitch.main.runtime.sdk_values import is_nonbool_int, string_value
 from hitch.main.sequences import unique_nonempty
-from hitch.main.sessions import agent_tasks, session_stage
+from hitch.main.sessions import session_stage, stage_resolution
 from hitch.main.workflows import pr_stage, pr_tracking
-
-logger = logging.getLogger(__name__)
 
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
@@ -40,65 +35,29 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             continue
         rollout_state = _rollout_file_state_from_value(session.get("codex_path"))
         stored_pr = registered_prs_by_thread_id.get(session_id)
-        registered_pr = (
-            stored_pr if pr_tracking.record_is_current(stored_pr) else None
-        )
         active_instance = active_instances_by_thread_id.get(session_id)
-        publishing_before_registration = bool(
-            active_instance is not None
-            and active_instance.agent_kind == agent_tasks.PR_PUBLISH_AGENT_KIND
-            and not pr_tracking.watch_registered_by_instance(
-                registered_pr, active_instance.pk
-            )
+        pr = stage_resolution.pr_display_state(stored_pr, active_instance)
+        resolution = stage_resolution.resolve_stage(
+            entries=(), history_loader=partial(
+                stage_resolution.read_stage_history,
+                rollout_state.path if rollout_state is not None else None,
+                has_activity=bool(session.get("has_activity")),
+            ),
+            history_complete=True, pr=pr, active_instance=active_instance,
+            awaiting_user_input=session_id in waiting_thread_ids,
+            cache=stage_resolution.StageCache(
+                string_value(session.get("stage_cache_key")), session.get("stage_cache_mtime_ns", 0),
+            ),
+            source_mtime_ns=rollout_state.mtime_ns if rollout_state is not None else None,
         )
-        awaiting_user_input = session_id in waiting_thread_ids
-        cached_stage = _cached_stage_for_session_row(session, rollout_state)
-        if (
-            active_instance is None
-            and not pr_tracking.pr_handoff_for_record(stored_pr)
-            and not awaiting_user_input
-            and cached_stage is not None
-            and cached_stage.key
-            not in {
-                session_stage.PR.key,
-                session_stage.DONE_MERGED.key,
-                session_stage.DONE_CLOSED.key,
-            }
-        ):
-            session["stage"] = _session_list_stage_context(cached_stage)
-            continue
-        rollout_path = rollout_state.path if rollout_state is not None else None
-        pr_snapshot = (
-            {}
-            if publishing_before_registration
-            else pr_tracking.pr_handoff_for_record(registered_pr)
-        )
-        stage = session_stage.derive_stage(
-            entries=_session_stage_entries(rollout_path, has_activity=bool(session.get("has_activity"))),
-            active_instance=active_instance,
-            awaiting_user_input=awaiting_user_input,
-            pr_snapshot=pr_snapshot,
-        )
-        stage_executing = stage.key == session_stage.IMPLEMENTATION.key and (
-            active_instance is not None
-        )
+        stage = resolution.stage
         session["stage"] = _session_list_stage_context(
-            stage,
-            pr_snapshot=pr_snapshot,
-            executing=stage_executing,
+            stage, pr_snapshot=pr.snapshot,
+            executing=stage == session_stage.IMPLEMENTATION and active_instance is not None,
         )
-        # The stage cache is keyed only on the rollout file's mtime, so it may
-        # only hold stages that are a pure function of the rollout. A stage that
-        # an active worker forced (e.g. Implementation while
-        # a turn runs) is transient state the mtime key cannot track: once the
-        # worker goes away without rewriting the rollout, the cached
-        # row would still satisfy the read guard and resurrect the stale active
-        # badge. Persist only when no such owner contributed to the stage.
-        if active_instance is None and not awaiting_user_input:
+        if resolution.should_persist:
             pr_stage._update_cached_stage_best_effort(
-                session_id,
-                stage,
-                rollout_state.mtime_ns if rollout_state is not None else 0,
+                session_id, stage, rollout_state.mtime_ns if rollout_state is not None else 0,
             )
 
 
@@ -175,35 +134,3 @@ def _active_instances_by_thread_id(
     for instance in active_instances:
         by_thread_id.setdefault(instance.thread_id, instance)
     return by_thread_id
-
-
-def _cached_stage_for_session_row(
-    session: Mapping[str, Any],
-    rollout_state: _RolloutFileState | None,
-) -> session_stage.SessionStage | None:
-    if rollout_state is None:
-        return None
-    cached = session_stage.stage_for_key(string_value(session.get("stage_cache_key")))
-    if cached is None:
-        return None
-    return (
-        cached
-        if session.get("stage_cache_mtime_ns") == rollout_state.mtime_ns
-        else None
-    )
-
-
-def _session_stage_entries(
-    rollout_path: Path | None, *, has_activity: bool,
-) -> Iterator[dict[str, Any]]:
-    # Derivation consumes history only if live worker/input/PR state is insufficient.
-    stage_data = None
-    if rollout_path is not None:
-        try:
-            stage_data = rollout.session_stage_data(rollout_path)
-        except Exception:
-            logger.exception("failed to parse rollout %s for session stage", rollout_path)
-    if stage_data is not None and stage_data.entries:
-        yield from stage_data.entries
-    elif has_activity:
-        yield {"kind": "user"}
