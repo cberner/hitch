@@ -105,6 +105,9 @@ spec covers both surfaces.
   Usage or Profile page retrieves background results automatically and checks
   quota again at its two-minute refresh interval. Quota checks do not restart
   a completed token sweep.
+- `USAGE-quota-local-time`: Quota's last-checked timestamp uses the browser's
+  local timezone, including a timezone label, on initial render and after
+  automatic refreshes on both Usage and Profile.
 
 ### 4.2 Cached Rendering and Performance
 

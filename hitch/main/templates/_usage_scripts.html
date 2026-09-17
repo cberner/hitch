@@ -35,6 +35,20 @@
                     });
                 });
 
+                for (const el of document.querySelectorAll("time[data-quota-checked-at]")) {
+                    const date = new Date(el.dateTime);
+                    if (!Number.isFinite(date.getTime())) continue;
+                    el.textContent = date.toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        timeZoneName: "short",
+                    });
+                }
+
                 for (const el of document.querySelectorAll("time[data-resets-at]")) {
                     const seconds = Number(el.dataset.resetsAt);
                     if (!Number.isFinite(seconds) || seconds <= 0) continue;
