@@ -26,7 +26,6 @@ class SettingsValues(NamedTuple):
     extra_system_prompt: str
     use_worktrees: bool
     auto_pr_enabled: bool
-    auto_qa_enabled: bool
     web_search_mode: str
     show_archived_sessions: bool
     last_selected_repo: str
@@ -109,7 +108,6 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _HITCH_EXTRA_INSTRUCTIONS_COOKIE = "hitch_extra_instructions"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
-_AUTO_QA_COOKIE = "hitch_auto_qa"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
@@ -404,7 +402,6 @@ _SETTING_SPECS: tuple[_SettingSpec, ...] = (
     ),
     _bool_spec("use_worktrees", _USE_WORKTREES_COOKIE),
     _bool_spec("auto_pr_enabled", _AUTO_PR_COOKIE),
-    _bool_spec("auto_qa_enabled", _AUTO_QA_COOKIE),
     _SettingSpec(
         "web_search_mode",
         _WEB_SEARCH_COOKIE,

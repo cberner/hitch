@@ -26,9 +26,8 @@ setting, separately from personal/project instructions and user messages.
   the character limit and the guest cookie's encoded size. Old forms that omit
   the field preserve the stored value.
 - `HI-workflow`: The saved Hitch instructions include the selected turn's
-  workflow: None, Plan, Auto-QA, or Auto-PR. Auto-PR takes precedence over Auto-QA;
-  Plan suppresses both automatic workflows in the defaults. Proposal PR titles
-  are supplied only for Auto-PR. Overrides may customize the guidance; no
+  workflow: None, Plan, or Auto-PR. Plan suppresses Auto-PR in the defaults.
+  Proposal PR titles are supplied only for Auto-PR. Overrides may customize the guidance; no
   default instructions are silently appended to an override.
 - `HI-turn-snapshot`: Each visible turn started from Hitch saves its effective
   Hitch instructions separately from the personal/project developer prompt.

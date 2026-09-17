@@ -324,7 +324,6 @@ def _settings_context(
         "hitch_extra_instructions_max_len": _HITCH_EXTRA_INSTRUCTIONS_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
-        "current_auto_qa": current_settings.auto_qa_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
         "current_disk_usage_max_percent": _format_disk_usage_max_percent(

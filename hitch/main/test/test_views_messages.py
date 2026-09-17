@@ -122,7 +122,6 @@ class SendMessageViewTests(TestCase):
             extra_system_prompt="",
             use_worktrees=False,
             auto_pr_enabled=False,
-            auto_qa_enabled=False,
             web_search_mode="",
             show_archived_sessions=False,
             last_selected_repo="",
@@ -1186,24 +1185,22 @@ class SendMessageViewTests(TestCase):
         project = _make_project(extra_system_prompt="Use project fixtures.")
         metadata = SessionMetadata.objects.create(thread_id="abc", cwd="/repo", project=project)
         cases = (
-            (False, False, False, False),
-            (False, True, False, False),
-            (True, False, False, False),
-            (True, False, True, False),
-            (True, False, False, True),
-            (True, False, True, True),
+            (False, False, False),
+            (True, False, False),
+            (True, True, False),
+            (True, False, True),
+            (True, True, True),
         )
-        for override, (auto_pr, auto_qa, plan_mode, image_only) in product(
+        for override, (auto_pr, plan_mode, image_only) in product(
             (None, "Use my Hitch workflow.\nKeep explanations brief.", ""), cases
         ):
             with (
-                self.subTest(override=override, auto_pr=auto_pr, auto_qa=auto_qa, plan=plan_mode, image=image_only),
+                self.subTest(override=override, auto_pr=auto_pr, plan=plan_mode, image=image_only),
                 tempfile.TemporaryDirectory() as raw,
                 override_settings(CODEX_EVENTS_DIR=Path(raw)),
             ):
                 metadata.auto_pr_enabled = auto_pr
-                metadata.auto_qa_enabled = auto_qa
-                metadata.save(update_fields=["auto_pr_enabled", "auto_qa_enabled"])
+                metadata.save(update_fields=["auto_pr_enabled"])
                 _seed_cookies(
                     self.client,
                     **{
@@ -1223,7 +1220,7 @@ class SendMessageViewTests(TestCase):
                 expected: dict[str, Any] = {
                     "developer_instructions": "Use personal conventions.\n\nUse project fixtures.",
                     "hitch_extra_instructions": hitch_instructions_for_turn(
-                        override, auto_pr_enabled=auto_pr, auto_qa_enabled=auto_qa, plan_mode=plan_mode
+                        override, auto_pr_enabled=auto_pr, plan_mode=plan_mode
                     ),
                 }
                 if plan_mode:
@@ -1524,7 +1521,6 @@ class SendMessageViewTests(TestCase):
                     "hitch_extra_instructions": hitch_instructions_for_turn(
                         None,
                         auto_pr_enabled=True,
-                        auto_qa_enabled=False,
                     ),
                     "model": "gpt-5.4",
                     "collaboration_mode": "default",

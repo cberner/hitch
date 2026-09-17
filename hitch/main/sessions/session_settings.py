@@ -89,9 +89,6 @@ def _new_session_form_context(
         current_new_session_project,
         global_enabled=current_settings.auto_pr_enabled,
     )
-    current_new_session_auto_qa = (
-        current_settings.auto_qa_enabled and not current_new_session_auto_pr
-    )
     return {
         "repos": repos,
         "new_session_projects": new_session_projects,
@@ -113,7 +110,6 @@ def _new_session_form_context(
         ),
         "current_new_session_use_worktrees": current_settings.use_worktrees,
         "current_new_session_auto_pr": current_new_session_auto_pr,
-        "current_new_session_auto_qa": current_new_session_auto_qa,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
         "new_session_web_search_options": [
             {"id": value, "display_name": label}

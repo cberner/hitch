@@ -27,12 +27,11 @@ def _attach_proposed_session_display_state(
         proposed_session.accept_cwd = (  # type: ignore[attr-defined]
             "" if project is not None else target_cwd
         )
-        auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(proposed_session)
+        auto_pr_enabled = _auto_pr_enabled_for_proposed_session(proposed_session)
         proposed_session.accept_auto_pr = auto_pr_enabled  # type: ignore[attr-defined]
-        proposed_session.accept_auto_qa = auto_qa_enabled  # type: ignore[attr-defined]
         metadata = _proposal_metadata(proposed_session)
-        proposed_session.accept_auto_review_explicit = (  # type: ignore[attr-defined]
-            "auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata
+        proposed_session.accept_auto_pr_explicit = (  # type: ignore[attr-defined]
+            "auto_pr_enabled" in metadata
         )
 
 
@@ -53,15 +52,11 @@ def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
     return "\n".join(parts)
 
 
-def _auto_review_settings_for_proposed_session(
+def _auto_pr_enabled_for_proposed_session(
     proposed_session: ProposedSession,
-) -> tuple[bool, bool]:
+) -> bool:
     metadata = _proposal_metadata(proposed_session)
-    if "auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata:
-        auto_pr_enabled = metadata.get("auto_pr_enabled") is True
-        auto_qa_enabled = metadata.get("auto_qa_enabled") is True and not auto_pr_enabled
-        return auto_pr_enabled, auto_qa_enabled
-    return False, False
+    return metadata.get("auto_pr_enabled") is True
 
 
 def _proposal_metadata(proposed_session: ProposedSession) -> dict[str, object]:

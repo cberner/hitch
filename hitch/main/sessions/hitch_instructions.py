@@ -17,7 +17,7 @@ DEFAULT_HITCH_EXTRA_INSTRUCTIONS = (
     "do not perform automatic review or publish a pull request. When the "
     "workflow is None, respond to the user's request without starting an "
     "automatic review or pull-request workflow.\n\n"
-    "When Auto-QA or Auto-PR is selected, after completing the user's requested "
+    "When Auto-PR is selected, after completing the user's requested "
     "implementation, continue in the same turn:\n\n"
     f"{optional_review_prompt(prepare_pull_request=False)}\n\n"
     "When Auto-PR is selected, also complete the following:\n\n"
@@ -29,7 +29,6 @@ def hitch_instructions_for_turn(
     override: str | None,
     *,
     auto_pr_enabled: bool = False,
-    auto_qa_enabled: bool = False,
     plan_mode: bool = False,
     pr_title: str = "",
 ) -> str:
@@ -40,8 +39,6 @@ def hitch_instructions_for_turn(
         workflow = "Plan"
     elif auto_pr_enabled:
         workflow = "Auto-PR"
-    elif auto_qa_enabled:
-        workflow = "Auto-QA"
     else:
         workflow = "None"
     context = f"Hitch workflow for this turn: {workflow}."

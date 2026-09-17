@@ -34,7 +34,6 @@ _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
-_AUTO_QA_COOKIE = "hitch_auto_qa"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -1011,12 +1010,6 @@ class UpdateSettingsViewTests(TestCase):
                 _AUTO_PR_COOKIE,
                 "true",
                 {"auto_pr": "yes"},
-            ),
-            (
-                "auto-QA setting",
-                _AUTO_QA_COOKIE,
-                "true",
-                {"auto_qa": "yes"},
             ),
             (
                 "web search setting",
