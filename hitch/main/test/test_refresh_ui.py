@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, override
 from unittest.mock import patch
 
@@ -288,6 +288,54 @@ class UsageRefreshTests(TestCase):
         self.assertIn('data-profile="1"', result["html"])
         self.assertIn("project-usage-card", result["html"])
         self.assertNotIn("project-usage-card", self.poll(initial.context["usage_cursor"])["html"])
+
+    def test_quota_checked_time_uses_browser_timezone_after_load_and_refresh(self) -> None:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+
+        checked_at = datetime(2026, 1, 15, 2, 30, 45, tzinfo=UTC)
+        responses = {}
+        for surface in ("profile", "usage"):
+            with patch.object(caches, "_rate_limits_for_usage_context") as quota:
+                quota.return_value = caches._RateLimitsUsageState({"limit_name": "Codex"}, False, checked_at)
+                initial = self.client.get(reverse(surface))
+                quota.return_value = caches._RateLimitsUsageState(
+                    {"limit_name": "Codex"}, False, checked_at + timedelta(hours=1)
+                )
+                refreshed = self.poll(initial.context["usage_cursor"], profile=surface == "profile")
+                responses[surface] = (initial.content.decode(), refreshed)
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                for surface, zone, initial_text, refreshed_text in (
+                    ("profile", "America/Los_Angeles", "Jan 14, 2026, 6:30:45 PM PST", "Jan 14, 2026, 7:30:45 PM PST"),
+                    ("usage", "Asia/Kolkata", "Jan 15, 2026, 8:00:45 AM GMT+5:30", "Jan 15, 2026, 9:00:45 AM GMT+5:30"),
+                ):
+                    with self.subTest(surface=surface, timezone=zone):
+                        html, refreshed = responses[surface]
+                        page = browser.new_page(locale="en-US", timezone_id=zone)
+                        page.clock.install()
+                        url = "http://hitch.test" + reverse(surface)
+                        page.route(url, lambda route, _request, html=html: route.fulfill(body=html))
+                        page.route(
+                            "http://hitch.test/usage/refresh/**",
+                            lambda route, _request, refreshed=refreshed: route.fulfill(json=refreshed),
+                        )
+                        page.goto(url)
+                        timestamp = page.locator("time[data-quota-checked-at]")
+                        self.assertEqual(timestamp.inner_text(), initial_text)
+                        self.assertEqual(timestamp.get_attribute("datetime"), checked_at.isoformat())
+                        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+                        page.wait_for_function(
+                            "expected => document.querySelector('[data-quota-checked-at]').textContent === expected",
+                            arg=refreshed_text,
+                        )
+                        page.close()
+            finally:
+                browser.close()
 
     def test_list_fragment_updates_names_and_omits_page_scripts(self) -> None:
         row = _seed_usage_metadata("list")

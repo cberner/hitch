@@ -136,7 +136,7 @@
             <p class="usage-plan" role="status">
                 {% if rate_limits_refresh_pending %}Refreshing quota usage...
                 {% elif rate_limits_stale %}Quota is out of date. Showing the last known values.{% endif %}
-                {% if rate_limits_fetched_at %}Last checked {{ rate_limits_fetched_at|date:"Y-m-d H:i:s T" }}.{% endif %}
+                {% if rate_limits_fetched_at %}Last checked <time data-quota-checked-at datetime="{{ rate_limits_fetched_at|date:'c' }}">{{ rate_limits_fetched_at|date:"Y-m-d H:i:s T" }}</time>.{% endif %}
             </p>
             <div class="rate-limit-list" aria-label="Quota usage">
                 {% for window in rate_limits.windows %}
