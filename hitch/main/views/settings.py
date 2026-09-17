@@ -208,7 +208,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             hitch_extra_instructions = None
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
-    auto_qa = request.POST.get("auto_qa", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_disk_usage_max_percent = request.POST.get("disk_usage_max_percent")
     posted_initial_disk_usage_max_percent = request.POST.get(
@@ -259,9 +258,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_pr not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-PR setting")
     auto_pr = "true" if auto_pr == "true" else "false"
-    if auto_qa not in {"", "true"}:
-        return HttpResponseBadRequest("invalid auto-QA setting")
-    auto_qa = "true" if auto_qa == "true" else "false"
     if web_search_mode and web_search_mode not in _VALID_WEB_SEARCH_MODES:
         return HttpResponseBadRequest("invalid web search setting")
     disk_usage_max_percent: float | None = None
@@ -333,7 +329,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
-        auto_qa_enabled=auto_qa == "true",
         web_search_mode=web_search_mode,
         show_archived_sessions=(
             stored.show_archived_sessions

@@ -376,8 +376,7 @@
                             data-proposed-session-project="{{ proposed_session.accept_project_id }}"
                             data-proposed-session-cwd="{{ proposed_session.accept_cwd }}"
                             data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
-                            data-proposed-session-auto-pr="{% if proposed_session.accept_auto_review_explicit %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
-                            data-proposed-session-auto-qa="{% if proposed_session.accept_auto_review_explicit %}{% if proposed_session.accept_auto_qa %}true{% else %}false{% endif %}{% endif %}"
+                            data-proposed-session-auto-pr="{% if proposed_session.accept_auto_pr_explicit %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
                         >Do it</button>
                         {% endif %}
                     </div>
@@ -438,7 +437,6 @@
             <input type="hidden" name="cwd" data-do-session-cwd>
             <input type="hidden" name="proposed_session" data-do-session-id>
             <input type="hidden" name="auto_pr" data-do-session-auto-pr>
-            <input type="hidden" name="auto_qa" data-do-session-auto-qa>
             <h2 id="do-session-title" tabindex="-1" autofocus>Continue proposed session</h2>
             <p class="meta" data-do-session-title></p>
             <label>
@@ -464,7 +462,6 @@
             const doCwd = doDialog && doDialog.querySelector("[data-do-session-cwd]");
             const doId = doDialog && doDialog.querySelector("[data-do-session-id]");
             const doAutoPr = doDialog && doDialog.querySelector("[data-do-session-auto-pr]");
-            const doAutoQa = doDialog && doDialog.querySelector("[data-do-session-auto-qa]");
             const doCancel = doDialog && doDialog.querySelector("[data-do-session-cancel]");
             const rejectDialog = document.querySelector("[data-reject-session-dialog]");
             const rejectForm = rejectDialog && rejectDialog.querySelector("[data-reject-session-form]");
@@ -499,10 +496,6 @@
                     if (doAutoPr) {
                         doAutoPr.value = button.dataset.proposedSessionAutoPr || "";
                         doAutoPr.disabled = !button.dataset.proposedSessionAutoPr;
-                    }
-                    if (doAutoQa) {
-                        doAutoQa.value = button.dataset.proposedSessionAutoQa || "";
-                        doAutoQa.disabled = !button.dataset.proposedSessionAutoQa;
                     }
                     showDialog(doDialog);
                     if (doHeading) doHeading.focus();

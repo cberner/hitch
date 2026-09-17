@@ -241,7 +241,6 @@ def upsert_local_session(
     preview: str = "",
     archived: bool = False,
     auto_pr_enabled: bool | None = None,
-    auto_qa_enabled: bool | None = None,
     codex_path: str | None = None,
     is_hidden_system_session: bool = False,
 ) -> SessionMetadata:
@@ -267,8 +266,6 @@ def upsert_local_session(
     defaults["project_cleared"] = project_cleared
     if auto_pr_enabled is not None:
         defaults["auto_pr_enabled"] = auto_pr_enabled
-    if auto_qa_enabled is not None:
-        defaults["auto_qa_enabled"] = auto_qa_enabled
     defaults["is_hidden_system_session"] = is_hidden_system_session
     metadata, _created = SessionMetadata.objects.update_or_create(
         thread_id=thread_id,

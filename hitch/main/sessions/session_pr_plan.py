@@ -135,9 +135,3 @@ def _auto_pr_enabled_for_session(session_id: str) -> bool:
     return SessionMetadata.objects.filter(
         thread_id=session_id, auto_pr_enabled=True
     ).exists()
-
-
-def _auto_qa_enabled_for_session(session_id: str) -> bool:
-    return SessionMetadata.objects.filter(
-        thread_id=session_id, auto_qa_enabled=True
-    ).exists()

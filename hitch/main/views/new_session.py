@@ -23,7 +23,7 @@ from hitch.main.models import (
 )
 from hitch.main.proposals.proposal_display import (
     _attach_proposed_session_display_state,
-    _auto_review_settings_for_proposed_session,
+    _auto_pr_enabled_for_proposed_session,
     _proposed_session_prompt,
 )
 from hitch.main.proposals.proposed_sessions import _proposal_outcome_metadata
@@ -114,11 +114,11 @@ def _proposal_has_usable_stored_target(
     )
 
 
-def _proposal_has_explicit_auto_review_settings(
+def _proposal_has_explicit_auto_pr_setting(
     proposed_session: ProposedSession,
 ) -> bool:
     metadata = proposed_session.outcome_metadata
-    return isinstance(metadata, dict) and ("auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata)
+    return isinstance(metadata, dict) and "auto_pr_enabled" in metadata
 
 
 def _new_session_post_models_and_settings(
@@ -641,19 +641,10 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     if auto_pr_error is not None:
         return HttpResponseBadRequest(auto_pr_error)
-    auto_qa_enabled, auto_qa_error = _posted_bool_override(
-        request.POST.get("auto_qa"),
-        default=settings.auto_qa_enabled,
-        error="invalid auto-QA setting",
-    )
-    if auto_qa_error is not None:
-        return HttpResponseBadRequest(auto_qa_error)
-    if auto_pr_enabled:
-        auto_qa_enabled = False
-    if proposed_session is not None and _proposal_has_explicit_auto_review_settings(
+    if proposed_session is not None and _proposal_has_explicit_auto_pr_setting(
         proposed_session
     ):
-        auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(proposed_session)
+        auto_pr_enabled = _auto_pr_enabled_for_proposed_session(proposed_session)
     web_search_mode, web_search_error = _posted_web_search_override(
         request.POST.get("web_search_mode"),
         default=settings.web_search_mode,
@@ -717,20 +708,14 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 _reset_new_session_proposal_start_claim(proposed_session)
             _cleanup_worktree_quietly(managed_worktree)
             raise
-        # Only proposal acceptances carry forward auto-review, and only the
-        # settings the proposal itself requested. A bare ``/qa`` or
-        # ``/pr`` (no proposal) is a one-off review, and a coding-agent proposal
-        # leaves these inputs empty, so in both cases the resolved
-        # ``auto_*_enabled`` here are just the user's global/form defaults.
-        # Persisting those would silently auto-review every later follow-up in
-        # the session, so derive the stored flags from the proposal only.
+        # Manual review/PR shortcuts inherit only the proposal's Auto-PR flag;
+        # global defaults must not enable automatic follow-up publication.
         if proposed_session is not None:
-            session_auto_pr_enabled, session_auto_qa_enabled = _auto_review_settings_for_proposed_session(
+            session_auto_pr_enabled = _auto_pr_enabled_for_proposed_session(
                 proposed_session
             )
         else:
             session_auto_pr_enabled = False
-            session_auto_qa_enabled = False
         task = (
             agent_tasks.publish_pr_task()
             if pr_now_activation
@@ -774,7 +759,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                     project_cleared=target.project_cleared,
                     name=thread_name,
                     auto_pr_enabled=session_auto_pr_enabled,
-                    auto_qa_enabled=session_auto_qa_enabled,
                 )
                 _finish_new_session_proposal_start_claim(
                     proposed_session,
@@ -819,7 +803,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "hitch_extra_instructions": hitch_instructions_for_turn(
             settings.hitch_extra_instructions,
             auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
             plan_mode=plan_mode,
             pr_title=proposed_session.title if proposed_session is not None else "",
         ),
@@ -872,7 +855,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         name=proposed_session.title if proposed_session is not None else "",
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
         codex_path=codex_pool.thread_path_for_instance(instance),
     )
     _finish_new_session_proposal_start_claim(

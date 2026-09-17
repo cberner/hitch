@@ -47,7 +47,6 @@ from hitch.main.sessions.session_entry_display import (
 )
 from hitch.main.sessions.session_pr_plan import (
     _auto_pr_enabled_for_session,
-    _auto_qa_enabled_for_session,
     _count_user_entries,
     _fix_pr_url_for_thread,
     _thread_plan_mode_state,
@@ -497,9 +496,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             previous_web_search_mode
         )
         auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
-        auto_qa_enabled = (
-            False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
-        )
         if agent_task_activation:
             task_model, task_reasoning_effort = _stored_model_and_effort(
                 resumed, settings
@@ -564,7 +560,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             "hitch_extra_instructions": hitch_instructions_for_turn(
                 settings.hitch_extra_instructions,
                 auto_pr_enabled=automatic_pr_available,
-                auto_qa_enabled=auto_qa_enabled,
                 plan_mode=plan_mode,
             ),
             "sandbox_policy": sandbox_policy or None,

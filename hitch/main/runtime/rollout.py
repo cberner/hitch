@@ -475,7 +475,7 @@ def pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
             # instead of being folded into a skipped ``thinking`` entry as it
             # is for the collapsed session view. Skip it so both inputs agree
             # that only a real (final/unset-phase) agent reply resolves a
-            # pending plan -- otherwise auto-PR/auto-QA can fire on a plan the
+            # pending plan -- otherwise auto-PR can fire on a plan the
             # user has not approved yet. Collapsed entries carry no phase, so
             # they always fall through to the terminator below.
             if entry.get("phase") == "commentary":

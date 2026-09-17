@@ -50,7 +50,6 @@ class InboxViewTests(TestCase):
             relevant_files=["hitch/main/rollout.py"],
             outcome_metadata={
                 "auto_pr_enabled": True,
-                "auto_qa_enabled": False,
             },
         )
         ProposedSession.objects.create(
@@ -96,7 +95,8 @@ class InboxViewTests(TestCase):
             'if (doForm) doForm.addEventListener("submit", () => hideDialog(doDialog));',
         )
         self.assertContains(response, 'data-proposed-session-auto-pr="true"')
-        self.assertContains(response, 'data-proposed-session-auto-qa="false"')
+        self.assertNotContains(response, "auto-qa")
+        self.assertNotContains(response, 'name="auto_qa"')
         self.assertContains(
             response,
             'data-proposed-session-prompt="Go ahead and implement this proposed session.',

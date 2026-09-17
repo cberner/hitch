@@ -15,7 +15,7 @@ and their optional delegation through Codex's native subagents.
   native Codex subagent it chooses to involve.
 - Review-guidance turn: An ordinary visible coding turn that asks the coding
   agent to review changes and delegate review as it sees fit.
-- Review trigger: `/qa`, `/pr`, Auto-QA, or Auto-PR.
+- Review trigger: `/qa`, `/pr`, or Auto-PR.
 
 ## 2. Goals and Non-Goals
 
@@ -78,7 +78,7 @@ and their optional delegation through Codex's native subagents.
 - `REVIEW-fix-pr`: `/fix-pr` starts an ordinary visible follow-up turn for the
   PR currently registered to the session. It does not infer or create a PR when
   no registered identity exists.
-- `REVIEW-auto-guidance`: Auto-QA or Auto-PR adds the corresponding review or
+- `REVIEW-auto-guidance`: Auto-PR adds review and
   publication/watch context through the editable Hitch extra instructions in
   the original coding turn's developer instructions. The default guidance
   completes the selected workflow in that turn and suppresses automatic work
@@ -112,7 +112,7 @@ and their optional delegation through Codex's native subagents.
 - `REVIEW-accept-native`: Delegating review uses Codex's native `spawn_agent`
   path and returns findings to the coding agent without Hitch review-runtime
   processes or callbacks.
-- `REVIEW-accept-ordinary-turns`: `/qa`, `/pr`, `/pr-now`, `/fix-pr`, Auto-QA,
+- `REVIEW-accept-ordinary-turns`: `/qa`, `/pr`, `/pr-now`, `/fix-pr`,
   and Auto-PR run as ordinary visible turns with normal steering, stopping, and
   failure display.
 - `REVIEW-accept-no-loop`: Reviewer findings alone never cause Hitch to start a

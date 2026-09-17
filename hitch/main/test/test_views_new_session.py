@@ -53,7 +53,6 @@ from hitch.main.test.support import (
 )
 from hitch.main.test.views_helpers import (
     _AUTO_PR_COOKIE,
-    _AUTO_QA_COOKIE,
     _ENABLE_MEMORIES_COOKIE,
     _EXTRA_SYSTEM_PROMPT_COOKIE,
     _LAST_SELECTED_REPO_COOKIE,
@@ -701,7 +700,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
     @patch("hitch.main.runtime.codex_pool.spawn_new_session")
     @patch("hitch.main.repos.discover_repos")
-    def test_new_session_accept_preserves_proposal_auto_qa_setting(
+    def test_new_session_accept_ignores_retired_proposal_setting(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
@@ -727,13 +726,13 @@ class NewSessionViewTests(TestCase):
                 "prompt": prompt,
                 "cwd": self.REPO,
                 "proposed_session": str(proposal.pk),
-                "auto_qa": "false",
+                "auto_qa": "true",
             },
         )
 
         self.assertEqual(response.status_code, 302)
         metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertTrue(metadata.auto_qa_enabled)
+        self.assertFalse(metadata.auto_pr_enabled)
         self.assertEqual(RecentPrompt.objects.get().prompt, prompt)
         self.assertEqual(RecentPrompt.objects.get().project, project)
         proposal.refresh_from_db()
@@ -749,7 +748,6 @@ class NewSessionViewTests(TestCase):
             hitch_extra_instructions=hitch_instructions_for_turn(
                 None,
                 auto_pr_enabled=False,
-                auto_qa_enabled=True,
             ),
             thread_name="Add parser coverage",
         )
@@ -776,7 +774,6 @@ class NewSessionViewTests(TestCase):
             outcome_metadata={
                 "resume_source_session": True,
                 "auto_pr_enabled": True,
-                "auto_qa_enabled": False,
             },
         )
         mock_spawn.return_value = SimpleNamespace(thread_id="fresh-recovery")
@@ -811,7 +808,6 @@ class NewSessionViewTests(TestCase):
             hitch_extra_instructions=hitch_instructions_for_turn(
                 None,
                 auto_pr_enabled=True,
-                auto_qa_enabled=False,
                 pr_title=proposal.title,
             ),
             thread_name=proposal.title,
@@ -1001,7 +997,6 @@ class NewSessionViewTests(TestCase):
                     "hitch_extra_instructions": hitch_instructions_for_turn(
                         None,
                         auto_pr_enabled=case["expected"],
-                        auto_qa_enabled=False,
                     ),
                     "developer_instructions": None,
                     "model": None,
@@ -1094,19 +1089,18 @@ class NewSessionViewTests(TestCase):
         _setup_codex(mock_codex, models=[_make_model("gpt-default", is_default=True)])
         project = _make_project(repo_path=self.REPO, extra_system_prompt="Use project fixtures.")
         cases = (
-            (False, False, False, False),
-            (False, True, False, False),
-            (True, False, False, False),
-            (True, False, True, False),
-            (True, False, False, True),
-            (True, False, True, True),
+            (False, False, False),
+            (True, False, False),
+            (True, True, False),
+            (True, False, True),
+            (True, True, True),
         )
-        for index, (guidance_override, (auto_pr, auto_qa, plan_mode, image_only)) in enumerate(
+        for index, (guidance_override, (auto_pr, plan_mode, image_only)) in enumerate(
             product((None, "Use my Hitch workflow.\nKeep explanations brief.", ""), cases)
         ):
             with (
                 self.subTest(
-                    guidance=guidance_override, auto_pr=auto_pr, auto_qa=auto_qa, plan=plan_mode, image=image_only
+                    guidance=guidance_override, auto_pr=auto_pr, plan=plan_mode, image=image_only
                 ),
                 tempfile.TemporaryDirectory() as raw,
                 override_settings(CODEX_EVENTS_DIR=Path(raw)),
@@ -1126,7 +1120,6 @@ class NewSessionViewTests(TestCase):
                     "prompt": prompt,
                     "project": str(project.pk),
                     "auto_pr": str(auto_pr).lower(),
-                    "auto_qa": str(auto_qa).lower(),
                     "plan_mode": str(plan_mode).lower(),
                 }
                 if image_only:
@@ -1138,7 +1131,7 @@ class NewSessionViewTests(TestCase):
                 expected: dict[str, Any] = {
                     "developer_instructions": "Use personal conventions.\n\nUse project fixtures.",
                     "hitch_extra_instructions": hitch_instructions_for_turn(
-                        guidance_override, auto_pr_enabled=auto_pr, auto_qa_enabled=auto_qa, plan_mode=plan_mode
+                        guidance_override, auto_pr_enabled=auto_pr, plan_mode=plan_mode
                     ),
                     "model": "gpt-default",
                     "reasoning_effort": None if plan_mode else "high",
@@ -1406,8 +1399,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         # A coding-agent proposal leaves the inbox's
         # auto-review inputs empty, so the proposal did not request auto-review.
-        # Accepting it via /qa with global auto-QA enabled must not persist
-        # auto-QA on the session: only proposal-requested settings carry forward.
+        # Only proposal-requested Auto-PR settings carry forward after /qa.
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
         mock_create_thread.return_value = "coding-proposal-thread"
@@ -1417,7 +1409,7 @@ class NewSessionViewTests(TestCase):
             title="Tidy up logging",
         )
         client = Client()
-        _seed_cookies(client, **{_AUTO_QA_COOKIE: "true"})
+        _seed_cookies(client, **{_AUTO_PR_COOKIE: "true"})
 
         response = client.post(
             reverse("new_session"),
@@ -1433,7 +1425,6 @@ class NewSessionViewTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         metadata = SessionMetadata.objects.get(thread_id="coding-proposal-thread")
-        self.assertFalse(metadata.auto_qa_enabled)
         self.assertFalse(metadata.auto_pr_enabled)
 
     @patch("hitch.main.runtime.codex_pool._spawn_turn")

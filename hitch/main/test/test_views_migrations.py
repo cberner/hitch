@@ -1609,3 +1609,39 @@ class SessionApprovalSnapshotMigrationTests(TransactionTestCase):
             "watch_approval_mode": "deny_all", "watch_approval_owner_id": None,
         })
         self.assertEqual(pr_model.objects.get(thread_id="unrelated").state, pr_state)
+
+
+class RemoveAutoQaMigrationTests(TransactionTestCase):
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor
+
+    def test_removes_settings_without_changing_auto_pr_or_session_history(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        previous = [("main", "0084_session_approval_snapshots")]
+        old_apps = self._migrate(previous).loader.project_state(previous).apps
+        user = old_apps.get_model("auth", "User").objects.create(username="retired-setting")
+        old_apps.get_model("main", "UserSettings").objects.create(
+            user=user, auto_qa_enabled=True, auto_pr_enabled=True,
+        )
+        old_apps.get_model("main", "SessionMetadata").objects.create(
+            thread_id="retired-setting", codex_name="Keep this session",
+            auto_qa_enabled=True, auto_pr_enabled=False,
+        )
+
+        new_apps = self._migrate(leaf).loader.project_state(leaf).apps
+        for model_name, lookup, expected_auto_pr in (
+            ("UserSettings", {"user_id": user.pk}, True),
+            ("SessionMetadata", {"thread_id": "retired-setting"}, False),
+        ):
+            model = new_apps.get_model("main", model_name)
+            self.assertIs(model.objects.get(**lookup).auto_pr_enabled, expected_auto_pr)
+            with self.assertRaises(FieldDoesNotExist):
+                model._meta.get_field("auto_qa_enabled")
+            with connection.cursor() as cursor:
+                columns = connection.introspection.get_table_description(cursor, model._meta.db_table)
+            self.assertNotIn("auto_qa_enabled", {column.name for column in columns})
+        session = new_apps.get_model("main", "SessionMetadata").objects.get(thread_id="retired-setting")
+        self.assertEqual(session.codex_name, "Keep this session")

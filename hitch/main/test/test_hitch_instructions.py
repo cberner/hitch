@@ -43,19 +43,19 @@ class HitchInstructionsTests(SimpleTestCase):
             self.assertIsNone(instruction_baseline.recorded_developer_instructions(path))
 
     def test_defaults_follow_selected_workflow(self) -> None:
-        for auto_pr, auto_qa, plan, workflow in (
-            (False, False, False, "None"),
-            (False, True, False, "Auto-QA"),
-            (True, True, False, "Auto-PR"),
-            (True, True, True, "Plan"),
+        for auto_pr, plan, workflow in (
+            (False, False, "None"),
+            (True, False, "Auto-PR"),
+            (True, True, "Plan"),
         ):
             with self.subTest(workflow=workflow):
                 text = hitch_instructions_for_turn(
-                    None, auto_pr_enabled=auto_pr, auto_qa_enabled=auto_qa,
+                    None, auto_pr_enabled=auto_pr,
                     plan_mode=plan, pr_title=" Proposed\nchange ",
                 )
                 self.assertTrue(text.startswith(f"Hitch workflow for this turn: {workflow}."))
                 self.assertTrue(text.endswith(DEFAULT_HITCH_EXTRA_INSTRUCTIONS))
+                self.assertNotIn("Auto-QA", text)
                 self.assertEqual("Requested pull request title: Proposed change" in text, auto_pr and not plan)
 
     def test_override_replaces_defaults_and_empty_disables(self) -> None:
@@ -65,4 +65,4 @@ class HitchInstructionsTests(SimpleTestCase):
             f"Hitch workflow for this turn: Auto-PR.\n\n{custom}",
         )
         self.assertEqual(hitch_instructions_for_turn("", auto_pr_enabled=True), "")
-        self.assertEqual(hitch_instructions_for_turn(" \n", auto_qa_enabled=True), "")
+        self.assertEqual(hitch_instructions_for_turn(" \n", auto_pr_enabled=True), "")

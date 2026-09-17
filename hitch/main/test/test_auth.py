@@ -28,7 +28,6 @@ _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
-_AUTO_QA_COOKIE = "hitch_auto_qa"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -89,7 +88,7 @@ class AuthViewTests(TestCase):
                 ),
                 _USE_WORKTREES_COOKIE: "true",
                 _AUTO_PR_COOKIE: "true",
-                _AUTO_QA_COOKIE: "true",
+                "hitch_auto_qa": "true",
                 _SHOW_ARCHIVED_COOKIE: "true",
                 _LAST_SELECTED_REPO_COOKIE: "/home/user/proj",
                 _ENABLE_MEMORIES_COOKIE: "true",
@@ -110,14 +109,13 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.extra_system_prompt, "Prefer focused tests.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
-        self.assertTrue(settings.auto_qa_enabled)
+        self.assertNotIn("hitch_auto_qa", response.cookies)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
         self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/proj"
@@ -161,7 +159,6 @@ class AuthViewTests(TestCase):
             approval_mode="deny_all",
             use_worktrees=True,
             auto_pr_enabled=True,
-            auto_qa_enabled=True,
             last_selected_repo="/home/user/stored",
         )
         self.client.force_login(user)
@@ -175,7 +172,6 @@ class AuthViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/stored"
         )
@@ -286,7 +282,6 @@ class AuthenticatedSettingsTests(TestCase):
                 "extra_system_prompt": "  Keep it small.  ",
                 "use_worktrees": "true",
                 "auto_pr": "true",
-                "auto_qa": "true",
                 "show_archived_sessions": "true",
                 "enable_memories": "true",
             },
@@ -299,14 +294,12 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
-        self.assertTrue(settings.auto_qa_enabled)
         self.assertTrue(settings.show_archived_sessions)
         self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "readOnly")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
 
     def test_archived_visibility_update_preserves_other_account_settings(self) -> None:
@@ -321,7 +314,6 @@ class AuthenticatedSettingsTests(TestCase):
             extra_system_prompt="Keep it small.",
             use_worktrees=True,
             auto_pr_enabled=True,
-            auto_qa_enabled=True,
             show_archived_sessions=False,
             last_selected_repo="/home/user/proj",
         )
@@ -340,7 +332,6 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.auto_pr_enabled)
-        self.assertTrue(settings.auto_qa_enabled)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
@@ -360,7 +351,6 @@ class AuthenticatedSettingsTests(TestCase):
             approval_mode="deny_all",
             use_worktrees=True,
             auto_pr_enabled=True,
-            auto_qa_enabled=True,
             last_selected_repo="/home/user/account",
             enable_memories=True,
         )
@@ -374,7 +364,6 @@ class AuthenticatedSettingsTests(TestCase):
                 _APPROVAL_COOKIE: "approve_all",
                 _USE_WORKTREES_COOKIE: "false",
                 _AUTO_PR_COOKIE: "false",
-                _AUTO_QA_COOKIE: "false",
                 _LAST_SELECTED_REPO_COOKIE: "/home/user/cookie",
                 _ENABLE_MEMORIES_COOKIE: "false",
             },
@@ -398,7 +387,9 @@ class AuthenticatedSettingsTests(TestCase):
             settings_response, 'name="use_worktrees" value="true" checked'
         )
         self.assertContains(settings_response, 'name="auto_pr" value="true" checked')
-        self.assertContains(settings_response, 'name="auto_qa" value="true" checked')
+        for response in (settings_response, new_session_response):
+            self.assertNotContains(response, "Auto-QA")
+            self.assertNotContains(response, 'name="auto_qa"')
         self.assertContains(
             settings_response, 'name="enable_memories" value="true" checked'
         )
@@ -413,7 +404,6 @@ class AuthenticatedSettingsTests(TestCase):
             _cookie_value(new_session_response, _USE_WORKTREES_COOKIE), "true"
         )
         self.assertEqual(_cookie_value(new_session_response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(new_session_response, _AUTO_QA_COOKIE), "true")
         self.assertEqual(
             _cookie_value(new_session_response, _LAST_SELECTED_REPO_COOKIE),
             "/home/user/account",
