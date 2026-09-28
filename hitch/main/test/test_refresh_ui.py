@@ -352,20 +352,22 @@ class UsageRefreshTests(TestCase):
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import sync_playwright
 
-        from hitch.main.test.support import _seed_cookies
-        from hitch.main.test.views_helpers import _SHOW_ARCHIVED_COOKIE
+        from hitch.main.test.support import _make_project, _seed_cookies
+        from hitch.main.test.views_helpers import _SELECTED_PROJECT_COOKIE, _SHOW_ARCHIVED_COOKIE
 
         path = _make_rollout(
             self, [_token_count_line(input_tokens=400, cached_input_tokens=50, output_tokens=600, total_tokens=1000)]
         )
-        row = _seed_usage_metadata("browser", path=path)
+        project = _make_project()
+        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
+        row = _seed_usage_metadata("browser", path=path, project=project)
         _cache_token_usage(
             "browser", input_tokens=10, cached_input_tokens=0, output_tokens=20, total_tokens=30, path=""
         )
-        usage = self.client.get(reverse("usage"))
+        usage = self.client.get(reverse("profile"))
         token_usage._refresh_usage_token_cache_best_effort(token_usage._usage_token_refresh_candidates([row]))
-        usage_result = self.poll(usage.context["usage_cursor"])
-        other = _seed_usage_metadata("other-browser", path=path)
+        usage_result = self.poll(usage.context["usage_cursor"], profile=True)
+        other = _seed_usage_metadata("other-browser", path=path, project=project)
         other.codex_updated_at = (row.codex_updated_at or timezone.now()) - timedelta(days=1)
         other.save(update_fields=["codex_updated_at"])
         session_index.update_cached_name(other.thread_id, "Other original")
@@ -388,7 +390,7 @@ class UsageRefreshTests(TestCase):
                 errors: list[str] = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.clock.install()
-                page.route("http://hitch.test/usage/", lambda route: route.fulfill(body=usage.content.decode()))
+                page.route("http://hitch.test/profile/", lambda route: route.fulfill(body=usage.content.decode()))
                 usage_requests: list[str] = []
 
                 def serve_usage(route: Any) -> None:
@@ -396,12 +398,21 @@ class UsageRefreshTests(TestCase):
                     route.fulfill(json=usage_result)
 
                 page.route("http://hitch.test/usage/refresh/**", serve_usage)
-                page.goto("http://hitch.test/usage/")
-                page.locator("[data-lifetime-total-toggle]").click()
+                page.goto("http://hitch.test/profile/")
+                page.locator('[aria-controls="lifetime-total-chart"]').click()
+                project_toggle = page.locator('[aria-controls="project-total-chart"]')
+                project_toggle.focus()
+                project_toggle.press("Enter")
                 page.clock.run_for(1000)
                 page.wait_for_function("!document.body.textContent.includes('Refreshing session token usage')")
                 self.assertIn("600", page.locator("[data-usage-root]").inner_text())
-                self.assertEqual(page.locator("[data-lifetime-total-toggle]").get_attribute("aria-expanded"), "true")
+                for chart_id in ("lifetime-total-chart", "project-total-chart"):
+                    toggle = page.locator(f'[aria-controls="{chart_id}"]')
+                    self.assertEqual(toggle.get_attribute("aria-expanded"), "true")
+                    self.assertTrue(page.locator(f"#{chart_id}").is_visible())
+                self.assertTrue(project_toggle.evaluate("el => el === document.activeElement"))
+                project_toggle.press("Space")
+                self.assertFalse(page.locator("#project-total-chart").is_visible())
                 page.clock.run_for(5000)
                 self.assertEqual(len(usage_requests), 1)
 

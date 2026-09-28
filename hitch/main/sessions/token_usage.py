@@ -39,7 +39,6 @@ from hitch.main.runtime.rollout_state import (
 )
 from hitch.main.runtime.sdk_values import updated_at_seconds
 from hitch.main.sessions import session_index
-from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -430,25 +429,13 @@ def _lifetime_token_usage_for_metadata(
     *,
     selected_project_id: int | None = None,
 ) -> dict[str, Any]:
-    legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
-    hidden_thread_ids = system_agents.hidden_thread_ids()
-    hidden_thread_ids.update(
-        metadata.thread_id
-        for metadata in metadata_rows
-        if metadata.codex_thread_source == "subagent"
-        and metadata.thread_id not in legacy_promoted_ids
-    )
     cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
         metadata.thread_id for metadata in metadata_rows
     )
     total_usage = _empty_lifetime_token_usage()
-    session_usage = _empty_lifetime_token_usage()
-    system_usage = _empty_lifetime_token_usage()
     selected_project_usage = _empty_lifetime_token_usage()
-    selected_project_system_usage = _empty_lifetime_token_usage()
     total_by_date: dict[str, dict[str, int]] = {}
-    session_by_date: dict[str, dict[str, int]] = {}
-    system_by_date: dict[str, dict[str, int]] = {}
+    selected_project_by_date: dict[str, dict[str, int]] = {}
     refresh_pending_count = 0
     partial_count = 0
     for metadata in metadata_rows:
@@ -462,14 +449,9 @@ def _lifetime_token_usage_for_metadata(
             continue
         daily_usage = _daily_token_usage_from_cache(cache)
         usage = _token_usage_from_cache(cache)
-        is_system = metadata.thread_id in hidden_thread_ids
         total_usage["input"] += _non_cached_input_tokens(usage)
         total_usage["output"] += usage.get("output_tokens", 0)
         total_usage["cached"] += usage.get("cached_input_tokens", 0)
-        bucket = system_usage if is_system else session_usage
-        bucket["input"] += _non_cached_input_tokens(usage)
-        bucket["output"] += usage.get("output_tokens", 0)
-        bucket["cached"] += usage.get("cached_input_tokens", 0)
         if (
             selected_project_id is not None
             and metadata.project_id == selected_project_id
@@ -477,31 +459,14 @@ def _lifetime_token_usage_for_metadata(
             selected_project_usage["input"] += _non_cached_input_tokens(usage)
             selected_project_usage["output"] += usage.get("output_tokens", 0)
             selected_project_usage["cached"] += usage.get("cached_input_tokens", 0)
-            if is_system:
-                selected_project_system_usage["input"] += _non_cached_input_tokens(
-                    usage
-                )
-                selected_project_system_usage["output"] += usage.get("output_tokens", 0)
-                selected_project_system_usage["cached"] += usage.get(
-                    "cached_input_tokens", 0
-                )
+            _merge_daily_token_usage(selected_project_by_date, daily_usage)
         _merge_daily_token_usage(total_by_date, daily_usage)
-        _merge_daily_token_usage(
-            system_by_date if is_system else session_by_date,
-            daily_usage,
-        )
-    lifetime_usage = _formatted_lifetime_token_usage(
-        total_usage=total_usage,
-        session_usage=session_usage,
-        system_usage=system_usage,
-        total_by_date=total_by_date,
-        session_by_date=session_by_date,
-        system_by_date=system_by_date,
-    )
+    lifetime_usage: dict[str, Any] = {
+        "total": _formatted_lifetime_token_usage(total_usage, total_by_date),
+    }
     if selected_project_id is not None:
         lifetime_usage["selected_project"] = {
-            "total": _format_lifetime_token_usage(selected_project_usage),
-            "system": _format_lifetime_token_usage(selected_project_system_usage),
+            "total": _formatted_lifetime_token_usage(selected_project_usage, selected_project_by_date),
         }
     lifetime_usage["refresh_pending"] = refresh_pending_count > 0
     lifetime_usage["refresh_pending_count"] = refresh_pending_count
@@ -895,30 +860,13 @@ def _write_missing_path_terminal_token_usage_cache(
 
 
 def _formatted_lifetime_token_usage(
-    *,
-    total_usage: Mapping[str, int],
-    session_usage: Mapping[str, int],
-    system_usage: Mapping[str, int],
-    total_by_date: Mapping[str, Mapping[str, int]],
-    session_by_date: Mapping[str, Mapping[str, int]],
-    system_by_date: Mapping[str, Mapping[str, int]],
+    usage: Mapping[str, int],
+    usage_by_date: Mapping[str, Mapping[str, int]],
 ) -> dict[str, Any]:
     return {
-        "total": {
-            **_format_lifetime_token_usage(total_usage),
-            "chart": _format_lifetime_token_chart(total_by_date),
-            "chart_axis": _format_lifetime_token_chart_axis(total_by_date),
-        },
-        "sessions": {
-            **_format_lifetime_token_usage(session_usage),
-            "chart": _format_lifetime_token_chart(session_by_date),
-            "chart_axis": _format_lifetime_token_chart_axis(session_by_date),
-        },
-        "system": {
-            **_format_lifetime_token_usage(system_usage),
-            "chart": _format_lifetime_token_chart(system_by_date),
-            "chart_axis": _format_lifetime_token_chart_axis(system_by_date),
-        },
+        **_format_lifetime_token_usage(usage),
+        "chart": _format_lifetime_token_chart(usage_by_date),
+        "chart_axis": _format_lifetime_token_chart_axis(usage_by_date),
     }
 
 
