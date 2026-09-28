@@ -59,7 +59,7 @@ def save_session_approval(
         raise ValueError("invalid approval mode")
     resolved = resolve_approval(SessionMetadata(approval_mode=override), defaults)
     owner_id = CodexInstance.objects.filter(
-        thread_id=thread_id, purpose=CodexInstance.PURPOSE_USER,
+        thread_id=thread_id,
     ).order_by("-pk").values_list("pk", flat=True).first()
     SessionMetadata.objects.update_or_create(
         thread_id=thread_id,

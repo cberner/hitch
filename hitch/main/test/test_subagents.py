@@ -158,11 +158,6 @@ class SubagentViewTests(TestCase):
         response = self.client.get(reverse("session", args=["parent"]))
         html = response.content.decode()
         self.assertIn("data-agent-select", html)
-        read_only = common._render_session_detail(
-            response.wsgi_request, "parent", read_only=True,
-        )
-        self.assertContains(read_only, "data-agent-select")
-        self.assertNotContains(read_only, '<form class="composer"')
         state: dict[str, Any] = {
             "fail": False, "text": "Child response", "next_url": "/sessions/parent/agents/?agent=child&before=20",
         }

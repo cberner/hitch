@@ -30,23 +30,6 @@ ARCHIVED_SESSIONS_DIR = "archived_sessions"
 # ``archived_sessions`` parent.
 _ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
 STALE_AFTER = timedelta(seconds=30)
-HIDDEN_SYSTEM_THREAD_SOURCE = "subagent"
-AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = "You are Hitch's autonomous goal agent."
-AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = (
-    "You are Hitch's autonomous goal confidence judge."
-)
-LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = "You are Hitch's standing order agent."
-LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = (
-    "You are Hitch's standing order confidence judge."
-)
-_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLES = (
-    AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
-    LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
-)
-_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLES = (
-    AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
-    LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
-)
 
 
 class RefreshResult(NamedTuple):
@@ -242,7 +225,6 @@ def upsert_local_session(
     archived: bool = False,
     auto_pr_enabled: bool | None = None,
     codex_path: str | None = None,
-    is_hidden_system_session: bool = False,
 ) -> SessionMetadata:
     now = timezone.now()
     existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
@@ -266,7 +248,6 @@ def upsert_local_session(
     defaults["project_cleared"] = project_cleared
     if auto_pr_enabled is not None:
         defaults["auto_pr_enabled"] = auto_pr_enabled
-    defaults["is_hidden_system_session"] = is_hidden_system_session
     metadata, _created = SessionMetadata.objects.update_or_create(
         thread_id=thread_id,
         defaults=defaults,
@@ -362,39 +343,6 @@ def display_title_for(*, thread_id: str, name: object, preview: object) -> str:
     if len(candidate) > DISPLAY_TITLE_MAX_LEN:
         return candidate[:DISPLAY_TITLE_MAX_LEN].rstrip() + "..."
     return candidate
-
-
-def hidden_system_session_from_metadata(
-    *, name: str, preview: str, thread_source: str
-) -> bool:
-    if thread_source == HIDDEN_SYSTEM_THREAD_SOURCE:
-        return True
-    if name in _AUTONOMOUS_GOAL_AGENT_PROMPT_TITLES:
-        return (
-            preview.startswith(f"{name}\n\n")
-            and (
-                (
-                    "Autonomous goal title:" in preview
-                    and "Autonomous goal objective:" in preview
-                )
-                or (
-                    "Standing order title:" in preview
-                    and "Standing order goal:" in preview
-                )
-            )
-            and "Return only JSON matching this shape:" in preview
-        )
-    if name in _AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLES:
-        return (
-            preview.startswith(f"{name}\n\n")
-            and (
-                "Autonomous goal title:" in preview
-                or "Standing order title:" in preview
-            )
-            and "Candidate session JSON:" in preview
-            and "Return only JSON matching this shape:" in preview
-        )
-    return False
 
 
 def updated_at_seconds(value: Any) -> float:
@@ -533,13 +481,6 @@ def _codex_defaults(
     codex_updated_at = updated_at or created_at or now
     if existing is not None and existing.codex_updated_at is not None:
         codex_updated_at = max(codex_updated_at, existing.codex_updated_at)
-    is_hidden_system_session = hidden_system_session_from_metadata(
-        name=name_value,
-        preview=preview_value,
-        thread_source=thread_source,
-    )
-    if existing is not None and existing.is_hidden_system_session:
-        is_hidden_system_session = True
     return {
         "cwd": cwd,
         "codex_display_title": display_title_for(
@@ -554,7 +495,6 @@ def _codex_defaults(
         "codex_path": path if isinstance(path, str) else "",
         "codex_thread_source": thread_source,
         "codex_last_synced_at": now,
-        "is_hidden_system_session": is_hidden_system_session,
     }
 
 

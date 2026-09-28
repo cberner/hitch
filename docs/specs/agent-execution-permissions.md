@@ -6,7 +6,7 @@ Status: Draft
 
 ### 1.1 Purpose
 
-Define how Hitch controls local Codex execution, escalation approvals, and non-interactive system-session behavior.
+Define how Hitch controls local Codex execution and escalation approvals.
 
 ### 1.2 Definitions
 
@@ -14,9 +14,8 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Approval mode: How Hitch resolves Codex escalation requests.
 - Escalation: A Codex request for Hitch to approve, decline, cancel, or amend a command/file-change decision.
 - User session: A user-visible Codex session.
-- System session: A historical Hitch-owned background session. The visible coding turn that publishes a PR and invokes `hitch.watch_pr` is a user session, not a system session.
 - Session-scoped tool: An immutable dynamic tool registered on a visible coding
-  session. Handlers verify the invoking session's purpose before dispatch.
+  session.
 
 ## 2. Goals and Non-Goals
 
@@ -25,13 +24,11 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - Give users clear sandbox and approval controls.
 - Make `Approve all (dangerous)` explicit: no prompts, no policy amendments, and fail closed when plain acceptance is unavailable.
 - Keep prompts predictable across Auto review, Always prompt, Deny all, and Approve all.
-- Keep system sessions least-privileged, isolated when write-capable, and non-interactive.
 - Persist escalation decisions safely and race-free.
 
 ### 2.2 Non-Goals
 
 - Replace Codex's internal sandbox or reviewer.
-- Prompt users for system-session escalations.
 - Relax sandboxing because an escalation failed.
 
 ## 3. User Stories
@@ -39,8 +36,6 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - As a user, I can choose read-only, workspace-write, or full-access execution.
 - As a user, I can choose Auto review, Always prompt, Deny all, or Approve all behavior.
 - As a user, I can change a user session's approval behavior without restarting it.
-- As a user, background workflows never interrupt me with approval prompts.
-- As a workflow author, I can run read-only system analysis and inherit permissions only when writes and isolation require it.
 
 ## 4. Requirements
 
@@ -75,7 +70,7 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
   Session metadata owns approval snapshots independently of PR registration;
   changing permissions does not create or modify PR records or historical workers.
 - `PERM-session-approval-override`: A user session may override the global approval mode.
-- `PERM-proposal-accept-permissions`: Accepted Proposals re-resolve sandbox and approval as user sessions; system-only state must not carry over.
+- `PERM-proposal-accept-permissions`: Accepted Proposals re-resolve sandbox and approval as user sessions.
 - `PERM-live-approval-update`: Updating a running user session's approval mode affects future Hitch-routed escalations; non-routed server-side decisions use the new mode on the next turn or routed escalation.
 - `PERM-live-approval-resolve`: Switching to Deny all or Approve all resolves compatible pending Hitch prompts according to the new mode.
 - `PERM-sandbox-start-scope`: Sandbox policy is selected when a session or turn starts; later setting changes do not affect that turn except through offered escalation decisions.
@@ -119,21 +114,13 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-stop-quiet-turn`: Stopping an active session requests Codex cancellation without waiting for another stream event, including while a command is running silently; a later Stop may force-kill a turn that does not cancel.
 - `PERM-decision-race-safe`: Concurrent decisions for one request resolve exactly once; later attempts receive already-resolved results.
 
-### 4.5 Historical System Sessions
-
-- `PERM-system-retired`: Hitch no longer starts hidden background workflow
-  sessions. Their historical logs and approval audit remain readable.
-- `PERM-system-tools-unavailable`: Hidden system sessions receive no Hitch tools,
-  and tool handlers reject calls from retired hidden roles.
-
-### 4.6 UX Requirements
+### 4.5 UX Requirements
 
 - `PERM-settings-copy`: Settings copy explains sandbox policy versus approval mode.
 - `PERM-session-copy`: Session UI shows effective sandbox, approval mode, whether each follows defaults or overrides them, and dangerous labels where relevant.
 - `PERM-danger-confirmation`: Dangerous settings require explicit selection and are never defaults or reset selections.
 - `PERM-approval-events`: Session streams show approval-requested and approval-resolved events for interactive prompts.
 - `PERM-automatic-approval-events`: Automatic approvals, denials, and fail-closed resolutions create audit entries on the session detail page without prompts.
-- `PERM-hidden-automatic-approval-audit`: Historical system-session approval audit remains on that system session's detail page.
 - `PERM-noninteractive-no-noise`: Non-interactive approvals/denials do not prompt, but denial and fail-closed failures remain diagnosable.
 
 ## 5. Success Criteria
@@ -145,4 +132,4 @@ Define how Hitch controls local Codex execution, escalation approvals, and non-i
 - `PERM-accept-user-decision-validated`: User and automatic decisions must be offered by Codex; unavailable, timed-out, stopped, or racing decisions fail safe.
 - `PERM-accept-stop-quiet-turn`: A user can stop a turn that is blocked in a silent command without waiting for that command to emit output.
 - `PERM-accept-proposal-permissions-reset`: Accepted Proposals re-resolve sandbox and approval as user sessions.
-- `PERM-accept-automatic-approval-audit`: Non-interactive approvals, denials, and fail-closed outcomes are visible on the session detail page; historical system-session outcomes remain readable on their log pages.
+- `PERM-accept-automatic-approval-audit`: Non-interactive approvals, denials, and fail-closed outcomes are visible on the session detail page.

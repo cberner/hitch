@@ -1645,3 +1645,132 @@ class RemoveAutoQaMigrationTests(TransactionTestCase):
             self.assertNotIn("auto_qa_enabled", {column.name for column in columns})
         session = new_apps.get_model("main", "SessionMetadata").objects.get(thread_id="retired-setting")
         self.assertEqual(session.codex_name, "Keep this session")
+
+
+class RemoveRetiredAutomationMigrationTests(TransactionTestCase):
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor
+
+    def test_discards_automation_and_archives_threads_without_resurrecting_them(self) -> None:
+        from django.urls import reverse
+
+        from hitch.main.sessions import session_index
+        from hitch.main.test.support import _seed_cookies
+
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        previous = [("main", "0085_remove_auto_qa")]
+        old = self._migrate(previous).loader.project_state(previous).apps
+        metadata_model = old.get_model("main", "SessionMetadata")
+        instance_model = old.get_model("main", "CodexInstance")
+        workflow_model = old.get_model("main", "SystemWorkflow")
+        run_model = old.get_model("main", "SystemAgentRun")
+        proposal_model = old.get_model("main", "ProposedSession")
+        approval_model = old.get_model("main", "ApprovalRequest")
+        now = timezone.now()
+        workflow = workflow_model.objects.create(kind="qa", main_thread_id="ordinary", cwd="/repo")
+        for thread_id, source, hidden in (
+            ("ordinary", "cli", False),
+            ("flag-only", "cli", True),
+            ("native", "subagent", True),
+            ("accepted", "subagent", True),
+            ("run-only", "subagent", False),
+            ("placeholder", "cli", False),
+        ):
+            metadata_model.objects.create(
+                thread_id=thread_id,
+                cwd="/repo",
+                codex_display_title=f"Title {thread_id}",
+                codex_updated_at=None if thread_id == "placeholder" else now,
+                codex_thread_source=source,
+                is_hidden_system_session=hidden,
+            )
+        for thread_id, purpose in (
+            ("ordinary", "user"),
+            ("ordinary", "system_feedback"),
+            ("worker-only", "system_agent"),
+            ("placeholder", "system_agent"),
+            ("accepted", "system_agent"),
+            ("run-only", "user"),
+        ):
+            instance = instance_model.objects.create(
+                pid=0,
+                thread_id=thread_id,
+                cwd="/repo",
+                events_path="/dev/null",
+                purpose=purpose,
+                status="completed",
+                workflow_id=workflow.pk,
+            )
+            if thread_id == "run-only":
+                run_model.objects.create(workflow=workflow, instance=instance, thread_id=thread_id, agent_kind="qa")
+            if purpose == "system_agent":
+                approval_model.objects.create(instance=instance, method="test", params={}, decision="cancel")
+        proposal = proposal_model.objects.create(
+            title="Accepted work",
+            outcome_status="accepted",
+            accepted_session=metadata_model.objects.get(thread_id="accepted"),
+        )
+        notice = proposal_model.objects.create(title="Old notice", inbox_kind="notice")
+        pending = proposal_model.objects.create(
+            title="Follow-up", source_session=metadata_model.objects.get(thread_id="ordinary")
+        )
+        apps = self._migrate(leaf).loader.project_state(leaf).apps
+        metadata_model = apps.get_model("main", "SessionMetadata")
+        proposal_model = apps.get_model("main", "ProposedSession")
+        self.assertFalse(proposal_model.objects.filter(pk=notice.pk).exists())
+        self.assertEqual(proposal_model.objects.filter(pk__in=[proposal.pk, pending.pk]).count(), 2)
+        self.assertFalse(apps.get_model("main", "ApprovalRequest").objects.exists())
+        self.assertEqual(apps.get_model("main", "CodexInstance").objects.count(), 2)
+        for name in ("SystemWorkflow", "SystemAgentRun"):
+            with self.assertRaises(LookupError):
+                apps.get_model("main", name)
+        for thread_id in ("flag-only", "worker-only", "placeholder", "run-only"):
+            row = metadata_model.objects.get(thread_id=thread_id)
+            self.assertTrue(row.codex_archived)
+            self.assertTrue(row.archive_local_only)
+            self.assertIsNotNone(row.codex_archived_at)
+            self.assertIsNotNone(row.codex_updated_at)
+            session_index.upsert_thread(
+                SimpleNamespace(
+                    id=thread_id,
+                    cwd="/repo",
+                    name="Stale Codex title",
+                    preview="",
+                    archived=False,
+                    thread_source="cli",
+                    updated_at=now.timestamp() + 1,
+                ),
+                projects=[],
+            )
+            row.refresh_from_db()
+            self.assertTrue(row.codex_archived)
+        for thread_id in ("ordinary", "accepted", "native"):
+            self.assertFalse(metadata_model.objects.get(thread_id=thread_id).codex_archived)
+        session_index.mark_synced(archived=False, complete=True)
+        session_index.mark_synced(archived=True, complete=True)
+        with patch("hitch.main.caches._start_models_refresh_thread"):
+            response = self.client.get(reverse("index"))
+            self.assertContains(response, "Title ordinary")
+            self.assertContains(response, "Title accepted")
+            for title in ("Title flag-only", "Title native", "Title run-only", "Title placeholder"):
+                self.assertNotContains(response, title)
+            _seed_cookies(self.client, hitch_show_archived_sessions="true")
+            response = self.client.get(reverse("index"))
+            self.assertContains(response, "Title flag-only")
+            self.assertNotContains(response, "Title native")
+        for url in ("/system-sessions/", "/system-sessions/flag-only/"):
+            self.assertEqual(self.client.get(url).status_code, 404)
+        with patch("hitch.main.views.common.Codex") as codex:
+            codex.thread_list.return_value = SimpleNamespace(data=[], next_cursor=None)
+            result = session_index.refresh_from_codex(
+                codex, projects=[], include_archived=True, use_state_db_only=False,
+            )
+        self.assertFalse(result.failed)
+        for thread_id in ("flag-only", "worker-only", "placeholder", "run-only"):
+            row = metadata_model.objects.get(thread_id=thread_id)
+            self.assertTrue(row.codex_archived)
+            self.assertTrue(row.archive_local_only)
+            self.assertIsNotNone(row.codex_updated_at)

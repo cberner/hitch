@@ -1041,7 +1041,6 @@
             const liveRoot = document.querySelector("[data-live-root]");
             const historyStartRequested = window.location.hash === "#history-start";
             const historyPartial = sessionMain && sessionMain.dataset.historyPartial === "true";
-            const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
             const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
             // The Django ``resolve_approval`` URL is templated with a
             // placeholder pk of ``0`` server-side; the JS swaps in the
@@ -1422,9 +1421,7 @@
                 header.className = "entry-header";
                 const role = document.createElement("span");
                 role.className = "role";
-                role.textContent = liveRoot && liveRoot.dataset.activeAuthor
-                    ? liveRoot.dataset.activeAuthor
-                    : "User";
+                role.textContent = "User";
                 header.appendChild(role);
                 header.appendChild(timestampElement(timestampSeconds, ""));
                 const msg = document.createElement("div");
@@ -2021,7 +2018,7 @@
                 detail.className = "approval-detail";
                 detail.textContent = approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
-                if (READ_ONLY || payload.automatic) {
+                if (payload.automatic) {
                     wrap.appendChild(box);
                     insertBeforeLive(wrap);
                     approvals.set(id, { node: wrap, box, actions: null, resolved: false });
@@ -2089,34 +2086,6 @@
                 header.className = "input-request-header";
                 header.textContent = params.isBlocking === false ? "Question · Codex is continuing" : "Question · Answer to continue";
                 box.appendChild(header);
-                if (READ_ONLY) {
-                    for (const question of questions) {
-                        const qid = typeof question.id === "string" ? question.id : "";
-                        if (!qid) continue;
-                        const qbox = document.createElement("div");
-                        qbox.className = "input-question";
-                        const qheader = document.createElement("div");
-                        qheader.className = "input-question-header";
-                        qheader.textContent = typeof question.header === "string" ? question.header : "";
-                        if (qheader.textContent) qbox.appendChild(qheader);
-                        const title = document.createElement("div");
-                        title.className = "input-question-title";
-                        title.textContent = typeof question.question === "string" ? question.question : qid;
-                        qbox.appendChild(title);
-                        box.appendChild(qbox);
-                    }
-                    wrap.appendChild(box);
-                    insertBeforeLive(wrap);
-                    inputRequests.set(id, {
-                        node: wrap,
-                        box,
-                        actions: null,
-                        answers: {},
-                        resolved: false,
-                    });
-                    followRenderedContent();
-                    return;
-                }
                 const answers = {};
                 const requiredQuestionIds = [];
                 let refreshSubmitState = () => {};

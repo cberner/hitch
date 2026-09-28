@@ -53,8 +53,6 @@ def _latest_user_instance_ended_in_plan_mode(session_id: str) -> bool:
     latest = codex_pool.latest_for_thread(session_id)
     return bool(
         latest is not None
-        and latest.purpose == CodexInstance.PURPOSE_USER
-        and latest.workflow_id is None
         and latest.status == CodexInstance.STATUS_COMPLETED
         and latest.plan_mode
     )

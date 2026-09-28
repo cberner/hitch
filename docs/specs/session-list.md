@@ -4,7 +4,7 @@ Status: Implemented
 
 ## Requirements
 
-- `LIST-refresh`: Session and system-session lists fetch updated rows in place
+- `LIST-refresh`: Session lists fetch updated rows in place
   every five seconds while visible, with an initial follow-up after one second
   to pick up background index refreshes. Names, activity ordering, archive
   state, and stages update using the current page's filters and pagination.
@@ -37,3 +37,14 @@ Status: Implemented
   overwrite the cache.
   Full-history and registered-PR stages remain available for durable classification.
   Each view keeps its existing badge formatting.
+
+- `LIST-retired-system-sessions`: The System sessions navigation, list, and
+  detail endpoints are removed. Upgrades archive retired threads with durable
+  local overrides; refreshes cannot restore them to the ordinary index.
+  Show archived may reveal archived threads. Native subagents remain in the
+  Agent picker instead of appearing as separate index rows, except for sessions
+  explicitly accepted from proposals.
+- `LIST-local-archive-restore`: Unarchive and accepted follow-up submissions
+  clear a local archive override when the rollout is already active in Codex.
+  They do not attempt to move that rollout. Rejected submissions retain the
+  local archive override and leave the active rollout in place.

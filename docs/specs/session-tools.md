@@ -4,15 +4,14 @@ Status: Draft
 
 ## 1. Overview
 
-Hitch exposes immutable, thread-scoped dynamic tools. Visible coding sessions
-receive user-session tools; hidden system sessions receive no tools.
+Hitch exposes immutable, thread-scoped dynamic tools. Coding sessions receive
+the same tool set; retired background roles are removed.
 
 ## 2. Requirements
 
 - `SESSIONTOOLS-quota-registration`: Newly created visible coding sessions
-  register `hitch.get_codex_quota`, with no arguments. Hidden system-agent
-  sessions do not receive it. Existing threads need a new session because
-  dynamic tool registration is immutable.
+  register `hitch.get_codex_quota`, with no arguments. Existing threads need a
+  new session because dynamic tool registration is immutable.
 - `SESSIONTOOLS-quota-fresh`: Every invocation synchronously requests
   `account/rateLimits/read` through a separate app-server transport. It must
   bypass Hitch's quota caches, background refresh, and refresh throttles, and
@@ -28,7 +27,7 @@ receive user-session tools; hidden system sessions receive no tools.
   threshold is reached. A failed check leaves quota unknown. This is a polling
   tool, not an automatic hard cap on usage between checks.
 - `SESSIONTOOLS-rename-registration`: Newly created visible coding sessions
-  register `hitch.rename_session`; hidden system-agent sessions do not. Dynamic
+  register `hitch.rename_session`. Dynamic
   tool registration is immutable, so sessions created before the tool was
   available require a new session to use it.
 - `SESSIONTOOLS-rename-current`: The tool renames only the invoking session. Its
@@ -40,10 +39,6 @@ receive user-session tools; hidden system sessions receive no tools.
 - `SESSIONTOOLS-rename-failure`: If Codex rejects the rename because the thread
   is archived or unknown, the tool returns an error and does not update Hitch's
   cached title.
-- `SESSIONTOOLS-role-registration`: Only visible coding sessions receive Hitch
-  tools. Hidden system sessions receive no tools.
-- `SESSIONTOOLS-role-authorization`: Tool handlers check the invoking session's
-  purpose before dispatch. Registration alone is not authorization.
 
 ## 3. Success Criteria
 
@@ -54,5 +49,3 @@ receive user-session tools; hidden system sessions receive no tools.
   name changes the invoking session's persisted and cached names.
 - `SESSIONTOOLS-rename-validation`: Invalid names fail without attempting a
   rename.
-- `SESSIONTOOLS-role-isolation-success`: Hidden system sessions cannot invoke
-  visible-session tools or retired autonomous-goal tools.

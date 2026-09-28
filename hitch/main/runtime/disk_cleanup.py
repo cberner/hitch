@@ -201,8 +201,8 @@ def _session_metadata_rows() -> list[SessionMetadata]:
             "codex_archived",
             "codex_archived_at",
             "codex_updated_at",
-            "is_hidden_system_session",
             "derived_stage",
+            "codex_thread_source",
         )
         .order_by("codex_updated_at", "pk")
     )
@@ -277,7 +277,7 @@ def _candidate_sort_key(
     candidate: _CleanupCandidate,
 ) -> tuple[int, datetime, int, str]:
     priority = {
-        "system": 0,
+        "subagent": 0,
         "orphaned": 1,
         "archived_pr": 2,
         "archived_old": 3,

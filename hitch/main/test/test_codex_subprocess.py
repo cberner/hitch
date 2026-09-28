@@ -518,30 +518,6 @@ class SpawnNewSessionTests(TestCase):
             "thread-abc", "Add parser coverage"
         )
 
-    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
-    @patch("hitch.main.runtime.codex_pool.Codex")
-    def test_system_agent_thread_start_excludes_hitch_tools(
-        self, mock_codex: MagicMock, mock_launch: MagicMock
-    ) -> None:
-        codex = _stub_codex_thread_start(mock_codex)
-        mock_launch.return_value = SimpleNamespace(pid=1)
-
-        with (
-            _events_dir() as events_dir,
-            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-        ):
-            codex_pool.spawn_new_session(
-                cwd="/repo",
-                prompt="hi",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            )
-
-        payload = _thread_start_payload(codex)
-        self.assertNotIn("dynamicTools", payload)
-        self.assertIn(
-            "features.default_mode_request_user_input=false",
-            mock_codex.call_args.kwargs["config"].config_overrides,
-        )
 
     @patch("hitch.main.runtime.codex_pool.Codex")
     def test_create_session_thread_registers_hitch_tools(
@@ -1669,7 +1645,6 @@ class ReconcileAndLookupTests(TestCase):
         pid: int = 1,
         thread_id: str = "t",
         status: str | None = None,
-        purpose: str = CodexInstance.PURPOSE_USER,
         events_path: str = "/dev/null",
     ) -> CodexInstance:
         return CodexInstance.objects.create(
@@ -1678,7 +1653,6 @@ class ReconcileAndLookupTests(TestCase):
             cwd="/r",
             events_path=events_path,
             status=status or CodexInstance.STATUS_COMPLETED,
-            purpose=purpose,
         )
 
     @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
@@ -2289,10 +2263,9 @@ class ReconcileAndLookupTests(TestCase):
     def test_reconcile_updates_pr_state_for_dead_workers(
         self, _mock_worker_alive: MagicMock, mock_notify: MagicMock
     ) -> None:
-        system_agent = self._make(
+        instance = self._make(
             pid=10,
             status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
         n = reconciliation.reconcile_dead()
@@ -2300,7 +2273,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(n, 1)
         mock_notify.assert_called_once()
         notified = mock_notify.call_args.args[0]
-        self.assertEqual(notified.pk, system_agent.pk)
+        self.assertEqual(notified.pk, instance.pk)
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
 
     @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
@@ -2570,7 +2543,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
         *,
         pid: int = 1,
         status: str = CodexInstance.STATUS_RUNNING,
-        purpose: str = CodexInstance.PURPOSE_USER,
     ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=pid,
@@ -2578,7 +2550,6 @@ class ReconcileOrphanedWorkersTests(TestCase):
             cwd="/r",
             events_path="/dev/null",
             status=status,
-            purpose=purpose,
         )
 
     @patch("hitch.main.runtime.codex_pool._force_kill_instance")
@@ -4719,7 +4690,7 @@ class CodexWorkerCommandTests(TestCase):
 
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_worker_scopes_user_input_to_visible_purposes(
+    def test_worker_enables_default_mode_user_input(
         self, mock_codex: MagicMock
     ) -> None:
         codex_ctx = mock_codex.return_value.__enter__.return_value
@@ -4732,28 +4703,21 @@ class CodexWorkerCommandTests(TestCase):
         )
         codex_ctx.thread_resume.return_value = thread
 
-        for purpose, enabled in (
-            (CodexInstance.PURPOSE_USER, "true"),
-            (CodexInstance.PURPOSE_SYSTEM_FEEDBACK, "true"),
-            (CodexInstance.PURPOSE_SYSTEM_AGENT, "false"),
-        ):
-            with self.subTest(purpose=purpose), tempfile.TemporaryDirectory() as raw:
-                thread.turn.reset_mock()
-                codex_ctx.thread_resume.reset_mock()
-                instance = self._make_instance(Path(raw), prompt="Apply the review fix")
-                instance.purpose = purpose
-                instance.save(update_fields=["purpose"])
-                call_command("codex_worker", "--instance-id", str(instance.pk))
+        with tempfile.TemporaryDirectory() as raw:
+            thread.turn.reset_mock()
+            codex_ctx.thread_resume.reset_mock()
+            instance = self._make_instance(Path(raw), prompt="Apply the review fix")
+            call_command("codex_worker", "--instance-id", str(instance.pk))
 
-                thread.turn.assert_called_once()
-                codex_ctx._client.request.assert_not_called()
-                codex_ctx.thread_resume.assert_called_once_with("thread-1")
-                config = mock_codex.call_args.kwargs["config"]
-                self.assertEqual(
-                    config.config_overrides,
-                    ("features.memories=false", f"features.default_mode_request_user_input={enabled}",
-                     "features.step_model_switching=true"),
-                )
+            thread.turn.assert_called_once()
+            codex_ctx._client.request.assert_not_called()
+            codex_ctx.thread_resume.assert_called_once_with("thread-1")
+            config = mock_codex.call_args.kwargs["config"]
+            self.assertEqual(
+                config.config_overrides,
+                ("features.memories=false", "features.default_mode_request_user_input=true",
+                 "features.step_model_switching=true"),
+            )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_diff_updates_are_not_persisted(self, mock_codex: MagicMock) -> None:

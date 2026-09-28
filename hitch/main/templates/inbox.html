@@ -311,7 +311,6 @@
                 <li class="proposal">
                     <div class="proposal-header">
                         <h3>{{ proposed_session.title }}</h3>
-                        {% if proposed_session.inbox_kind != "notice" %}
                         <div class="proposal-menu" data-context-menu>
                             <button type="button" class="proposal-menu-toggle" aria-label="Actions for {{ proposed_session.title }}" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
                             <div class="proposal-menu-panel" role="menu" data-context-menu-panel hidden>
@@ -330,7 +329,6 @@
                                 >Reject</button>
                             </div>
                         </div>
-                        {% endif %}
                     </div>
                     <p class="meta">
                         {% if show_inbox_project_names %}
@@ -340,11 +338,7 @@
                         No repo -
                         {% endif %}
                         {% endif %}
-                        {% if proposed_session.inbox_kind == "notice" %}
-                        Notice
-                        {% else %}
                         From coding agent - {{ proposed_session.get_confidence_display }} confidence
-                        {% endif %}
                     </p>
                     {% if proposed_session.summary %}
                     <p>{{ proposed_session.summary }}</p>
@@ -360,13 +354,6 @@
                     </div>
                     {% endif %}
                     <div class="proposal-actions">
-                        {% if proposed_session.inbox_kind == "notice" %}
-                        <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
-                            {% csrf_token %}
-                            <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
-                            <button type="submit" class="button secondary">Dismiss</button>
-                        </form>
-                        {% else %}
                         <button
                             type="button"
                             class="button"
@@ -378,7 +365,6 @@
                             data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
                             data-proposed-session-auto-pr="{% if proposed_session.accept_auto_pr_explicit %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
                         >Do it</button>
-                        {% endif %}
                     </div>
                 </li>
                 {% endfor %}

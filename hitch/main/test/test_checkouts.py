@@ -101,7 +101,8 @@ class CheckoutRetentionTests(TestCase):
                     cwd = str(Path(raw) / name)
                     Path(cwd).mkdir()
                     metadata = SessionMetadata.objects.create(
-                        thread_id=name, cwd=cwd, codex_archived=archived, is_hidden_system_session=hidden,
+                        thread_id=name, cwd=cwd, codex_archived=archived,
+                        codex_thread_source="subagent" if hidden else "",
                         derived_stage=stage, codex_archived_at=archived_at,
                     )
                     if name == "promoted":

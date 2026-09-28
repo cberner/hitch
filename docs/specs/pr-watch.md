@@ -50,7 +50,7 @@ explicitly unwatched.
 ### 3.1 Tool Availability and Contract
 
 - `PRWATCH-tool-registration`: Visible coding sessions register the dynamic
-  tools `hitch.watch_pr` and `hitch.unwatch_pr`; hidden system-agent sessions do not.
+  tools `hitch.watch_pr` and `hitch.unwatch_pr`.
 - `PRWATCH-upgrade-capability`: Dynamic-tool availability is stored in the
   Codex thread. A pre-tool session that lacks `hitch.watch_pr` rejects a manual
   PR task with a clear instruction to start a new session; an automatic PR
@@ -235,9 +235,8 @@ explicitly unwatched.
   tagged as review, publication, or watch tasks, and allowed to settle as
   ordinary turns. Obsolete hidden wrapper workers and their pending prompts are
   made terminal so removed routing cannot resume them.
-- `PRWATCH-steering-upgrade`: Queued legacy steering text is retained only as
-  audit data on the retired wrapper and is not replayed. The legacy steering
-  model is removed.
+- `PRWATCH-steering-upgrade`: Queued legacy steering text is discarded without
+  replay. Retired wrapper records and the legacy steering model are removed.
 
 ## 4. Success Criteria
 

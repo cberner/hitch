@@ -498,45 +498,6 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(older, "Old answer")
         mock_codex.assert_not_called()
 
-    @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)
-    @patch("hitch.main.views.common.Codex")
-    def test_large_ordinary_uuid_is_not_a_system_session(
-        self, mock_codex: MagicMock
-    ) -> None:
-        session_id = "01a00cfd-d74e-7c60-bcc3-1883f856c96b"
-        rollout_path = _make_rollout(
-            self,
-            [
-                _rollout_line(
-                    "event_msg",
-                    {"type": "user_message", "message": "Ordinary prompt"},
-                ),
-                _rollout_line(
-                    "event_msg",
-                    {"type": "agent_message", "message": "Ordinary answer"},
-                ),
-            ],
-        )
-        now = datetime(2025, 1, 5, tzinfo=UTC)
-        SessionMetadata.objects.create(
-            thread_id=session_id,
-            cwd="/repo",
-            codex_path=str(rollout_path),
-            codex_name="Ordinary session",
-            codex_created_at=now,
-            codex_updated_at=now,
-        )
-        client = _setup_codex(mock_codex)
-        client._client.thread_read.return_value = SimpleNamespace(
-            thread=_session(session_id)
-        )
-
-        response = self.client.get(
-            reverse("system_session", kwargs={"session_id": session_id})
-        )
-
-        self.assertEqual(response.status_code, 404)
-        client._client.thread_read.assert_called_once_with(session_id, include_turns=True)
 
     @patch.object(common_views, "_SESSION_HISTORY_MESSAGE_TARGET", 2)
     @patch.object(common_views, "_SESSION_HISTORY_MIN_BYTES", 1)

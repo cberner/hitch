@@ -20,7 +20,6 @@ from django.core.files.uploadedfile import UploadedFile
 from django.db import close_old_connections, transaction
 from django.db.models import QuerySet
 from django.http import (
-    Http404,
     HttpRequest,
     HttpResponse,
 )
@@ -87,14 +86,11 @@ from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
-    _active_worker_status_text,
-    _apply_system_authors,
     _display_title,
     _entries_for_with_source,
     _entries_include_active_turn,
     _latest_user_turn_failure,
     _mark_active_history_user_entries,
-    _pending_user_author,
     _pending_user_prompt,
     _pending_user_timestamp,
     _show_active_worker_transcript,
@@ -150,7 +146,7 @@ from hitch.main.sessions.settings_cookies import (
     _option_label,
     _web_search_mode_label,
 )
-from hitch.main.workflows import pr_stage, pr_tracking, system_agents
+from hitch.main.workflows import pr_stage, pr_tracking
 from hitch.main.worktrees import cleanup_managed_worktree_path as cleanup_managed_worktree_path
 from hitch.main.worktrees import cleanup_worktree as cleanup_worktree
 from hitch.main.worktrees import create_worktree_for_session as create_worktree_for_session
@@ -542,11 +538,6 @@ def _usage_refresh_state(
 def _render_session_detail(
     request: HttpRequest,
     session_id: str,
-    *,
-    read_only: bool = False,
-    display_title: str | None = None,
-    system_prompt: str = "",
-    require_system_agent_thread: bool = False,
 ) -> HttpResponse:
     # Reconcile this thread before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
@@ -595,7 +586,6 @@ def _render_session_detail(
         session_id,
         metadata,
         active_instance=active_instance,
-        require_system_agent_thread=require_system_agent_thread,
         history_message_target=(
             _SESSION_HISTORY_MESSAGE_TARGET if paginate_history else None
         ),
@@ -629,10 +619,7 @@ def _render_session_detail(
             try:
                 resumed = codex._client.thread_read(session_id, include_turns=True)
             except (InternalRpcError, InvalidRequestError) as exc:
-                if (
-                    not require_system_agent_thread
-                    and _thread_read_temporarily_unavailable(exc)
-                ):
+                if _thread_read_temporarily_unavailable(exc):
                     if active_instance is None:
                         latest = codex_pool.latest_for_thread(session_id)
                         if latest is not None and latest.status == CodexInstance.STATUS_FAILED:
@@ -662,18 +649,8 @@ def _render_session_detail(
                             resolved_settings,
                             plan_model,
                         )
-                if (
-                    require_system_agent_thread
-                    and isinstance(exc, InvalidRequestError)
-                    and _thread_read_missing_or_invalid(exc)
-                ):
-                    raise Http404("system session not found") from None
                 raise
             thread = resumed.thread
-            if require_system_agent_thread and not system_agents.hitch_system_agent_thread(
-                thread
-            ):
-                raise Http404("system session not found")
             models_data = _models_for_plan_mode_fallback(codex)
             resolved_settings = _resolved_settings(request, models_data)
             plan_model = _plan_mode_model_from_models(
@@ -707,7 +684,7 @@ def _render_session_detail(
             ),
         )
         rollout_data = None
-    if not raw_entries and active_instance is None and not require_system_agent_thread:
+    if not raw_entries and active_instance is None:
         latest = codex_pool.latest_for_thread(session_id)
         if latest is not None and latest.status == CodexInstance.STATUS_FAILED:
             unstarted_instance = latest
@@ -717,12 +694,9 @@ def _render_session_detail(
         else _thread_is_archived(thread)
     )
     history_paginated = history_page is not None
-    if history_paginated:
-        entries = raw_entries
-    else:
-        entries = _apply_system_authors(raw_entries, session_id)
-        if full_history_requested:
-            _mark_active_history_user_entries(entries, active_instance)
+    entries = raw_entries
+    if not history_paginated and full_history_requested:
+        _mark_active_history_user_entries(entries, active_instance)
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -732,23 +706,21 @@ def _render_session_detail(
     stored_pr = pr_tracking.stored_record_for_thread(session_id)
     pr = stage_resolution.pr_display_state(stored_pr, active_instance)
     pr_url = _registered_pr_url(pr.record)
-    stage_context: dict[str, Any] | None = None
-    if not read_only:
-        resolution = stage_resolution.resolve_stage(
-            entries=entries, history_complete=not history_paginated,
-            pr=pr, active_instance=active_instance,
-            awaiting_user_input=session_id in _thread_ids_awaiting_input([session_id]),
-            cache=(
-                stage_resolution.StageCache(metadata.derived_stage, metadata.derived_stage_source_mtime_ns)
-                if metadata is not None and (rollout_data is not None or history_paginated or entries_backed_by_rollout)
-                else None
-            ),
-            source_mtime_ns=detail_rollout_state.mtime_ns if detail_rollout_state is not None else None,
-            leading_user_text=history_page.leading_user_text if history_page is not None else None,
-        )
-        if resolution.should_persist:
-            pr_stage._update_cached_stage_best_effort(session_id, resolution.stage, stage_cache_mtime_ns)
-        stage_context = dict(resolution.stage.as_context())
+    resolution = stage_resolution.resolve_stage(
+        entries=entries, history_complete=not history_paginated,
+        pr=pr, active_instance=active_instance,
+        awaiting_user_input=session_id in _thread_ids_awaiting_input([session_id]),
+        cache=(
+            stage_resolution.StageCache(metadata.derived_stage, metadata.derived_stage_source_mtime_ns)
+            if metadata is not None and (rollout_data is not None or history_paginated or entries_backed_by_rollout)
+            else None
+        ),
+        source_mtime_ns=detail_rollout_state.mtime_ns if detail_rollout_state is not None else None,
+        leading_user_text=history_page.leading_user_text if history_page is not None else None,
+    )
+    if resolution.should_persist:
+        pr_stage._update_cached_stage_best_effort(session_id, resolution.stage, stage_cache_mtime_ns)
+    stage_context = dict(resolution.stage.as_context())
     # While a worker is running, drop the entries that belong to its
     # in-progress turn when SSE has claimed that turn. A worker kept alive
     # across a deploy can lack the user item in its event log even while its
@@ -839,12 +811,10 @@ def _render_session_detail(
     )
     thread_cwd = _thread_cwd(thread)
     settings_context = _settings_context(settings, models_data)
-    active_worker_status_text = _active_worker_status_text(active_instance)
     latest_user_turn_failure = _latest_user_turn_failure(session_id)
     pr_watch_progress = pr_tracking.pr_watch_progress(
         pr.record.state if pr.record is not None else None
     )
-    live_status_text = active_worker_status_text
     debug_chat_url = _debug_chat_new_session_url(
         session_id, session_project, projects, cwd=thread_cwd
     )
@@ -910,10 +880,7 @@ def _render_session_detail(
         models_data,
         preserve_current_choices=True,
     )
-    instruction_instance = (
-        active_instance or codex_pool.latest_for_thread(session_id)
-        if not read_only else None
-    )
+    instruction_instance = active_instance or codex_pool.latest_for_thread(session_id)
     response = render(
         request,
         "session.html",
@@ -937,9 +904,7 @@ def _render_session_detail(
                 if history_page is not None and history_page.has_older
                 else ""
             ),
-            "display_title": display_title or _display_title(thread),
-            "read_only": read_only,
-            "system_prompt": system_prompt,
+            "display_title": _display_title(thread),
             "instruction_instance": instruction_instance,
             "mcp_approval_history": mcp_approval_history(session_id),
             "pending_mcp_approvals": pending_mcp_approvals(session_id),
@@ -978,9 +943,7 @@ def _render_session_detail(
             "show_active_worker_transcript": show_active_worker_transcript,
             "rollout_owns_active_turn": rollout_owns_active_turn,
             "pr_watch_progress": pr_watch_progress,
-            "active_worker_status_text": active_worker_status_text,
             "latest_user_turn_failure": latest_user_turn_failure,
-            "live_status_text": live_status_text,
             # Carried into the Stop button so the click targets the
             # specific worker the page is streaming, not "whichever
             # worker is latest at click time" — overlapping turns can
@@ -994,7 +957,6 @@ def _render_session_detail(
                 if rollout_owns_active_turn
                 else _pending_user_prompt(active_instance or unstarted_instance)
             ),
-            "pending_user_author": _pending_user_author(active_instance or unstarted_instance),
             "pending_user_timestamp": _pending_user_timestamp(active_instance or unstarted_instance),
             "token_usage": session_token_usage,
             "session_model": session_model,
@@ -1686,7 +1648,6 @@ def _recover_stale_new_session_proposal_start_claims() -> None:
     claim_lookup = f"outcome_metadata__{claim_key}__isnull"
     now = timezone.now()
     claimed_proposals = ProposedSession.objects.filter(
-        inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
         outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         accepted_session__isnull=True,
         **{claim_lookup: False},

@@ -35,7 +35,6 @@ from hitch.main.sessions.session_entry_display import (
     _active_history_user_identity,
     _active_instance_for,
     _active_stream_owns_turn,
-    _apply_system_authors,
     _trim_in_progress_turn,
 )
 from hitch.main.sessions.session_resume import (
@@ -352,7 +351,6 @@ def _rollout_entry_for_detail(
     entries = list(collapse_flat_entries(list(rollout_data.flat_entries)))
     if not _entries_include_transcript(entries):
         raise Http404("session not found")
-    entries = _apply_system_authors(entries, session_id)
     if entry_index < 0 or entry_index >= len(entries):
         raise Http404("intermediate entry not found")
     entry = entries[entry_index]

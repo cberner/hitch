@@ -81,6 +81,17 @@ def _metadata_rollout_path_indicates_archived(
     return rollout_path is not None and _rollout_path_is_archived(rollout_path)
 
 
+def _locally_archived_active_rollout(metadata: SessionMetadata | None) -> Path | None:
+    if metadata is None or not metadata.codex_archived or not metadata.archive_local_only:
+        return None
+    path = _rollout_path_from_value(metadata.codex_path)
+    if path is None or not path.is_file():
+        path = _stored_rollout_path_for_thread(metadata.thread_id)
+    if path is not None and not _rollout_path_is_archived(path):
+        return path
+    return None
+
+
 def _thread_resume_archived_error(exc: InvalidRequestError) -> bool:
     message = str(exc).lower()
     return " is archived" in message and "unarchive" in message
@@ -223,14 +234,11 @@ def _metadata_resume_for_inactive_session(
     metadata: SessionMetadata | None,
     *,
     active_instance: CodexInstance | None,
-    require_system_agent_thread: bool,
     history_message_target: int | None = None,
     allow_active_rollout: bool = False,
     active_user_identity: rollout.SessionHistoryUserIdentity | None = None,
 ) -> _MetadataResume | None:
-    if metadata is None or (
-        require_system_agent_thread and not metadata.is_hidden_system_session
-    ):
+    if metadata is None:
         return None
     archived = (
         _metadata_indicates_archived(metadata)

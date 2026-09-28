@@ -30,7 +30,7 @@ spec covers both surfaces.
   displayed token usage is fresh, still refreshing, terminally partial, failed,
   unavailable, and whether polling should continue.
 - Total usage: Token usage across all indexed sessions, including native Codex
-  subagents and historical hidden Hitch automation.
+  subagents and archived threads.
 - Project total: The same inclusive usage restricted to the active project.
 
 ## 2. Goals and Non-Goals
@@ -83,7 +83,7 @@ spec covers both surfaces.
   be derived from the same rollout snapshot when a cache row is refreshed, so a
   daily chart cannot disagree with the headline count for that cache row.
 - `USAGE-inclusive-totals`: Usage must combine visible sessions, native Codex
-  subagents, and historical hidden Hitch automation into one total. Do not
+  subagents, and archived threads into one total. Do not
   display separate user-session or system-session usage buckets.
 - `USAGE-project-scope`: Profile's active-project usage summary must use the
   currently selected project and include all of its session usage in one total.

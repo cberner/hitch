@@ -112,7 +112,7 @@ def _deliver_terminal(record: SessionPullRequest) -> None:
         ):
             return
         newer = CodexInstance.objects.filter(
-            thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER, workflow_id__isnull=True,
+            thread_id=record.thread_id,
             pk__gt=record.state.get(pr_tracking.WATCH_TERMINAL_INSTANCE_STATE_KEY, registration.owner_instance_id),
         ).exclude(agent_kind=agent_tasks.PR_WATCH_AGENT_KIND).order_by("-pk").first()
         if newer is not None:
@@ -131,7 +131,7 @@ def _resume_watch(
     if SessionMetadata.objects.filter(thread_id=record.thread_id, codex_archived=True).exists():
         return False
     previous = CodexInstance.objects.filter(
-        thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER,
+        thread_id=record.thread_id,
     ).order_by("-pk").first()
     if previous is None:
         return False

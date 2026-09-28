@@ -1,10 +1,9 @@
-"""Session list pages: index, system sessions, inbox, and usage."""
-import uuid
+"""Session list pages: index, inbox, and usage."""
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from django.db.models import Q
 from django.http import (
-    Http404,
     HttpRequest,
     HttpResponse,
     JsonResponse,
@@ -16,17 +15,14 @@ from django.views.decorators.http import require_http_methods
 from openai_codex import CodexError
 
 from hitch.main.models import (
-    CodexInstance,
     Project,
     ProposedSession,
-    SessionMetadata,
-    SystemAgentRun,
 )
 from hitch.main.proposals.proposal_display import (
     _attach_proposed_session_display_state,
 )
 from hitch.main.runtime import app_server_pool, reconciliation
-from hitch.main.sessions import session_index, system_agent_summary
+from hitch.main.sessions import session_index
 from hitch.main.sessions.project_visibility import (
     _filter_session_metadata_by_project_visibility,
     _project_visibility_label,
@@ -38,27 +34,15 @@ from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
 from hitch.main.sessions.session_cursor import (
-    _index_cursor,
     _index_cursor_sort_key,
     _is_index_cursor,
 )
 from hitch.main.sessions.session_metadata_display import (
-    _ensure_indexed_system_threads,
-    _filter_visible_session_metadata_rows,
-    _index_cursor_for_metadata,
-    _index_cursor_for_metadata_row,
     _index_cursor_for_session,
-    _legacy_system_metadata_page,
-    _metadata_rows_after_index_cursor,
     _non_negative_int,
     _session_index_sort_key,
     _session_row_for_metadata,
-    _sort_session_rows,
     _sorted_visible_index_rows,
-    _system_session_metadata_rows,
-)
-from hitch.main.sessions.session_resume import (
-    _session_detail_metadata,
 )
 from hitch.main.sessions.session_settings import (
     _cached_models_and_settings,
@@ -73,13 +57,7 @@ from hitch.main.sessions.settings_cookies import (
     SettingsValues,
     _apply_cookie_updates,
 )
-from hitch.main.sessions.system_agent_summary import (
-    _system_agent_instance_for_thread,
-    _system_agent_run_detail_title,
-    _system_agent_run_for_thread,
-)
 from hitch.main.views import common
-from hitch.main.workflows import system_agents
 
 
 class SessionListPage(NamedTuple):
@@ -94,22 +72,10 @@ class SessionListPage(NamedTuple):
 
 @dataclass
 class _SessionListQuery:
-    """Shared inputs for building one session-list page.
+    """Project filters for one session-list page."""
 
-    Bundles the viewer/filter context that every page builder needs so it is
-    threaded through the pagination variants as one value. The id sets are
-    shared and mutable so index builders can add hidden system sessions
-    discovered from durable metadata.
-    """
-
-    projects: list[Project]
     current_project: Project | None
     project_visibility: SessionProjectVisibility | None
-    system_only: bool
-    hidden_thread_ids: set[str]
-    system_thread_ids: set[str]
-    runs_by_thread_id: dict[str, SystemAgentRun]
-    instances_by_thread_id: dict[str, CodexInstance]
 
 _SESSION_PAGE_SIZE = 50
 
@@ -121,28 +87,8 @@ def _session_list_page(
     projects: list[Project],
     current_project: Project | None,
     project_visibility: SessionProjectVisibility | None,
-    system_only: bool,
 ) -> SessionListPage:
-    hidden_thread_ids = system_agents.hidden_thread_ids()
-    system_thread_ids = hidden_thread_ids if system_only else set()
-    query = _SessionListQuery(
-        projects=projects,
-        current_project=current_project,
-        project_visibility=project_visibility,
-        system_only=system_only,
-        hidden_thread_ids=hidden_thread_ids,
-        system_thread_ids=system_thread_ids,
-        runs_by_thread_id=(
-            system_agent_summary._system_agent_runs_by_thread_id(system_thread_ids)
-            if system_only
-            else {}
-        ),
-        instances_by_thread_id=(
-            system_agent_summary._system_agent_instances_by_thread_id(system_thread_ids)
-            if system_only
-            else {}
-        ),
-    )
+    query = _SessionListQuery(current_project, project_visibility)
     required_archived = current_settings.show_archived_sessions
     active_complete = session_index.is_complete(archived=False)
     archived_complete = (
@@ -224,28 +170,13 @@ def _session_list_page_from_warm_index(
     projects: list[Project],
     current_project: Project | None,
     project_visibility: SessionProjectVisibility | None,
-    system_only: bool,
     allow_refresh_needed: bool = False,
 ) -> SessionListPage | None:
     required_archived = current_settings.show_archived_sessions
     if not _session_index_sources_complete(include_archived=required_archived):
         return None
 
-    hidden_thread_ids: set[str] = set()
-    system_thread_ids: set[str] = set()
-    if system_only:
-        hidden_thread_ids = system_agents.hidden_thread_ids()
-        system_thread_ids = hidden_thread_ids
-    query = _SessionListQuery(
-        projects=projects,
-        current_project=current_project,
-        project_visibility=project_visibility,
-        system_only=system_only,
-        hidden_thread_ids=hidden_thread_ids,
-        system_thread_ids=system_thread_ids,
-        runs_by_thread_id={},
-        instances_by_thread_id={},
-    )
+    query = _SessionListQuery(current_project, project_visibility)
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
         not request_uses_index_cursor
@@ -268,97 +199,8 @@ def _session_list_page_from_warm_index(
             include_active=refresh_active,
             include_archived=refresh_archived,
         )
-    if system_only:
-        return _system_session_list_page_from_index(
-            request,
-            current_project=current_project,
-            show_archived=current_settings.show_archived_sessions,
-            system_thread_ids=system_thread_ids,
-            projects=projects,
-        )
     return _session_list_page_from_index(
         request, query, show_archived=current_settings.show_archived_sessions
-    )
-
-def _system_session_list_page_from_index(
-    request: HttpRequest,
-    *,
-    current_project: Project | None,
-    show_archived: bool,
-    system_thread_ids: set[str],
-    projects: list[Project],
-) -> SessionListPage:
-    _ensure_indexed_system_threads(system_thread_ids, projects=projects)
-    legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
-    indexed_system_thread_ids = set(
-        SessionMetadata.objects.filter(is_hidden_system_session=True)
-        .exclude(codex_updated_at__isnull=True)
-        .exclude(thread_id__in=legacy_promoted_ids)
-        .values_list("thread_id", flat=True)
-    )
-    system_thread_ids = system_thread_ids | indexed_system_thread_ids
-    rows = _system_session_metadata_rows(
-        current_project=current_project,
-        show_archived=show_archived,
-        system_thread_ids=system_thread_ids,
-    )
-    index_cursor = _index_cursor(request.GET.get("cursor", ""))
-    next_cursor = ""
-    has_more = False
-    if index_cursor is not None and not index_cursor.exact_updated_at:
-        metadata_page, next_cursor, has_more = _legacy_system_metadata_page(
-            rows, index_cursor
-        )
-        offset = 0
-    elif index_cursor is not None:
-        rows = _metadata_rows_after_index_cursor(rows, index_cursor)
-        offset = 0
-        metadata_page = list(rows[:_SESSION_PAGE_SIZE])
-    else:
-        offset = _non_negative_int(request.GET.get("offset", ""))
-        metadata_page = list(rows[offset : offset + _SESSION_PAGE_SIZE])
-    page_thread_ids = [metadata.thread_id for metadata in metadata_page]
-    runs_by_thread_id = system_agent_summary._system_agent_runs_by_thread_id(
-        page_thread_ids
-    )
-    instances_by_thread_id = (
-        system_agent_summary._system_agent_instances_by_thread_id(page_thread_ids)
-    )
-    page = [
-        session
-        for metadata in metadata_page
-        if (
-            session := _session_row_for_metadata(
-                metadata,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                system_only=True,
-            )
-        )
-        is not None
-    ]
-    if (
-        index_cursor is None or index_cursor.exact_updated_at
-    ) and metadata_page and len(metadata_page) == _SESSION_PAGE_SIZE:
-        has_more = _metadata_rows_after_index_cursor(
-            rows,
-            _index_cursor_for_metadata_row(metadata_page[-1]),
-        ).exists()
-        next_cursor = (
-            ""
-            if not has_more or not metadata_page
-            else _index_cursor_for_metadata(metadata_page[-1])
-        )
-    next_offset = offset + len(page)
-    return SessionListPage(
-        sessions=page,
-        next_cursor=next_cursor,
-        next_offset=0 if next_cursor or not has_more else next_offset,
-        next_done=not has_more,
-        include_archived_source=False,
-        archived_next_cursor="",
-        archived_next_offset=0,
-        archived_next_done=True,
     )
 
 def _session_list_page_from_index(
@@ -368,17 +210,6 @@ def _session_list_page_from_index(
     show_archived: bool,
 ) -> SessionListPage:
     rows = session_index.indexed_sessions()
-    if query.system_only:
-        _ensure_indexed_system_threads(query.system_thread_ids, projects=query.projects)
-        rows = session_index.indexed_sessions()
-        legacy_promoted_ids = system_agents.legacy_promoted_system_thread_ids()
-        indexed_system_thread_ids = set(
-            rows.filter(is_hidden_system_session=True)
-            .exclude(thread_id__in=legacy_promoted_ids)
-            .values_list("thread_id", flat=True)
-        )
-        query.hidden_thread_ids.update(indexed_system_thread_ids)
-        query.system_thread_ids.update(indexed_system_thread_ids)
     if query.project_visibility is not None:
         rows = _filter_session_metadata_by_project_visibility(
             rows, query.project_visibility
@@ -387,30 +218,12 @@ def _session_list_page_from_index(
         rows = rows.filter(project=query.current_project)
     if not show_archived:
         rows = rows.filter(codex_archived=False)
-    if query.system_only:
-        rows = rows.filter(thread_id__in=query.system_thread_ids)
-    else:
-        rows = _filter_visible_session_metadata_rows(rows)
-        if query.hidden_thread_ids:
-            rows = rows.exclude(thread_id__in=query.hidden_thread_ids)
-    if query.system_only:
-        metadata_rows = list(rows)
-        sessions = [
-            session
-            for metadata in metadata_rows
-            if (
-                session := _session_row_for_metadata(
-                    metadata,
-                    runs_by_thread_id=query.runs_by_thread_id,
-                    instances_by_thread_id=query.instances_by_thread_id,
-                    system_only=True,
-                )
-            )
-            is not None
-        ]
-        sessions = _sort_session_rows(sessions)
-    else:
-        sessions = _sorted_visible_index_rows(rows)
+    # Accepted proposals are user sessions even if their source was a subagent.
+    accepted = ProposedSession.objects.filter(
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+    ).values("accepted_session_id")
+    rows = rows.filter(~Q(codex_thread_source="subagent") | Q(pk__in=accepted))
+    sessions = _sorted_visible_index_rows(rows)
     index_cursor = _index_cursor_sort_key(request.GET.get("cursor", ""))
     if index_cursor is not None:
         sessions = [
@@ -422,28 +235,13 @@ def _session_list_page_from_index(
     else:
         offset = _non_negative_int(request.GET.get("offset", ""))
     page_sort_rows = sessions[offset : offset + _SESSION_PAGE_SIZE]
-    if query.system_only:
-        page = page_sort_rows
-    else:
-        page_thread_ids = [str(session["id"]) for session in page_sort_rows]
-        metadata_by_thread_id = {
-            metadata.thread_id: metadata
-            for metadata in rows.filter(thread_id__in=page_thread_ids)
-        }
-        page = [
-            session
-            for thread_id in page_thread_ids
-            if (metadata := metadata_by_thread_id.get(thread_id)) is not None
-            if (
-                session := _session_row_for_metadata(
-                    metadata,
-                    runs_by_thread_id=query.runs_by_thread_id,
-                    instances_by_thread_id=query.instances_by_thread_id,
-                    system_only=False,
-                )
-            )
-            is not None
-        ]
+    page_thread_ids = [str(session["id"]) for session in page_sort_rows]
+    metadata_by_thread_id = {metadata.thread_id: metadata for metadata in rows.filter(thread_id__in=page_thread_ids)}
+    page = [
+        _session_row_for_metadata(metadata)
+        for thread_id in page_thread_ids
+        if (metadata := metadata_by_thread_id.get(thread_id)) is not None
+    ]
     next_offset = offset + len(page_sort_rows)
     done = next_offset >= len(sessions)
     next_cursor = "" if done or not page else _index_cursor_for_session(page[-1])
@@ -526,7 +324,6 @@ def _session_list_page_from_codex_or_warm_index(
     projects: list[Project],
     current_project: Project | None,
     project_visibility: SessionProjectVisibility | None,
-    system_only: bool,
 ) -> SessionListPage:
     try:
         with app_server_pool.borrow_codex(
@@ -539,7 +336,6 @@ def _session_list_page_from_codex_or_warm_index(
                 projects=projects,
                 current_project=current_project,
                 project_visibility=project_visibility,
-                system_only=system_only,
             )
     except CodexError:
         fallback = _session_list_page_from_warm_index(
@@ -548,7 +344,6 @@ def _session_list_page_from_codex_or_warm_index(
             projects=projects,
             current_project=current_project,
             project_visibility=project_visibility,
-            system_only=system_only,
             allow_refresh_needed=True,
         )
         if fallback is None:
@@ -575,7 +370,6 @@ def index(request: HttpRequest) -> HttpResponse:
         projects=projects,
         current_project=current_project,
         project_visibility=session_project_visibility,
-        system_only=False,
     )
     if session_page is None:
         session_page = _session_list_page_from_codex_or_warm_index(
@@ -584,7 +378,6 @@ def index(request: HttpRequest) -> HttpResponse:
             projects=projects,
             current_project=current_project,
             project_visibility=session_project_visibility,
-            system_only=False,
         )
     _attach_session_stage_context(session_page.sessions)
     settings_context = common._settings_context(current_settings, models_data)
@@ -614,82 +407,6 @@ def index(request: HttpRequest) -> HttpResponse:
     )
     _apply_cookie_updates(response, cookie_updates)
     return common._prevent_stale_cache(response)
-
-@require_http_methods(["GET"])
-def system_sessions(request: HttpRequest) -> HttpResponse:
-    reconciliation.reconcile_dead_if_due()
-    models_data, resolved_settings = _cached_models_and_settings(request)
-    current_settings = resolved_settings.values
-    cookie_updates = resolved_settings.cookie_updates
-    projects = list(Project.objects.all())
-    current_project = _selected_project_for_settings(current_settings, projects)
-    session_page = _session_list_page_from_warm_index(
-        request,
-        current_settings=current_settings,
-        projects=projects,
-        current_project=current_project,
-        project_visibility=None,
-        system_only=True,
-    )
-    if session_page is None:
-        session_page = _session_list_page_from_codex_or_warm_index(
-            request,
-            current_settings=current_settings,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=None,
-            system_only=True,
-        )
-    settings_context = common._settings_context(current_settings, models_data)
-    response = render(
-        request,
-        "_session_list_content.html" if request.headers.get("X-Hitch-Refresh") == "sessions" else "index.html",
-        {
-            "sessions": session_page.sessions,
-            "next_sessions_url": _next_sessions_url(request, session_page),
-            "has_projects": bool(projects),
-            "archived_visibility_url": reverse("update_archived_session_visibility"),
-            "login_url": reverse("login"),
-            "register_url": reverse("register"),
-            "current_show_archived_sessions": current_settings.show_archived_sessions,
-            "name_max_len": common._NAME_MAX_LEN,
-            "display_title_max_len": session_index.DISPLAY_TITLE_MAX_LEN,
-            "system_session_list": True,
-            "show_new_session_controls": False,
-            **settings_context,
-        },
-    )
-    _apply_cookie_updates(response, cookie_updates)
-    return common._prevent_stale_cache(response)
-
-@require_http_methods(["GET"])
-def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
-    run_id = _positive_int(request.GET.get("run_id", ""))
-    run = _system_agent_run_for_thread(session_id, run_id=run_id)
-    instance = run.instance if run is not None else None
-    if instance is None and run_id is None:
-        instance = _system_agent_instance_for_thread(session_id)
-    if instance is None:
-        if run_id is not None:
-            raise Http404("system session not found")
-        metadata = _session_detail_metadata(session_id)
-        if not _valid_codex_session_id(session_id) and not (
-            metadata is not None and metadata.is_hidden_system_session
-        ):
-            raise Http404("system session not found")
-        return common._render_session_detail(
-            request,
-            session_id,
-            read_only=True,
-            require_system_agent_thread=True,
-        )
-    return common._render_session_detail(
-        request,
-        session_id,
-        read_only=True,
-        display_title=_system_agent_run_detail_title(run, instance),
-        system_prompt=instance.prompt,
-    )
 
 @require_http_methods(["GET"])
 def usage(request: HttpRequest) -> HttpResponse:
@@ -755,18 +472,3 @@ def inbox(request: HttpRequest) -> HttpResponse:
     )
     _apply_cookie_updates(response, cookie_updates)
     return response
-
-def _positive_int(value: str) -> int | None:
-    try:
-        parsed = int(value)
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
-
-def _valid_codex_session_id(session_id: str) -> bool:
-    value = session_id.removeprefix("urn:uuid:")
-    try:
-        uuid.UUID(value)
-    except ValueError:
-        return False
-    return True

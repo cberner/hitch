@@ -104,20 +104,6 @@ class SessionIndexRefreshTests(TestCase):
         metadata.refresh_from_db()
         self.assertEqual(metadata.codex_updated_at, datetime(2027, 1, 1, tzinfo=UTC))
 
-    def test_upsert_thread_preserves_existing_hidden_system_flag(self) -> None:
-        SessionMetadata.objects.create(
-            thread_id="system-thread",
-            cwd="/repo",
-            codex_created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            codex_updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-            codex_last_synced_at=datetime(2026, 1, 1, tzinfo=UTC),
-            is_hidden_system_session=True,
-        )
-
-        session_index.upsert_thread(_thread("system-thread", updated_at=1), projects=[])
-
-        metadata = SessionMetadata.objects.get(thread_id="system-thread")
-        self.assertTrue(metadata.is_hidden_system_session)
 
     def test_capped_refresh_keeps_never_complete_source_incomplete(self) -> None:
         thread_list = MagicMock(

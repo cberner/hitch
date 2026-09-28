@@ -26,7 +26,6 @@ class TurnOptions(TypedDict, total=False):
     developer_instructions: str | None
     hitch_extra_instructions: str | None
     new_thread: bool
-    purpose: str
     agent_kind: str
     user_message_index: int | None
 

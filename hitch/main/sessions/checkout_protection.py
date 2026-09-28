@@ -9,8 +9,7 @@ from django.db import models
 from django.utils import timezone
 
 from hitch.main import checkouts
-from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata, SessionPullRequest, SystemAgentRun
-from hitch.main.workflows import system_agents
+from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata, SessionPullRequest
 
 ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=1)
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
@@ -19,13 +18,11 @@ _PROPOSAL_SESSION_ID_FIELDS = ("source_session_id", "accepted_session_id")
 
 @dataclass(frozen=True)
 class SessionRetention:
-    legacy_promoted_thread_ids: frozenset[str]
-    hidden_system_thread_ids: frozenset[str]
+    accepted_thread_ids: frozenset[str]
 
     def removal_reason(self, metadata: SessionMetadata, *, now: datetime) -> str | None:
-        is_system = metadata.is_hidden_system_session or metadata.thread_id in self.hidden_system_thread_ids
-        if is_system and metadata.thread_id not in self.legacy_promoted_thread_ids:
-            return "system"
+        if metadata.codex_thread_source == "subagent" and metadata.thread_id not in self.accepted_thread_ids:
+            return "subagent"
         if not metadata.codex_archived:
             return None
         if metadata.derived_stage in _PR_DONE_STAGE_KEYS:
@@ -76,7 +73,7 @@ def _has_current_protection(cwd: str, *, aliases: Iterable[str], changed_since: 
     # to catch newly registered aliases without rescanning the full session index.
     rows = SessionMetadata.objects.filter(
         matching_paths | models.Q(updated_at__gte=changed_since)
-    ).only("thread_id", "cwd", "codex_archived", "codex_archived_at", "derived_stage", "is_hidden_system_session")
+    ).only("thread_id", "cwd", "codex_archived", "codex_archived_at", "derived_stage", "codex_thread_source")
     metadata_rows = [row for row in rows if row.cwd and checkouts.managed_key(row.cwd) == normalized]
     active_thread_ids = {thread_id for thread_id, _ in active}
     if any(row.thread_id in active_thread_ids for row in metadata_rows):
@@ -86,23 +83,13 @@ def _has_current_protection(cwd: str, *, aliases: Iterable[str], changed_since: 
         models.Q(source_session_id__in=ids) | models.Q(accepted_session_id__in=ids)
     ).exists():
         return True
-    thread_ids = [row.thread_id for row in metadata_rows]
-    promoted = frozenset(ProposedSession.objects.filter(
-        outcome_status=ProposedSession.OUTCOME_ACCEPTED, accepted_session_id__in=ids,
-    ).values_list("accepted_session__thread_id", flat=True))
-    hidden = set(SystemAgentRun.objects.filter(thread_id__in=thread_ids).values_list("thread_id", flat=True))
-    hidden.update(CodexInstance.objects.filter(
-        thread_id__in=thread_ids, purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-    ).values_list("thread_id", flat=True))
-    retention = SessionRetention(promoted, frozenset(hidden))
+    retention = SessionRetention(_accepted_thread_ids())
     now = timezone.now()
     return any(retention.removal_reason(row, now=now) is None for row in metadata_rows)
 
 
 def snapshot(*, now: datetime) -> ProtectionSnapshot:
-    legacy_promoted_thread_ids = system_agents.legacy_promoted_system_thread_ids()
-    hidden_system_thread_ids = _hidden_system_thread_ids()
-    retention = SessionRetention(frozenset(legacy_promoted_thread_ids), frozenset(hidden_system_thread_ids))
+    retention = SessionRetention(_accepted_thread_ids())
     protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
         CodexInstance.objects.filter(status__in=CodexInstance.ACTIVE_STATUSES)
@@ -138,6 +125,13 @@ def snapshot(*, now: datetime) -> ProtectionSnapshot:
     )
 
 
+def _accepted_thread_ids() -> frozenset[str]:
+    return frozenset(ProposedSession.objects.filter(
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session__isnull=False,
+    ).values_list("accepted_session__thread_id", flat=True))
+
+
 def _protected_proposal_session_ids() -> set[int]:
     protected = ProposedSession.objects.filter(outcome_status=ProposedSession.OUTCOME_UNSET)
     session_ids: set[int] = set()
@@ -148,21 +142,6 @@ def _protected_proposal_session_ids() -> set[int]:
             if isinstance(value, int)
         )
     return session_ids
-
-
-def _hidden_system_thread_ids() -> set[str]:
-    thread_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    thread_ids.update(
-        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
-        .exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    return thread_ids - system_agents.legacy_promoted_system_thread_ids()
 
 
 def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
@@ -178,18 +157,14 @@ def _protected_visible_user_worktree_paths(
 ) -> set[str]:
     paths: set[str] = set()
     rows = (
-        SessionMetadata.objects.filter(
-            models.Q(is_hidden_system_session=False)
-            | models.Q(thread_id__in=retention.legacy_promoted_thread_ids)
-        )
-        .exclude(cwd="")
+        SessionMetadata.objects.exclude(cwd="")
         .only(
             "thread_id",
             "cwd",
             "codex_archived",
             "codex_archived_at",
-            "is_hidden_system_session",
             "derived_stage",
+            "codex_thread_source",
         )
     )
     for metadata in rows:
@@ -205,4 +180,3 @@ def _normalized_managed_paths(paths: Iterable[str]) -> set[str]:
         if normalized_path is not None:
             normalized.add(normalized_path)
     return normalized
-

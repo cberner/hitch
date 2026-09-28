@@ -138,7 +138,6 @@ def spawn_new_session(
     web_search_mode: str | None = None,
     enable_memories: bool = False,
     plan_mode: bool = False,
-    purpose: str = CodexInstance.PURPOSE_USER,
     agent_kind: str = "",
     user_message_index: int | None = 0,
 ) -> CodexInstance:
@@ -153,7 +152,7 @@ def spawn_new_session(
     """
     config = app_server_config(
         enable_memories=enable_memories,
-        enable_user_input=purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
+        enable_user_input=True,
         web_search_mode=web_search_mode,
     )
     start_kwargs: dict[str, Any] = {
@@ -172,7 +171,7 @@ def spawn_new_session(
         start_kwargs["approvalPolicy"] = approval[0]
         if approval[1] is not None:
             start_kwargs["approvalsReviewer"] = approval[1]
-    dynamic_tools = registered_dynamic_tool_specs(purpose=purpose)
+    dynamic_tools = registered_dynamic_tool_specs()
     if dynamic_tools:
         start_kwargs["dynamicTools"] = dynamic_tools
     name_source = (
@@ -216,7 +215,6 @@ def spawn_new_session(
         web_search_mode=web_search_mode,
         enable_memories=enable_memories,
         plan_mode=plan_mode,
-        purpose=purpose,
         agent_kind=agent_kind,
         user_message_index=user_message_index,
     )
@@ -254,12 +252,11 @@ def create_session_thread_with_path(
     model: str | None = None,
     enable_memories: bool = False,
     web_search_mode: str | None = None,
-    purpose: str = CodexInstance.PURPOSE_USER,
 ) -> tuple[str, str]:
-    """Create a persisted role-scoped thread without starting its first turn."""
+    """Create a persisted coding thread without starting its first turn."""
     config = app_server_config(
         enable_memories=enable_memories,
-        enable_user_input=purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
+        enable_user_input=True,
         web_search_mode=web_search_mode,
     )
     start_kwargs: dict[str, Any] = {
@@ -267,7 +264,7 @@ def create_session_thread_with_path(
         "developerInstructions": developer_instructions,
         "model": model,
     }
-    dynamic_tools = registered_dynamic_tool_specs(purpose=purpose)
+    dynamic_tools = registered_dynamic_tool_specs()
     if dynamic_tools:
         start_kwargs["dynamicTools"] = dynamic_tools
 
@@ -340,7 +337,6 @@ def _spawn_turn(
     developer_instructions: str | None = None,
     hitch_extra_instructions: str | None = None,
     new_thread: bool = False,
-    purpose: str = CodexInstance.PURPOSE_USER,
     agent_kind: str = "",
     user_message_index: int | None = None,
 ) -> CodexInstance:
@@ -352,11 +348,10 @@ def _spawn_turn(
     """
     from hitch.main.sessions.model_settings import session_model_override
 
-    if purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
-        override = session_model_override(thread_id)
-        if override is not None:
-            model, reasoning_effort = override
-            stored_model, stored_reasoning_effort = override
+    override = session_model_override(thread_id)
+    if override is not None:
+        model, reasoning_effort = override
+        stored_model, stored_reasoning_effort = override
     previous = latest_for_thread(thread_id)
     if developer_instructions is None:
         developer_instructions = (
@@ -402,7 +397,6 @@ def _spawn_turn(
         enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
-        purpose=purpose,
         agent_kind=agent_kind,
         user_message_index=user_message_index,
     )
@@ -1680,7 +1674,6 @@ def _spawn_worker(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
-    purpose: str = CodexInstance.PURPOSE_USER,
     agent_kind: str = "",
     user_message_index: int | None = None,
 ) -> CodexInstance:
@@ -1725,7 +1718,6 @@ def _spawn_worker(
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,
-            purpose=purpose,
             agent_kind=agent_kind,
             user_message_index=user_message_index,
         )

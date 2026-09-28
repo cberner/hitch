@@ -28,7 +28,8 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   are cleaned up by their checkout root. Orphan age is determined from the root
   directory name, including when discovered through an alias. Startup still requires the requested cwd
   to exist. Candidate selection and the leased recheck use the
-  same retention policy for visible, archived, and historical system sessions.
+  same retention policy for visible and archived sessions; native subagents do not independently pin a
+  checkout protected by their parent.
   Unresolvable paths are ineligible for removal; startup must fail if it cannot
   resolve a required checkout lease.
 - `ST-shared-assets`: Session styles and scripts load as external shared assets.
@@ -38,7 +39,7 @@ space used by repetitive reasoning, command, file-change, and web-search activit
 - `ST-agent-picker`: Visible session detail pages offer an Agent drop-down with
   Main agent and its native Codex subagents, including nested and archived
   descendants. Use nicknames and roles when available. Unrelated threads and
-  historical Hitch system sessions without native ancestry are excluded.
+  threads without native ancestry are excluded.
 - `ST-agent-transcripts`: Selecting a subagent displays its read-only transcript
   on the same page. Preserve the main agent's draft and keep its stream separate.
   Switching back restores the main conversation and its controls. Selection
@@ -55,7 +56,6 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   sessions as well as Plan mode. Pending questions remain answerable until
   the user responds or stops the worker; elapsed time must not supply an
   empty answer or resume the agent. Approval mode does not answer questions.
-  Hidden background workers do not enable Default-mode user input.
 - `ST-nonblocking-questions`: Honor Codex's `isBlocking` distinction. A
   nonblocking question leaves generation, streamed progress, steering, and
   subsequent questions available. Blocking questions still wait for a real
@@ -193,8 +193,8 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   as its source, and the renderer does not trust TeX commands that request
   external resources or unsafe HTML.
 - `ST-history-preview`: Large sessions initially render a bounded preview of
-  recent persisted user and agent messages, including read-only historical
-  system-session logs. Scrolling upward loads older preview pages.
+  recent persisted user and agent messages. Scrolling upward loads older
+  preview pages.
 - `ST-message-records`: Preview and full-history readers support both legacy
   message events and completed `UserMessage`/`AgentMessage` snapshots. Preserve
   user turn boundaries, image markers, and agent phases, and render assistant

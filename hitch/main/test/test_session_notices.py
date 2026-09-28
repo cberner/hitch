@@ -13,7 +13,6 @@ from django.urls import reverse
 from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.test.support import _make_model, _setup_codex
 from hitch.main.test.views_helpers import _basic_session_rollout_lines, _make_rollout
-from hitch.main.views import common
 
 
 class SessionNoticeTests(TestCase):
@@ -42,9 +41,6 @@ class SessionNoticeTests(TestCase):
         url = reverse("session", args=["session"])
         response = self.client.get(url)
         html = response.content.decode()
-        read_only = common._render_session_detail(response.wsgi_request, "session", read_only=True)
-        self.assertContains(read_only, "Model at capacity")
-        self.assertNotContains(read_only, "Change model")
         instance.status, instance.pid = CodexInstance.STATUS_RUNNING, 1
         instance.save()
         active_html = self.client.get(url).content.decode()

@@ -129,9 +129,7 @@ def reconcile_orphaned_workers() -> int:
     A still-running worker is spared only while a turn could genuinely be in
     progress or just finishing:
 
-    * its instance is still ``starting``/``running`` (spanning *all* purposes --
-      user, system-agent, and workflow turns -- so a system-session worker is
-      never reaped);
+    * its instance is still ``starting``/``running``;
     * its instance reached a terminal status within ``_ORPHAN_REAP_GRACE``:
       ``codex_worker`` commits the terminal status *before* running
       ``_update_completed_turn_pr`` and input-image

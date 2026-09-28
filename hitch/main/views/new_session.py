@@ -186,7 +186,6 @@ def _posted_proposed_session_for_new_session(
         )
         .filter(
             pk=session_id,
-            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
             outcome_status=ProposedSession.OUTCOME_UNSET,
         )
         .first()
@@ -402,7 +401,6 @@ def _proposed_session_for_new_session_page(
         )
         .filter(
             pk=session_id,
-            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
             outcome_status=ProposedSession.OUTCOME_UNSET,
         )
         .first()

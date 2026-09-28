@@ -17,7 +17,7 @@ def remember_prompt(prompt: str, thread_id: str = "", *, cwd: str = "") -> None:
     try:
         with transaction.atomic():
             metadata = SessionMetadata.objects.filter(thread_id=thread_id).first()
-            if metadata is not None and metadata.is_hidden_system_session:
+            if metadata is not None and metadata.codex_thread_source == "subagent":
                 return
             project_id = metadata.project_id if metadata is not None else None
             if project_id is None and not (metadata and metadata.project_cleared):

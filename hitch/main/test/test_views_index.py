@@ -1,6 +1,5 @@
 """Session index and project view tests."""
 
-import base64
 import html
 import json
 import os
@@ -18,7 +17,6 @@ from django.test import (
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from openai_codex.errors import CodexError as CodexError
-from openai_codex.errors import InvalidRequestError
 from openai_codex.generated.v2_all import (
     SortDirection,
     ThreadSortKey,
@@ -35,8 +33,6 @@ from hitch.main.models import (
     SessionIndexSyncState,
     SessionMetadata,
     SessionPullRequest,
-    SystemAgentRun,
-    SystemWorkflow,
 )
 from hitch.main.sessions import (
     session_index,
@@ -522,134 +518,8 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_cursor_keeps_same_second_rows_stable(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        same_second = datetime.fromtimestamp(1000, UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        for i in range(51):
-            SessionMetadata.objects.create(
-                thread_id=f"system-{i:02d}",
-                cwd="/repo",
-                codex_display_title=f"System {i:02d}",
-                codex_name=f"System {i:02d}",
-                codex_created_at=same_second,
-                codex_updated_at=same_second + timedelta(microseconds=50 - i),
-                codex_last_synced_at=now,
-                is_hidden_system_session=True,
-            )
 
-        response = self.client.get(reverse("system_sessions"))
-        load_more_url = self._assert_index_cursor_url(response)
 
-        self.assertContains(response, "System 00")
-        self.assertContains(response, "System 49")
-        self.assertNotContains(response, "System 50")
-
-        response = self.client.get(load_more_url)
-
-        self.assertContains(response, "System 50")
-        self.assertNotContains(response, "System 00")
-        self.assertNotContains(response, "System 49")
-        client.thread_list.assert_not_called()
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_keeps_cold_index_second_precision_across_pages(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        mock_discover.return_value = []
-        threads = [
-            SimpleNamespace(
-                id=f"system-{i:03d}",
-                name=f"System {i:03d}",
-                preview="",
-                cwd="/repo",
-                path=None,
-                updated_at=1000 + ((119 - i) / 1_000_000),
-                thread_source=ThreadSource.subagent,
-            )
-            for i in range(120)
-        ]
-        client = _setup_codex(mock_codex, threads=threads)
-
-        response = self.client.get(reverse("system_sessions"))
-        page_two_url = self._assert_index_cursor_url(response)
-
-        self.assertContains(response, "System 119")
-        self.assertContains(response, "System 070")
-        self.assertNotContains(response, "System 069")
-
-        response = self.client.get(page_two_url)
-        page_three_url = self._assert_index_cursor_url(response)
-
-        self.assertContains(response, "System 069")
-        self.assertContains(response, "System 020")
-        self.assertNotContains(response, "System 070")
-        self.assertNotContains(response, "System 019")
-
-        response = self.client.get(page_three_url)
-
-        self.assertContains(response, "System 019")
-        self.assertContains(response, "System 000")
-        self.assertNotContains(response, "System 070")
-        self.assertNotContains(response, "System 020")
-        self.assertEqual(client.thread_list.call_count, 1)
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_ignores_invalid_index_cursor_timestamps(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        client = _setup_codex(mock_codex)
-        client.thread_list.side_effect = CodexError("thread list unavailable")
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="system",
-            cwd="/repo",
-            codex_display_title="System",
-            codex_name="System",
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-            is_hidden_system_session=True,
-        )
-
-        cases = (
-            ("NaN", ""),
-            ("Infinity", ""),
-            ("-Infinity", ""),
-            ("1e100", ""),
-            ("1e100", ',"updated_at_precision":"exact"'),
-            ("-1e100", ""),
-            ("-1e100", ',"updated_at_precision":"exact"'),
-        )
-        for updated_at, precision in cases:
-            with self.subTest(updated_at=updated_at, precision=precision):
-                cursor_payload = f'{{"updated_at":{updated_at},"id":"a"{precision}}}'
-                cursor = "idx:" + base64.urlsafe_b64encode(cursor_payload.encode()).decode()
-
-                response = self.client.get(reverse("system_sessions"), {"cursor": cursor})
-
-                self.assertEqual(response.status_code, 200)
-                self.assertContains(response, "System")
-        client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.common.Codex")
     def test_full_refresh_invalidates_absent_active_rows(self, mock_codex: MagicMock) -> None:
@@ -768,247 +638,11 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_system_sessions_backfill_missing_cached_metadata(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _setup_codex(mock_codex)
-        mock_discover.return_value = []
-        now = datetime.now(UTC)
-        project = _make_project(name="Repo")
-        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
-        SessionIndexSyncState.objects.create(
-            source=SessionIndexSyncState.SOURCE_ACTIVE,
-            last_synced_at=now,
-            is_complete=True,
-        )
-        SessionMetadata.objects.create(
-            thread_id="visible",
-            cwd="/repo",
-            codex_display_title="Visible",
-            codex_created_at=now,
-            codex_updated_at=now,
-            codex_last_synced_at=now,
-            project=project,
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind="autonomous_goal_run",
-            main_thread_id="visible",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="system-thread",
-            cwd="/repo",
-            prompt="Autonomous goal prompt",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind="autonomous_goal_run",
-            display_author="Autonomous goal agent",
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="autonomous_goal_run",
-            thread_id="system-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        SessionMetadata.objects.create(
-            thread_id="system-thread",
-            cwd="/repo",
-            project=project,
-        )
-
-        response = self.client.get(reverse("system_sessions"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Autonomous goal agent")
-        self.assertContains(response, "completed")
-        metadata = SessionMetadata.objects.get(thread_id="system-thread")
-        self.assertEqual(metadata.project, project)
-        self.assertIsNotNone(metadata.codex_updated_at)
 
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_hides_system_agent_threads(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
-        visible = _session("visible", preview="Visible")
-        hidden = _session("system-thread", preview="Hidden system")
-        _setup_codex(mock_codex, threads=[visible, hidden])
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind="autonomous_goal_run",
-            main_thread_id="visible",
-            cwd="/repo",
-        )
-        instance = CodexInstance.objects.create(
-            pid=1,
-            thread_id="system-thread",
-            cwd="/repo",
-            prompt="autonomous goal",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind="autonomous_goal_run",
-            thread_id="system-thread",
-            instance=instance,
-        )
 
-        response = self.client.get(reverse("index"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Visible")
-        self.assertNotContains(response, "Hidden system")
 
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_hides_system_agent_instance_threads_without_run_record(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        visible = _session("visible", preview="Visible")
-        hidden = _session("autonomous-goal-thread", preview="Hidden autonomous goal")
-        hidden.turns = []
-        client = _setup_codex(mock_codex, threads=[visible, hidden])
-        client._client.thread_read.return_value = SimpleNamespace(thread=hidden)
-        mock_discover.return_value = []
-        workflow = SystemWorkflow.objects.create(
-            kind="autonomous_goal_run",
-            main_thread_id="autonomous-goal:1",
-            cwd="/repo",
-        )
-        CodexInstance.objects.create(
-            pid=1,
-            thread_id="autonomous-goal-thread",
-            cwd="/repo",
-            prompt="autonomous goal",
-            events_path="/dev/null",
-            status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind="autonomous_goal_run",
-        )
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Visible")
-        self.assertNotContains(response, "Hidden autonomous goal")
-
-        system_response = self.client.get(reverse("system_sessions"))
-
-        self.assertEqual(system_response.status_code, 200)
-        self.assertContains(system_response, "Hidden autonomous goal")
-        self.assertContains(system_response, "autonomous goal run")
-        self.assertContains(system_response, "failed")
-        self.assertContains(
-            system_response,
-            reverse(
-                "system_session",
-                kwargs={"session_id": "autonomous-goal-thread"},
-            ),
-        )
-
-        detail_response = self.client.get(
-            reverse(
-                "system_session",
-                kwargs={"session_id": "autonomous-goal-thread"},
-            )
-        )
-
-        self.assertEqual(detail_response.status_code, 200)
-        self.assertContains(detail_response, "autonomous goal run log")
-        self.assertContains(detail_response, "System prompt")
-        self.assertContains(detail_response, "autonomous goal")
-
-    @patch("hitch.main.repos.discover_repos")
-    @patch("hitch.main.views.common.Codex")
-    def test_hides_legacy_autonomous_goal_prompt_threads_without_source(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        visible = _session("visible", name="Visible")
-        candidate = _session(
-            "legacy-candidate",
-            name=session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
-            preview=(
-                f"{session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
-                "Analyze the repo.\n\n"
-                "Autonomous goal title: Docs\n\n"
-                "Autonomous goal objective:\nKeep documentation tidy.\n\n"
-                "Return only JSON matching this shape: {}"
-            ),
-        )
-        judge = _session(
-            "legacy-judge",
-            name=session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
-            preview=(
-                f"{session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
-                "Judge it.\n\n"
-                "Autonomous goal title: Docs\n\n"
-                "Candidate session JSON:\n{}\n\n"
-                "Return only JSON matching this shape: {}"
-            ),
-        )
-        legacy_candidate = _session(
-            "legacy-standing-candidate",
-            name=session_index.LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
-            preview=(
-                f"{session_index.LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
-                "Analyze the repo.\n\n"
-                "Standing order title: Docs\n\n"
-                "Standing order goal:\nKeep documentation tidy.\n\n"
-                "Return only JSON matching this shape: {}"
-            ),
-        )
-        legacy_judge = _session(
-            "legacy-standing-judge",
-            name=session_index.LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
-            preview=(
-                f"{session_index.LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
-                "Judge it.\n\n"
-                "Standing order title: Docs\n\n"
-                "Candidate session JSON:\n{}\n\n"
-                "Return only JSON matching this shape: {}"
-            ),
-        )
-        _setup_codex(
-            mock_codex,
-            threads=[visible, candidate, judge, legacy_candidate, legacy_judge],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("index"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Visible")
-        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal confidence judge.")
-        self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
-        self.assertNotContains(response, "You are Hitch&#x27;s standing order confidence judge.")
-
-        system_response = self.client.get(reverse("system_sessions"))
-
-        self.assertEqual(system_response.status_code, 200)
-        self.assertNotContains(system_response, "Visible")
-        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
-        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal confidence judge.")
-        self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
-        self.assertContains(system_response, "You are Hitch&#x27;s standing order confidence judge.")
-
-    @patch("hitch.main.views.common.Codex")
-    def test_untracked_system_session_non_thread_invalid_request_is_not_404(self, mock_codex: MagicMock) -> None:
-        session_id = "00000000-0000-0000-0000-000000000001"
-        client = _setup_codex(mock_codex)
-        client._client.thread_read.side_effect = InvalidRequestError(-32600, "model provider not found")
-
-        with self.assertRaises(InvalidRequestError):
-            self.client.get(reverse("system_session", kwargs={"session_id": session_id}))
 
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.common.Codex")
@@ -1024,7 +658,7 @@ class IndexViewTests(TestCase):
         mock_discover.return_value = []
         metadata = SessionMetadata.objects.create(
             thread_id="accepted-candidate",
-            is_hidden_system_session=True,
+            codex_thread_source="subagent",
         )
         CodexInstance.objects.create(
             pid=0,
@@ -1033,7 +667,6 @@ class IndexViewTests(TestCase):
             prompt="Analyze the repo.",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
         ProposedSession.objects.create(
             title="Accepted proposal",
@@ -1046,8 +679,6 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Accepted candidate")
 
-        system_response = self.client.get(reverse("system_sessions"))
-        self.assertNotContains(system_response, "Accepted candidate")
 
 
     @patch("hitch.main.repos.discover_repos")
@@ -1168,7 +799,6 @@ class IndexViewTests(TestCase):
             prompt="qa",
             events_path="/dev/null",
             status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             approval_mode="auto_review",
         )
         system_pending = ApprovalRequest.objects.create(
@@ -1777,9 +1407,8 @@ class IndexViewTests(TestCase):
             path=other_path,
         )
         legacy = _seed_usage_metadata("legacy", path=session_path, project=project)
-        legacy.is_hidden_system_session = True
         legacy.codex_archived = True
-        legacy.save(update_fields=["is_hidden_system_session", "codex_archived"])
+        legacy.save(update_fields=["codex_archived"])
         _cache_token_usage(
             "legacy", input_tokens=10, cached_input_tokens=0, output_tokens=20, total_tokens=30, path=session_path
         )

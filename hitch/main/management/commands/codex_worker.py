@@ -495,7 +495,7 @@ def _run_turn(
     os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
     config = app_server_config(
         enable_memories=enable_memories,
-        enable_user_input=instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES,
+        enable_user_input=True,
         web_search_mode=web_search_mode,
         sqlite_home=sqlite_home,
     )
@@ -611,13 +611,12 @@ def _run_turn(
             retry_delay = _CAPACITY_RETRY_INITIAL_SECONDS
             control_cursor = _SteerControlCursor()
             for attempt in itertools.count():
-                if instance.purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
-                    override = session_model_override(instance.thread_id)
-                    if override is not None:
-                        model, reasoning_effort = override
-                        effort = ReasoningEffort(reasoning_effort) if reasoning_effort else None
-                        instance.model, instance.reasoning_effort = override
-                        instance.save(update_fields=["model", "reasoning_effort"])
+                override = session_model_override(instance.thread_id)
+                if override is not None:
+                    model, reasoning_effort = override
+                    effort = ReasoningEffort(reasoning_effort) if reasoning_effort else None
+                    instance.model, instance.reasoning_effort = override
+                    instance.save(update_fields=["model", "reasoning_effort"])
                 final_turn = None
                 client_message_id = f"hitch-instance-{instance.pk}"
                 if attempt:
@@ -1891,7 +1890,6 @@ def _make_approval_handler(
                     thread_id=instance.thread_id,
                     instance_id=instance.pk,
                     agent_kind=instance.agent_kind,
-                    purpose=instance.purpose,
                     user_message_index=instance.user_message_index,
                     cancel_requested=lambda: _cancel_requested or question_cancelled(),
                     on_response_sent=on_response_sent,

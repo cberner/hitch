@@ -30,7 +30,6 @@ from hitch.main.models import (
     RecentPrompt,
     SessionMetadata,
     SessionPullRequest,
-    SystemWorkflow,
     UserInputRequest,
 )
 from hitch.main.runtime import codex_pool
@@ -524,9 +523,6 @@ class SendMessageViewTests(TestCase):
                 self.assertEqual(kwargs["reasoning_effort"], "high")
                 self.assertNotIn("plan_mode", kwargs)
                 self.assertNotIn("workflow_id", kwargs)
-                self.assertFalse(
-                    SystemWorkflow.objects.filter(main_thread_id="abc").exists()
-                )
 
     @patch("hitch.main.runtime.codex_pool._spawn_turn")
     @patch("hitch.main.views.common.Codex")
@@ -708,6 +704,44 @@ class SendMessageViewTests(TestCase):
             ),
         )
 
+
+    @patch("hitch.main.repos.discover_repos")
+    @patch("hitch.main.runtime.codex_pool._spawn_turn")
+    @patch("hitch.main.views.common.Codex")
+    def test_locally_archived_follow_up_keeps_rollout_active(
+        self, mock_codex: MagicMock, mock_spawn: MagicMock, mock_discover: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        with tempfile.NamedTemporaryFile() as rollout:
+            metadata = SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+            for accepted in (False, True):
+                with self.subTest(accepted=accepted):
+                    metadata.codex_path = rollout.name
+                    metadata.codex_archived = True
+                    metadata.codex_archived_at = timezone.now()
+                    metadata.archive_local_only = True
+                    metadata.save()
+                    self._patch_codex(mock_codex, model="gpt-5.4" if accepted else None, models=[])
+                    client = mock_codex.return_value.__enter__.return_value
+                    client.thread_unarchive.side_effect = InvalidRequestError(
+                        -32600, "no archived rollout found for thread id abc",
+                    )
+                    response = self.client.post(
+                        reverse("send_message", kwargs={"session_id": "abc"}),
+                        data={"prompt": "follow-up", "collaboration_mode": "default"},
+                    )
+                    self.assertEqual(response.status_code, 302 if accepted else 400)
+                    metadata.refresh_from_db()
+                    self.assertEqual(metadata.codex_archived, not accepted)
+                    self.assertEqual(metadata.archive_local_only, not accepted)
+                    if not accepted:
+                        self.assertEqual(metadata.codex_path, rollout.name)
+                        mock_spawn.assert_not_called()
+                    else:
+                        mock_spawn.assert_called_once()
+                    client.thread_unarchive.assert_not_called()
+                    client.thread_archive.assert_not_called()
+                    self.assertTrue(Path(rollout.name).is_file())
 
     @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.repos.discover_repos")

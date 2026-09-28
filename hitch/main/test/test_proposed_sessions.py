@@ -13,7 +13,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 
 from hitch.main import checkouts
-from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata
+from hitch.main.models import ProposedSession, SessionMetadata
 from hitch.main.proposals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
@@ -24,7 +24,6 @@ from hitch.main.proposals.proposed_sessions import (
 from hitch.main.runtime.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
-    registered_dynamic_tool_specs,
 )
 from hitch.main.test.support import _make_project
 
@@ -130,11 +129,6 @@ class ProposedSessionServiceTests(TestCase):
             prompt="Prompt",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
-        notice = ProposedSession.objects.create(
-            project=project,
-            title="Notice",
-            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
-        )
         other_project = _make_project(name="Other", repo_path="/other")
         other_project_proposal = ProposedSession.objects.create(
             project=other_project,
@@ -151,15 +145,6 @@ class ProposedSessionServiceTests(TestCase):
                     title="Updated",
                 ),
                 "proposal has already been resolved",
-            ),
-            (
-                notice.pk,
-                ProposedSessionUpdateInput(
-                    proposal_id=notice.pk,
-                    cwd="/repo",
-                    title="Updated",
-                ),
-                "proposal item is not editable",
             ),
             (
                 other_project_proposal.pk,
@@ -514,22 +499,3 @@ class CodexToolTests(TestCase):
 
                 self.assertFalse(response["success"])
                 self.assertIn(message, response["contentItems"][0]["text"])
-
-
-class RetiredGoalToolsTests(TestCase):
-    def test_retired_roles_receive_no_tools_and_cannot_publish(self) -> None:
-        for kind in ("autonomous_goal_run", "autonomous_goal_reviewer"):
-            with self.subTest(kind=kind):
-                self.assertEqual(registered_dynamic_tool_specs(
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                ), [])
-                context = ToolContext(
-                    cwd="/repo", thread_id="hidden", agent_kind=kind,
-                    purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                )
-                for name in (
-                    "get_goal", "list_goal_sessions", "review", "propose_session", "no_proposal", "approve", "deny",
-                ):
-                    result = handle_dynamic_tool_call({"tool": name, "arguments": {}}, context)
-                    self.assertFalse(result["success"], name)
-        self.assertFalse(ProposedSession.objects.exists())
