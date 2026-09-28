@@ -99,15 +99,15 @@ and their optional delegation through Codex's native subagents.
   framework steering queue or recovery narration.
 - `REVIEW-visible-stage`: Active tagged review and publication turns display QA
   and PR stages respectively and appear in the ordinary session transcript.
-- `REVIEW-no-framework-loop`: These triggers create no PR/QA `SystemWorkflow`,
+- `REVIEW-no-framework-loop`: These triggers create no background PR/QA workflow,
   hidden reviewer, framework-managed repair turn, or repeated review loop.
 - `REVIEW-no-local-merge`: Review and PR tasks never apply session changes
   directly to another local branch.
 
 ## 4. Success Criteria
 
-- `REVIEW-accept-native-configuration`: New, resumed, promoted, and visible
-  system-feedback coding workers start without Hitch reviewer-role or
+- `REVIEW-accept-native-configuration`: New, resumed, and proposal-created
+  coding workers start without Hitch reviewer-role or
   multi-agent feature overrides.
 - `REVIEW-accept-native`: Delegating review uses Codex's native `spawn_agent`
   path and returns findings to the coding agent without Hitch review-runtime

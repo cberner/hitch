@@ -2,24 +2,19 @@
         {% if sessions %}
         <ul class="session-list">
             {% for session in sessions %}
-            <li class="session"{% if not system_session_list %} data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}"{% endif %}>
-                {% if not system_session_list %}
+            <li class="session" data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}">
                 <div class="session-swipe-action" aria-hidden="true">Archive</div>
-                {% endif %}
                 <div class="session-content">
-                    <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
+                    <a class="session-link" href="{% url 'session' session_id=session.id %}">
                         <div class="session-title" data-session-title>{{ session.display_title }}</div>
                         <div class="session-meta">
                             {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}"{% if session.stage.executing %} data-executing="true"{% endif %}>{{ session.stage.label }}</span>{% endif %}
                             <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
                             {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
-                            {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}
-                            {% if session.system_status %}<span class="meta-item"><span class="meta-label">status</span>{{ session.system_status }}</span>{% endif %}
                             <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
                             {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
                         </div>
                     </a>
-                    {% if not system_session_list %}
                     <div class="session-row-menu" data-session-menu>
                         <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                         <div class="session-menu" role="menu" data-session-menu-panel hidden>
@@ -32,9 +27,7 @@
                             </form>
                         </div>
                     </div>
-                    {% endif %}
                 </div>
-                {% if not system_session_list %}
                 <div class="session-rename" data-session-rename hidden>
                     <form method="post" action="{% url 'set_session_name' session_id=session.id %}" data-session-rename-form>
                         {% csrf_token %}
@@ -43,7 +36,6 @@
                         <button type="submit">Save</button>
                     </form>
                 </div>
-                {% endif %}
             </li>
             {% endfor %}
         </ul>
@@ -52,8 +44,8 @@
         {% endif %}
         {% else %}
         <div class="empty">
-            <p>{% if system_session_list %}No system sessions found.{% else %}No sessions found.{% endif %}</p>
-            {% if not system_session_list %}<p class="hint">Tap “New session” to start your first one.</p>{% endif %}
+            <p>No sessions found.</p>
+            <p class="hint">Tap “New session” to start your first one.</p>
         </div>
         {% endif %}
 </div>

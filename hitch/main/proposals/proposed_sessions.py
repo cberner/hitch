@@ -69,8 +69,6 @@ def update_proposed_session(values: ProposedSessionUpdateInput) -> ProposedSessi
     proposal = ProposedSession.objects.filter(pk=values.proposal_id).first()
     if proposal is None or proposal.project_id != project.pk:
         raise ProposedSessionError("proposal does not match current Hitch project")
-    if proposal.inbox_kind != ProposedSession.INBOX_KIND_PROPOSAL:
-        raise ProposedSessionError("proposal item is not editable")
     if proposal.outcome_status != ProposedSession.OUTCOME_UNSET:
         raise ProposedSessionError("proposal has already been resolved")
 
@@ -98,7 +96,6 @@ def update_proposed_session(values: ProposedSessionUpdateInput) -> ProposedSessi
     updated = ProposedSession.objects.filter(
         pk=proposal.pk,
         project_id=project.pk,
-        inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
         outcome_status=ProposedSession.OUTCOME_UNSET,
     ).update(**update_values, updated_at=updated_at)
     if not updated:

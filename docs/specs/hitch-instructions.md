@@ -36,7 +36,7 @@ setting, separately from personal/project instructions and user messages.
 - `HI-delivery`: Thread creation and worker resume combine the two saved
   instruction fields through Codex's developer-instruction channel. Clearing
   Hitch instructions explicitly replaces previously persisted guidance even
-  when the resulting developer prompt is empty. Legacy and hidden workers
+  when the resulting developer prompt is empty. Legacy workers
   without a Hitch snapshot preserve their existing instruction handling.
 - `HI-existing-baseline`: New sessions preserve Codex's configured developer
   instructions when no personal/project override is supplied. Imported or

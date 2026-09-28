@@ -46,12 +46,6 @@ urlpatterns = [
     ),
     path("projects/new/", settings_views.new_project, name="new_project"),
     path("projects/edit/", settings_views.edit_project, name="edit_project"),
-    path("system-sessions/", session_list.system_sessions, name="system_sessions"),
-    path(
-        "system-sessions/<str:session_id>/",
-        session_list.system_session,
-        name="system_session",
-    ),
     path("sessions/new/", new_session.new_session, name="new_session"),
     path(
         "sessions/<str:session_id>/history/",

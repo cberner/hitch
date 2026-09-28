@@ -5,12 +5,8 @@ accumulate per debounced quota or reconciliation resource. An old key is safe
 to drop without affecting session history. The runtime maintenance scheduler
 runs this sweep daily.
 
-Reaping terminal ``SystemWorkflow`` / ``CodexInstance`` rows and their event
-files is intentionally out of scope -- those are read back by the
-historical system-session logs and session resume in ways
-that make age alone an unsafe deletion signal -- and is left to a separate,
-more carefully scoped change. Disk-pressure cleanup remains the backstop for
-worktrees.
+Worker history retention is separate from throttle expiry. Disk-pressure
+cleanup remains the backstop for worktrees.
 """
 
 from __future__ import annotations

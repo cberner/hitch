@@ -69,8 +69,6 @@ class ProposedSession(models.Model):
         (CONFIDENCE_VERY_HIGH, "Very high"),
     )
 
-    INBOX_KIND_PROPOSAL = "proposal"
-    INBOX_KIND_NOTICE = "notice"
     ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY = "accepted_session_start_claimed_at"
     ACCEPTED_SESSION_START_CLAIM_TTL = timedelta(minutes=30)
     ACCEPTED_SESSION_START_CLAIM_CLOCK_SKEW = timedelta(minutes=1)
@@ -79,11 +77,6 @@ class ProposedSession(models.Model):
     OUTCOME_ACCEPTED = "accepted"
     OUTCOME_REJECTED = "rejected"
     OUTCOME_DISMISSED = "dismissed"
-
-    INBOX_KIND_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
-        (INBOX_KIND_PROPOSAL, "Proposal"),
-        (INBOX_KIND_NOTICE, "Notice"),
-    )
 
     OUTCOME_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
         (OUTCOME_UNSET, "Not set"),
@@ -100,11 +93,6 @@ class ProposedSession(models.Model):
         blank=True,
     )
     title = models.CharField(max_length=200)
-    inbox_kind = models.CharField(
-        max_length=16,
-        choices=INBOX_KIND_CHOICES,
-        default=INBOX_KIND_PROPOSAL,
-    )
     summary = models.TextField(blank=True, default="")
     prompt = models.TextField(blank=True, default="")
     confidence = models.CharField(
@@ -213,7 +201,6 @@ class SessionMetadata(models.Model):
     codex_thread_source = models.CharField(max_length=64, blank=True, default="")
     codex_last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True)
     usage_last_checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    is_hidden_system_session = models.BooleanField(default=False, db_index=True)
     derived_stage = models.CharField(max_length=32, blank=True, default="", db_index=True)
     derived_stage_source_mtime_ns = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -341,20 +328,6 @@ class CodexInstance(models.Model):
     # instance active?" check (queryset filters and ``is_active``) reads this so
     # the definition can never drift between callers.
     ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_STARTING, STATUS_RUNNING)
-    PURPOSE_USER = "user"
-    PURPOSE_SYSTEM_AGENT = "system_agent"
-    PURPOSE_SYSTEM_FEEDBACK = "system_feedback"
-    # These turns run on a user-visible coding thread and may use Hitch's
-    # trusted coding capabilities. Hidden system agents must remain excluded.
-    VISIBLE_CODING_PURPOSES: ClassVar[frozenset[str]] = frozenset(
-        {PURPOSE_USER, PURPOSE_SYSTEM_FEEDBACK}
-    )
-
-    PURPOSE_CHOICES = (
-        (PURPOSE_USER, "user"),
-        (PURPOSE_SYSTEM_AGENT, "system agent"),
-        (PURPOSE_SYSTEM_FEEDBACK, "system feedback"),
-    )
     APPROVAL_MODE_PROMPT_USER = "prompt_user"
     APPROVAL_MODE_APPROVE_ALL = "approve_all"
     LIVE_EDITABLE_APPROVAL_MODES: ClassVar[frozenset[str]] = frozenset(
@@ -401,19 +374,13 @@ class CodexInstance(models.Model):
     # rendered to users. Depending on the Codex error variant this is either a
     # string discriminator or an object with structured details.
     codex_error_info = models.JSONField(default=None, blank=True, null=True)
-    purpose = models.CharField(
-        max_length=32, choices=PURPOSE_CHOICES, default=PURPOSE_USER
-    )
-    workflow_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     agent_kind = models.CharField(max_length=64, blank=True, default="")
-    display_author = models.CharField(max_length=128, blank=True, default="")
     user_message_index = models.PositiveIntegerField(null=True, blank=True, db_index=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["thread_id", "-started_at"]),
             models.Index(fields=["status"]),
-            models.Index(fields=["purpose"]),
         ]
 
     @override
@@ -424,113 +391,6 @@ class CodexInstance(models.Model):
     def is_active(self) -> bool:
         """Whether this worker is still live (STARTING or RUNNING)."""
         return self.status in CodexInstance.ACTIVE_STATUSES
-
-
-class SystemWorkflow(models.Model):
-    """Historical ledger for retired Hitch background workflows."""
-
-    STATUS_RUNNING = "running"
-    STATUS_BLOCKED = "blocked"
-    STATUS_COMPLETED = "completed"
-    STATUS_FAILED = "failed"
-    STATUS_MAX_ITERATIONS_REACHED = "max_iterations_reached"
-
-    STATUS_CHOICES = (
-        (STATUS_RUNNING, "running"),
-        (STATUS_BLOCKED, "blocked"),
-        (STATUS_COMPLETED, "completed"),
-        (STATUS_FAILED, "failed"),
-        (STATUS_MAX_ITERATIONS_REACHED, "max iterations reached"),
-    )
-    ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_RUNNING,)
-
-    kind = models.CharField(max_length=64)
-    main_thread_id = models.CharField(max_length=128, db_index=True)
-    cwd = models.CharField(max_length=4096)
-    status = models.CharField(max_length=64, choices=STATUS_CHOICES, default=STATUS_RUNNING)
-    step = models.CharField(max_length=64, blank=True, default="")
-    iteration = models.PositiveIntegerField(default=0)
-    max_iterations = models.PositiveIntegerField(default=3)
-    state = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["kind", "main_thread_id", "status"]),
-        ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["kind", "main_thread_id"],
-                condition=models.Q(status="running"),
-                name="uniq_running_system_workflow",
-            )
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return (
-            f"SystemWorkflow(kind={self.kind}, main_thread_id={self.main_thread_id}, "
-            f"status={self.status})"
-        )
-
-    @property
-    def is_active(self) -> bool:
-        """Whether this workflow is still running (and thus pins its worktree)."""
-        return self.status in SystemWorkflow.ACTIVE_STATUSES
-
-
-class SystemAgentRun(models.Model):
-    """Historical turn in a Hitch background workflow."""
-
-    STATUS_STARTING = "starting"
-    STATUS_RUNNING = "running"
-    STATUS_COMPLETED = "completed"
-    STATUS_FAILED = "failed"
-
-    STATUS_CHOICES = (
-        (STATUS_STARTING, "starting"),
-        (STATUS_RUNNING, "running"),
-        (STATUS_COMPLETED, "completed"),
-        (STATUS_FAILED, "failed"),
-    )
-
-    workflow = models.ForeignKey(
-        SystemWorkflow, on_delete=models.CASCADE, related_name="agent_runs"
-    )
-    agent_kind = models.CharField(max_length=64)
-    thread_id = models.CharField(max_length=128, db_index=True)
-    instance = models.ForeignKey(
-        CodexInstance,
-        on_delete=models.CASCADE,
-        related_name="system_agent_runs",
-    )
-    status = models.CharField(max_length=64, choices=STATUS_CHOICES, default=STATUS_STARTING)
-    input = models.JSONField(default=dict, blank=True)
-    output = models.JSONField(default=dict, blank=True)
-    raw_output = models.TextField(blank=True, default="")
-    error = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["workflow", "-created_at"]),
-            models.Index(fields=["agent_kind", "status"]),
-        ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["instance"],
-                name="uniq_system_agent_run_instance",
-            )
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return (
-            f"SystemAgentRun(agent_kind={self.agent_kind}, thread_id={self.thread_id}, "
-            f"status={self.status})"
-        )
 
 
 class ApprovalRequest(models.Model):

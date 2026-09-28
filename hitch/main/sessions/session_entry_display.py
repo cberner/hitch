@@ -282,20 +282,10 @@ def _current_task_text(steps: tuple[codex_events.TaskPlanStep, ...]) -> str:
     return steps[-1].step if steps else ""
 
 
-def _pending_user_author(active: CodexInstance | None) -> str:
-    if active is None:
-        return ""
-    return active.display_author if active.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK else ""
-
-
 def _pending_user_timestamp(active: CodexInstance | None) -> int:
     if active is None:
         return 0
     return int(active.started_at.timestamp())
-
-
-def _active_worker_status_text(active: CodexInstance | None) -> str:
-    return ""
 
 
 def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
@@ -303,7 +293,6 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
     latest = (
         CodexInstance.objects.filter(
             thread_id=session_id,
-            purpose=CodexInstance.PURPOSE_USER,
         )
         .only("status", "error", "codex_error_info", "started_at", "ended_at")
         # User turns may overlap. A later-ending older turn must supersede a
@@ -343,36 +332,6 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
         "change_model": code == "serverOverloaded",
         "timestamp": int(timestamp.timestamp()),
     }
-
-
-def _apply_system_authors(entries: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
-    system_authors: dict[int, str] = {
-        user_message_index: author
-        for user_message_index, author in CodexInstance.objects.filter(
-            thread_id=session_id,
-            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-            user_message_index__isnull=False,
-        ).values_list("user_message_index", "display_author")
-        if isinstance(user_message_index, int) and author
-    }
-    if not system_authors:
-        return entries
-    user_message_index = 0
-    for entry in entries:
-        user_message_index = _apply_system_author(entry, system_authors, user_message_index)
-    return entries
-
-
-def _apply_system_author(entry: dict[str, Any], system_authors: dict[int, str], user_message_index: int) -> int:
-    if entry.get("kind") == "user":
-        author = system_authors.get(user_message_index)
-        if author:
-            entry["display_author"] = author
-        return user_message_index + 1
-    if entry.get("kind") == "intermediate":
-        for item in entry.get("items", []):
-            user_message_index = _apply_system_author(item, system_authors, user_message_index)
-    return user_message_index
 
 
 def _display_title(thread: Any) -> str:

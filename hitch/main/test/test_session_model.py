@@ -18,7 +18,6 @@ from hitch.main.models import CodexInstance, SessionMetadata
 from hitch.main.runtime import codex_pool
 from hitch.main.test.support import _make_model, _setup_codex
 from hitch.main.test.views_helpers import _basic_session_rollout_lines, _make_rollout
-from hitch.main.views import common
 
 
 class SessionModelTests(TestCase):
@@ -111,8 +110,6 @@ class SessionModelTests(TestCase):
         self.assertTrue(response.context["session_model_pending"])
         next_message = response.context["next_message_config"]
         self.assertEqual((next_message[0]["value"], next_message[1]["plan_value"]), ("second", "high"))
-        readonly = common._render_session_detail(response.wsgi_request, "session", read_only=True)
-        self.assertNotContains(readonly, "data-model-settings-form>")
         active.model, active.reasoning_effort = "second", "high"
         active.save()
         self.assertFalse(self.client.get(url).context["session_model_pending"])

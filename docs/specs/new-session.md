@@ -8,7 +8,7 @@ Status: Implemented
   scrollable list of the 20 most recent nonblank user prompts saved by Hitch,
   newest first, from the project currently selected in the new-session form.
   Changing the project immediately updates the list. Include follow-up prompts and
-  archived sessions; exclude automated turns and hidden system sessions.
+  archived sessions; exclude automated turns and native subagents.
 - `NS-history-storage`: Save accepted browser submissions, including steering
   during an active turn, before adding worker instructions. Keep only the last
   20 nonblank submissions per project. Bare-repo sessions and legacy history

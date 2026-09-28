@@ -1787,7 +1787,7 @@ class NewSessionViewTests(TestCase):
         project = _make_project()
         SessionMetadata.objects.create(thread_id="project-thread", project=project)
         SessionMetadata.objects.create(
-            thread_id="hidden-thread", project=project, is_hidden_system_session=True,
+            thread_id="hidden-thread", project=project, codex_thread_source="subagent",
         )
         remember_prompt("Bare repo prompt")
         for index in range(22):

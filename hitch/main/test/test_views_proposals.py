@@ -200,8 +200,7 @@ class InboxViewTests(TestCase):
             summary="Should render.",
         )
         ProposedSession.objects.create(
-            title="No repo notice",
-            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            title="No repo proposal",
             summary="No project attached.",
         )
 
@@ -230,7 +229,7 @@ class InboxViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible projects")
         self.assertContains(response, "Other proposal")
-        self.assertContains(response, "No repo notice")
+        self.assertContains(response, "No repo proposal")
         self.assertContains(response, "No repo -")
         self.assertNotContains(response, "Matching proposal")
 
@@ -381,22 +380,6 @@ class InboxViewTests(TestCase):
         self.assertIsNone(proposal.accepted_session)
 
 
-    def test_notice_rejects_non_dismissed_outcome(self) -> None:
-        project = _make_project()
-        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        notice = ProposedSession.objects.create(
-            project=project,
-            title="No proposal from Improve tests",
-            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
-        )
-
-        response = self.client.post(
-            reverse("update_proposed_session_outcome", args=[notice.pk]),
-            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"outcome status is invalid")
 
 
     @patch("hitch.main.views.common.cleanup_managed_worktree_path")
@@ -410,7 +393,7 @@ class InboxViewTests(TestCase):
             thread_id="candidate-thread",
             cwd="/repo-worktree",
             project=project,
-            is_hidden_system_session=True,
+            codex_thread_source="subagent",
         )
         proposal = ProposedSession.objects.create(
             project=project,
@@ -459,16 +442,15 @@ class InboxViewTests(TestCase):
 
 
 
-    def test_resolves_ordinary_proposals_and_notices(self) -> None:
+    def test_resolves_ordinary_proposals(self) -> None:
         project = _make_project()
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        for kind, outcome, reason in (
-            ("proposal", "rejected", "Already done"),
-            ("proposal", "dismissed", ""),
-            ("notice", "dismissed", ""),
+        for outcome, reason in (
+            ("rejected", "Already done"),
+            ("dismissed", ""),
         ):
-            with self.subTest(kind=kind, outcome=outcome):
-                proposal = ProposedSession.objects.create(project=project, title="Follow-up", inbox_kind=kind)
+            with self.subTest(outcome=outcome):
+                proposal = ProposedSession.objects.create(project=project, title="Follow-up")
                 response = self.client.post(
                     reverse("update_proposed_session_outcome", args=[proposal.pk]),
                     {"outcome_status": outcome, "reason": reason},

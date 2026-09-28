@@ -9,22 +9,17 @@
         <style>.edit-title[hidden] { display: block; }</style>
     </noscript>
 {% endblock %}
-{% block body_attrs %}{% if read_only %} class="read-only"{% endif %}{% endblock %}
 {% block body %}
     <header class="topbar">
         <div class="topbar-inner">
             {% include "_primary_nav.html" %}
             <div class="topbar-title">{{ display_title }}</div>
-            {% if not read_only or debug_chat_url %}
             <div class="topbar-menu" data-session-menu>
                 <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
-                    {% if not read_only %}
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if active_worker %}disabled{% endif %}>View diff</button>
-                    {% endif %}
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
-                    {% if not read_only %}
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <button type="button" role="menuitem" data-approval-mode-open>Approval mode</button>
                     <button type="button" role="menuitem" data-model-settings-open>Model and effort</button>
@@ -36,10 +31,8 @@
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
                         <button type="submit" role="menuitem">{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
                     </form>
-                    {% endif %}
                 </div>
             </div>
-            {% endif %}
         </div>
     </header>
     <main data-session-main
@@ -83,7 +76,6 @@
         </aside>
         <div class="session-content">
         <div class="session-head">
-            {% if not read_only %}
             <div class="edit-title" data-edit-title hidden>
                 <form method="post" action="{{ set_name_url }}">
                     {% csrf_token %}
@@ -91,7 +83,6 @@
                     <button type="submit">Save</button>
                 </form>
             </div>
-            {% endif %}
             <p class="meta">
                 {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}">{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
@@ -110,7 +101,7 @@
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
             </p>
             {% endif %}
-            {% if not read_only and not active_worker %}
+            {% if not active_worker %}
             <p class="next-message" aria-label="Settings for the next message" data-next-message-config>
                 {% for item in next_message_config %}
                 <span class="next-message-item"
@@ -126,10 +117,8 @@
             {% endif %}
         </div>
 
-        {% if not read_only %}
         <p class="meta" data-model-settings-pending {% if not session_model_pending %}hidden{% endif %}>Main agent next turn: <span data-pending-model>{{ session_model_settings.current_model }}</span> · <span data-pending-effort>{{ session_model_settings.current_effort|default:"Model default" }}</span></p>
         <p class="meta" data-model-settings-status role="status" hidden></p>
-        {% endif %}
 
         <div class="agent-picker" data-agent-picker
              data-agents-url="{{ session_agents_url }}"
@@ -169,7 +158,7 @@
             {% endfor %}
         </details>
         {% endif %}
-        {% if system_prompt or instruction_instance or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
+        {% if instruction_instance or entries or history_next_url or latest_user_turn_failure or pending_user_prompt or active_worker %}
         <section class="thread" data-thread id="history-start">
             {% if instruction_instance %}
             <details class="system-prompt" data-session-instructions>
@@ -179,12 +168,6 @@
                 <div class="system-prompt-body">{% if instruction_instance.developer_instructions %}{{ instruction_instance.developer_instructions }}{% elif instruction_instance.hitch_extra_instructions == None %}Not recorded{% else %}None{% endif %}</div>
                 <strong>Hitch extra instructions</strong>
                 <div class="system-prompt-body">{% if instruction_instance.hitch_extra_instructions == None %}No separate Hitch instructions were recorded for this turn. Imported sessions keep their existing Codex instructions when those instructions cannot be recovered.{% elif instruction_instance.hitch_extra_instructions %}{{ instruction_instance.hitch_extra_instructions }}{% else %}Disabled{% endif %}</div>
-            </details>
-            {% endif %}
-            {% if system_prompt %}
-            <details class="system-prompt">
-                <summary>System prompt</summary>
-                <div class="system-prompt-body">{{ system_prompt }}</div>
             </details>
             {% endif %}
             {% if history_next_url %}
@@ -206,7 +189,7 @@
                         <div class="body">{{ latest_user_turn_failure.details }}</div>
                     </details>
                     {% endif %}
-                    {% if latest_user_turn_failure.change_model and not read_only %}
+                    {% if latest_user_turn_failure.change_model %}
                     <button type="button" class="button secondary turn-failure-action" data-model-settings-open>Change model</button>
                     {% endif %}
                 </div>
@@ -215,7 +198,7 @@
             {% if pending_user_prompt %}
             <div class="entry" data-pending-user>
                 <div class="entry-header">
-                    <span class="role">{% if pending_user_author %}{{ pending_user_author }}{% else %}User{% endif %}</span>
+                    <span class="role">User</span>
                     {% if pending_user_timestamp %}
                     <time data-ts="{{ pending_user_timestamp }}">{{ pending_user_timestamp }}</time>
                     {% endif %}
@@ -228,9 +211,7 @@
             {% if active_worker %}
             <div class="entry"
                  data-live-root
-                 data-active-author="{{ pending_user_author }}"
                  data-hide-transcript="{{ show_active_worker_transcript|yesno:'false,true' }}"
-                 data-read-only="{{ read_only|yesno:'true,false' }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
             {% endif %}
@@ -245,9 +226,8 @@
             <span class="live-status"
                   data-live-status
                   data-state="{% if active_worker %}working{% else %}idle{% endif %}"
-                  {% if live_status_text %}data-working-text="{{ live_status_text }}"{% endif %}
                   role="status"
-                  aria-live="polite">{% if live_status_text %}{{ live_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+                  aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
             <details class="turn-notice" data-turn-notice data-thread-id="{{ main_agent_id }}" hidden>
                 <summary><span data-turn-notice-title role="status" aria-live="polite"></span></summary>
                 <div class="turn-notice-body" data-turn-notice-body></div>
@@ -283,7 +263,6 @@
     <button type="button" class="jump-latest" data-jump-latest aria-label="Jump to latest message" hidden>↓</button>
     {% endif %}
 
-    {% if not read_only %}
     <dialog class="new-session" data-move-project-dialog aria-labelledby="move-project-title">
         <form method="post" action="{{ set_project_url }}">
             {% csrf_token %}
@@ -336,7 +315,6 @@
             </div>
         </form>
     </dialog>
-    {% endif %}
 
     {% if not active_worker %}
     <dialog class="diff-modal" data-diff-modal data-diff-url="{{ session_diff_url }}" aria-labelledby="diff-modal-title">
@@ -351,7 +329,6 @@
     </dialog>
     {% endif %}
 
-    {% if not read_only %}
     {% if active_worker %}
     <form id="stop-session-form" method="post" action="{{ stop_url }}" data-stop-form>
         {% csrf_token %}
@@ -431,7 +408,6 @@
             {% endif %}
         </div>
     </form>
-    {% endif %}
 
     <script src="{% static 'vendor/katex/katex.min.js' %}"></script>
     <script src="{% static 'vendor/katex/contrib/auto-render.min.js' %}"></script>

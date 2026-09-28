@@ -231,7 +231,6 @@ def _record_has_newer_instance(
 def _newer_user_instance_exists(thread_id: str, instance_id: int) -> bool:
     return CodexInstance.objects.filter(
         thread_id=thread_id,
-        purpose=CodexInstance.PURPOSE_USER,
         pk__gt=instance_id,
     ).exists()
 
@@ -277,7 +276,7 @@ def record_pr_watch_result(
             state[WATCH_ACTIVE_STATE_KEY] = False
             if result.get("status") == "terminal" and WATCH_TERMINAL_INSTANCE_STATE_KEY not in state:
                 state[WATCH_TERMINAL_INSTANCE_STATE_KEY] = (
-                    CodexInstance.objects.filter(thread_id=record.thread_id, purpose=CodexInstance.PURPOSE_USER)
+                    CodexInstance.objects.filter(thread_id=record.thread_id)
                     .order_by("-pk").values_list("pk", flat=True).first()
                     or registration.owner_instance_id
                 )
@@ -475,9 +474,7 @@ def _pr_gate_status_label(status: str) -> str:
 def supersede_pr_after_turn(instance: CodexInstance) -> None:
     """Retire stale PR UI state after unrelated visible session activity."""
     if (
-        instance.purpose != CodexInstance.PURPOSE_USER
-        or instance.workflow_id is not None
-        or instance.agent_kind == PR_WATCH_AGENT_KIND
+        instance.agent_kind == PR_WATCH_AGENT_KIND
         or not isinstance(instance.pk, int)
     ):
         return

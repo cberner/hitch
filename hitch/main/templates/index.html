@@ -644,10 +644,6 @@
                     <span class="plus">+</span>New session
                 </a>
                 {% endif %}
-                {% if system_session_list %}
-                <a class="session-list-menu-fallback" href="{% url 'index' %}">Sessions</a>
-                {% else %}
-                <a class="session-list-menu-fallback" href="{% url 'system_sessions' %}">System sessions</a>
                 <noscript>
                     <form class="session-list-menu-fallback-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-fallback>
                         {% csrf_token %}
@@ -658,14 +654,9 @@
                         <button type="submit" class="button secondary session-list-menu-fallback-submit">Apply</button>
                     </form>
                 </noscript>
-                {% endif %}
                 <div class="session-list-menu" data-session-list-menu>
                     <button type="button" class="session-list-menu-toggle" aria-label="Page actions" aria-haspopup="menu" aria-expanded="false" data-session-list-menu-open>...</button>
                     <div class="session-list-menu-panel" role="menu" data-session-list-menu-panel hidden>
-                        {% if system_session_list %}
-                        <a href="{% url 'index' %}" role="menuitem">Sessions</a>
-                        {% else %}
-                        <a href="{% url 'system_sessions' %}" role="menuitem">System sessions</a>
                         <form class="session-list-menu-form" method="post" action="{{ archived_visibility_url }}" role="none" data-archived-visibility-form>
                             {% csrf_token %}
                             <label class="session-list-menu-check" role="menuitemcheckbox" aria-checked="{% if current_show_archived_sessions %}true{% else %}false{% endif %}">
@@ -675,26 +666,24 @@
                             <button type="submit" class="session-list-menu-submit" data-archived-visibility-submit>Apply</button>
                         </form>
                         <button type="button" role="menuitem" data-visible-projects-open>Visible projects</button>
-                        {% endif %}
                     </div>
                 </div>
             </div>
         </div>
     </header>
     <main>
-        {% if not system_session_list and not has_projects %}
+        {% if not has_projects %}
         <div class="project-banner">
             <p>Create a project to group sessions by repository.</p>
             <a class="button" href="{{ new_project_url }}">Create project</a>
         </div>
         {% endif %}
         <div class="session-list-header">
-            <p class="section-label">{% if system_session_list %}System sessions{% else %}{{ session_list_title }}{% endif %}</p>
+            <p class="section-label">{{ session_list_title }}</p>
         </div>
         {% include "_session_list_content.html" %}
     </main>
 
-    {% if not system_session_list %}
     <div class="archive-notices">
         <div class="archive-toast" data-archive-toast hidden aria-live="polite">
             <span data-archive-toast-text>Session archived</span>
@@ -728,7 +717,6 @@
             </div>
         </form>
     </dialog>
-    {% endif %}
 
     {% if show_new_session_controls %}
     <a class="fab" href="{% url 'new_session' %}" aria-label="New session">

@@ -22,7 +22,6 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     SessionPullRequest,
-    SystemWorkflow,
 )
 from hitch.main.runtime import disk_cleanup
 from hitch.main.sessions import checkout_protection
@@ -204,7 +203,7 @@ class DiskCleanupTests(TestCase):
             codex_created_at=now,
             codex_updated_at=now,
             codex_last_synced_at=now,
-            is_hidden_system_session=hidden_system,
+            codex_thread_source="subagent" if hidden_system else "",
             derived_stage=stage,
         )
 
@@ -259,7 +258,7 @@ class DiskCleanupTests(TestCase):
     def test_global_settings_str(self) -> None:
         self.assertEqual(str(GlobalSettings()), "GlobalSettings")
 
-    def test_cleanup_orders_system_then_archived_pr_then_old_archived(self) -> None:
+    def test_cleanup_orders_subagents_then_archived_pr_then_old_archived(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -335,7 +334,7 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
 
-    def test_legacy_promoted_candidate_worktree_is_preserved(self) -> None:
+    def test_accepted_candidate_worktree_is_preserved(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -358,7 +357,6 @@ class DiskCleanupTests(TestCase):
                 prompt="Analyze the repo.",
                 events_path="/dev/null",
                 status=CodexInstance.STATUS_COMPLETED,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             )
             ProposedSession.objects.create(
                 title="Accepted legacy proposal",
@@ -776,7 +774,7 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
 
-    def test_stale_visible_system_session_does_not_protect_worktree(self) -> None:
+    def test_inactive_subagent_does_not_protect_worktree(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -786,14 +784,13 @@ class DiskCleanupTests(TestCase):
         ):
             root = Path(raw)
             shared_path = self._managed_path(root, "shared")
-            self._session(thread_id="system", cwd=shared_path)
+            self._session(thread_id="system", cwd=shared_path, hidden_system=True)
             CodexInstance.objects.create(
                 pid=123,
                 thread_id="system",
                 cwd=shared_path,
                 events_path="/tmp/events.jsonl",
                 status=CodexInstance.STATUS_COMPLETED,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             )
 
             cleaned = self._run_cleanup(
@@ -932,7 +929,7 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
 
-    def test_active_system_session_is_not_finished_for_cleanup(self) -> None:
+    def test_active_subagent_is_not_finished_for_cleanup(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -954,13 +951,6 @@ class DiskCleanupTests(TestCase):
                 cwd=system_path,
                 events_path="/tmp/events.jsonl",
                 status=CodexInstance.STATUS_RUNNING,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            )
-            SystemWorkflow.objects.create(
-                kind="autonomous_goal_run",
-                main_thread_id="system",
-                cwd=system_path,
-                status=SystemWorkflow.STATUS_RUNNING,
             )
             self._session(
                 thread_id="old",

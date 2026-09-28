@@ -52,6 +52,7 @@ from hitch.main.sessions.session_pr_plan import (
     _thread_plan_mode_state,
 )
 from hitch.main.sessions.session_resume import (
+    _locally_archived_active_rollout,
     _metadata_indicates_archived,
     _metadata_resume_for_inactive_session,
     _metadata_rollout_path_indicates_archived,
@@ -250,10 +251,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     input_images_owned = False
     session_unarchived_for_turn = False
     session_unarchive_recorded = False
+    session_locally_unarchived = False
     startup_stack = ExitStack()
 
     def restore_archived_session_for_rejected_turn() -> None:
-        if session_unarchived_for_turn:
+        if session_unarchived_for_turn and not session_locally_unarchived:
             _restore_archived_session_for_rejected_turn(session_id, settings)
 
     try:
@@ -325,7 +327,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 HttpResponseBadRequest("thread cwd is not an allowed repository")
             )
         if should_unarchive_for_turn:
-            _unarchive_session_for_turn(session_id, settings)
+            session_locally_unarchived = _locally_archived_active_rollout(metadata) is not None
+            if not session_locally_unarchived:
+                _unarchive_session_for_turn(session_id, settings)
             session_unarchived_for_turn = True
             force_live_resume = True
         metadata_resume = (
@@ -335,7 +339,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 session_id,
                 metadata,
                 active_instance=active_instance,
-                require_system_agent_thread=False,
             )
         )
         resumed: Any
@@ -369,6 +372,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                             )
                         ) from exc
                     _unarchive_session_for_turn(session_id, settings, codex=codex)
+                    session_locally_unarchived = False
                     session_unarchived_for_turn = True
                     resumed = codex._client.thread_resume(session_id)
                 thread = resumed.thread

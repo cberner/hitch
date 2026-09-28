@@ -6,17 +6,14 @@ Status: Draft
 
 ### 1.1 Purpose
 
-The Inbox is Hitch's review surface for asynchronous work and automation
-messages. It lets users decide what to do with proposed follow-up sessions and
-acknowledge notices from Hitch background systems.
+The Inbox lets users review proposed follow-up sessions from coding agents.
+Retired automation notices and their special handling are removed on upgrade.
 
 ### 1.2 Definitions
 
 - Inbox item: Any unresolved item shown in the Inbox.
 - Proposal: An Inbox item that can become a normal user-visible session.
-- Notice: A dismissible Inbox message that informs the user about automation
-  state, such as automation failing or finding no proposal.
-- Source session: The Codex session or system session that created the item.
+- Source session: The coding session that created the item.
 - Outcome: The final user decision for an Inbox item: accepted, rejected, or
   dismissed.
 
@@ -24,30 +21,24 @@ acknowledge notices from Hitch background systems.
 
 ### 2.1 Goals
 
-- Give users a single place to review asynchronous work from Codex and Hitch
-  automation.
+- Give users a single place to review follow-up work from coding agents.
 - Let users accept useful work into a normal session, reject it with a reason,
   or dismiss it.
-- Let Hitch surface non-proposal messages without forcing them into session
-  acceptance flows.
 - Preserve enough source metadata to explain where an item came from and clean up
-  background resources safely.
+  resources safely.
 
 ### 2.2 Non-Goals
 
 - The Inbox is not a general chat or notification center for every app event.
-- Notices do not start sessions.
 - Resolved Inbox items do not remain in the active Inbox.
 
 ## 3. User Stories
 
-- As a user, I can see pending proposed sessions and automation messages in one
+- As a user, I can see pending proposed sessions in one
   Inbox.
 - As a user, I can accept a Proposal and continue it as a normal session.
 - As a user, I can reject a Proposal with feedback that future automation can
   use.
-- As a user, I can dismiss notices such as automation failures or no-proposal
-  messages.
 - As Codex, I can create an Inbox Proposal when I identify useful follow-up
   work.
 
@@ -55,8 +46,8 @@ acknowledge notices from Hitch background systems.
 
 ### 4.1 Inbox Items
 
-- `INBOX-item-kinds`: The Inbox supports at least two item kinds: Proposal and
-  Notice.
+- `INBOX-proposals-only`: Every Inbox item is a Proposal. Upgrades delete
+  historical Notice items instead of preserving their records or UI.
 - `INBOX-unresolved-only`: The active Inbox shows only unresolved items.
 - `INBOX-project-visibility`: Inbox items respect the same visible-project
   filtering used by the session list.
@@ -79,16 +70,7 @@ acknowledge notices from Hitch background systems.
 - `INBOX-proposal-dismiss`: Dismissing a Proposal resolves it without requiring a
   reason.
 
-### 4.3 Notices and Messages
-
-- `INBOX-notice-purpose`: A Notice is an Inbox message that informs the user
-  about automation state but cannot be accepted as a session.
-- `INBOX-notice-dismiss-only`: The Inbox UI exposes only Dismiss for Notice
-  items.
-- `INBOX-notice-system-cleanup`: System cleanup may also resolve Notice items
-  when their source automation is deleted or otherwise cleaned up.
-
-### 4.4 Codex-Created Proposals
+### 4.3 Codex-Created Proposals
 
 - `INBOX-codex-tool`: Hitch exposes a `hitch.propose_session` tool that lets a
   Codex session create or edit a Proposal Inbox item.
@@ -107,7 +89,7 @@ acknowledge notices from Hitch background systems.
   `propose_session` management command through the configured Hitch environment
   fallback.
 
-### 4.5 Outcomes and Concurrency
+### 4.4 Outcomes and Concurrency
 
 - `INBOX-outcome-one-way`: Final Inbox item outcomes are one-way transitions
   from unresolved to accepted, rejected, or dismissed.
@@ -127,7 +109,7 @@ acknowledge notices from Hitch background systems.
   rejection reason.
 - `INBOX-dismissed-metadata`: Dismissed items record the user resolution.
 
-### 4.6 UX Requirements
+### 4.5 UX Requirements
 
 - `INBOX-empty-state`: The Inbox has a clear empty state when there are no visible
   unresolved items.
@@ -137,9 +119,7 @@ acknowledge notices from Hitch background systems.
   starting message before creating the session.
 - `INBOX-reject-dialog`: Rejecting a Proposal asks for a reason before resolving
   it.
-- `INBOX-item-actions`: Proposal and Notice actions must match their item kind so
-  notices cannot be accepted and proposals can be accepted, rejected, or
-  dismissed.
+- `INBOX-item-actions`: Proposals can be accepted, rejected, or dismissed.
 
 ## 5. Success Criteria
 
@@ -147,10 +127,6 @@ acknowledge notices from Hitch background systems.
   user-visible session and removes the item from the active Inbox.
 - `INBOX-reject-requires-reason`: Rejecting a Proposal without a reason is not
   allowed.
-- `INBOX-notice-dismiss`: A Notice can be dismissed but cannot be accepted or
-  rejected.
-- `INBOX-notice-cleanup-success`: System cleanup can dismiss unresolved Notice
-  items without requiring an Inbox UI action.
 - `INBOX-accept-rollback-success`: If Proposal session creation fails or a
   provisional start claim expires, the item returns to the active Inbox.
 - `INBOX-tool-creates-item`: A valid `hitch.propose_session` call creates a

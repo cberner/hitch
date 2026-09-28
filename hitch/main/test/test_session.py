@@ -1022,7 +1022,6 @@ class SessionViewActiveWorkerTests(TestCase):
             thread_id="thread-1",
             status=CodexInstance.STATUS_FAILED,
             error="This content was flagged for possible cybersecurity risk.",
-            purpose=CodexInstance.PURPOSE_USER,
         )
         CodexInstance.objects.filter(pk=instance.pk).update(ended_at=ended_at)
 
@@ -1182,17 +1181,3 @@ class SessionViewActiveWorkerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, reverse("stop_session", kwargs={"session_id": "thread-1"}))
-
-
-
-
-
-
-
-
-
-
-    def test_system_session_detail_requires_system_run(self) -> None:
-        response = self.client.get(reverse("system_session", kwargs={"session_id": "thread-1"}))
-
-        self.assertEqual(response.status_code, 404)

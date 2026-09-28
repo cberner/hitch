@@ -14,7 +14,7 @@ from openai_codex import Codex
 from openai_codex.errors import CodexError, InvalidRequestError
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
-from hitch.main.models import CodexInstance, ProposedSession
+from hitch.main.models import ProposedSession
 from hitch.main.proposals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
@@ -49,7 +49,6 @@ class ToolContext:
     thread_id: str
     instance_id: int = 0
     agent_kind: str = ""
-    purpose: str = CodexInstance.PURPOSE_USER
     user_message_index: int | None = None
     cancel_requested: Callable[[], bool] = _not_cancelled
     on_response_sent: Callable[[Callable[[], None]], None] | None = None
@@ -64,7 +63,6 @@ class HitchTool:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[[dict[str, Any], ToolContext], str]
-    roles: frozenset[str]
 
 
 class HitchToolError(RuntimeError):
@@ -75,11 +73,7 @@ def is_dynamic_tool_call(method: str) -> bool:
     return method == _TOOL_CALL_METHOD
 
 
-def registered_dynamic_tool_specs(
-    *,
-    purpose: str = CodexInstance.PURPOSE_USER,
-) -> list[dict[str, Any]]:
-    role = _tool_role(purpose=purpose)
+def registered_dynamic_tool_specs() -> list[dict[str, Any]]:
     tools = _TOOLS.values()
     return [
         {
@@ -90,7 +84,6 @@ def registered_dynamic_tool_specs(
             "deferLoading": False,
         }
         for tool in tools
-        if role in tool.roles
     ]
 
 
@@ -103,15 +96,9 @@ def handle_dynamic_tool_call(params: dict[str, Any] | None, context: ToolContext
         namespace = _HITCH_NAMESPACE
     if not isinstance(namespace, str) or not isinstance(tool_name, str):
         return _tool_response("tool namespace and name are required", success=False)
-    role = _tool_role(purpose=context.purpose)
     tool = _TOOLS.get((namespace, tool_name))
     if tool is None:
         return _tool_response(f"unknown Hitch tool: {namespace}.{tool_name}", success=False)
-    if role not in tool.roles:
-        return _tool_response(
-            f"Hitch tool {namespace}.{tool_name} is unavailable in this session",
-            success=False,
-        )
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         return _tool_response("tool arguments must be an object", success=False)
@@ -313,12 +300,6 @@ def _handle_unwatch_pr(arguments: dict[str, Any], context: ToolContext) -> str:
     return json.dumps(result, sort_keys=True)
 
 
-def _tool_role(*, purpose: str) -> str:
-    if purpose in CodexInstance.VISIBLE_CODING_PURPOSES:
-        return "visible"
-    return "none"
-
-
 def _proposal_id_arg(arguments: dict[str, Any]) -> int | None:
     value = arguments.get("proposal_id")
     if value is None:
@@ -424,7 +405,6 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_propose_session,
-        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _RENAME_SESSION_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -447,7 +427,6 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_rename_session,
-        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _GET_CODEX_QUOTA_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -463,7 +442,6 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
         ),
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         handler=_handle_get_codex_quota,
-        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _WATCH_PR_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -490,7 +468,6 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_watch_pr,
-        roles=frozenset({"visible"}),
     ),
     (_HITCH_NAMESPACE, _UNWATCH_PR_TOOL): HitchTool(
         namespace=_HITCH_NAMESPACE,
@@ -507,6 +484,5 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
             "additionalProperties": False,
         },
         handler=_handle_unwatch_pr,
-        roles=frozenset({"visible"}),
     ),
 }

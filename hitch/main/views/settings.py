@@ -59,7 +59,6 @@ from hitch.main.sessions.settings_cookies import (
     _visible_session_project_ids_cookie_fits,
 )
 from hitch.main.views import common
-from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,6 @@ def _apply_live_global_approval_mode(effective_approval_mode: str) -> None:
     ).values("thread_id")
     common._apply_live_approval_mode_to_instances(
         CodexInstance.objects.filter(
-            purpose=CodexInstance.PURPOSE_USER,
             status__in=CodexInstance.ACTIVE_STATUSES,
         ).exclude(thread_id__in=explicit_override_thread_ids),
         effective_approval_mode,
@@ -121,15 +119,12 @@ def _associate_existing_sessions_with_project(project: Project, request: HttpReq
     except CodexError:
         common.logger.warning("failed to list sessions while creating project")
         return
-    hidden_thread_ids = system_agents.hidden_thread_ids()
     seen: set[str] = set()
     for thread in threads:
         thread_id = getattr(thread, "id", None)
         if not isinstance(thread_id, str) or not thread_id or thread_id in seen:
             continue
         seen.add(thread_id)
-        if thread_id in hidden_thread_ids:
-            continue
         cwd = common._thread_cwd(thread)
         if not cwd or not same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir):
             continue

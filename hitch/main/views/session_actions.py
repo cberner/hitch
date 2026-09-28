@@ -28,7 +28,10 @@ from hitch.main.sessions.execution_settings import RequestApproval, save_session
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
-from hitch.main.sessions.session_resume import _stored_rollout_path_for_thread
+from hitch.main.sessions.session_resume import (
+    _locally_archived_active_rollout,
+    _stored_rollout_path_for_thread,
+)
 from hitch.main.sessions.session_settings import (
     _model_default_effort,
     _reasoning_effort_values,
@@ -156,7 +159,6 @@ def set_session_model(request: HttpRequest, session_id: str) -> HttpResponse:
         instances = list(CodexInstance.objects.filter(
             thread_id=session_id,
             status__in=CodexInstance.ACTIVE_STATUSES,
-            purpose__in=CodexInstance.VISIBLE_CODING_PURPOSES,
         ))
         results = [codex_pool.update_instance_model(
             instance, model=model, reasoning_effort=effort,
@@ -223,14 +225,15 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
         settings = _stored_settings(request)
         is_archived = archived == "true"
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+        if not is_archived and _locally_archived_active_rollout(metadata) is not None:
+            session_index.update_cached_archived(session_id, archived=False)
+            return _archive_success_response(request, session_id, archived=False)
         local_only = False
         thread_for_metadata = None
         with app_server_pool.borrow_codex(
             common.Codex, enable_memories=settings.enable_memories
         ) as codex:
-            metadata = SessionMetadata.objects.filter(
-                thread_id=session_id
-            ).first()
             try:
                 if metadata is None and is_archived:
                     thread_for_metadata = codex._client.thread_read(session_id).thread
@@ -292,10 +295,14 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
         if rollout_path is not None:
             # This thread's rollout moved, so only its file-keyed cache is stale.
             ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+    return _archive_success_response(request, session_id, archived=is_archived)
+
+
+def _archive_success_response(request: HttpRequest, session_id: str, *, archived: bool) -> HttpResponse:
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":
         return redirect("index")
-    if archived == "true":
+    if archived:
         return redirect("index")
     return redirect("session", session_id=session_id)

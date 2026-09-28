@@ -466,6 +466,37 @@ class SetSessionApprovalModeViewTests(TestCase):
 
 class SetSessionArchivedViewTests(TestCase):
     @patch("hitch.main.views.common.Codex")
+    def test_unarchive_local_override_preserves_active_rollout(self, mock_codex: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "sessions" / "rollout-2026-06-07T05-43-07-abc.jsonl"
+            path.parent.mkdir()
+            path.write_text("{}\n")
+            metadata = SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+            usage = ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+            for cached in (True, False):
+                for ajax in (True, False):
+                    with self.subTest(cached=cached, ajax=ajax), patch(
+                        "hitch.main.sessions.session_resume.codex_pool.codex_home_dir", return_value=Path(raw),
+                    ):
+                        metadata.codex_archived = True
+                        metadata.archive_local_only = True
+                        metadata.codex_path = str(path) if cached else "/missing/rollout.jsonl"
+                        metadata.save()
+                        response = self.client.post(
+                            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+                            data={"archived": "false"},
+                            headers={"X-Requested-With": "XMLHttpRequest"} if ajax else {},
+                        )
+                        self.assertEqual(response.status_code, 204 if ajax else 302)
+                        metadata.refresh_from_db()
+                        self.assertFalse(metadata.codex_archived)
+                        self.assertFalse(metadata.archive_local_only)
+                        self.assertIsNone(metadata.codex_archived_at)
+                        self.assertTrue(path.is_file())
+                        self.assertTrue(ArchivedSessionTokenUsage.objects.filter(pk=usage.pk).exists())
+            mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.common.Codex")
     def test_missing_rollout_archive_and_undo_survive_index_refresh(
         self, mock_codex: MagicMock
     ) -> None:

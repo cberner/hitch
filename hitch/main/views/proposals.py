@@ -37,16 +37,10 @@ def update_proposed_session_outcome(request: HttpRequest, proposed_session_id: i
         return HttpResponseBadRequest("outcome status is invalid")
     outcome_notes = request.POST.get("reason", request.POST.get("outcome_notes", "")).strip()
     if (
-        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_PROPOSAL
-        and outcome_status == ProposedSession.OUTCOME_REJECTED
+        outcome_status == ProposedSession.OUTCOME_REJECTED
         and not outcome_notes
     ):
         return HttpResponseBadRequest("reason is required")
-    if (
-        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_NOTICE
-        and outcome_status != ProposedSession.OUTCOME_DISMISSED
-    ):
-        return HttpResponseBadRequest("outcome status is invalid")
     if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
         return HttpResponseBadRequest("proposal must be started before acceptance")
     update_values: dict[str, Any] = {
