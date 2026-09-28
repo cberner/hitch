@@ -1,4 +1,4 @@
-"""Auth, profile, health dashboard, and admin endpoints."""
+"""Auth, profile, and admin endpoints."""
 from typing import Any
 
 from django.contrib.auth import login as auth_login
@@ -16,7 +16,7 @@ from django.views.decorators.http import require_http_methods
 from hitch.main.models import (
     UserSettings,
 )
-from hitch.main.runtime import health, reconciliation
+from hitch.main.runtime import reconciliation
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
@@ -100,7 +100,6 @@ def profile(request: HttpRequest) -> HttpResponse:
             "profile_status": "Signed in" if user is not None else "Signed out",
             "logout_url": reverse("logout") if user is not None else "",
             "nuke_codex_url": reverse("nuke_codex") if user is not None else "",
-            "health_url": reverse("health_dashboard") if user is not None else "",
             "nuked_count": _parse_nuked_count(request.GET.get("nuked")),
             **usage_context.template_context,
             "show_project_usage_summary": True,
@@ -139,27 +138,6 @@ def _profile_usage_context(request: HttpRequest) -> common.UsageContext:
             **settings_context,
         },
         cookie_updates={},
-    )
-
-@require_http_methods(["GET"])
-def health_dashboard(request: HttpRequest) -> HttpResponse:
-    """Hitch health dashboard: leak and backlog signals on one page.
-
-    Linked from the bottom of the profile page. Requires authentication since
-    it exposes operational internals. The copy block is built to be long-pressed
-    and pasted into a chat with the assistant when diagnosing issues.
-    """
-    if _authenticated_user(request) is None:
-        return redirect(f"{reverse('login')}?next={reverse('health_dashboard')}")
-    report = health.collect_health_report()
-    return render(
-        request,
-        "health.html",
-        {
-            "report": report,
-            "copy_text": report.copy_text(),
-            "profile_url": reverse("profile"),
-        },
     )
 
 @require_http_methods(["POST"])

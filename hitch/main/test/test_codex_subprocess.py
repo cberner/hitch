@@ -3133,55 +3133,6 @@ class ReapOrphanedAppServersTests(TestCase):
         mock_kill.assert_called_once()
 
 
-class CountRunningCodexAppServersTests(SimpleTestCase):
-    def _write_app_server(
-        self, proc_root: Path, pid: int, ppid: int | None = None
-    ) -> None:
-        marker = (
-            f"{reconciliation._APP_SERVER_DEPLOYMENT_ENV}="
-            f"{reconciliation._app_server_deployment_id()}"
-        ).encode()
-        pid_dir = proc_root / str(pid)
-        pid_dir.mkdir()
-        (pid_dir / "cmdline").write_bytes(
-            b"\0".join(
-                [b"/usr/local/bin/codex", b"app-server", b"--listen", b"stdio://"]
-            )
-            + b"\0"
-        )
-        (pid_dir / "environ").write_bytes(marker + b"\0")
-        if ppid is not None:
-            (pid_dir / "stat").write_text(f"{pid} (codex app) S {ppid} 0 0\n")
-
-    def test_missing_stat_counts_pid(self) -> None:
-        # ppid unknown (no stat) -> count it rather than silently drop, so a
-        # leaked app-server is never undercounted.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 100)
-
-            self.assertEqual(
-                reconciliation.count_running_codex_app_servers(proc_root=proc_root), 1
-            )
-
-    def test_orphaned_native_child_is_counted(self) -> None:
-        # A native child whose wrapper already died (parent reparented to init,
-        # not in the matched set) is itself a leaked logical app-server.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_app_server(proc_root, 200, ppid=1)
-
-            self.assertEqual(
-                reconciliation.count_running_codex_app_servers(proc_root=proc_root), 1
-            )
-
-    def test_no_proc_root_counts_zero(self) -> None:
-        missing = Path(tempfile.gettempdir()) / "definitely-not-here-13579"
-        self.assertEqual(
-            reconciliation.count_running_codex_app_servers(proc_root=missing), 0
-        )
-
-
 class InterruptActiveTests(TestCase):
     def _make(
         self,

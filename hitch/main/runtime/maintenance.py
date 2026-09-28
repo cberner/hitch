@@ -25,7 +25,6 @@ _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
 _scheduler = server_lifecycle.SchedulerHandle(
     thread_name="hitch-maintenance",
-    tick_interval_seconds=_MAINTENANCE_INTERVAL_SECONDS,
 )
 
 

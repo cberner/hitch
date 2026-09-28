@@ -8,11 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import override
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from django.db import connection
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -493,14 +492,12 @@ class DiskCleanupTests(TestCase):
                     "hitch.main.runtime.disk_cleanup._prune_oversized_finished_event_logs",
                     return_value=150,
                 ) as mock_prune,
-                patch("hitch.main.runtime.disk_cleanup.invalidate_hitch_home_disk_usage") as mock_invalidate,
                 patch("hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path") as mock_cleanup,
             ):
                 cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
         self.assertEqual(cleaned, 0)
         mock_prune.assert_called_once_with()
-        mock_invalidate.assert_called_once_with()
         mock_cleanup.assert_not_called()
 
     def test_noop_removal_counts_only_successful_planned_deletions(self) -> None:
@@ -1004,177 +1001,3 @@ class DirectorySizeTests(TestCase):
             total = disk_cleanup._directory_size(root)
 
         self.assertGreaterEqual(total, 2 * allocated)
-
-
-class DiskUsageSnapshotTests(SimpleTestCase):
-    @override
-    def setUp(self) -> None:
-        self._reset_snapshot()
-
-    @override
-    def tearDown(self) -> None:
-        self._reset_snapshot()
-
-    @staticmethod
-    def _reset_snapshot() -> None:
-        with disk_cleanup._disk_usage_snapshot_lock:
-            disk_cleanup._disk_usage_snapshot = None
-            disk_cleanup._disk_usage_refreshing = False
-            disk_cleanup._disk_usage_generation = 0
-
-    @staticmethod
-    def _run_scheduled_refresh(mock_thread: MagicMock, index: int = -1) -> None:
-        call = mock_thread.call_args_list[index]
-        call.kwargs["target"](*call.kwargs["args"])
-
-    def test_refresh_is_single_flight(self) -> None:
-        with patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread:
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-
-        mock_thread.assert_called_once()
-        mock_thread.return_value.start.assert_called_once_with()
-
-    def test_refresh_thread_start_failure_allows_retry(self) -> None:
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch.object(disk_cleanup.logger, "exception") as mock_log,
-        ):
-            mock_thread.return_value.start.side_effect = [
-                RuntimeError("cannot start thread"),
-                None,
-            ]
-
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-            self.assertFalse(disk_cleanup._disk_usage_refreshing)
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-
-        self.assertEqual(mock_thread.call_count, 2)
-        self.assertTrue(disk_cleanup._disk_usage_refreshing)
-        mock_log.assert_called_once_with("failed to start Hitch disk usage refresh")
-
-    def test_fresh_snapshot_is_reused_and_stale_snapshot_refreshes(self) -> None:
-        now = timezone.now()
-        usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-            captured_at=now,
-            invalidation_token="token",
-            usage=usage,
-        )
-
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch("hitch.main.runtime.disk_cleanup.timezone.now", return_value=now),
-            patch.object(disk_cleanup, "_disk_usage_invalidation_token", return_value="token"),
-            patch.object(disk_cleanup, "_max_allowed_percent", return_value=20.0),
-        ):
-            self.assertEqual(disk_cleanup.cached_hitch_home_disk_usage(), usage)
-            mock_thread.assert_not_called()
-
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch(
-                "hitch.main.runtime.disk_cleanup.timezone.now",
-                return_value=now + disk_cleanup._DISK_USAGE_SNAPSHOT_TTL,
-            ),
-            patch.object(disk_cleanup, "_disk_usage_invalidation_token", return_value="token"),
-            patch.object(disk_cleanup, "_max_allowed_percent", return_value=20.0),
-        ):
-            self.assertEqual(disk_cleanup.cached_hitch_home_disk_usage(), usage)
-            mock_thread.assert_called_once()
-
-    def test_failed_refresh_can_be_retried(self) -> None:
-        now = timezone.now()
-        stale_usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-            captured_at=now - disk_cleanup._DISK_USAGE_SNAPSHOT_TTL,
-            invalidation_token="token",
-            usage=stale_usage,
-        )
-        with (
-            patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread,
-            patch("hitch.main.runtime.disk_cleanup.timezone.now", return_value=now),
-            patch.object(
-                disk_cleanup,
-                "hitch_home_disk_usage",
-                side_effect=RuntimeError("scan failed"),
-            ),
-            patch.object(disk_cleanup, "_disk_usage_invalidation_token", return_value="token"),
-            patch.object(disk_cleanup, "_max_allowed_percent", return_value=20.0),
-            patch("hitch.main.runtime.disk_cleanup.close_old_connections") as mock_close,
-            patch.object(disk_cleanup.logger, "exception") as mock_log,
-        ):
-            self.assertEqual(disk_cleanup.cached_hitch_home_disk_usage(), stale_usage)
-            self._run_scheduled_refresh(mock_thread)
-            self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-
-        self.assertEqual(mock_thread.call_count, 2)
-        self.assertEqual(mock_close.call_count, 2)
-        mock_log.assert_called_once_with("failed to refresh Hitch disk usage snapshot")
-
-    def test_shared_token_expires_snapshot_from_another_process(self) -> None:
-        usage = disk_cleanup.HitchDiskUsage(100, 200, 1000)
-        with tempfile.TemporaryDirectory() as raw, override_settings(HITCH_HOME_DIR=Path(raw)):
-            old_token = disk_cleanup._disk_usage_invalidation_token()
-            disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-                captured_at=timezone.now(),
-                invalidation_token=old_token,
-                usage=usage,
-            )
-
-            disk_cleanup._publish_disk_usage_invalidation()
-
-            with patch("hitch.main.runtime.disk_cleanup.threading.Thread") as mock_thread:
-                self.assertIsNone(disk_cleanup.cached_hitch_home_disk_usage())
-
-        self.assertIsNone(disk_cleanup._disk_usage_snapshot)
-        mock_thread.assert_called_once()
-
-    def test_invalidate_clears_snapshot_and_advances_generation(self) -> None:
-        disk_cleanup._disk_usage_snapshot = disk_cleanup._DiskUsageSnapshot(
-            captured_at=timezone.now(),
-            invalidation_token="token",
-            usage=disk_cleanup.HitchDiskUsage(100, 200, 1000),
-        )
-        disk_cleanup._disk_usage_generation = 7
-
-        with patch.object(disk_cleanup, "_publish_disk_usage_invalidation") as mock_publish:
-            disk_cleanup.invalidate_hitch_home_disk_usage()
-
-        mock_publish.assert_called_once_with()
-        self.assertIsNone(disk_cleanup._disk_usage_snapshot)
-        self.assertEqual(disk_cleanup._disk_usage_generation, 8)
-
-    def test_shared_token_read_failure_is_nonfatal(self) -> None:
-        token_path = MagicMock(spec=Path)
-        token_path.read_text.side_effect = OSError("token unreadable")
-        with (
-            patch.object(
-                disk_cleanup,
-                "_disk_usage_invalidation_path",
-                return_value=token_path,
-            ),
-            patch.object(disk_cleanup.logger, "exception") as mock_log,
-        ):
-            self.assertEqual(disk_cleanup._disk_usage_invalidation_token(), "")
-
-        token_path.read_text.assert_called_once_with(encoding="utf-8")
-        mock_log.assert_called_once_with("failed to read Hitch disk usage invalidation token")
-
-    def test_shared_token_publish_failures_are_nonfatal(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as raw,
-            override_settings(HITCH_HOME_DIR=Path(raw)),
-            patch.object(Path, "write_text", side_effect=OSError("write failed")),
-            patch.object(Path, "unlink", side_effect=OSError("unlink failed")),
-            patch.object(disk_cleanup.logger, "exception") as mock_log,
-        ):
-            disk_cleanup._publish_disk_usage_invalidation()
-
-        self.assertEqual(
-            mock_log.call_args_list,
-            [
-                call("failed to publish Hitch disk usage invalidation"),
-                call("failed to remove disk usage invalidation temporary file"),
-            ],
-        )

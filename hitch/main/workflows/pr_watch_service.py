@@ -20,7 +20,6 @@ _OBSERVATION_SECONDS = 60
 _SCHEDULER_SECONDS = 60
 _scheduler = server_lifecycle.SchedulerHandle(
     thread_name="hitch-pr-watch",
-    tick_interval_seconds=_SCHEDULER_SECONDS,
 )
 
 
