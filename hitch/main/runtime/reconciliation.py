@@ -366,8 +366,7 @@ def _iter_codex_app_server_pids(
     If a legacy wrapper/native pair is present, both halves are yielded,
     deliberately not deduped: the nuke sweep must SIGKILL each one because
     SIGKILL is not delivered to a process's children. The bundled native
-    runtime appears once. ``count_running_codex_app_servers`` is the surface
-    that collapses any pair to one logical app-server.
+    runtime appears once.
     """
     if deployment_id is None:
         deployment_id = _app_server_deployment_id()
@@ -522,27 +521,6 @@ def _proc_cwd_is_this_checkout(pid_dir: Path) -> bool:
     except OSError:
         return False
 
-
-def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
-    """Number of *logical* ``codex app-server`` processes this deployment is running.
-
-    Read-only counterpart to ``nuke_codex_app_servers``: a health surface for
-    spotting leaked app-servers (each holds a CODEX_HOME state-DB connection)
-    without killing anything. The bundled runtime has one native process, while
-    a legacy npm CLI may have a wrapper/native pair. Drop any matched pid whose
-    parent is itself matched so the figure reflects logical app-servers, not
-    doubled pids. A pid whose parent is unknown or unmatched -- including a
-    native child orphaned by a dead wrapper -- counts, so a leaked app-server is
-    never undercounted.
-    """
-    matched = _matched_app_server_pids(
-        proc_root=proc_root, deployment_id=_app_server_deployment_id()
-    )
-    return sum(
-        1
-        for pid, entry in matched.items()
-        if (ppid := _proc_ppid(entry)) is None or ppid not in matched
-    )
 
 def _finalize_reaped_instance(instance_id: int) -> None:
     """Clean up after force-killing a reaped worker so its turn isn't left in a

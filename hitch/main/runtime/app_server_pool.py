@@ -493,7 +493,6 @@ _KEEPALIVE_INTERVAL_SECONDS = 30
 
 _keepalive = server_lifecycle.SchedulerHandle(
     thread_name="hitch-codex-pool-keepalive",
-    tick_interval_seconds=_KEEPALIVE_INTERVAL_SECONDS,
 )
 
 def _codex_pool_keepalive_enabled() -> bool:

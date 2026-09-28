@@ -12,7 +12,7 @@ refs, and remove goal-specific proposal relations. Accepted
 sessions, their worktrees, historical system-session logs, and token usage remain
 available. Historical system threads stay hidden from the ordinary session list;
 previously accepted sessions stay visible. Retired workflow records do not
-contribute live waiting badges, health backlogs, or worktree ownership; active
+contribute live waiting badges or worktree ownership; active
 workers and visible/proposed sessions retain their normal cleanup protections.
 
 Ordinary coding-session proposals remain supported by the

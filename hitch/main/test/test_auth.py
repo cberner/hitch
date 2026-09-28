@@ -39,6 +39,18 @@ def _make_user(username: str = "dev@example.com", password: str = "StrongPass123
 
 
 class AuthViewTests(TestCase):
+    @patch("hitch.main.views.common.Codex")
+    def test_health_dashboard_is_removed(self, mock_codex: MagicMock) -> None:
+        _setup_codex(mock_codex)
+        for signed_in in (False, True):
+            with self.subTest(signed_in=signed_in):
+                if signed_in:
+                    self.client.force_login(_make_user())
+                self.assertEqual(self.client.get("/health/").status_code, 404)
+                response = self.client.get(reverse("profile"))
+                self.assertNotContains(response, 'href="/health/"')
+                self.assertNotContains(response, "Hitch health dashboard")
+
     def test_hitch_instructions_login_import_and_logout_mirror(self) -> None:
         cookie = settings_cookies._HITCH_EXTRA_INSTRUCTIONS_COOKIE
         encode = settings_cookies._encode_hitch_extra_instructions_cookie
