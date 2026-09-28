@@ -29,10 +29,9 @@ spec covers both surfaces.
 - Usage status: The backend-reported state that tells the browser whether the
   displayed token usage is fresh, still refreshing, terminally partial, failed,
   unavailable, and whether polling should continue.
-- User session: A normal user-visible Codex session.
-- HITCH system session: A hidden or system-owned session used by Hitch
-  automation, except for system-created work that Hitch intentionally exposes
-  as user-visible session work.
+- Total usage: Token usage across all indexed sessions, including native Codex
+  subagents and historical hidden Hitch automation.
+- Project total: The same inclusive usage restricted to the active project.
 
 ## 2. Goals and Non-Goals
 
@@ -83,12 +82,11 @@ spec covers both surfaces.
 - `USAGE-daily-source`: Headline counts and daily buckets for one session must
   be derived from the same rollout snapshot when a cache row is refreshed, so a
   daily chart cannot disagree with the headline count for that cache row.
-- `USAGE-system-buckets`: Usage totals must split user sessions and HITCH
-  system sessions using the same hidden/system-session classification used by
-  the session and automation UI.
+- `USAGE-inclusive-totals`: Usage must combine visible sessions, native Codex
+  subagents, and historical hidden Hitch automation into one total. Do not
+  display separate user-session or system-session usage buckets.
 - `USAGE-project-scope`: Profile's active-project usage summary must use the
-  currently selected project and must distinguish all selected-project usage
-  from selected-project system-session usage.
+  currently selected project and include all of its session usage in one total.
 - `USAGE-project-profile-only`: Active-project token sections are profile-only.
   They must not appear on `/usage/` unless a future spec explicitly changes the
   Usage page information architecture.
@@ -188,13 +186,12 @@ spec covers both surfaces.
   affected token-usage section.
 - `USAGE-refresh-accessibility`: Refresh indicators and async count updates
   should be accessible to assistive technology without being excessively noisy.
-- `USAGE-token-sections`: `/usage/` and `/profile/` must both represent these
-  shared token-usage sections when their data is available: All sessions,
-  Sessions, and HITCH system.
-- `USAGE-profile-token-sections`: `/profile/` must additionally represent these
-  profile-only token-usage sections when a current project and project usage
-  data are available: Active project all sessions and Active project system
-  sessions.
+- `USAGE-token-sections`: `/usage/` and `/profile/` must both show an All
+  sessions total when data is available, with non-cached input, output, and
+  cached input breakdowns.
+- `USAGE-profile-token-sections`: `/profile/` must additionally show an Active
+  project total with the same breakdown when a current project and project
+  usage data are available.
 - `USAGE-chart-all-token-sections`: Every token-usage section in
   `USAGE-token-sections` and `USAGE-profile-token-sections` must be expandable
   to a usage-by-day bar chart on the surfaces where that section is visible
@@ -278,10 +275,9 @@ spec covers both surfaces.
 - `USAGE-accept-refresh-failure`: If a sweep cannot refresh some sessions, the
   page stops polling and shows last-known or partial token usage rather than an
   indefinite spinner.
-- `USAGE-accept-all-token-charts`: All sessions, Sessions, HITCH system, Active
-  project all sessions, and Active project system sessions each expose a
-  stacked usage-by-day chart when daily data exists on the surfaces where those
-  sections are visible.
+- `USAGE-accept-all-token-charts`: All sessions and Active project totals each
+  expose a stacked usage-by-day chart when daily data exists on the surfaces
+  where those sections are visible.
 - `USAGE-accept-no-quota-charts`: Quota and rate-limit sections keep their
   background-refreshed live rate-limit presentation and do not gain daily usage
   charts.

@@ -1776,6 +1776,13 @@ class IndexViewTests(TestCase):
             total_tokens=5_000,
             path=other_path,
         )
+        legacy = _seed_usage_metadata("legacy", path=session_path, project=project)
+        legacy.is_hidden_system_session = True
+        legacy.codex_archived = True
+        legacy.save(update_fields=["is_hidden_system_session", "codex_archived"])
+        _cache_token_usage(
+            "legacy", input_tokens=10, cached_input_tokens=0, output_tokens=20, total_tokens=30, path=session_path
+        )
         client = _setup_codex(mock_codex)
 
         response = self.client.get(reverse("profile"))
@@ -1783,19 +1790,30 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Active project")
         self.assertContains(response, "Hitch")
-        self.assertContains(response, "System sessions")
-        self.assertContains(response, 'class="project-usage-card"', count=2)
+        self.assertNotContains(response, "System sessions")
+        self.assertNotContains(response, "HITCH system")
+        self.assertContains(response, 'class="project-usage-card"', count=1)
         self.assertContains(response, "total tokens", count=2)
         lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
         project_usage = lifetime_usage["selected_project"]
-        self.assertEqual(project_usage["total"]["total"], "930")
-        self.assertEqual(project_usage["total"]["input"], "530")
-        self.assertEqual(project_usage["total"]["output"], "330")
+        self.assertEqual(project_usage["total"]["total"], "960")
+        self.assertEqual(project_usage["total"]["input"], "540")
+        self.assertEqual(project_usage["total"]["output"], "350")
         self.assertEqual(project_usage["total"]["cached"], "70")
-        self.assertEqual(project_usage["system"]["total"], "280")
-        self.assertEqual(project_usage["system"]["input"], "180")
-        self.assertEqual(project_usage["system"]["output"], "80")
-        self.assertEqual(project_usage["system"]["cached"], "20")
+        self.assertNotIn("system", project_usage)
+        self.assertNotIn("system", lifetime_usage)
+        self.assertNotIn("sessions", lifetime_usage)
+        self.assertEqual(project_usage["total"]["chart"][0]["total"], "960")
+        self.assertEqual(lifetime_usage["total"]["total"], "6K")
+        self.assertEqual(lifetime_usage["total"]["cached"], "270")
+        self.assertContains(response, 'aria-controls="project-total-chart"')
+        self.assertContains(response, '<span class="token-usage-total">960</span>', html=True)
+
+        usage_response = self.client.get(reverse("usage"))
+        self.assertContains(usage_response, 'class="token-usage-total"', count=1)
+        self.assertNotContains(usage_response, "HITCH system")
+        self.assertNotContains(usage_response, 'class="project-usage-card"')
+        self.assertEqual(usage_response.context["lifetime_usage"]["total"], lifetime_usage["total"])
         client.thread_list.assert_not_called()
 
     def test_lifetime_token_chart_formats_segments(self) -> None:
@@ -2617,51 +2635,27 @@ class UnarchiveFailureTests(TestCase):
                 self.assertEqual(page.evaluate(row_archived), "false")
             finally:
                 browser.close()
-class UsageTileAccessibilityTests(TestCase):
-    """Only lifetime-stat tiles that actually have a chart may be interactive.
 
-    Regression guard: a chartless tile must not render as an expandable button
-    (role/tabindex/aria-expanded), since toggling it reveals nothing.
-    """
 
-    def _render(self, *, sessions_chart: bool, system_chart: bool) -> str:
+class UsageChartAccessibilityTests(TestCase):
+    def test_only_totals_with_chart_data_have_expandable_controls(self) -> None:
         from django.template.loader import render_to_string
 
-        chart = [
-            {
-                "date": "2025-01-02",
-                "total": "10",
-                "input": "5",
-                "output": "3",
-                "cached": "2",
-                "input_percent": 50,
-                "output_percent": 30,
-                "cached_percent": 20,
-            }
-        ]
-        lifetime_usage = {
-            "total": {},
-            "sessions": {
-                "input": "5",
-                "output": "3",
-                "cached": "2",
-                "chart": chart if sessions_chart else None,
-                "chart_axis": [],
-            },
-            "system": {
-                "input": "1",
-                "output": "1",
-                "cached": "0",
-                "chart": chart if system_chart else None,
-                "chart_axis": [],
-            },
-        }
-        return render_to_string("_usage_sections.html", {"lifetime_usage": lifetime_usage})
-
-    def test_both_tiles_interactive_when_both_charted(self) -> None:
-        html = self._render(sessions_chart=True, system_chart=True)
-        self.assertEqual(html.count('class="lifetime-stat" role="button"'), 2)
-        self.assertNotIn('class="lifetime-stat">', html)
+        chart = [{"date": "2025-01-02", "total": "10", "input": "5", "output": "3", "cached": "2"}]
+        for total_chart, project_chart in ((True, True), (True, False), (False, True), (False, False)):
+            with self.subTest(total_chart=total_chart, project_chart=project_chart):
+                html = render_to_string("_usage_sections.html", {
+                    "show_project_usage_summary": True,
+                    "current_project": {"name": "Hitch"},
+                    "lifetime_usage": {
+                        "total": {"chart": chart if total_chart else []},
+                        "selected_project": {"total": {"chart": chart if project_chart else []}},
+                    },
+                })
+                self.assertEqual('aria-controls="lifetime-total-chart"' in html, total_chart)
+                self.assertEqual('aria-controls="project-total-chart"' in html, project_chart)
+                self.assertEqual(html.count('aria-expanded="false"'), total_chart + project_chart)
+                self.assertNotIn('role="button"', html)
 
 
 class SharedCsrfHelperTests(TestCase):

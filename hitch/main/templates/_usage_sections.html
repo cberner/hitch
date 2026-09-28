@@ -8,7 +8,7 @@
                             class="usage-title-button"
                             aria-expanded="false"
                             aria-controls="lifetime-total-chart"
-                            data-lifetime-total-toggle>
+                            data-usage-chart-toggle>
                         All sessions
                     </button>
                     {% else %}
@@ -28,58 +28,45 @@
             {% include "_lifetime_token_chart.html" with chart=lifetime_usage.total.chart chart_axis=lifetime_usage.total.chart_axis chart_label="All sessions token usage by date" chart_class="usage-total-chart" chart_id="lifetime-total-chart" only %}
             {% endif %}
             <div class="lifetime-stats" aria-label="All sessions token usage">
-                <div class="lifetime-stat"{% if lifetime_usage.sessions.chart %} role="button" tabindex="0" aria-expanded="false"{% endif %}>
-                    <span class="lifetime-label">Sessions</span>
+                <div class="lifetime-stat">
+                    <span class="token-usage-total">{{ lifetime_usage.total.total }}</span>
+                    <span class="token-usage-total-label">total tokens</span>
                     <div class="lifetime-breakdown">
                         <span class="lifetime-metric">
                             <span class="lifetime-metric-label">Input</span>
-                            <span class="lifetime-value">{{ lifetime_usage.sessions.input }}</span>
+                            <span class="lifetime-value">{{ lifetime_usage.total.input }}</span>
                         </span>
                         <span class="lifetime-metric">
                             <span class="lifetime-metric-label">Output</span>
-                            <span class="lifetime-value">{{ lifetime_usage.sessions.output }}</span>
+                            <span class="lifetime-value">{{ lifetime_usage.total.output }}</span>
                         </span>
                         <span class="lifetime-metric">
                             <span class="lifetime-metric-label">Cached</span>
-                            <span class="lifetime-value">{{ lifetime_usage.sessions.cached }}</span>
+                            <span class="lifetime-value">{{ lifetime_usage.total.cached }}</span>
                         </span>
                     </div>
-                    {% if lifetime_usage.sessions.chart %}
-                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.sessions.chart chart_axis=lifetime_usage.sessions.chart_axis chart_label="Sessions token usage by date" chart_class="lifetime-chart" only %}
-                    {% endif %}
-                </div>
-                <div class="lifetime-stat"{% if lifetime_usage.system.chart %} role="button" tabindex="0" aria-expanded="false"{% endif %}>
-                    <span class="lifetime-label">HITCH system</span>
-                    <div class="lifetime-breakdown">
-                        <span class="lifetime-metric">
-                            <span class="lifetime-metric-label">Input</span>
-                            <span class="lifetime-value">{{ lifetime_usage.system.input }}</span>
-                        </span>
-                        <span class="lifetime-metric">
-                            <span class="lifetime-metric-label">Output</span>
-                            <span class="lifetime-value">{{ lifetime_usage.system.output }}</span>
-                        </span>
-                        <span class="lifetime-metric">
-                            <span class="lifetime-metric-label">Cached</span>
-                            <span class="lifetime-value">{{ lifetime_usage.system.cached }}</span>
-                        </span>
-                    </div>
-                    {% if lifetime_usage.system.chart %}
-                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.system.chart chart_axis=lifetime_usage.system.chart_axis chart_label="HITCH system token usage by date" chart_class="lifetime-chart" only %}
-                    {% endif %}
                 </div>
             </div>
             {% if show_project_usage_summary and current_project and lifetime_usage.selected_project %}
             <div class="project-usage-summary" aria-labelledby="active-project-usage-title">
                 <div class="usage-subheader">
-                    <h3 id="active-project-usage-title">Active project</h3>
+                    <h3 id="active-project-usage-title">
+                        {% if lifetime_usage.selected_project.total.chart %}
+                        <button type="button" class="usage-title-button" aria-expanded="false"
+                                aria-controls="project-total-chart" data-usage-chart-toggle>Active project</button>
+                        {% else %}
+                        Active project
+                        {% endif %}
+                    </h3>
                     <p class="usage-plan">{{ current_project.name }}</p>
                 </div>
+                {% if lifetime_usage.selected_project.total.chart %}
+                {% include "_lifetime_token_chart.html" with chart=lifetime_usage.selected_project.total.chart chart_axis=lifetime_usage.selected_project.total.chart_axis chart_label="Active project token usage by date" chart_class="usage-total-chart" chart_id="project-total-chart" only %}
+                {% endif %}
                 <div class="project-usage-stats" aria-label="{{ current_project.name }} token usage">
                     <div class="project-usage-card">
-                        <span class="lifetime-label">All sessions</span>
-                        <span class="project-usage-total">{{ lifetime_usage.selected_project.total.total }}</span>
-                        <span class="project-usage-total-label">total tokens</span>
+                        <span class="token-usage-total">{{ lifetime_usage.selected_project.total.total }}</span>
+                        <span class="token-usage-total-label">total tokens</span>
                         <div class="lifetime-breakdown">
                             <span class="lifetime-metric">
                                 <span class="lifetime-metric-label">Input</span>
@@ -92,25 +79,6 @@
                             <span class="lifetime-metric">
                                 <span class="lifetime-metric-label">Cached</span>
                                 <span class="lifetime-value">{{ lifetime_usage.selected_project.total.cached }}</span>
-                            </span>
-                        </div>
-                    </div>
-                    <div class="project-usage-card">
-                        <span class="lifetime-label">System sessions</span>
-                        <span class="project-usage-total">{{ lifetime_usage.selected_project.system.total }}</span>
-                        <span class="project-usage-total-label">total tokens</span>
-                        <div class="lifetime-breakdown">
-                            <span class="lifetime-metric">
-                                <span class="lifetime-metric-label">Input</span>
-                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.input }}</span>
-                            </span>
-                            <span class="lifetime-metric">
-                                <span class="lifetime-metric-label">Output</span>
-                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.output }}</span>
-                            </span>
-                            <span class="lifetime-metric">
-                                <span class="lifetime-metric-label">Cached</span>
-                                <span class="lifetime-value">{{ lifetime_usage.selected_project.system.cached }}</span>
                             </span>
                         </div>
                     </div>
