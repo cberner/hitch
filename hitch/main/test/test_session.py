@@ -1055,6 +1055,17 @@ class SessionViewActiveWorkerTests(TestCase):
                 self.assertEqual(bool(failure["details"]), code != "other")
                 self.assertEqual(failure["change_model"], code == "serverOverloaded")
 
+        for disconnect_code in ("other", None):
+            with self.subTest(disconnect_code=disconnect_code):
+                instance.codex_error_info = disconnect_code
+                instance.error = "stream disconnected before completion: An error occurred. Request ID <request>."
+                instance.save(update_fields=["codex_error_info", "error"])
+                response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+                self.assertContains(response, "Connection to model lost")
+                self.assertContains(response, "Send a follow-up message to continue this session.")
+                self.assertContains(response, "Request ID &lt;request&gt;")
+                self.assertEqual(response.context["latest_user_turn_failure"]["details"], instance.error)
+
 
     @patch("hitch.main.views.common.Codex")
     def test_finished_worker_rebuilds_task_plan_on_page_load(self, mock_codex: MagicMock) -> None:

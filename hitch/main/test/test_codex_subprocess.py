@@ -30,6 +30,7 @@ from django.utils import timezone
 from openai_codex import ApprovalMode, Codex, Sandbox, Thread, TurnHandle
 from openai_codex._message_router import MessageRouter
 from openai_codex.client import CodexClient
+from openai_codex.generated.notification_registry import NOTIFICATION_MODELS
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
@@ -5043,6 +5044,73 @@ class CodexWorkerCommandTests(TestCase):
             self.assertEqual(args["model"], "test-model")
             self.assertEqual(args["effort"], ReasoningEffort.high)
             self.assertEqual(args["sandbox_policy"].root.type, "readOnly")
+
+    @patch("hitch.main.management.commands.codex_worker._wait_for_capacity_retry")
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_high_demand_disconnect_retries_only_without_model_recovery(
+        self, mock_codex: MagicMock, wait: MagicMock,
+    ) -> None:
+        def event(method: str, **payload: Any) -> Notification:
+            return Notification(method=method, payload=cast(Any, NOTIFICATION_MODELS[method].model_validate({
+                "threadId": "thread-1", "turnId": "turn-1", **payload,
+            })))
+
+        demand = event("error", willRetry=True, error={
+            "message": "Reconnecting... 5/5",
+            "additionalDetails": "We\u2019re currently experiencing high demand, which may cause temporary errors.",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+        })
+        disconnected = "stream disconnected before completion: An error occurred while processing your request."
+        retry = event("error", willRetry=True, error={
+            "message": "Reconnecting... 1/5", "additionalDetails": disconnected,
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+        })
+        terminal = event("error", willRetry=False, error={"message": disconnected, "codexErrorInfo": "other"})
+        failed = _completed_event("turn-1", TurnStatus.failed, disconnected, "other")
+        recovered = _completed_event("turn-2", TurnStatus.completed)
+        # Match the production sequence: demand warning, generic reconnects, then `other`.
+        quiet = event("item/commandExecution/outputDelta", itemId="cmd", delta="still running")
+        for name, intermediate, outcome, should_retry in (
+            ("unresolved", [quiet], failed, True),
+            ("child output", [event("item/agentMessage/delta", threadId="child", itemId="msg", delta="hi")],
+             failed, True),
+            ("other turn", [event("item/agentMessage/delta", turnId="other", itemId="msg", delta="hi")], failed, True),
+            ("reasoning", [event("item/reasoning/textDelta", itemId="r", contentIndex=0, delta="hi")], failed, False),
+            ("message", [event("item/agentMessage/delta", itemId="msg", delta="hi")], failed, False),
+            ("tool call", [event("item/started", startedAtMs=1,
+                                 item={"id": "w", "type": "webSearch", "query": "proof"})],
+             failed, False),
+            ("policy", [], _completed_event("turn-1", TurnStatus.failed, disconnected, "cyberPolicy"), False),
+            ("unknown error", [], _completed_event("turn-1", TurnStatus.failed, "Unknown error", "other"), False),
+            ("interrupted", [], _completed_event("turn-1", TurnStatus.interrupted), False),
+            ("completed", [], _completed_event("turn-1", TurnStatus.completed), False),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                thread = mock_codex.return_value.__enter__.return_value.thread_resume.return_value
+                thread.turn.reset_mock()
+                # A second disconnect without demand must stop; never carry capacity
+                # evidence across attempts, even when Codex reuses an execution ID.
+                attempt_events = [demand, *intermediate, retry, terminal, outcome]
+                thread.turn.side_effect = [
+                    SimpleNamespace(id="turn-1", stream=lambda events=attempt_events: iter(events)),
+                    SimpleNamespace(id="turn-1", stream=lambda: iter([failed])),
+                    SimpleNamespace(id="turn-2", stream=lambda: iter([recovered])),
+                ]
+                wait.reset_mock()
+                wait.return_value = True
+                instance = self._make_instance(Path(raw))
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+                instance.refresh_from_db()
+                self.assertEqual(thread.turn.call_count, 2 if should_retry else 1)
+                self.assertEqual(wait.call_args_list, [call(60)] if should_retry else [])
+                if should_retry:
+                    notices = [json.loads(line) for line in Path(instance.events_path).read_text().splitlines()]
+                    notice = next(n for n in notices if n["method"] == "error"
+                                  and n["payload"]["error"]["codexErrorInfo"] == "serverOverloaded")
+                    self.assertIn("high demand", notice["payload"]["error"]["additionalDetails"])
+                    self.assertIn(disconnected, notice["payload"]["error"]["additionalDetails"])
+                    self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+                    self.assertEqual(instance.error, disconnected)
 
     @patch("hitch.main.management.commands.codex_worker._wait_for_capacity_retry")
     @patch("hitch.main.management.commands.codex_worker.Codex")

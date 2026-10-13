@@ -21,6 +21,7 @@ from hitch.main.models import (
     CodexInstance,
 )
 from hitch.main.runtime import codex_events, codex_pool, rollout
+from hitch.main.runtime.turn_errors import is_model_connection_failure
 from hitch.main.sessions import session_index
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
@@ -318,10 +319,7 @@ def _latest_user_turn_failure(session_id: str) -> dict[str, Any] | None:
         title = "Request blocked"
         details = message
         message = "Codex stopped this turn after a safety check. Review your request before continuing."
-    elif code in (
-        "httpConnectionFailed", "responseStreamDisconnected", "responseStreamConnectionFailed",
-        "responseTooManyFailedAttempts",
-    ):
+    elif is_model_connection_failure(code, message):
         title = "Connection to model lost"
         details = message
         message = "Codex could not finish this turn. Send a follow-up message to continue this session."
