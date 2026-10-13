@@ -111,6 +111,7 @@ from hitch.main.runtime.mcp_approval import (
 )
 from hitch.main.runtime.question_transport import QuestionClient, is_user_input_request
 from hitch.main.runtime.question_transport import QuestionCodex as Codex
+from hitch.main.runtime.turn_errors import CapacityFailureTracker
 from hitch.main.sessions.hitch_instructions import combined_developer_instructions
 from hitch.main.sessions.session_settings import _PLAN_MODE_REASONING_EFFORT
 from hitch.main.sessions.user_input import wire_user_input_response as _wire_user_input_response
@@ -675,6 +676,7 @@ def _run_turn(
                     control_path=control_path,
                     cursor=control_cursor,
                 )
+                capacity_failure = CapacityFailureTracker(instance.thread_id, turn.id)
                 try:
                     # A Stop click that landed before the turn handle existed sets the
                     # flag without us being able to call interrupt yet; act on it now
@@ -687,6 +689,7 @@ def _run_turn(
                     )
                     for event in turn.stream():
                         _write_notification(event)
+                        capacity_failure.observe(event)
                         payload = event.payload
                         if (
                             isinstance(payload, TurnCompletedNotification)
@@ -713,7 +716,7 @@ def _run_turn(
                     if interrupt_forwarder is not None:
                         _stop_interrupt_forwarder(interrupt_forwarder)
                         interrupt_forwarder = None
-                if not _is_capacity_failure(final_turn) or _cancel_requested:
+                if not capacity_failure.is_capacity_failure(final_turn) or _cancel_requested:
                     break
                 assert final_turn is not None
                 _write_event("error", {
@@ -723,7 +726,10 @@ def _run_turn(
                     "error": {
                         "codexErrorInfo": "serverOverloaded",
                         "message": f"Model at capacity. Retrying in {retry_delay // 60} minute(s).",
-                        "additionalDetails": final_turn.error.message if final_turn.error else None,
+                        "additionalDetails": "\n\n".join(filter(None, (
+                            capacity_failure.details,
+                            final_turn.error.message if final_turn.error else None,
+                        ))),
                     },
                 })
                 if not _wait_for_capacity_retry(retry_delay):
@@ -741,14 +747,6 @@ def _run_turn(
         if goal_forwarder is not None:
             goal_forwarder.join(timeout=0.5)
     return final_turn
-
-
-def _is_capacity_failure(turn: Turn | None) -> bool:
-    return (
-        turn is not None
-        and turn.status == TurnStatus.failed
-        and _serialized_codex_error_info(turn.error) == "serverOverloaded"
-    )
 
 
 def _wait_for_capacity_retry(delay: int) -> bool:

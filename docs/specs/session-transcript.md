@@ -124,7 +124,8 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   leaving recovered warnings.
   These notices remain separate from Hitch's browser connection status and
   are hidden while viewing a subagent.
-- `ST-capacity-retries`: A turn that fails with `serverOverloaded` keeps its
+- `ST-capacity-retries`: A turn that fails with `serverOverloaded`, or a model
+  connection failure following an unresolved high-demand retry warning, keeps its
   worker active and automatically continues the existing task after 1 minute,
   doubling the delay on each capacity failure up to 30 minutes. Further capacity
   failures retry every 30 minutes until recovery or Stop. Show the next delay
@@ -132,10 +133,15 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   policies; do not repeat the original prompt or attachments. Stop cancels the
   wait promptly. Messages submitted during backoff are queued for the next
   attempt, which reloads saved model and effort changes. Other errors retain
-  their existing terminal behavior.
+  their existing terminal behavior. High-demand warnings apply only to their
+  thread and turn, and clear when model output or a new tool call resumes;
+  usage updates and output from existing tools do not clear them. Preserve both
+  the high-demand warning and the final error in the retry notice.
 - `ST-turn-failures`: Terminal cybersecurity-policy and model
   connection failures use a clear title and next-step guidance, with the original
-  Codex message in expandable details. Other failures retain their original
+  Codex message in expandable details. Recognize the standard stream-disconnect
+  message even when Codex labels it `other` or omits the error code.
+  Other failures retain their original
   message. Previously recorded capacity failures offer the existing model-and-effort
   dialog on writable sessions. Dialog actions never resend a prompt or change
   the model automatically.
