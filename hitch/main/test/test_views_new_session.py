@@ -38,7 +38,7 @@ from hitch.main.sessions import (
     session_settings,
 )
 from hitch.main.sessions.hitch_instructions import hitch_instructions_for_turn
-from hitch.main.sessions.prompt_history import remember_prompt
+from hitch.main.sessions.prompt_history import remember_initial_prompt
 from hitch.main.sessions.settings_cookies import (
     _HITCH_EXTRA_INSTRUCTIONS_COOKIE,
     _encode_hitch_extra_instructions_cookie,
@@ -1745,7 +1745,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.common.Codex")
-    def test_recent_prompts_store_only_new_submissions_and_keep_latest_twenty(
+    def test_recent_prompts_store_only_new_initial_prompts_and_keep_latest_twenty(
         self, mock_codex: MagicMock, _mock_discover: MagicMock,
     ) -> None:
         _setup_codex(mock_codex)
@@ -1759,9 +1759,9 @@ class NewSessionViewTests(TestCase):
         prompts = [f"Prompt {index}" for index in range(22)]
         prompts[-1] = 'Full prompt\n<script>alert("unsafe")</script> & quotes'
         for prompt in prompts:
-            remember_prompt(prompt)
-        remember_prompt("")
-        remember_prompt(" \n\t ")
+            remember_initial_prompt(prompt)
+        remember_initial_prompt("")
+        remember_initial_prompt(" \n\t ")
         response = self.client.get(reverse("new_session"))
 
         self.assertEqual(
@@ -1772,7 +1772,7 @@ class NewSessionViewTests(TestCase):
         self.assertNotContains(response, '<script>alert("unsafe")</script>')
         self.assertNotContains(response, "Old worker prompt")
 
-        remember_prompt("A new submitted prompt")
+        remember_initial_prompt("A new submitted prompt")
         self.assertEqual(RecentPrompt.objects.count(), 20)
         self.assertEqual(RecentPrompt.objects.latest("pk").prompt, "A new submitted prompt")
         self.assertFalse(RecentPrompt.objects.filter(prompt=prompts[2]).exists())
@@ -1780,19 +1780,20 @@ class NewSessionViewTests(TestCase):
             patch.object(RecentPrompt.objects, "create", side_effect=DatabaseError("locked")),
             self.assertLogs("hitch.main.sessions.prompt_history", level="ERROR"),
         ):
-            remember_prompt("Already accepted by worker")
+            remember_initial_prompt("Already accepted by worker")
         self.assertEqual(RecentPrompt.objects.count(), 20)
 
     def test_recent_prompts_retain_twenty_per_project(self) -> None:
         project = _make_project()
-        SessionMetadata.objects.create(thread_id="project-thread", project=project)
         SessionMetadata.objects.create(
             thread_id="hidden-thread", project=project, codex_thread_source="subagent",
         )
-        remember_prompt("Bare repo prompt")
+        remember_initial_prompt("Bare repo prompt")
         for index in range(22):
-            remember_prompt(f"Project prompt {index}", "project-thread")
-        remember_prompt("Hidden prompt", "hidden-thread")
+            thread_id = f"project-thread-{index}"
+            SessionMetadata.objects.create(thread_id=thread_id, project=project)
+            remember_initial_prompt(f"Project prompt {index}", thread_id)
+        remember_initial_prompt("Hidden prompt", "hidden-thread")
         self.assertEqual(RecentPrompt.objects.filter(project=project).count(), 20)
         self.assertEqual(
             RecentPrompt.objects.filter(project=project).earliest("pk").prompt,
@@ -1811,7 +1812,7 @@ class NewSessionViewTests(TestCase):
                     SessionMetadata.objects.create(
                         thread_id="imported", cwd=project.repo_path, **metadata_fields,
                     )
-                remember_prompt("Follow-up", "imported", cwd=project.repo_path)
+                remember_initial_prompt("Initial prompt", "imported", cwd=project.repo_path)
                 self.assertEqual(
                     RecentPrompt.objects.latest("pk").project,
                     None if metadata_fields else project,
@@ -1820,7 +1821,7 @@ class NewSessionViewTests(TestCase):
         CodexInstance.objects.create(
             pid=0, thread_id="active", cwd=project.repo_path, prompt="Initial prompt",
         )
-        remember_prompt("Steering", "active")
+        remember_initial_prompt("Initial prompt", "active")
         self.assertEqual(RecentPrompt.objects.latest("pk").project, project)
 
     @patch("hitch.main.repos.discover_repos", return_value=[])
@@ -1837,8 +1838,8 @@ class NewSessionViewTests(TestCase):
         empty_project = _make_project(name="Empty project", repo_path="/empty")
         _mock_discover.return_value = [Path(project.repo_path), Path(empty_project.repo_path)]
         SessionMetadata.objects.create(thread_id="project-thread", project=project)
-        remember_prompt("Bare repo prompt")
-        remember_prompt(prompt, "project-thread")
+        remember_initial_prompt("Bare repo prompt")
+        remember_initial_prompt(prompt, "project-thread")
         response = self.client.get(
             reverse("new_session"),
             {"prompt": "Existing draft", "project": str(project.pk)},

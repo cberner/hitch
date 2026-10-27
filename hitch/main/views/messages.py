@@ -40,7 +40,6 @@ from hitch.main.sessions.message_intent import (
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
-from hitch.main.sessions.prompt_history import remember_prompt
 from hitch.main.sessions.session_approval import _parse_instance_id
 from hitch.main.sessions.session_entry_display import (
     _entries_for,
@@ -272,7 +271,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             input_image_paths=input_image_paths,
         ):
             input_images_owned = True
-            remember_prompt(request.POST.get("prompt", ""), session_id)
             return redirect("session", session_id=session_id)
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
@@ -548,7 +546,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 task_kwargs["web_search_mode"] = web_search_mode
             startup.spawn(approval=RequestApproval(settings.approval_mode), **task_kwargs)
             record_session_unarchived_for_accepted_turn()
-            remember_prompt(request.POST.get("prompt", ""), session_id, cwd=cwd)
             return redirect("session", session_id=session_id)
         automatic_pr_available = bool(
             auto_pr_enabled
@@ -601,7 +598,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # delete files the worker was handed.
         input_images_owned = True
         record_session_unarchived_for_accepted_turn()
-        remember_prompt(request.POST.get("prompt", ""), session_id, cwd=cwd)
         return redirect("session", session_id=session_id)
     except _TurnRejectedError as rejected:
         restore_archived_session_for_rejected_turn()

@@ -338,8 +338,7 @@ class SendMessageViewTests(TestCase):
             data={"prompt": "  also update docs  ", "active_instance": "42"},
         )
 
-        self.assertEqual(RecentPrompt.objects.get().prompt, "  also update docs  ")
-        self.assertEqual(RecentPrompt.objects.get().project, project)
+        self.assertFalse(RecentPrompt.objects.exists())
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
@@ -695,8 +694,7 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(RecentPrompt.objects.latest("pk").prompt, "follow-up")
-        self.assertEqual(RecentPrompt.objects.latest("pk").project, project)
+        self.assertFalse(RecentPrompt.objects.exists())
         self._assert_follow_up_spawn(
             mock_spawn,
             developer_instructions=(
