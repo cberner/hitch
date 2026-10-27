@@ -41,7 +41,7 @@ from hitch.main.sessions.pr_prompts import PR_SLASH_DISPLAY_PROMPT
 from hitch.main.sessions.project_visibility import (
     _metadata_by_thread_id as _metadata_by_thread_id,
 )
-from hitch.main.sessions.prompt_history import remember_prompt
+from hitch.main.sessions.prompt_history import remember_initial_prompt
 from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
     _PLAN_MODE_REASONING_EFFORT,
@@ -551,7 +551,7 @@ def _remember_repo_and_redirect(
         cookie_updates = _settings_cookie_updates(remembered_values)
     else:
         cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-    remember_prompt(request.POST.get("prompt", ""), thread_id)
+    remember_initial_prompt(request.POST.get("prompt", ""), thread_id)
     response = redirect("session", session_id=thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response

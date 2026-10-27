@@ -160,7 +160,7 @@ class ProposedSession(models.Model):
 
 
 class RecentPrompt(models.Model):
-    """Submitted user text, before worker instructions are appended."""
+    """Initial session prompt, before worker instructions are appended."""
 
     prompt = models.TextField()
     project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.CASCADE)

@@ -1380,6 +1380,32 @@ class AutoReviewFieldRemovalMigrationTests(TransactionTestCase):
         self.assertEqual(legacy_worker.auto_pr_triggered_at, triggered_at)
 
 
+class ResetRecentPromptHistoryMigrationTests(TransactionTestCase):
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.migrate(targets)
+        return executor
+
+    def test_clears_legacy_history_without_removing_sessions(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+        before = [("main", "0086_remove_retired_automation")]
+        old = self._migrate(before).loader.project_state(before).apps
+        project = old.get_model("main", "Project").objects.create(name="Repo", repo_path="/repo")
+        old.get_model("main", "SessionMetadata").objects.create(thread_id="existing", project=project)
+        history = old.get_model("main", "RecentPrompt")
+        history.objects.create(prompt="Initial prompt", project=project)
+        history.objects.create(prompt="Follow-up", project=project)
+        history.objects.create(prompt="Bare repo follow-up")
+
+        apps = self._migrate(leaf).loader.project_state(leaf).apps
+
+        self.assertFalse(apps.get_model("main", "RecentPrompt").objects.exists())
+        session = apps.get_model("main", "SessionMetadata").objects.get(thread_id="existing")
+        self.assertEqual(session.project_id, project.pk)
+        self.assertTrue(apps.get_model("main", "Project").objects.filter(pk=project.pk).exists())
+
+
 class RemoveAutonomousGoalsMigrationTests(TransactionTestCase):
     def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
         executor = MigrationExecutor(connection)

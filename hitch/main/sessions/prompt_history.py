@@ -1,4 +1,4 @@
-"""Bounded history of accepted browser prompts."""
+"""Bounded history of initial prompts accepted from the new-session form."""
 
 import logging
 
@@ -10,7 +10,7 @@ from hitch.main.sessions.session_index import _project_for_cwd
 logger = logging.getLogger(__name__)
 
 
-def remember_prompt(prompt: str, thread_id: str = "", *, cwd: str = "") -> None:
+def remember_initial_prompt(prompt: str, thread_id: str = "", *, cwd: str = "") -> None:
     if not prompt.strip():
         return
     # History is optional bookkeeping after the worker has accepted the input.
