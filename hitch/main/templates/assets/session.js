@@ -452,6 +452,17 @@
                 const input = composer.querySelector("[data-composer-input]");
                 const submit = composer.querySelector("[data-composer-submit]");
                 const stop = composer.querySelector("[data-composer-stop]");
+                // Tab-local drafts survive full-page refreshes from worker and PR updates.
+                const draftKey = `hitch:composer:${composer.action}`;
+                const saveDraft = (value) => {
+                    try {
+                        if (value) window.sessionStorage.setItem(draftKey, value);
+                        else window.sessionStorage.removeItem(draftKey);
+                    } catch {} // Storage restrictions must not break the composer.
+                };
+                try {
+                    input.value = window.sessionStorage.getItem(draftKey) ?? input.value;
+                } catch {}
                 const planModeInput = composer.querySelector("[data-plan-mode-input]");
                 const planModeExplicitInput = composer.querySelector("[data-plan-mode-explicit-input]");
                 const slashCommand = composer.querySelector("[data-slash-command]");
@@ -491,6 +502,7 @@
                     }
                 };
                 const sync = () => {
+                    saveDraft(input.value);
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
                     syncComposerHeight();
@@ -809,6 +821,7 @@
                             sync();
                         }
                     }
+                    if (!isStopSubmit) saveDraft("");
                     // Defer the disable until after the form's entry
                     // list has been serialized: the Stop button carries
                     // the active worker's id as its name/value, and

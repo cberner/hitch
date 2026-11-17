@@ -91,6 +91,13 @@ space used by repetitive reasoning, command, file-change, and web-search activit
   the main composer draft when questions arrive or are answered. Suggested
   choices may preselect the first option, but are not submitted automatically;
   Submit and Skip are explicit user actions.
+- `ST-composer-draft`: Keep unsent Add instructions / Send a message text in
+  tab-local session storage, keyed by session. Restore it after page reloads,
+  including worker completion and Hitch/PR updates. Other sessions and tabs
+  maintain independent drafts. Clear the draft when submitting the composer or
+  deleting its text; stopping a worker does not clear it. No server-side or
+  localStorage persistence is required. Unavailable browser storage must not
+  prevent composing or sending messages.
 - `ST-reader-isolation`: Displaying a session or refreshing its metadata must
   not acquire a Codex thread writer lease. Browser reads remain available
   before, during, and after a detached worker turn.
